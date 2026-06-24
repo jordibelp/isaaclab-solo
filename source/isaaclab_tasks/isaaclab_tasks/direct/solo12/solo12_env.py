@@ -1,0 +1,1030 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers.
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+from __future__ import annotations
+
+import gymnasium as gym
+import torch
+
+import isaaclab.sim as sim_utils
+import isaaclab.utils.math as math_utils
+from isaaclab.assets import Articulation
+from isaaclab.envs import DirectRLEnv
+from isaaclab.sensors import ContactSensor
+from isaaclab.sim import schemas as sim_schemas
+from isaaclab.utils.buffers import DelayBuffer
+
+from .solo12_env_cfg import Solo12EnvCfg
+
+
+class Solo12Env(DirectRLEnv):
+    cfg: Solo12EnvCfg
+
+    def __init__(self, cfg: Solo12EnvCfg, render_mode: str | None = None, **kwargs):
+        super().__init__(cfg, render_mode, **kwargs)
+
+        action_dim = gym.spaces.flatdim(self.single_action_space)
+        self._actions = torch.zeros(self.num_envs, action_dim, device=self.device)
+        self._previous_actions = torch.zeros_like(self._actions)
+        self._processed_actions = torch.zeros_like(self._actions)
+        self._delayed_processed_actions = torch.zeros_like(self._actions)
+        self._applied_actions = torch.zeros_like(self._actions)
+
+        max_action_delay = self.cfg.actuation_delay_range[1]
+        self._action_delay_buffer = DelayBuffer(max_action_delay, self.num_envs, device=self.device)
+        self._action_delay_steps = torch.zeros(self.num_envs, dtype=torch.int, device=self.device)
+
+        self._commands = torch.zeros(self.num_envs, 3, device=self.device)
+        self._command_steps_left = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self._command_resample_interval = max(1, int(round(self.cfg.command_resampling_time_s / self.step_dt)))
+        if not 0.0 <= self.cfg.opposite_direction_cmd_prob <= 1.0:
+            raise ValueError(
+                "opposite_direction_cmd_prob must be between 0 and 1, "
+                f"got {self.cfg.opposite_direction_cmd_prob}"
+            )
+
+        self._joint_ids, _ = self._robot.find_joints(self.cfg.joint_names, preserve_order=True)
+        self._base_body_ids, _ = self._contact_sensor.find_bodies("base")
+        self._feet_body_ids, _ = self._contact_sensor.find_bodies(".*_calf")
+        self._feet_robot_body_ids, _ = self._robot.find_bodies(".*_calf")
+        self._thigh_body_ids, _ = self._contact_sensor.find_bodies(".*_thigh")
+        self._base_wrench_body_ids, _ = self._robot.find_bodies("base")
+        self._joint_wrench_body_ids, _ = self._robot.find_bodies([".*_thigh", ".*_calf"])
+        self._reset_joint_pos = self._build_reset_joint_pos()
+        self._q_offset_action_and_obs = self._build_q_offset_action_and_obs()
+        self._base_push_interval_step_range = self._seconds_range_to_steps(self.cfg.base_push_interval_range_s)
+        self._base_push_duration_step_range = self._seconds_range_to_steps(self.cfg.base_push_duration_range_s)
+        self._base_push_steps_left = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self._base_push_steps_until_next = self._sample_int_steps(
+            self._base_push_interval_step_range, self.num_envs
+        )
+        self._base_push_forces_b = torch.zeros(
+            self.num_envs, len(self._base_wrench_body_ids), 3, device=self.device
+        )
+        self._base_push_application_points_b = torch.zeros_like(self._base_push_forces_b)
+        self._base_push_application_half_extents = torch.tensor(
+            self.cfg.base_push_application_half_extents, dtype=torch.float, device=self.device
+        )
+        if self._base_push_application_half_extents.shape != (3,) or torch.any(
+            self._base_push_application_half_extents <= 0.0
+        ):
+            raise ValueError(
+                "base_push_application_half_extents must contain three positive values, "
+                f"got {self.cfg.base_push_application_half_extents}."
+            )
+        half_x, half_y, half_z = self._base_push_application_half_extents
+        self._base_push_face_areas = torch.stack(
+            (
+                4.0 * half_x * half_y,
+                4.0 * half_y * half_z,
+                4.0 * half_y * half_z,
+                4.0 * half_x * half_z,
+                4.0 * half_x * half_z,
+            )
+        )
+        self._max_velx_range_curriculum_values = self._parse_max_velx_range_curriculum()
+        self._max_velx_range_curriculum_idx = 0
+        self._base_push_force_curriculum_values = self._parse_base_push_force_curriculum()
+        self._base_push_force_curriculum_idx = 0
+        self._base_push_mean_reward_smooth: float | None = None
+        self._base_push_last_curriculum_step = 0
+        if self._max_velx_range_curriculum_values:
+            self._set_max_velx_range_curriculum_level(0)
+        if self._base_push_force_curriculum_values:
+            self._set_base_push_force_curriculum_level(0)
+        self._tricky_terrain_active = False
+        self._refresh_tricky_terrain_origins(force=True)
+
+        self._episode_sums = {
+            key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+            for key in [
+                "track_lin_vel_xy_exp",
+                "track_ang_vel_z_exp",
+                "lin_vel_z_l2",
+                "ang_vel_xy_l2",
+                "dof_torques_l2",
+                "dof_acc_l2",
+                "action_rate_l2",
+                "feet_air_time",
+                "undesired_contacts",
+                "flat_orientation_l2",
+                "force_transmited_through_joints",
+                "foot_contact",
+            ]
+        }
+        self._episode_reward_sums = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self._base_imu_history_len = self.cfg.base_imu_history_length if self.cfg.imu_raw_inputs else 0
+        self._base_imu_history_sample_dim = self.cfg.base_imu_history_sample_dim
+        self._base_imu_history = torch.zeros(
+            self.num_envs,
+            self._base_imu_history_len,
+            self._base_imu_history_sample_dim,
+            device=self.device,
+        )
+        self._base_imu_bias = torch.zeros(self.num_envs, 6, device=self.device)
+        self._base_imu_orientation_bias_rpy = torch.zeros(self.num_envs, 3, device=self.device)
+        self._base_imu_heading_reference = torch.zeros(self.num_envs, 4, device=self.device)
+        self._base_imu_heading_reference[:, 0] = 1.0
+        self._imu_noise_scale = float(self.cfg.imu_noise_scale)
+        self._base_imu_gravity_bias_w = torch.tensor(
+            self.cfg.base_imu.gravity_bias, dtype=torch.float, device=self.device
+        ).unsqueeze(0)
+        self._gravity_direction_w = torch.tensor((0.0, 0.0, -1.0), dtype=torch.float, device=self.device).unsqueeze(0)
+
+    def _setup_scene(self):
+        self._robot = Articulation(self.cfg.robot)
+        self._apply_configured_base_mass()
+        self.scene.articulations["robot"] = self._robot
+
+        self._contact_sensor = ContactSensor(self.cfg.contact_sensor)
+        self.scene.sensors["contact_sensor"] = self._contact_sensor
+
+        self.cfg.terrain.num_envs = self.scene.cfg.num_envs
+        self.cfg.terrain.env_spacing = self.scene.cfg.env_spacing
+        self._terrain = self.cfg.terrain.class_type(self.cfg.terrain)
+        self._terrain_height_wp_mesh = self._build_terrain_height_query_mesh()
+
+        self.scene.clone_environments(copy_from_source=False)
+        if self.device == "cpu":
+            self.scene.filter_collisions(global_prim_paths=[self.cfg.terrain.prim_path])
+
+        light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
+        light_cfg.func("/World/Light", light_cfg)
+
+    def _apply_configured_base_mass(self):
+        if self.cfg.base_mass is None:
+            return
+
+        source_robot_path = self.cfg.robot.prim_path.replace(self.scene.env_regex_ns, self.scene.env_prim_paths[0])
+        source_base_path = f"{source_robot_path}/base"
+        mass_cfg = sim_utils.MassPropertiesCfg(mass=self.cfg.base_mass)
+        sim_schemas.define_mass_properties(source_base_path, mass_cfg)
+
+    def _build_terrain_height_query_mesh(self):
+        if not self.cfg.include_foot_height_obs:
+            return None
+
+        terrain_prim_paths = getattr(self._terrain, "terrain_prim_paths", None)
+        if not terrain_prim_paths:
+            return None
+
+        import numpy as np
+        import omni
+        from pxr import UsdGeom
+
+        from isaaclab.terrains.trimesh.utils import make_plane
+        from isaaclab.utils.warp import convert_to_warp_mesh
+
+        terrain_prim_path = terrain_prim_paths[0]
+        plane_prim = sim_utils.get_first_matching_child_prim(
+            terrain_prim_path, lambda prim: prim.GetTypeName() == "Plane"
+        )
+        if plane_prim is not None:
+            plane_mesh = make_plane(size=(2e6, 2e6), height=0.0, center_zero=True)
+            return convert_to_warp_mesh(plane_mesh.vertices, plane_mesh.faces, device=self.device)
+
+        mesh_prim = sim_utils.get_first_matching_child_prim(
+            terrain_prim_path, lambda prim: prim.GetTypeName() == "Mesh"
+        )
+        if mesh_prim is None or not mesh_prim.IsValid():
+            return None
+
+        usd_mesh = UsdGeom.Mesh(mesh_prim)
+        points = np.asarray(usd_mesh.GetPointsAttr().Get())
+        transform_matrix = np.array(omni.usd.get_world_transform_matrix(usd_mesh)).T
+        points = np.matmul(points, transform_matrix[:3, :3].T)
+        points += transform_matrix[:3, 3]
+        indices = np.asarray(usd_mesh.GetFaceVertexIndicesAttr().Get())
+        return convert_to_warp_mesh(points, indices, device=self.device)
+
+    def _build_reset_joint_pos(self) -> torch.Tensor:
+        initial_position = self.cfg.initial_position.lower()
+        joint_pos = self._robot.data.default_joint_pos[:, self._joint_ids].clone()
+
+        if initial_position == "rigid":
+            return joint_pos
+        if initial_position == "flexed":
+            initial_joint_pos_cfg = self.cfg.flexed_initial_joint_pos
+        else:
+            initial_joint_pos_cfg = self.cfg.initial_joint_pos_by_name.get(initial_position)
+        if initial_joint_pos_cfg is None:
+            supported_positions = sorted(["rigid", *self.cfg.initial_joint_pos_by_name.keys()])
+            raise ValueError(
+                f"Unsupported initial_position '{self.cfg.initial_position}'. "
+                f"Use one of: {', '.join(supported_positions)}."
+            )
+
+        initial_joint_pos = torch.tensor(
+            [initial_joint_pos_cfg[joint_name] for joint_name in self.cfg.joint_names],
+            device=self.device,
+            dtype=joint_pos.dtype,
+        )
+        joint_pos[:] = initial_joint_pos
+        return joint_pos
+
+    def _build_q_offset_action_and_obs(self) -> torch.Tensor:
+        offset_cfg = self.cfg.q_offset_action_and_obs
+        joint_pos = self._robot.data.default_joint_pos[:, self._joint_ids].clone()
+
+        if offset_cfg is None:
+            offset = self._reset_joint_pos[0]
+        elif isinstance(offset_cfg, dict):
+            offset = torch.tensor(
+                [offset_cfg[joint_name] for joint_name in self.cfg.joint_names],
+                device=self.device,
+                dtype=joint_pos.dtype,
+            )
+        elif isinstance(offset_cfg, (int, float)):
+            offset = torch.full((len(self._joint_ids),), float(offset_cfg), device=self.device, dtype=joint_pos.dtype)
+        else:
+            offset = torch.tensor(offset_cfg, device=self.device, dtype=joint_pos.dtype)
+            if offset.numel() != len(self._joint_ids):
+                raise ValueError(
+                    "q_offset_action_and_obs must be a scalar, a joint-name dictionary, "
+                    f"or have {len(self._joint_ids)} values, got {offset.numel()}."
+                )
+
+        joint_pos[:] = offset.reshape(1, -1)
+        return joint_pos
+
+    def _seconds_range_to_steps(self, seconds_range: tuple[float, float]) -> tuple[int, int]:
+        low_s, high_s = seconds_range
+        if low_s < 0.0 or high_s < low_s:
+            raise ValueError(f"Invalid seconds range: {seconds_range}")
+        low_steps = max(1, int(round(low_s / self.step_dt)))
+        high_steps = max(low_steps, int(round(high_s / self.step_dt)))
+        return low_steps, high_steps
+
+    def _sample_int_steps(self, step_range: tuple[int, int], count: int) -> torch.Tensor:
+        low, high = step_range
+        if low == high:
+            return torch.full((count,), low, dtype=torch.long, device=self.device)
+        return torch.randint(low, high + 1, (count,), dtype=torch.long, device=self.device)
+
+    def _fill_uniform_range(self, tensor: torch.Tensor, value_range: tuple[float, float]):
+        low, high = value_range
+        if low == high:
+            tensor.fill_(low)
+        else:
+            tensor.uniform_(low, high)
+
+    def _parse_base_push_force_curriculum(self) -> tuple[float, ...]:
+        values = tuple(float(value) for value in self.cfg.forces_applied_to_base_curriculum)
+        if any(value < 0.0 for value in values):
+            raise ValueError(f"forces_applied_to_base_curriculum must be non-negative, got {values}.")
+        if not 0.0 < self.cfg.forces_curriculum_smoothing <= 1.0:
+            raise ValueError(
+                "forces_curriculum_smoothing must be in (0, 1], "
+                f"got {self.cfg.forces_curriculum_smoothing}."
+            )
+        return values
+
+    def _parse_max_velx_range_curriculum(self) -> tuple[float, ...]:
+        values = tuple(float(value) for value in self.cfg.max_velx_range_curriculum)
+        if any(value < 0.0 for value in values):
+            raise ValueError(f"max_velx_range_curriculum must be non-negative, got {values}.")
+        return values
+
+    def _set_max_velx_range_curriculum_level(self, level_idx: int):
+        max_vel_x = self._max_velx_range_curriculum_values[level_idx]
+        self._max_velx_range_curriculum_idx = level_idx
+        self.cfg.command_lin_vel_x_range = (-max_vel_x, max_vel_x)
+
+    def _set_base_push_force_curriculum_level(self, level_idx: int):
+        force = self._base_push_force_curriculum_values[level_idx]
+        self._base_push_force_curriculum_idx = level_idx
+        self.cfg.base_push_force_xy_range = (-force, force)
+
+    def get_curriculum_global_idx(self) -> int | None:
+        has_velx_curriculum = bool(self._max_velx_range_curriculum_values)
+        has_force_curriculum = bool(self._base_push_force_curriculum_values)
+        if not has_velx_curriculum and not has_force_curriculum:
+            return None
+        if not has_velx_curriculum:
+            return self._base_push_force_curriculum_idx
+
+        velx_idx = self._max_velx_range_curriculum_idx
+        if velx_idx < len(self._max_velx_range_curriculum_values) - 1:
+            return velx_idx
+        return velx_idx + self._base_push_force_curriculum_idx
+
+    def get_curriculum_max_global_idx(self) -> int | None:
+        has_velx_curriculum = bool(self._max_velx_range_curriculum_values)
+        has_force_curriculum = bool(self._base_push_force_curriculum_values)
+        if not has_velx_curriculum and not has_force_curriculum:
+            return None
+        if not has_velx_curriculum:
+            return len(self._base_push_force_curriculum_values) - 1
+        if not has_force_curriculum:
+            return len(self._max_velx_range_curriculum_values) - 1
+        return len(self._max_velx_range_curriculum_values) + len(self._base_push_force_curriculum_values) - 2
+
+    def _clip_curriculum_activation_idx(self, start_idx: int) -> int:
+        max_idx = self.get_curriculum_max_global_idx()
+        if max_idx is None:
+            return int(start_idx)
+        return min(int(start_idx), max_idx)
+
+    def _tricky_terrain_should_be_active(self) -> bool:
+        if not getattr(self.cfg, "tricky_terrain", False):
+            return False
+        start_idx = getattr(self.cfg, "curriculum_tricky_terrain_idx", None)
+        if start_idx is None:
+            return True
+        start_idx = self._clip_curriculum_activation_idx(start_idx)
+        curriculum_idx = self.get_curriculum_global_idx()
+        if curriculum_idx is None:
+            return start_idx <= 0
+        return curriculum_idx is not None and curriculum_idx >= start_idx
+
+    def _sample_terrain_origins_from_tiles(
+        self,
+        rows: tuple[int, ...],
+        columns: tuple[int, ...],
+        env_ids: torch.Tensor,
+        column_weights: tuple[float, ...] | None = None,
+    ):
+        terrain_origins = getattr(self._terrain, "terrain_origins", None)
+        if terrain_origins is None:
+            return
+        if len(rows) == 0:
+            raise ValueError("At least one terrain row must be provided.")
+        if len(columns) == 0:
+            raise ValueError("At least one terrain column must be provided.")
+        if column_weights is not None and len(column_weights) != len(columns):
+            raise ValueError(
+                f"column_weights length {len(column_weights)} must match columns length {len(columns)}."
+            )
+
+        num_rows, num_cols = terrain_origins.shape[:2]
+        invalid_rows = [row for row in rows if row < 0 or row >= num_rows]
+        invalid_cols = [col for col in columns if col < 0 or col >= num_cols]
+        if invalid_rows:
+            raise ValueError(f"Terrain rows {invalid_rows} are outside available range [0, {num_rows - 1}].")
+        if invalid_cols:
+            raise ValueError(f"Terrain columns {invalid_cols} are outside available range [0, {num_cols - 1}].")
+
+        row_ids = torch.tensor(rows, dtype=torch.long, device=self.device)
+        column_ids = torch.tensor(columns, dtype=torch.long, device=self.device)
+        origin_pool = terrain_origins[row_ids[:, None], column_ids[None, :], :].reshape(
+            len(rows) * len(columns), 3
+        )
+        if column_weights is None:
+            selected_ids = torch.randint(origin_pool.shape[0], (len(env_ids),), device=self.device)
+        else:
+            # origin_pool is row-major over (rows, columns): pool index k -> column (k % len(columns)).
+            # Rows are weighted uniformly, columns by their proportion-matched weight. torch.multinomial
+            # normalizes the (unnormalized) weights internally.
+            col_weights = torch.tensor(column_weights, dtype=torch.float, device=self.device)
+            pool_weights = col_weights.repeat(len(rows))
+            selected_ids = torch.multinomial(pool_weights, len(env_ids), replacement=True)
+        self._terrain.env_origins[env_ids] = origin_pool[selected_ids]
+
+    def _refresh_tricky_terrain_origins(self, env_ids: torch.Tensor | None = None, force: bool = False):
+        if not getattr(self.cfg, "tricky_terrain", False):
+            return
+        if getattr(self._terrain, "terrain_origins", None) is None:
+            return
+
+        should_be_active = self._tricky_terrain_should_be_active()
+        changed = should_be_active != self._tricky_terrain_active
+        if env_ids is None:
+            if not force and not changed:
+                return
+            env_ids = self._robot._ALL_INDICES
+        elif changed:
+            env_ids = self._robot._ALL_INDICES
+
+        if should_be_active:
+            columns = self.cfg.tricky_terrain_cols
+            column_weights = getattr(self.cfg, "tricky_terrain_col_weights", None)
+        else:
+            columns = self.cfg.tricky_terrain_flat_cols
+            column_weights = None
+        self._sample_terrain_origins_from_tiles(
+            tuple(self.cfg.tricky_terrain_spawn_rows),
+            tuple(columns),
+            env_ids,
+            column_weights=tuple(column_weights) if column_weights is not None else None,
+        )
+        self._tricky_terrain_active = should_be_active
+
+    def _update_base_push_force_curriculum(self, completed_episode_returns: torch.Tensor):
+        can_increase_velx = (
+            bool(self._max_velx_range_curriculum_values)
+            and self._max_velx_range_curriculum_idx < len(self._max_velx_range_curriculum_values) - 1
+        )
+        can_increase_force = (
+            bool(self._base_push_force_curriculum_values)
+            and self._base_push_force_curriculum_idx < len(self._base_push_force_curriculum_values) - 1
+        )
+        if (
+            (not can_increase_velx and not can_increase_force)
+            or len(completed_episode_returns) == 0
+        ):
+            return
+
+        if self.common_step_counter - self._base_push_last_curriculum_step < self.max_episode_length:
+            return
+
+        mean_reward = torch.mean(completed_episode_returns).item()
+        if self._base_push_mean_reward_smooth is None:
+            self._base_push_mean_reward_smooth = mean_reward
+        else:
+            smoothing = self.cfg.forces_curriculum_smoothing
+            self._base_push_mean_reward_smooth = (
+                (1.0 - smoothing) * self._base_push_mean_reward_smooth + smoothing * mean_reward
+            )
+
+        if self._base_push_mean_reward_smooth < self.cfg.forces_curriculum_threshold_reward:
+            return
+
+        if can_increase_velx:
+            self._set_max_velx_range_curriculum_level(self._max_velx_range_curriculum_idx + 1)
+        else:
+            self._set_base_push_force_curriculum_level(self._base_push_force_curriculum_idx + 1)
+        self._base_push_mean_reward_smooth = None
+        self._base_push_last_curriculum_step = self.common_step_counter
+        self._refresh_tricky_terrain_origins()
+
+    def _reset_base_pushes(self, env_ids: torch.Tensor):
+        self._base_push_steps_left[env_ids] = 0
+        self._base_push_steps_until_next[env_ids] = self._sample_int_steps(
+            self._base_push_interval_step_range, len(env_ids)
+        )
+        self._base_push_forces_b[env_ids] = 0.0
+        self._base_push_application_points_b[env_ids] = 0.0
+        self._robot.permanent_wrench_composer.reset(env_ids)
+
+    def _sample_base_push_surface_points(self, count: int) -> torch.Tensor:
+        half_extents = self._base_push_application_half_extents
+        unit_samples = torch.rand((count, 3), device=self.device).clamp_min(torch.finfo(torch.float).eps)
+        points = (2.0 * unit_samples - 1.0) * half_extents
+        face_ids = torch.multinomial(self._base_push_face_areas, count, replacement=True)
+
+        points[face_ids == 0, 2] = half_extents[2]  # top
+        points[face_ids == 1, 0] = half_extents[0]  # front
+        points[face_ids == 2, 0] = -half_extents[0]  # rear
+        points[face_ids == 3, 1] = half_extents[1]  # left
+        points[face_ids == 4, 1] = -half_extents[1]  # right
+        return points[:, None, :].expand(-1, len(self._base_wrench_body_ids), -1)
+
+    def _start_base_pushes(self, env_ids: torch.Tensor):
+        self._base_push_steps_left[env_ids] = self._sample_int_steps(
+            self._base_push_duration_step_range, len(env_ids)
+        )
+        self._base_push_steps_until_next[env_ids] = self._sample_int_steps(
+            self._base_push_interval_step_range, len(env_ids)
+        )
+
+        forces = torch.zeros((len(env_ids), len(self._base_wrench_body_ids), 3), device=self.device)
+        self._fill_uniform_range(forces[..., 0], self.cfg.base_push_force_xy_range)
+        self._fill_uniform_range(forces[..., 1], self.cfg.base_push_force_xy_range)
+        self._fill_uniform_range(forces[..., 2], self.cfg.base_push_force_z_range)
+        self._base_push_forces_b[env_ids] = forces
+        self._base_push_application_points_b[env_ids] = self._sample_base_push_surface_points(len(env_ids))
+
+    def _update_base_push_wrench(self):
+        inactive = self._base_push_steps_left <= 0
+        if torch.any(inactive):
+            self._base_push_steps_until_next[inactive] -= 1
+            start_env_ids = torch.nonzero(
+                inactive & (self._base_push_steps_until_next <= 0), as_tuple=False
+            ).squeeze(-1)
+            if len(start_env_ids) > 0:
+                self._start_base_pushes(start_env_ids)
+
+        active = self._base_push_steps_left > 0
+        self._base_push_forces_b[~active] = 0.0
+        self._base_push_application_points_b[~active] = 0.0
+        if torch.any(active):
+            self._robot.permanent_wrench_composer.set_forces_and_torques(
+                forces=self._base_push_forces_b,
+                positions=self._base_push_application_points_b,
+                body_ids=self._base_wrench_body_ids,
+            )
+            self._base_push_steps_left[active] -= 1
+        else:
+            self._robot.permanent_wrench_composer.reset()
+
+    def _pre_physics_step(self, actions: torch.Tensor):
+        resample_env_ids = torch.nonzero(self._command_steps_left <= 0, as_tuple=False).squeeze(-1)
+        if len(resample_env_ids) > 0:
+            self._resample_commands(resample_env_ids)
+            self._command_steps_left[resample_env_ids] = self._command_resample_interval
+        self._command_steps_left -= 1
+        self._update_base_push_wrench()
+
+        self._actions = actions.clone()
+        self._processed_actions = self.cfg.action_scale * self._actions + self._q_offset_action_and_obs
+
+    def _apply_action(self):
+        self._delayed_processed_actions = self._action_delay_buffer.compute(self._processed_actions)
+        self._applied_actions = (
+            self._delayed_processed_actions - self._q_offset_action_and_obs
+        ) / self.cfg.action_scale
+        self._robot.set_joint_position_target(self._delayed_processed_actions, joint_ids=self._joint_ids)
+
+    def step(self, action: torch.Tensor):
+        """Step the env while recording base IMU history at physics rate."""
+        action = action.to(self.device)
+        if self.cfg.action_noise_model:
+            action = self._action_noise_model(action)
+
+        self._pre_physics_step(action)
+
+        is_rendering = self.sim.has_gui() or self.sim.has_rtx_sensors()
+        for _ in range(self.cfg.decimation):
+            self._sim_step_counter += 1
+            self._apply_action()
+            self.scene.write_data_to_sim()
+            self.sim.step(render=False)
+            if self._sim_step_counter % self.cfg.sim.render_interval == 0 and is_rendering:
+                self.sim.render()
+            self.scene.update(dt=self.physics_dt)
+            self._record_base_imu_history_sample()
+
+        self.episode_length_buf += 1
+        self.common_step_counter += 1
+
+        self.reset_terminated[:], self.reset_time_outs[:] = self._get_dones()
+        self.reset_buf = self.reset_terminated | self.reset_time_outs
+        self.reward_buf = self._get_rewards()
+
+        reset_env_ids = self.reset_buf.nonzero(as_tuple=False).squeeze(-1)
+        if len(reset_env_ids) > 0:
+            self._reset_idx(reset_env_ids)
+            if self.sim.has_rtx_sensors() and self.cfg.num_rerenders_on_reset > 0:
+                for _ in range(self.cfg.num_rerenders_on_reset):
+                    self.sim.render()
+
+        if self.cfg.events:
+            if "interval" in self.event_manager.available_modes:
+                self.event_manager.apply(mode="interval", dt=self.step_dt)
+
+        self.obs_buf = self._get_observations()
+        if self.cfg.observation_noise_model:
+            self.obs_buf["policy"] = self._observation_noise_model(self.obs_buf["policy"])
+        return self.obs_buf, self.reward_buf, self.reset_terminated, self.reset_time_outs, self.extras
+
+    def _record_base_imu_history_sample(self):
+        if not self.cfg.imu_raw_inputs or self._base_imu_history_len == 0:
+            return
+
+        self._update_base_imu_bias_random_walk()
+        sample = torch.cat(
+            (
+                self._get_joint_state_obs(corrupt=True),
+                self._read_base_imu_sample(corrupt=True),
+                self._get_base_imu_history_action_obs(),
+            ),
+            dim=-1,
+        )
+        self._base_imu_history = torch.roll(self._base_imu_history, shifts=-1, dims=1)
+        self._base_imu_history[:, -1, :] = sample
+
+    def _get_base_imu_history_action_obs(self) -> torch.Tensor:
+        if self.cfg.base_imu_history_action_is_last_executed:
+            return self._applied_actions
+        return self._actions
+
+    def _read_base_imu_sample(self, corrupt: bool = True) -> torch.Tensor:
+        base_body_id = self._base_wrench_body_ids[0]
+        base_quat_w = self._robot.data.body_link_quat_w[:, base_body_id]
+        base_ang_vel_w = self._robot.data.body_com_ang_vel_w[:, base_body_id]
+        base_ang_acc_w = self._robot.data.body_com_ang_acc_w[:, base_body_id]
+        base_com_acc_w = self._robot.data.body_com_lin_acc_w[:, base_body_id]
+
+        # PhysX exposes COM acceleration. Convert it to the base link origin, where the IMU is mounted.
+        com_to_link_pos_b = -self._robot.data.body_com_pos_b[:, base_body_id]
+        com_to_link_pos_w = math_utils.quat_apply(base_quat_w, com_to_link_pos_b)
+        base_link_linear_acc_w = (
+            base_com_acc_w
+            + torch.linalg.cross(base_ang_acc_w, com_to_link_pos_w, dim=-1)
+            + torch.linalg.cross(
+                base_ang_vel_w, torch.linalg.cross(base_ang_vel_w, com_to_link_pos_w, dim=-1), dim=-1
+            )
+        )
+
+        gyro_b = math_utils.quat_apply_inverse(base_quat_w, base_ang_vel_w)
+        if self.cfg.imu_ekf_processed_inputs:
+            acc_b = math_utils.quat_apply_inverse(base_quat_w, base_link_linear_acc_w)
+            ekf_quat_w = math_utils.quat_mul(self._base_imu_heading_reference, base_quat_w)
+            if corrupt:
+                gyro_b, acc_b = self._maybe_corrupt_base_imu_vectors(gyro_b, acc_b, ekf_processed=True)
+                ekf_quat_w = self._maybe_corrupt_base_imu_orientation(ekf_quat_w)
+            orientation = self._get_base_imu_orientation_obs(ekf_quat_w)
+            if self.cfg.base_imu_clip:
+                gyro_b = gyro_b.clamp(-self.cfg.base_imu_gyro_clip, self.cfg.base_imu_gyro_clip)
+                acc_b = acc_b.clamp(-self.cfg.base_imu_ekf_acc_clip, self.cfg.base_imu_ekf_acc_clip)
+            return torch.cat((gyro_b, acc_b, orientation), dim=-1)
+
+        specific_force_w = base_link_linear_acc_w + self._base_imu_gravity_bias_w
+        acc_b = math_utils.quat_apply_inverse(base_quat_w, specific_force_w)
+        if corrupt:
+            gyro_b, acc_b = self._maybe_corrupt_base_imu_vectors(gyro_b, acc_b, ekf_processed=False)
+        sample = torch.cat((gyro_b, acc_b), dim=-1)
+        if self.cfg.base_imu_clip:
+            gyro = sample[:, :3].clamp(-self.cfg.base_imu_gyro_clip, self.cfg.base_imu_gyro_clip)
+            acc = sample[:, 3:6].clamp(-self.cfg.base_imu_acc_clip, self.cfg.base_imu_acc_clip)
+            sample = torch.cat((gyro, acc), dim=-1)
+        return sample
+
+    def _get_base_imu_orientation_obs(self, quat_w: torch.Tensor) -> torch.Tensor:
+        if self.cfg.use_rotMat_on_imu_encoder:
+            return math_utils.matrix_from_quat(quat_w).reshape(quat_w.shape[0], 9)
+        gravity_w = self._gravity_direction_w.expand(quat_w.shape[0], -1)
+        return math_utils.quat_apply_inverse(quat_w, gravity_w)
+
+    def _maybe_corrupt_base_imu_vectors(
+        self, gyro_b: torch.Tensor, acc_b: torch.Tensor, *, ekf_processed: bool
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if not self.cfg.enable_observation_corruption or not self.cfg.noisy_imu or self._imu_noise_scale == 0.0:
+            return gyro_b, acc_b
+
+        gyro_b = gyro_b + self._base_imu_bias[:, :3]
+        acc_b = acc_b + self._base_imu_bias[:, 3:6]
+        gyro_noise_std = (
+            self._imu_noise_scale * self.cfg.imu_gyro_noise_scale * self.cfg.base_imu_gyro_noise_std
+        )
+        acc_noise_std = self._imu_noise_scale * self.cfg.imu_acc_noise_scale * (
+            self.cfg.base_imu_ekf_acc_noise_std if ekf_processed else self.cfg.base_imu_acc_noise_std
+        )
+        if gyro_noise_std > 0.0:
+            gyro_b = gyro_b + torch.randn_like(gyro_b) * gyro_noise_std
+        if acc_noise_std > 0.0:
+            acc_b = acc_b + torch.randn_like(acc_b) * acc_noise_std
+        return gyro_b, acc_b
+
+    def _maybe_corrupt_base_imu_orientation(self, quat_w: torch.Tensor) -> torch.Tensor:
+        if not self.cfg.enable_observation_corruption or not self.cfg.noisy_imu or self._imu_noise_scale == 0.0:
+            return quat_w
+        noise_std = torch.tensor(
+            self.cfg.base_imu_orientation_noise_std_rpy, dtype=quat_w.dtype, device=quat_w.device
+        )
+        noise_std *= self._imu_noise_scale * self.cfg.imu_orientation_noise_scale
+        orientation_error = self._base_imu_orientation_bias_rpy + torch.randn_like(
+            self._base_imu_orientation_bias_rpy
+        ) * noise_std
+        return math_utils.quat_box_plus(quat_w, orientation_error)
+
+    def _sample_base_imu_bias(self, env_ids: torch.Tensor):
+        self._base_imu_bias[env_ids] = 0.0
+        self._base_imu_orientation_bias_rpy[env_ids] = 0.0
+        if not self.cfg.enable_observation_corruption or not self.cfg.noisy_imu or self._imu_noise_scale == 0.0:
+            return
+        gyro_bias_init_std = (
+            self._imu_noise_scale * self.cfg.imu_gyro_noise_scale * self.cfg.base_imu_gyro_bias_init_std
+        )
+        acc_bias_init_std = self._imu_noise_scale * self.cfg.imu_acc_noise_scale * (
+            self.cfg.base_imu_ekf_acc_bias_init_std
+            if self.cfg.imu_ekf_processed_inputs
+            else self.cfg.base_imu_acc_bias_init_std
+        )
+        if gyro_bias_init_std > 0.0:
+            self._base_imu_bias[env_ids, :3] = torch.randn(
+                len(env_ids), 3, dtype=self._base_imu_bias.dtype, device=self.device
+            ) * gyro_bias_init_std
+        if acc_bias_init_std > 0.0:
+            self._base_imu_bias[env_ids, 3:6] = torch.randn(
+                len(env_ids), 3, dtype=self._base_imu_bias.dtype, device=self.device
+            ) * acc_bias_init_std
+        if self.cfg.imu_ekf_processed_inputs and self.cfg.imu_orientation_noise_scale > 0.0:
+            orientation_bias_std = torch.tensor(
+                self.cfg.base_imu_orientation_bias_init_std_rpy,
+                dtype=self._base_imu_orientation_bias_rpy.dtype,
+                device=self.device,
+            )
+            orientation_bias_std *= self._imu_noise_scale * self.cfg.imu_orientation_noise_scale
+            self._base_imu_orientation_bias_rpy[env_ids] = torch.randn(
+                len(env_ids), 3, device=self.device
+            ) * orientation_bias_std
+
+    def _update_base_imu_bias_random_walk(self):
+        if not self.cfg.enable_observation_corruption or not self.cfg.noisy_imu or self._imu_noise_scale == 0.0:
+            return
+        gyro_bias_rw_std = (
+            self._imu_noise_scale * self.cfg.imu_gyro_noise_scale * self.cfg.base_imu_gyro_bias_rw_std_per_step
+        )
+        acc_bias_rw_std = self._imu_noise_scale * self.cfg.imu_acc_noise_scale * (
+            self.cfg.base_imu_ekf_acc_bias_rw_std_per_step
+            if self.cfg.imu_ekf_processed_inputs
+            else self.cfg.base_imu_acc_bias_rw_std_per_step
+        )
+        if gyro_bias_rw_std > 0.0:
+            self._base_imu_bias[:, :3] += (
+                torch.randn_like(self._base_imu_bias[:, :3]) * gyro_bias_rw_std
+            )
+        if acc_bias_rw_std > 0.0:
+            self._base_imu_bias[:, 3:6] += (
+                torch.randn_like(self._base_imu_bias[:, 3:6]) * acc_bias_rw_std
+            )
+        if self.cfg.imu_ekf_processed_inputs and self.cfg.imu_orientation_noise_scale > 0.0:
+            orientation_rw_std = torch.tensor(
+                self.cfg.base_imu_orientation_bias_rw_std_per_step_rpy,
+                dtype=self._base_imu_orientation_bias_rpy.dtype,
+                device=self.device,
+            )
+            orientation_rw_std *= self._imu_noise_scale * self.cfg.imu_orientation_noise_scale
+            self._base_imu_orientation_bias_rpy += torch.randn_like(
+                self._base_imu_orientation_bias_rpy
+            ) * orientation_rw_std
+
+    def _get_observations(self) -> dict:
+        if self.cfg.policy_model == "base_imu_teacher":
+            teacher_obs = self._get_teacher_critic_obs(corrupt=True)
+            self._previous_actions = self._actions.clone()
+            return {"policy": teacher_obs, "critic": teacher_obs}
+        if self.cfg.policy_model == "base_imu_student_rl":
+            policy_obs = torch.cat((self._base_imu_history.reshape(self.num_envs, -1), self._commands), dim=-1)
+            critic_obs = self._get_teacher_critic_obs(corrupt=False)
+            if self.cfg.feed_history_encoding_to_critic:
+                critic_obs = torch.cat((critic_obs, self._base_imu_history.reshape(self.num_envs, -1)), dim=-1)
+            self._previous_actions = self._actions.clone()
+            return {"policy": policy_obs, "critic": critic_obs}
+        if self.cfg.policy_model == "base_imu_student_dagger":
+            teacher_obs = self._get_teacher_critic_obs(corrupt=False)
+            policy_obs = torch.cat(
+                (teacher_obs, self._base_imu_history.reshape(self.num_envs, -1), self._commands), dim=-1
+            )
+            self._previous_actions = self._actions.clone()
+            return {"policy": policy_obs, "critic": teacher_obs}
+
+        joint_pos = self._robot.data.joint_pos[:, self._joint_ids] - self._q_offset_action_and_obs
+        joint_vel = self._robot.data.joint_vel[:, self._joint_ids]
+        action_obs = self._applied_actions if self.cfg.action_obs_is_last_executed else self._actions
+
+        obs_terms = []
+        if not self.cfg.remove_root_lin_vel_b_from_obs:
+            obs_terms.append(self._maybe_corrupt(self._robot.data.root_lin_vel_b, self.cfg.base_lin_vel_noise))
+        obs_terms.extend(
+            [
+                self._maybe_corrupt(self._robot.data.root_ang_vel_b, self.cfg.base_ang_vel_noise),
+                self._maybe_corrupt(self._robot.data.projected_gravity_b, self.cfg.projected_gravity_noise),
+                self._commands,
+                self._maybe_corrupt(joint_pos, self.cfg.joint_pos_noise),
+                self._maybe_corrupt(joint_vel, self.cfg.joint_vel_noise),
+                action_obs,
+            ]
+        )
+        obs = torch.cat(tuple(obs_terms), dim=-1)
+
+        self._previous_actions = self._actions.clone()
+        return {"policy": obs}
+
+    def _get_joint_state_obs(self, corrupt: bool) -> torch.Tensor:
+        joint_pos = self._robot.data.joint_pos[:, self._joint_ids] - self._q_offset_action_and_obs
+        joint_vel = self._robot.data.joint_vel[:, self._joint_ids]
+        if corrupt:
+            joint_pos = self._maybe_corrupt(joint_pos, self.cfg.joint_pos_noise)
+            joint_vel = self._maybe_corrupt(joint_vel, self.cfg.joint_vel_noise)
+        return torch.cat((joint_pos, joint_vel), dim=-1)
+
+    def _get_foot_height_obs(self) -> torch.Tensor:
+        foot_pos_w = self._robot.data.body_pos_w[:, self._feet_robot_body_ids, :]
+        terrain_z = self._get_terrain_height_below_feet(foot_pos_w)
+        return foot_pos_w[..., 2] - terrain_z
+
+    def _get_terrain_height_below_feet(self, foot_pos_w: torch.Tensor) -> torch.Tensor:
+        fallback_z = self._terrain.env_origins[:, 2].reshape(-1, 1).expand(-1, foot_pos_w.shape[1])
+        if self._terrain_height_wp_mesh is None:
+            return fallback_z
+
+        from isaaclab.utils.warp import raycast_mesh
+
+        ray_starts = foot_pos_w.reshape(-1, 3).clone()
+        ray_starts[:, 2] += 1.0
+        ray_directions = torch.zeros_like(ray_starts)
+        ray_directions[:, 2] = -1.0
+        ray_hits = raycast_mesh(ray_starts, ray_directions, self._terrain_height_wp_mesh, max_dist=5.0)[0]
+        terrain_z = ray_hits[:, 2].reshape(foot_pos_w.shape[0], foot_pos_w.shape[1])
+        return torch.where(torch.isfinite(terrain_z), terrain_z, fallback_z)
+
+    def _get_teacher_encoder_obs(self, corrupt: bool) -> torch.Tensor:
+        terms = [
+            self._maybe_corrupt(self._robot.data.projected_gravity_b, self.cfg.projected_gravity_noise)
+            if corrupt
+            else self._robot.data.projected_gravity_b,
+            self._maybe_corrupt(self._robot.data.root_lin_vel_b, self.cfg.base_lin_vel_noise)
+            if corrupt
+            else self._robot.data.root_lin_vel_b,
+            self._maybe_corrupt(self._robot.data.root_ang_vel_b, self.cfg.base_ang_vel_noise)
+            if corrupt
+            else self._robot.data.root_ang_vel_b,
+        ]
+        if self.cfg.include_foot_height_obs:
+            terms.append(self._get_foot_height_obs())
+        terms.extend(
+            [
+                self._applied_actions if self.cfg.action_obs_is_last_executed else self._actions,
+                self._get_joint_state_obs(corrupt=corrupt),
+            ]
+        )
+        return torch.cat(tuple(terms), dim=-1)
+
+    def _get_teacher_critic_obs(self, corrupt: bool) -> torch.Tensor:
+        return torch.cat((self._get_teacher_encoder_obs(corrupt=corrupt), self._commands), dim=-1)
+
+    def _get_rewards(self) -> torch.Tensor:
+        lin_vel_error = torch.sum(torch.square(self._commands[:, :2] - self._robot.data.root_lin_vel_b[:, :2]), dim=1)
+        yaw_rate_error = torch.square(self._commands[:, 2] - self._robot.data.root_ang_vel_b[:, 2])
+        z_vel_error = torch.square(self._robot.data.root_lin_vel_b[:, 2])
+        ang_vel_error = torch.sum(torch.square(self._robot.data.root_ang_vel_b[:, :2]), dim=1)
+        joint_torques = torch.sum(torch.square(self._robot.data.applied_torque[:, self._joint_ids]), dim=1)
+        joint_accel = torch.sum(torch.square(self._robot.data.joint_acc[:, self._joint_ids]), dim=1)
+        action_rate = torch.sum(torch.square(self._actions - self._previous_actions), dim=1)
+        flat_orientation = torch.sum(torch.square(self._robot.data.projected_gravity_b[:, :2]), dim=1)
+
+        first_contact = self._contact_sensor.compute_first_contact(self.step_dt)[:, self._feet_body_ids]
+        last_air_time = self._contact_sensor.data.last_air_time[:, self._feet_body_ids]
+        feet_air_time = torch.sum((last_air_time - self.cfg.feet_air_time_threshold) * first_contact, dim=1)
+        feet_air_time *= torch.norm(self._commands[:, :2], dim=1) > 0.1
+
+        undesired_contacts = self._compute_contact_count(self._thigh_body_ids, self.cfg.undesired_contact_threshold)
+        force_transmited_through_joints = self._compute_force_transmited_through_joints()
+        foot_contact = self._compute_foot_contact_penalty()
+
+        rewards = {
+            "track_lin_vel_xy_exp": torch.exp(-lin_vel_error / self.cfg.tracking_std**2)
+            * self.cfg.track_lin_vel_xy_reward_scale
+            * self.step_dt,
+            "track_ang_vel_z_exp": torch.exp(-yaw_rate_error / self.cfg.tracking_std**2)
+            * self.cfg.track_ang_vel_z_reward_scale
+            * self.step_dt,
+            "lin_vel_z_l2": z_vel_error * self.cfg.lin_vel_z_reward_scale * self.step_dt,
+            "ang_vel_xy_l2": ang_vel_error * self.cfg.ang_vel_xy_reward_scale * self.step_dt,
+            "dof_torques_l2": joint_torques * self.cfg.joint_torque_reward_scale * self.step_dt,
+            "dof_acc_l2": joint_accel * self.cfg.joint_accel_reward_scale * self.step_dt,
+            "action_rate_l2": action_rate * self.cfg.action_rate_reward_scale * self.step_dt,
+            "feet_air_time": feet_air_time * self.cfg.feet_air_time_reward_scale * self.step_dt,
+            "undesired_contacts": undesired_contacts * self.cfg.undesired_contact_reward_scale * self.step_dt,
+            "flat_orientation_l2": flat_orientation * self.cfg.base_tilt_penalty_reward_scale * self.step_dt,
+            "force_transmited_through_joints": force_transmited_through_joints
+            * self.cfg.force_transmited_through_joints_reward_scale
+            * self.step_dt,
+            "foot_contact": foot_contact * self.cfg.foot_contact_reward_scale * self.step_dt,
+        }
+
+        reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
+        step_log = {f"RewardsPerStep/{key}": torch.mean(value).item() for key, value in rewards.items()}
+        step_log["RewardsPerStep/cmd_tracking"] = (
+            step_log["RewardsPerStep/track_lin_vel_xy_exp"] + step_log["RewardsPerStep/track_ang_vel_z_exp"]
+        )
+        step_log["RewardsPerStep/total"] = torch.mean(reward).item()
+        self.extras["log"] = step_log
+        for key, value in rewards.items():
+            self._episode_sums[key] += value
+        self._episode_reward_sums += reward
+        return reward
+
+    def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
+        time_out = self.episode_length_buf >= self.max_episode_length - 1
+        net_contact_forces = self._contact_sensor.data.net_forces_w_history
+        base_contacts = torch.max(torch.norm(net_contact_forces[:, :, self._base_body_ids], dim=-1), dim=1)[0]
+        terminated = torch.any(base_contacts > self.cfg.base_contact_threshold, dim=1)
+        return terminated, time_out
+
+    def _reset_idx(self, env_ids: torch.Tensor | None):
+        if env_ids is None or len(env_ids) == self.num_envs:
+            env_ids = self._robot._ALL_INDICES
+
+        completed_env_ids = env_ids[self.episode_length_buf[env_ids] > 0]
+        completed_episode_returns = self._episode_reward_sums[completed_env_ids]
+        mean_episode_return = (
+            torch.mean(completed_episode_returns).item() if len(completed_episode_returns) > 0 else 0.0
+        )
+        mean_episode_length_steps = (
+            torch.mean(self.episode_length_buf[completed_env_ids].float()).item()
+            if len(completed_env_ids) > 0
+            else 0.0
+        )
+        self._update_base_push_force_curriculum(completed_episode_returns)
+        self._refresh_tricky_terrain_origins(env_ids)
+
+        self._robot.reset(env_ids)
+        super()._reset_idx(env_ids)
+
+        num_resets = len(env_ids)
+        self._actions[env_ids] = 0.0
+        self._previous_actions[env_ids] = 0.0
+        self._processed_actions[env_ids] = 0.0
+        self._delayed_processed_actions[env_ids] = 0.0
+        self._applied_actions[env_ids] = 0.0
+        if self.cfg.imu_raw_inputs:
+            self._base_imu_history[env_ids] = 0.0
+            self._sample_base_imu_bias(env_ids)
+
+        self._resample_commands(env_ids, allow_opposite=False)
+        self._command_steps_left[env_ids] = self._command_resample_interval
+        self._reset_base_pushes(env_ids)
+
+        joint_pos = self._robot.data.default_joint_pos[env_ids].clone()
+        joint_pos[:, self._joint_ids] = self._reset_joint_pos[env_ids]
+        if self.cfg.initial_position.lower() != "rigid":
+            low, high = self.cfg.flexed_initial_joint_pos_noise_range
+            if low != 0.0 or high != 0.0:
+                joint_pos[:, self._joint_ids] += torch.empty(
+                    (num_resets, len(self._joint_ids)), device=self.device
+                ).uniform_(low, high)
+        joint_vel = torch.zeros_like(self._robot.data.default_joint_vel[env_ids])
+
+        root_pose = self._robot.data.default_root_state[env_ids, :7].clone()
+        root_pose[:, :3] += self._terrain.env_origins[env_ids]
+        root_pose[:, 0] += self.cfg.reset_x_pos
+        root_pose[:, 1] += self.cfg.reset_y_pos
+        yaw = torch.full((num_resets,), self.cfg.reset_yaw, device=self.device)
+        zeros = torch.zeros_like(yaw)
+        root_pose[:, 3:7] = math_utils.quat_from_euler_xyz(zeros, zeros, yaw)
+        self._base_imu_heading_reference[env_ids] = math_utils.quat_from_euler_xyz(zeros, zeros, -yaw)
+
+        root_velocity = torch.zeros_like(self._robot.data.default_root_state[env_ids, 7:])
+        root_velocity[:, 0:3].uniform_(*self.cfg.reset_base_lin_vel_range)
+        root_velocity[:, 3:6].uniform_(*self.cfg.reset_base_ang_vel_range)
+
+        action_delays = torch.randint(
+            low=self.cfg.actuation_delay_range[0],
+            high=self.cfg.actuation_delay_range[1] + 1,
+            size=(num_resets,),
+            device=self.device,
+            dtype=torch.int,
+        )
+        self._action_delay_steps[env_ids] = action_delays
+        self._action_delay_buffer.set_time_lag(action_delays, env_ids)
+        self._action_delay_buffer.reset(env_ids)
+
+        self._robot.write_root_pose_to_sim(root_pose, env_ids)
+        self._robot.write_root_velocity_to_sim(root_velocity, env_ids)
+        self._robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
+        self._robot.set_joint_position_target(joint_pos[:, self._joint_ids], joint_ids=self._joint_ids, env_ids=env_ids)
+
+        extras = {}
+        for key in self._episode_sums:
+            # Included abs to see all positive (reward / penalty) in wandb
+            extras[f"Episode_Reward/{key}"] = torch.mean(self._episode_sums[key][env_ids]).abs() / self.max_episode_length_s
+            self._episode_sums[key][env_ids] = 0.0
+
+        extras['Episode_Reward/cmd_tracking'] = extras[f"Episode_Reward/track_lin_vel_xy_exp"] + extras[f"Episode_Reward/track_ang_vel_z_exp"]
+        extras["Episode_Reward/total"] = mean_episode_return
+        self._episode_reward_sums[env_ids] = 0.0
+        extras["Episode/length_steps"] = mean_episode_length_steps
+        extras["Episode/length_seconds"] = mean_episode_length_steps * self.step_dt
+
+        force_low, force_high = self.cfg.base_push_force_xy_range
+        velx_low, velx_high = self.cfg.command_lin_vel_x_range
+        extras["Curriculum/command_lin_vel_x_abs"] = max(abs(velx_low), abs(velx_high))
+        extras["Curriculum/max_velx_range_idx"] = self._max_velx_range_curriculum_idx
+        extras["Curriculum/base_push_force_xy_abs"] = max(abs(force_low), abs(force_high))
+        extras["Curriculum/base_push_force_idx"] = self._base_push_force_curriculum_idx
+        extras["Curriculum/tricky_terrain_active"] = float(self._tricky_terrain_active)
+        curriculum_idx = self.get_curriculum_global_idx()
+        if curriculum_idx is not None:
+            extras["Curriculum/global_idx"] = curriculum_idx
+        if self._base_push_mean_reward_smooth is not None:
+            extras["Curriculum/base_push_mean_reward_smooth"] = self._base_push_mean_reward_smooth
+
+        extras["Episode_Termination/base_contact"] = torch.count_nonzero(self.reset_terminated[env_ids]).item()
+        extras["Episode_Termination/time_out"] = torch.count_nonzero(self.reset_time_outs[env_ids]).item()
+        # include logs in wandb
+        self.extras["log"] = extras
+
+    def _resample_commands(self, env_ids: torch.Tensor, allow_opposite: bool = True):
+        commands = torch.empty((len(env_ids), 3), device=self.device)
+        commands[:, 0].uniform_(*self.cfg.command_lin_vel_x_range)
+        commands[:, 1].uniform_(*self.cfg.command_lin_vel_y_range)
+        commands[:, 2].uniform_(*self.cfg.command_ang_vel_z_range)
+
+        opposite_prob = self.cfg.opposite_direction_cmd_prob
+        if allow_opposite and opposite_prob > 0.0:
+            previous_commands = self._commands[env_ids]
+            flip_mask = torch.rand_like(commands) < opposite_prob
+            nonzero_previous = torch.abs(previous_commands) > 1e-6
+            commands = torch.where(flip_mask & nonzero_previous, -previous_commands, commands)
+
+        standing_mask = torch.rand(len(env_ids), device=self.device) < self.cfg.standing_env_prob
+        commands[standing_mask] = 0.0
+        self._commands[env_ids] = commands
+
+    def _compute_contact_count(self, body_ids: list[int], threshold: float) -> torch.Tensor:
+        net_contact_forces = self._contact_sensor.data.net_forces_w_history
+        is_contact = torch.max(torch.norm(net_contact_forces[:, :, body_ids], dim=-1), dim=1)[0] > threshold
+        return torch.sum(is_contact, dim=1)
+
+    def _compute_force_transmited_through_joints(self) -> torch.Tensor:
+        incoming_joint_wrench_b = self._robot.data.body_incoming_joint_wrench_b[:, self._joint_wrench_body_ids]
+        incoming_joint_force_b = incoming_joint_wrench_b[..., :3]
+        return torch.sum(torch.sum(torch.square(incoming_joint_force_b), dim=-1), dim=1)
+
+    def _compute_foot_contact_penalty(self) -> torch.Tensor:
+        contact_forces = self._contact_sensor.data.net_forces_w[:, self._feet_body_ids, :]
+        contact_force_norm = torch.norm(contact_forces, dim=-1)
+        excess_force = torch.clamp(contact_force_norm - self.cfg.foot_contact_safe_threshold, min=0.0)
+        if self.cfg.square_foot_penalty: 
+            excess_force = excess_force**2
+        return torch.sum(excess_force, dim=1)
+
+    def _maybe_corrupt(self, tensor: torch.Tensor, noise_range: tuple[float, float]) -> torch.Tensor:
+        if not self.cfg.enable_observation_corruption or noise_range[0] == noise_range[1] == 0.0:
+            return tensor
+        return tensor + torch.empty_like(tensor).uniform_(noise_range[0], noise_range[1])

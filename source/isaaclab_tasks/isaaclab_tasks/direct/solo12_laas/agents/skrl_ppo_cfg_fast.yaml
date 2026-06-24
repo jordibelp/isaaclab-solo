@@ -1,0 +1,92 @@
+seed: 42
+
+# Fast-iteration PPO config for Solo12 LAAS direct locomotion.
+# Goal: get a "good enough" walking policy quickly for reward-weight sweeps,
+# not necessarily the best final asymptotic performance.
+
+models:
+  # Shared backbone is cheaper and usually good enough for velocity-commanded quadrupeds.
+  separate: False
+  policy:
+    class: GaussianMixin
+    clip_actions: False
+    clip_log_std: True
+    min_log_std: -20.0
+    max_log_std: 2.0
+    initial_log_std: 0.0
+    network:
+      - name: net
+        input: OBSERVATIONS
+        layers: [256, 128, 64]
+        activations: elu
+    output: ACTIONS
+  value:
+    class: DeterministicMixin
+    clip_actions: False
+    network:
+      - name: net
+        input: OBSERVATIONS
+        layers: [256, 128, 64]
+        activations: elu
+    output: ONE
+
+memory:
+  class: RandomMemory
+  memory_size: -1
+
+agent:
+  mixed_precision: True
+  class: PPO
+
+  # Smaller rollout/update cycle for quicker iteration and earlier signal.
+  rollouts: 64
+  time_limit_bootstrap: True
+  learning_epochs: 5
+  mini_batches: 4
+
+  discount_factor: 0.99
+  lambda: 0.95
+  learning_rate: 1.0e-3
+  learning_rate_scheduler: KLAdaptiveLR
+  learning_rate_scheduler_kwargs:
+    kl_threshold: 0.01
+    min_lr: 1.0e-4
+    max_lr: 1.0e-3
+
+  state_preprocessor: RunningStandardScaler
+  state_preprocessor_kwargs: null
+  value_preprocessor: RunningStandardScaler
+  value_preprocessor_kwargs: null
+
+  random_timesteps: 0
+  learning_starts: 0
+
+  grad_norm_clip: 0.5
+  ratio_clip: 0.2
+  value_clip: 0.2
+  clip_predicted_values: True
+
+  # Slightly more exploration early on can help locomotion bootstrap faster.
+  entropy_loss_scale: 0.002
+  value_loss_scale: 0.5
+
+  kl_threshold: 0.03
+  rewards_shaper_scale: 1.0
+
+  experiment:
+    directory: "borinot_ppo_experiments_fast"
+    experiment_name: "solo12_laas_fast_"
+    write_interval: 10000
+    checkpoint_interval: 20000
+    wandb: True
+    wandb_kwargs:
+      project: "borinotIsaacLab"
+      entity: "jordibelp"
+      name: "Solo12 LAAS: ODRI USD + IdealPD actuator"
+      sync_tensorboard: true
+
+trainer:
+  class: SequentialTrainer
+  # Shorter default horizon for quick experiments. Extend when a setting looks promising.
+  timesteps: 2916667
+  environment_info: log

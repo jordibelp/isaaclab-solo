@@ -1,0 +1,115 @@
+# Local assistant / workspace state
+.claude/
+.openclaw/
+.worktrees/
+
+# C++
+**/cmake-build*/
+**/build*/
+**/*.so
+**/*.log*
+
+# Omniverse
+**/*.dmp
+**/.thumbs
+
+# No USD files allowed in the repo
+# **/*.usd tracked by git-lfs
+**/*.usda
+**/*.usdc
+**/*.usdz
+
+# Checkpoints / model artifacts
+**/checkpoints/
+**/checkpoint_recordings/
+**/*.pt
+**/*.pth
+**/*.ckpt
+**/*.onnx
+**/*.engine
+**/*.safetensors
+
+# Python
+.DS_Store
+**/*.egg-info/
+**/__pycache__/
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+**/.ipynb_checkpoints/
+**/*.pyc
+**/*.pb
+
+# Docker/Singularity
+**/*.sif
+docker/cluster/exports/
+docker/.container.cfg
+
+# Hydra / experiment outputs
+/outputs/
+**/outputs/
+
+# IDE
+**/.idea/
+**/.vscode/settings.json
+**/.vscode/launch.json
+
+# Local outputs and run artifacts
+/logs/
+**/logs/
+/wandb/
+**/wandb/
+/scene_exports/
+**/scene_exports/
+**/output/
+**/runs/
+**/recordings/
+**/videos/
+**/*.mp4
+**/*.avi
+**/*.mov
+**/*.mkv
+**/.neptune/*
+docker/artifacts/
+
+# Scratch / one-off local files
+/tmp/
+/tmp_*/
+/scratch/
+/scratch_*/
+*.tmp
+*.temp
+*.bak
+*.swp
+*.orig
+*.rej
+
+# Doc Outputs
+**/docs/_build/*
+**/generated/*
+
+# Isaac-Sim packman
+_isaac_sim*
+_repo
+_build
+.lastformat
+
+# RL-Games
+**/nn/
+**/summaries/
+
+# Pre-Trained Checkpoints
+/.pretrained_checkpoints/
+
+# Teleop Recorded Dataset
+/datasets/
+
+# Tests
+tests/
+
+# Docker history
+.isaac-lab-docker-history
+
+# TacSL sensor
+**/tactile_record/*
+**/gelsight_r15_data/*
