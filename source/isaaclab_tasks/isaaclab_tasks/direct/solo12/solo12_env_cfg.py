@@ -465,8 +465,9 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     # _proportional_tricky_spawn_columns). None falls back to uniform sampling over the columns.
     tricky_terrain_col_weights = SOLO12_TRICKY_TERRAIN_COL_WEIGHTS
     # terrain damping
-    compliant_contact_stiffness = 3_005.0
-    compliant_contact_damping = 60.0
+    compliant_contact_stiffness = 0.0 #3_005.0
+    compliant_contact_damping = 0.0 #60.0
+
 
     tracking_std = math.sqrt(0.25)
     feet_air_time_threshold = 0.5
