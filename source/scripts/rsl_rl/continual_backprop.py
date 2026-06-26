@@ -153,18 +153,48 @@ class _CBPGroup:
             "total_replacements": int(self.total_replacements),
         }
 
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+    def load_state_dict(self, state_dict: dict[str, Any], *, fallback_age: int | None = None) -> dict[str, Any]:
+        report = {
+            "name": self.name,
+            "util": "missing",
+            "mean_feature_act": "missing",
+            "ages": "missing",
+        }
         util = state_dict.get("util", None)
         if isinstance(util, torch.Tensor) and util.shape == self.util.shape:
-            self.util.copy_(util.to(self.device))
+            self.util.copy_(util.to(device=self.device, dtype=self.util.dtype))
+            report["util"] = "loaded"
+        elif isinstance(util, torch.Tensor):
+            report["util"] = f"shape_mismatch:{tuple(util.shape)}"
         mean_feature_act = state_dict.get("mean_feature_act", None)
         if isinstance(mean_feature_act, torch.Tensor) and mean_feature_act.shape == self.mean_feature_act.shape:
-            self.mean_feature_act.copy_(mean_feature_act.to(self.device))
+            self.mean_feature_act.copy_(mean_feature_act.to(device=self.device, dtype=self.mean_feature_act.dtype))
+            report["mean_feature_act"] = "loaded"
+        elif isinstance(mean_feature_act, torch.Tensor):
+            report["mean_feature_act"] = f"shape_mismatch:{tuple(mean_feature_act.shape)}"
         ages = state_dict.get("ages", None)
         if isinstance(ages, torch.Tensor) and ages.shape == self.ages.shape:
-            self.ages.copy_(ages.to(self.device))
+            self.ages.copy_(ages.to(device=self.device, dtype=self.ages.dtype))
+            report["ages"] = "loaded"
+        elif isinstance(ages, torch.Tensor):
+            report["ages"] = f"shape_mismatch:{tuple(ages.shape)}"
+        elif fallback_age is not None:
+            self.ages.fill_(float(max(0, int(fallback_age))))
+            report["ages"] = "fallback_optimizer_steps"
         self.accumulated_replacements = float(state_dict.get("accumulated_replacements", self.accumulated_replacements))
         self.total_replacements = int(state_dict.get("total_replacements", self.total_replacements))
+        return report
+
+    def initialize_ages_from_optimizer_steps(self, optimizer_steps: int) -> None:
+        self.ages.fill_(float(max(0, int(optimizer_steps))))
+
+    def age_summary(self) -> dict[str, float]:
+        ages = self.ages.detach().float()
+        return {
+            "min": float(ages.min().item()),
+            "mean": float(ages.mean().item()),
+            "max": float(ages.max().item()),
+        }
 
     def _flatten_features(self) -> torch.Tensor | None:
         if self._last_features is None:
@@ -369,6 +399,8 @@ class ContinualBackpropManager:
 
     def state_dict(self) -> dict[str, Any]:
         return {
+            "state_version": 2,
+            "stores_per_neuron_ages": True,
             "replacement_rate": self.replacement_rate,
             "maturity_threshold": self.maturity_threshold,
             "decay_rate": self.decay_rate,
@@ -381,15 +413,47 @@ class ContinualBackpropManager:
             "groups": {group.name: group.state_dict() for group in self.groups},
         }
 
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+    def load_state_dict(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+        report = {
+            "groups_loaded": 0,
+            "groups_total": len(self.groups),
+            "age_tensors_loaded": 0,
+            "age_tensors_from_optimizer_steps": 0,
+            "age_tensors_missing": 0,
+            "optimizer_steps": int(state_dict.get("optimizer_steps", self.optimizer_steps)),
+            "group_reports": [],
+        }
         groups = state_dict.get("groups", {})
         if not isinstance(groups, dict):
-            return
+            groups = {}
+        fallback_age = report["optimizer_steps"] if report["optimizer_steps"] > 0 else None
         for group in self.groups:
             group_state = groups.get(group.name, None)
             if isinstance(group_state, dict):
-                group.load_state_dict(group_state)
+                group_report = group.load_state_dict(group_state, fallback_age=fallback_age)
+                report["group_reports"].append(group_report)
+                report["groups_loaded"] += 1
+                if group_report["ages"] == "loaded":
+                    report["age_tensors_loaded"] += 1
+                elif group_report["ages"] == "fallback_optimizer_steps":
+                    report["age_tensors_from_optimizer_steps"] += 1
+                else:
+                    report["age_tensors_missing"] += 1
                 self.total_replacements_by_group[group.name] = int(group.total_replacements)
+            else:
+                group_report = {
+                    "name": group.name,
+                    "util": "missing",
+                    "mean_feature_act": "missing",
+                    "ages": "missing",
+                }
+                if fallback_age is not None:
+                    group.initialize_ages_from_optimizer_steps(fallback_age)
+                    group_report["ages"] = "fallback_optimizer_steps"
+                    report["age_tensors_from_optimizer_steps"] += 1
+                else:
+                    report["age_tensors_missing"] += 1
+                report["group_reports"].append(group_report)
         last_replacements = state_dict.get("last_replacements", {})
         if isinstance(last_replacements, dict):
             self.last_replacements = {str(key): int(value) for key, value in last_replacements.items()}
@@ -399,6 +463,18 @@ class ContinualBackpropManager:
                 if key in self.total_replacements_by_group:
                     self.total_replacements_by_group[str(key)] = int(value)
         self.optimizer_steps = int(state_dict.get("optimizer_steps", self.optimizer_steps))
+        return report
+
+    def initialize_ages_from_optimizer_steps(self, optimizer_steps: int) -> dict[str, Any]:
+        optimizer_steps = max(0, int(optimizer_steps))
+        for group in self.groups:
+            group.initialize_ages_from_optimizer_steps(optimizer_steps)
+        self.optimizer_steps = max(int(self.optimizer_steps), optimizer_steps)
+        return {
+            "groups_total": len(self.groups),
+            "age_tensors_from_optimizer_steps": len(self.groups),
+            "optimizer_steps": optimizer_steps,
+        }
 
     def after_optimizer_step(self, optimizer: torch.optim.Optimizer) -> dict[str, int]:
         self.optimizer_steps += 1
@@ -422,6 +498,7 @@ class ContinualBackpropManager:
             "optimizer_steps": int(self.optimizer_steps),
             "total_replacements": int(sum(self.total_replacements_by_group.values())),
             "total_replacements_by_group": dict(self.total_replacements_by_group),
+            "age_stats_by_group": {group.name: group.age_summary() for group in self.groups},
         }
 
 

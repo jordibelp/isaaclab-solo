@@ -527,10 +527,29 @@ def _restore_cbp_state_from_checkpoint(cbp_manager, checkpoint_path: str | None)
     checkpoint = torch.load(checkpoint_path, weights_only=False, map_location="cpu")
     state = checkpoint.get("continual_backprop_state_dict")
     if isinstance(state, dict):
-        cbp_manager.load_state_dict(state)
-        print(f"[INFO]: Restored continual backprop state from: {checkpoint_path}")
+        report = cbp_manager.load_state_dict(state)
+        print(
+            "[INFO]: Restored continual backprop state from: "
+            f"{checkpoint_path} "
+            f"(optimizer_steps={report['optimizer_steps']}, "
+            f"groups={report['groups_loaded']}/{report['groups_total']}, "
+            f"age_tensors={report['age_tensors_loaded']}/{report['groups_total']} exact"
+            f", fallback={report['age_tensors_from_optimizer_steps']})."
+        )
     else:
-        print("[INFO]: Checkpoint has no continual backprop state; starting CBP ages/utilities from scratch.")
+        infos = checkpoint.get("infos", {})
+        cbp_summary = infos.get("continual_backprop", {}) if isinstance(infos, dict) else {}
+        optimizer_steps = cbp_summary.get("optimizer_steps", None) if isinstance(cbp_summary, dict) else None
+        if optimizer_steps is not None:
+            report = cbp_manager.initialize_ages_from_optimizer_steps(int(optimizer_steps))
+            print(
+                "[INFO]: Checkpoint has only a continual backprop summary, not exact per-neuron state; "
+                f"initialized CBP ages from optimizer_steps={report['optimizer_steps']} for "
+                f"{report['age_tensors_from_optimizer_steps']}/{report['groups_total']} groups. "
+                "Future checkpoints will save exact per-neuron ages."
+            )
+        else:
+            print("[INFO]: Checkpoint has no continual backprop state; starting CBP ages/utilities from scratch.")
 
 
 def _sanitize_policy_action_std(runner) -> None:
