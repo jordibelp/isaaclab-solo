@@ -628,12 +628,12 @@ def _slip_angle_contact_counts(raw_env, num_envs: int, delta_deg: float) -> dict
     if contact_reaction is None:
         return None
 
-    contact_forces_w, normal_forces_w, _ = contact_reaction
+    _, normal_forces_w, friction_forces_w = contact_reaction
     contact_mask = torch.linalg.norm(normal_forces_w, dim=-1) > float(getattr(raw_env.cfg, "base_contact_threshold", 1.0))
 
-    horizontal_force = torch.linalg.norm(contact_forces_w[..., :2], dim=-1)
-    vertical_force = torch.abs(contact_forces_w[..., 2])
-    angle_deg = torch.rad2deg(torch.atan2(horizontal_force, torch.clamp(vertical_force, min=1.0e-6)))
+    normal_force = torch.linalg.norm(normal_forces_w, dim=-1)
+    friction_force = torch.linalg.norm(friction_forces_w, dim=-1)
+    angle_deg = torch.rad2deg(torch.atan2(friction_force, normal_force))
     static_mu, dynamic_mu = _foot_friction_values(raw_env, num_envs)
     angle_static_deg = torch.rad2deg(torch.atan(torch.clamp(static_mu, min=0.0)))
     angle_dynamic_deg = torch.rad2deg(torch.atan(torch.clamp(dynamic_mu, min=0.0)))

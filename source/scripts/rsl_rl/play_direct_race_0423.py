@@ -25,6 +25,7 @@ import inspect
 import math
 import os
 import re
+import shlex
 import statistics
 import subprocess
 import sys
@@ -318,7 +319,7 @@ parser.add_argument(
     default="auto",
     help=(
         "For --visualize-slip, write a physics-rate (per-substep) per-foot CSV time series of "
-        "tangential speed and reaction-force angles for offline angle-vs-time plots. Pass a path to "
+        "tangential speed and friction-cone angles for offline angle-vs-time plots. Pass a path to "
         "override the default <log_dir>/slip_logs/<checkpoint>_<timestamp>.csv, or 'none' to disable."
     ),
 )
@@ -1431,7 +1432,7 @@ class FootFrictionPopup:
 
 
 class SlipConeVisualizer:
-    """Live per-foot reaction-force cone status with UI and viewport dot markers."""
+    """Live per-foot friction-cone status with UI and viewport dot markers."""
 
     _DISPLAY_ORDER = ("FR", "FL", "RR", "RL")
     _SCHEMATIC_ORDER = ("FL", "FR", "RL", "RR")
@@ -1486,7 +1487,7 @@ class SlipConeVisualizer:
         self._foot_link_body_ids_cache: torch.Tensor | None = None
         self._contact_to_robot_perm_cache: torch.Tensor | None = None
         # Physics-rate (per-substep) sampler state. The sampler hooks raw_env.scene.update so
-        # foot velocity + reaction angle are captured at the full sim rate instead of once per
+        # foot velocity + cone angle are captured at the full sim rate instead of once per
         # policy step, which is what the live UI and the CSV time series consume.
         self._physics_sampler_active = False
         self._step_samples: dict[str, list[dict[str, object]]] = {}
@@ -1784,11 +1785,11 @@ class SlipConeVisualizer:
             name = foot_names[index] if index < len(foot_names) else ""
             label = FootFrictionPopup._label_from_foot_name(name) or f"foot_{index}"
             force_w = contact_forces_w[index]
-            horizontal_force = torch.linalg.norm(force_w[:2])
-            vertical_force = torch.abs(force_w[2])
-            angle_rad = torch.atan2(horizontal_force, torch.clamp(vertical_force, min=1.0e-6))
+            normal_norm_value = float(normal_force_norm[index].item())
+            friction_norm_value = float(friction_force_norm[index].item())
+            angle_rad = torch.atan2(friction_force_norm[index], normal_force_norm[index])
             angle_deg = float(torch.rad2deg(angle_rad).item())
-            effective_mu = float((horizontal_force / torch.clamp(vertical_force, min=1.0e-6)).item())
+            effective_mu = friction_norm_value / max(normal_norm_value, 1.0e-6)
             mu_static = float(static_mu[index].item())
             mu_dynamic = float(dynamic_mu[index].item())
             angle_static_deg = math.degrees(math.atan(max(0.0, mu_static)))
@@ -1797,8 +1798,6 @@ class SlipConeVisualizer:
             tangential_speed = float(np.linalg.norm(foot_vel[:2]))
             foot_vel_origin = foot_vel_origin_w[index].detach().cpu().numpy().astype(np.float64)
             tangential_speed_origin = float(np.linalg.norm(foot_vel_origin[:2]))
-            normal_norm_value = float(normal_force_norm[index].item())
-            friction_norm_value = float(friction_force_norm[index].item())
             rho_static = friction_norm_value / max(mu_static * normal_norm_value, 1.0e-6)
             rho_dynamic = friction_norm_value / max(mu_dynamic * normal_norm_value, 1.0e-6)
             contact = bool(contact_mask[index].item())
@@ -4063,7 +4062,37 @@ def _resolve_slip_csv_path(args_cli, log_dir: str, resume_path: str) -> str | No
     return str(slip_log_arg)
 
 
-def _generate_slip_plots_after_run(args_cli, slip_csv_path: str | None) -> None:
+def _format_slip_plot_float(value) -> str:
+    try:
+        return f"{float(value):g}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _format_slip_plot_range(value) -> str:
+    if isinstance(value, (str, bytes)):
+        return str(value)
+    try:
+        values = list(value)
+    except TypeError:
+        return str(value)
+    if len(values) >= 2:
+        return f"[{_format_slip_plot_float(values[0])}, {_format_slip_plot_float(values[1])}]"
+    return "[" + ", ".join(_format_slip_plot_float(item) for item in values) + "]"
+
+
+def _slip_plot_friction_title(env_cfg) -> str | None:
+    pieces = []
+    friction_static_range = getattr(env_cfg, "friction_static_range", None)
+    if friction_static_range is not None:
+        pieces.append(r"$\mu_s \in " + _format_slip_plot_range(friction_static_range) + "$")
+    mu_dynamic_static_ratio = getattr(env_cfg, "mu_dynamic_static_ratio", None)
+    if mu_dynamic_static_ratio is not None:
+        pieces.append(r"$\mu_d = " + _format_slip_plot_float(mu_dynamic_static_ratio) + r"\,\mu_s$")
+    return ", ".join(pieces) if pieces else None
+
+
+def _generate_slip_plots_after_run(args_cli, slip_csv_path: str | None, env_cfg=None) -> None:
     """Save per-foot slip plots from the recorded CSV and optionally open them interactively.
 
     The PNG is rendered with the Agg backend in-process (safe inside Kit). The interactive
@@ -4081,10 +4110,11 @@ def _generate_slip_plots_after_run(args_cli, slip_csv_path: str | None) -> None:
 
     png_path = args_cli.slip_plots_output or (os.path.splitext(slip_csv_path)[0] + ".png")
     min_samples = max(1, int(getattr(args_cli, "slip_plots_min_samples", 1)))
+    title_extra = _slip_plot_friction_title(env_cfg) if env_cfg is not None else None
     try:
         import slip_plots  # noqa: PLC0415
 
-        slip_plots.save_slip_figure(slip_csv_path, png_path, min_samples=min_samples)
+        slip_plots.save_slip_figure(slip_csv_path, png_path, min_samples=min_samples, title_extra=title_extra)
         print(f"[INFO] --generate-slip-plots: saved slip data to {slip_csv_path}", flush=True)
         print(f"[INFO] --generate-slip-plots: saved slip plot to {png_path}", flush=True)
     except Exception as exc:
@@ -4093,9 +4123,12 @@ def _generate_slip_plots_after_run(args_cli, slip_csv_path: str | None) -> None:
 
     slip_plots_script = os.path.join(str(_THIS_DIR), "slip_plots.py")
     repo_root = Path(__file__).resolve().parents[3]
-    interactive_cmd = (
-        f"{repo_root / 'isaaclab.sh'} -p {os.path.relpath(slip_plots_script, repo_root)} "
-        f"{slip_csv_path} --min-samples {min_samples}"
+    interactive_args = [slip_csv_path, "--min-samples", str(min_samples)]
+    if title_extra:
+        interactive_args.extend(("--title-extra", title_extra))
+    interactive_cmd = " ".join(
+        shlex.quote(str(part))
+        for part in [repo_root / "isaaclab.sh", "-p", os.path.relpath(slip_plots_script, repo_root), *interactive_args]
     )
     if bool(args_cli.slip_plots_no_window):
         print(f"[INFO] --generate-slip-plots: open interactively (zoom/pan) with:\n    {interactive_cmd}", flush=True)
@@ -4110,7 +4143,7 @@ def _generate_slip_plots_after_run(args_cli, slip_csv_path: str | None) -> None:
 
     try:
         subprocess.Popen(
-            [sys.executable, slip_plots_script, slip_csv_path, "--min-samples", str(min_samples)],
+            [sys.executable, slip_plots_script, *interactive_args],
             start_new_session=True,
         )
         print(
@@ -4937,7 +4970,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     contact_stat=str(args_cli.contact_stats_ui_viz),
                 )
                 print(
-                    "[INFO] Foot slip visualization enabled: coloring by reaction angle and contact speed.",
+                    "[INFO] Foot slip visualization enabled: coloring by cone angle and contact speed.",
                     flush=True,
                 )
             except Exception as exc:
@@ -5215,7 +5248,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         slip_cone_visualizer.close()
 
     # close() above flushes and closes the slip CSV, so the file is complete before we plot it.
-    _generate_slip_plots_after_run(args_cli, slip_csv_path)
+    _generate_slip_plots_after_run(args_cli, slip_csv_path, env_cfg=env_cfg)
 
     vec_env.close()
 
