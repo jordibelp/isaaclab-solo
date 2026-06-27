@@ -306,7 +306,7 @@ parser.add_argument(
     type=float,
     default=0.03,
     help=(
-        "Tangential contact-speed threshold in m/s used by --visualize-slip to split OK contact from slip."
+        "Friction-opposed contact-speed threshold in m/s used by --visualize-slip to split OK contact from slip."
     ),
 )
 parser.add_argument(
@@ -319,7 +319,7 @@ parser.add_argument(
     default="auto",
     help=(
         "For --visualize-slip, write a physics-rate (per-substep) per-foot CSV time series of "
-        "tangential speed and friction-cone angles for offline angle-vs-time plots. Pass a path to "
+        "friction-opposed speed and friction-cone angles for offline angle-vs-time plots. Pass a path to "
         "override the default <log_dir>/slip_logs/<checkpoint>_<timestamp>.csv, or 'none' to disable."
     ),
 )
@@ -331,7 +331,7 @@ parser.add_argument(
     choices=("max", "mean", "median"),
     default="max",
     help=(
-        "For --visualize-slip, how the live UI summarizes a foot's tangential speed: 'max' (worst substep in the "
+        "For --visualize-slip, how the live UI summarizes a foot's friction-opposed speed: 'max' (worst substep in the "
         "current policy step, default), or 'mean'/'median' of the speed over the whole ongoing contact. Use mean/median "
         "to suppress the brief high speed measured right at touchdown. The CSV log always keeps raw per-substep values."
     ),
@@ -1496,7 +1496,7 @@ class SlipConeVisualizer:
         self._decimation = 1
         self._foot_prev_contact: dict[str, bool] = {}
         self._foot_contact_counter: dict[str, int] = {}
-        # Per-foot tangential-speed buffer for the *current* ongoing contact, used by the
+        # Per-foot friction-opposed speed buffer for the *current* ongoing contact, used by the
         # mean/median UI aggregation so the touchdown-instant speed spike does not dominate.
         self._contact_speed_buffer: dict[str, list[float]] = {}
         self._contact_active_id: dict[str, int | None] = {}
@@ -1794,8 +1794,16 @@ class SlipConeVisualizer:
             mu_dynamic = float(dynamic_mu[index].item())
             angle_static_deg = math.degrees(math.atan(max(0.0, mu_static)))
             angle_dynamic_deg = math.degrees(math.atan(max(0.0, mu_dynamic)))
-            foot_vel = foot_vel_w[index].detach().cpu().numpy().astype(np.float64)
-            tangential_speed = float(np.linalg.norm(foot_vel[:2]))
+            foot_vel_tensor = foot_vel_w[index]
+            foot_vel = foot_vel_tensor.detach().cpu().numpy().astype(np.float64)
+            tangential_speed_xy = float(np.linalg.norm(foot_vel[:2]))
+            tangential_speed = self._friction_axis_speed(
+                foot_vel_tensor,
+                normal_forces_w[index],
+                friction_forces_w[index],
+                normal_force_norm[index],
+                friction_force_norm[index],
+            )
             foot_vel_origin = foot_vel_origin_w[index].detach().cpu().numpy().astype(np.float64)
             tangential_speed_origin = float(np.linalg.norm(foot_vel_origin[:2]))
             rho_static = friction_norm_value / max(mu_static * normal_norm_value, 1.0e-6)
@@ -1814,6 +1822,8 @@ class SlipConeVisualizer:
                 "status": status,
                 "color_key": color_key,
                 "force_w": force_w.detach().cpu().numpy().astype(np.float64),
+                "normal_force_w": normal_forces_w[index].detach().cpu().numpy().astype(np.float64),
+                "friction_force_w": friction_forces_w[index].detach().cpu().numpy().astype(np.float64),
                 "foot_pos_w": foot_pos_w[index].detach().cpu().numpy().astype(np.float64),
                 "foot_vel_w": foot_vel,
                 "angle_deg": angle_deg,
@@ -1825,6 +1835,7 @@ class SlipConeVisualizer:
                 "mu_static": mu_static,
                 "mu_dynamic": mu_dynamic,
                 "tangential_speed": tangential_speed,
+                "tangential_speed_xy": tangential_speed_xy,
                 "tangential_speed_origin": tangential_speed_origin,
                 "force_norm": float(force_norm[index].item()),
                 "normal_force_norm": normal_norm_value,
@@ -1833,10 +1844,39 @@ class SlipConeVisualizer:
         return states
 
     @staticmethod
+    def _friction_axis_speed(
+        foot_vel_w: torch.Tensor,
+        normal_force_w: torch.Tensor,
+        friction_force_w: torch.Tensor,
+        normal_force_norm: torch.Tensor,
+        friction_force_norm: torch.Tensor,
+    ) -> float:
+        """Velocity component opposed by the PhysX friction direction.
+
+        The old slip-speed diagnostic used ``||v_xy||``. That is only approximately tied to the
+        friction cone on flat ground, while the cone angle itself is computed from PhysX's
+        normal/friction force decomposition. This projects the contact-point velocity into the
+        contact tangent plane and then onto the measured friction-force axis. In sliding contact,
+        friction opposes relative motion, so only ``-dot(v_tangent, friction_dir)`` is slip speed.
+        """
+        friction_norm = float(friction_force_norm.item())
+        if friction_norm <= 1.0e-9:
+            return 0.0
+
+        normal_norm = float(normal_force_norm.item())
+        tangent_vel = foot_vel_w
+        if normal_norm > 1.0e-9:
+            normal_dir = normal_force_w / normal_force_norm.clamp_min(1.0e-9)
+            tangent_vel = foot_vel_w - torch.dot(foot_vel_w, normal_dir) * normal_dir
+
+        friction_dir = friction_force_w / friction_force_norm.clamp_min(1.0e-9)
+        return float(torch.clamp(-torch.dot(tangent_vel, friction_dir), min=0.0).item())
+
+    @staticmethod
     def _select_display_sample(samples: list[dict[str, object]]) -> dict[str, object]:
         """Pick the worst-case sample for a foot over the substeps of one policy step.
 
-        Prefer the in-contact substep with the highest tangential speed so a brief touchdown
+        Prefer the in-contact substep with the highest friction-opposed speed so a brief touchdown
         slip is not aliased away; if the foot never contacted during the step, show the latest
         substep so airborne feet still update.
         """
@@ -1849,7 +1889,7 @@ class SlipConeVisualizer:
         """Build the per-foot display state, summarizing speed per the selected stat.
 
         ``max`` keeps the worst substep in the current policy step. ``mean``/``median`` replace
-        the shown speed with the mean/median tangential speed over the *whole ongoing contact*
+        the shown speed with the mean/median friction-opposed speed over the *whole ongoing contact*
         and re-color against the friction cone, so a brief touchdown speed spike is averaged out.
         """
         if self.contact_stat == "max":
@@ -2044,10 +2084,17 @@ class SlipConeVisualizer:
             "contact",
             "contact_id",
             "tangential_speed",
+            "tangential_speed_xy",
             "tangential_speed_origin",
             "vx",
             "vy",
             "vz",
+            "normal_force_x",
+            "normal_force_y",
+            "normal_force_z",
+            "friction_force_x",
+            "friction_force_y",
+            "friction_force_z",
             "angle_deg",
             "angle_dyn_deg",
             "angle_static_deg",
@@ -2075,6 +2122,12 @@ class SlipConeVisualizer:
         vel = state.get("foot_vel_w")
         if vel is None:
             vel = np.zeros(3, dtype=np.float64)
+        normal_force = state.get("normal_force_w")
+        if normal_force is None:
+            normal_force = np.zeros(3, dtype=np.float64)
+        friction_force = state.get("friction_force_w")
+        if friction_force is None:
+            friction_force = np.zeros(3, dtype=np.float64)
         self._csv_writer.writerow(
             [
                 int(policy_step),
@@ -2085,10 +2138,17 @@ class SlipConeVisualizer:
                 int(bool(state.get("contact"))),
                 int(contact_id),
                 f"{float(state.get('tangential_speed', 0.0)):.6f}",
+                f"{float(state.get('tangential_speed_xy', 0.0)):.6f}",
                 f"{float(state.get('tangential_speed_origin', 0.0)):.6f}",
                 f"{float(vel[0]):.6f}",
                 f"{float(vel[1]):.6f}",
                 f"{float(vel[2]):.6f}",
+                f"{float(normal_force[0]):.6f}",
+                f"{float(normal_force[1]):.6f}",
+                f"{float(normal_force[2]):.6f}",
+                f"{float(friction_force[0]):.6f}",
+                f"{float(friction_force[1]):.6f}",
+                f"{float(friction_force[2]):.6f}",
                 f"{float(state.get('angle_deg', 0.0)):.4f}",
                 f"{float(state.get('angle_dynamic_deg', 0.0)):.4f}",
                 f"{float(state.get('angle_static_deg', 0.0)):.4f}",
@@ -2507,7 +2567,7 @@ class SlipConeVisualizer:
             )
         speed_desc = "worst substep/step" if self.contact_stat == "max" else f"{self.contact_stat} over contact"
         self._hint_model.set_value(
-            f"Colors use alpha vs alpha_dyn/alpha_static; vc is foot XY speed ({speed_desc}); "
+            f"Colors use alpha vs alpha_dyn/alpha_static; vc is friction-opposed contact speed ({speed_desc}); "
             f"red in cone band if vc > {self.speed_threshold:.3f}; "
             f"air rows {'shown' if self.viz_air_points else 'hold last contact'}"
         )

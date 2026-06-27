@@ -19,7 +19,7 @@ interactively to zoom into the details:
 
 The figure mirrors the manual ``tmp.py`` layout: a 2x2 grid (one subplot per foot) that
 concatenates every contact episode end-to-end and overlays the friction/normal cone angle
-against the dynamic/static friction-cone limits plus the tangential contact speed on a twin axis.
+against the dynamic/static friction-cone limits plus the friction-opposed contact speed on a twin axis.
 """
 
 from __future__ import annotations
@@ -200,6 +200,50 @@ def build_concatenated_contacts(df, foot, gap_s: float | None = DEFAULT_GAP_S, m
     return out, boundaries[:-1]
 
 
+def _numeric_column(df, column: str) -> np.ndarray:
+    import pandas as pd
+
+    return pd.to_numeric(df[column], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+
+
+def _friction_axis_speed_from_columns(df, speed_col: str = SPEED_COL) -> tuple[np.ndarray, str]:
+    friction_cols = {"friction_force_x", "friction_force_y", "friction_force_z"}
+    velocity_cols = {"vx", "vy", "vz"}
+    if friction_cols.issubset(df.columns) and velocity_cols.issubset(df.columns):
+        vel = np.column_stack([_numeric_column(df, col) for col in ("vx", "vy", "vz")])
+        friction = np.column_stack(
+            [_numeric_column(df, col) for col in ("friction_force_x", "friction_force_y", "friction_force_z")]
+        )
+        friction_norm = np.linalg.norm(friction, axis=1)
+        tangent_vel = vel
+        normal_cols = {"normal_force_x", "normal_force_y", "normal_force_z"}
+        if normal_cols.issubset(df.columns):
+            normal = np.column_stack(
+                [_numeric_column(df, col) for col in ("normal_force_x", "normal_force_y", "normal_force_z")]
+            )
+            normal_norm = np.linalg.norm(normal, axis=1)
+            normal_dir = np.divide(
+                normal,
+                normal_norm[:, None],
+                out=np.zeros_like(normal),
+                where=normal_norm[:, None] > 1.0e-9,
+            )
+            tangent_vel = vel - np.sum(vel * normal_dir, axis=1)[:, None] * normal_dir
+        signed_speed = np.divide(
+            np.sum(tangent_vel * friction, axis=1),
+            friction_norm,
+            out=np.zeros_like(friction_norm),
+            where=friction_norm > 1.0e-9,
+        )
+        return np.maximum(0.0, -signed_speed), "friction-opposed slip speed"
+
+    if speed_col in df.columns:
+        return np.abs(_numeric_column(df, speed_col)), "contact-point slip speed"
+    if {"vx", "vy"}.issubset(df.columns):
+        return np.hypot(_numeric_column(df, "vx"), _numeric_column(df, "vy")), "contact-point XY speed"
+    return np.zeros(len(df), dtype=float), "contact-point slip speed"
+
+
 def build_slip_figure(
     csv_path: str,
     *,
@@ -314,22 +358,30 @@ def build_slip_figure(
                 label="contact boundary" if i == 0 else "_nolegend_",
             )
 
-        # Right axis: tangential speed magnitude. Plot the Euclidean norm of the horizontal
-        # foot-velocity components (always >= 0) so the curve is an unambiguous slip speed and
-        # never a signed component. Fall back to the precomputed norm column if vx/vy are absent.
+        # Right axis: slip-speed magnitude. New logs include the PhysX friction-force vector, so
+        # project contact-point velocity onto the direction opposed by friction. This makes the
+        # speed curve use the same contact basis/sign convention as the dynamic friction limit.
+        # Older logs fall back to their stored speed column (historically ``||v_xy||``).
         ax2 = ax.twinx()
-        if {"vx", "vy"}.issubset(dff.columns):
-            tangential_speed = np.hypot(dff["vx"].to_numpy(), dff["vy"].to_numpy())
-        else:
-            tangential_speed = np.abs(dff[speed_col].to_numpy())
+        tangential_speed, speed_label = _friction_axis_speed_from_columns(dff, speed_col=speed_col)
         ax2.plot(
             t_seg,
             seg(tangential_speed),
             color="tab:red",
             linestyle="--",
             linewidth=1.2,
-            label="contact-point slip speed",
+            label=speed_label,
         )
+        if "tangential_speed_xy" in dff.columns:
+            ax2.plot(
+                t_seg,
+                seg(np.abs(_numeric_column(dff, "tangential_speed_xy"))),
+                color="tab:gray",
+                linestyle="-.",
+                linewidth=0.85,
+                alpha=0.5,
+                label="contact-point XY speed (old)",
+            )
         # Faint baseline: the raw foot-body-origin speed (pre-omega x r). Where this rides high
         # while the red contact-point curve sits near zero, the foot is rolling/pivoting over a
         # planted contact, not sliding — that is why the cone angle stays in the static band.
@@ -343,7 +395,7 @@ def build_slip_figure(
                 alpha=0.6,
                 label="foot-origin speed (raw)",
             )
-        ax2.set_ylabel("norm tangent velocity [m/s]", color="tab:red")
+        ax2.set_ylabel("contact speed [m/s]", color="tab:red")
         ax2.tick_params(axis="y", labelcolor="tab:red")
         # Fixed 0.5 m/s spacing on the velocity axis (and matching y-gridlines) instead of auto ticks.
         from matplotlib.ticker import MultipleLocator  # noqa: PLC0415
@@ -391,7 +443,7 @@ def build_slip_figure(
         )
 
     stem = os.path.basename(csv_path).rsplit(".", 1)[0]
-    title = f"Per-foot: all contact episodes concatenated — friction cone angle vs limits + tangential speed - {stem}"
+    title = f"Per-foot: all contact episodes concatenated — friction cone angle vs limits + friction-opposed speed - {stem}"
     if title_extra:
         title = f"{title}\n{title_extra}"
     fig.suptitle(title)
