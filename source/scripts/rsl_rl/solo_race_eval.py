@@ -176,10 +176,21 @@ parser.add_argument(
     "--slip_angle_delta_deg",
     dest="slip_angle_delta_deg",
     type=float,
-    default=0.5,
+    default=0.1,
     help=(
         "Half-width in degrees around the dynamic friction-cone angle used for slip-contact metrics. "
-        "Default: 0.5."
+        "Default: 0.1."
+    ),
+)
+parser.add_argument(
+    "--slip-speed-threshold",
+    "--slip_speed_threshold",
+    dest="slip_speed_threshold",
+    type=float,
+    default=0.03,
+    help=(
+        "Friction-opposed contact-speed threshold in m/s used to count actual sliding inside the dynamic "
+        "friction-cone band. Default: 0.03."
     ),
 )
 parser.add_argument(
@@ -212,6 +223,8 @@ if args_cli.eval_n_parallel <= 0:
     parser.error("--eval_n_parallel must be positive")
 if args_cli.slip_angle_delta_deg < 0.0:
     parser.error("--slip-angle-delta-deg must be non-negative")
+if args_cli.slip_speed_threshold < 0.0:
+    parser.error("--slip-speed-threshold must be non-negative")
 
 sys.argv = [sys.argv[0]] + hydra_args
 app_launcher = AppLauncher(args_cli)
@@ -592,6 +605,98 @@ def _foot_reference_positions_w(raw_env) -> torch.Tensor:
     return torch.where(valid_contact[..., None], contact_positions_w, foot_pos_w)
 
 
+def _foot_link_body_ids(raw_env) -> torch.Tensor | None:
+    cached = getattr(raw_env, "_eval_foot_link_body_ids", None)
+    if isinstance(cached, torch.Tensor):
+        return cached if cached.numel() else None
+
+    robot = getattr(raw_env, "_robot", None)
+    body_names = list(getattr(robot, "body_names", []) or [])
+    calf_names = list(getattr(raw_env, "_feet_robot_body_names", []) or [])
+    foot_ids: list[int] = []
+    for calf_name in calf_names:
+        foot_name = str(calf_name).replace("_calf", "_foot")
+        try:
+            foot_ids.append(body_names.index(foot_name))
+        except ValueError:
+            foot_ids = []
+            break
+
+    device = getattr(raw_env, "device", "cpu")
+    tensor = (
+        torch.as_tensor(foot_ids, dtype=torch.long, device=device)
+        if foot_ids
+        else torch.empty(0, dtype=torch.long, device=device)
+    )
+    try:
+        raw_env._eval_foot_link_body_ids = tensor
+    except Exception:
+        pass
+    return tensor if tensor.numel() else None
+
+
+def _foot_velocities_at_w(raw_env, point_w: torch.Tensor, num_envs: int) -> torch.Tensor | None:
+    try:
+        robot = raw_env._robot
+        data = robot.data
+        foot_body_ids = _foot_link_body_ids(raw_env)
+        body_ids = foot_body_ids if foot_body_ids is not None else raw_env._feet_robot_body_ids
+
+        origin_vel_w = getattr(data, "body_link_lin_vel_w", None)
+        origin_pos_w = getattr(data, "body_link_pos_w", None)
+        origin_ang_vel_w = getattr(data, "body_link_ang_vel_w", None)
+        if origin_vel_w is not None and origin_pos_w is not None and origin_ang_vel_w is not None:
+            v0 = origin_vel_w[:num_envs, body_ids, :]
+            p0 = origin_pos_w[:num_envs, body_ids, :]
+            w0 = origin_ang_vel_w[:num_envs, body_ids, :]
+            return v0 + torch.linalg.cross(w0, point_w - p0, dim=-1)
+
+        link_vel_w = getattr(data, "body_link_vel_w", None)
+        link_pos_w = getattr(data, "body_link_pos_w", None)
+        if link_vel_w is not None and link_pos_w is not None:
+            vel = link_vel_w[:num_envs, body_ids, :]
+            pos = link_pos_w[:num_envs, body_ids, :]
+            return vel[..., :3] + torch.linalg.cross(vel[..., 3:6], point_w - pos, dim=-1)
+
+        com_pos_w = getattr(data, "body_com_pos_w", None)
+        com_lin_vel_w = getattr(data, "body_com_lin_vel_w", None)
+        com_ang_vel_w = getattr(data, "body_com_ang_vel_w", None)
+        if com_pos_w is not None and com_lin_vel_w is not None and com_ang_vel_w is not None:
+            pos = com_pos_w[:num_envs, body_ids, :]
+            lin_vel = com_lin_vel_w[:num_envs, body_ids, :]
+            ang_vel = com_ang_vel_w[:num_envs, body_ids, :]
+            return lin_vel + torch.linalg.cross(ang_vel, point_w - pos, dim=-1)
+
+        root_vel = getattr(data, "root_lin_vel_w", None)
+        if root_vel is not None:
+            return root_vel[:num_envs, None, :].expand(-1, len(body_ids), -1)
+    except Exception:
+        return None
+    return None
+
+
+def _foot_velocities_w(raw_env, num_envs: int) -> torch.Tensor | None:
+    foot_pos_w = _foot_reference_positions_w(raw_env)[:num_envs]
+    return _foot_velocities_at_w(raw_env, foot_pos_w, num_envs)
+
+
+def _friction_opposed_slip_speed(
+    raw_env,
+    num_envs: int,
+    friction_forces_w: torch.Tensor,
+) -> torch.Tensor | None:
+    foot_vel_w = _foot_velocities_w(raw_env, num_envs)
+    if foot_vel_w is None or foot_vel_w.shape != friction_forces_w.shape:
+        return None
+    friction_norm = torch.linalg.norm(friction_forces_w, dim=-1, keepdim=True)
+    friction_dir = torch.where(
+        friction_norm > 1.0e-9,
+        friction_forces_w / friction_norm.clamp_min(1.0e-9),
+        torch.zeros_like(friction_forces_w),
+    )
+    return torch.clamp(-(foot_vel_w * friction_dir).sum(dim=-1), min=0.0)
+
+
 def _foot_friction_values(raw_env, num_envs: int) -> tuple[torch.Tensor, torch.Tensor]:
     num_feet = len(getattr(raw_env, "_feet_body_ids", []))
     try:
@@ -623,12 +728,21 @@ def _foot_friction_values(raw_env, num_envs: int) -> tuple[torch.Tensor, torch.T
     return torch.where(has_patch, static_mu, default_static), torch.where(has_patch, dynamic_mu, default_dynamic)
 
 
-def _slip_angle_contact_counts(raw_env, num_envs: int, delta_deg: float) -> dict[str, torch.Tensor] | None:
+def _slip_angle_contact_counts(
+    raw_env,
+    num_envs: int,
+    delta_deg: float,
+    speed_threshold: float,
+) -> dict[str, torch.Tensor] | None:
     contact_reaction = _contact_reaction_forces_w(raw_env, num_envs)
     if contact_reaction is None:
         return None
 
     _, normal_forces_w, friction_forces_w = contact_reaction
+    slip_speed = _friction_opposed_slip_speed(raw_env, num_envs, friction_forces_w)
+    if slip_speed is None:
+        return None
+
     contact_mask = torch.linalg.norm(normal_forces_w, dim=-1) > float(getattr(raw_env.cfg, "base_contact_threshold", 1.0))
 
     normal_force = torch.linalg.norm(normal_forces_w, dim=-1)
@@ -640,19 +754,25 @@ def _slip_angle_contact_counts(raw_env, num_envs: int, delta_deg: float) -> dict
     delta = float(delta_deg)
 
     below_dynamic = contact_mask & (angle_deg >= 0.0) & (angle_deg <= angle_dynamic_deg - delta)
-    slipping = contact_mask & (angle_deg > angle_dynamic_deg - delta) & (angle_deg <= angle_dynamic_deg + delta)
+    dynamic_band = contact_mask & (angle_deg > angle_dynamic_deg - delta) & (angle_deg <= angle_dynamic_deg + delta)
+    slipping = dynamic_band & (slip_speed > float(speed_threshold))
+    dynamic_band_sticking = dynamic_band & ~slipping
     dynamic_to_static = contact_mask & (angle_deg > angle_dynamic_deg + delta) & (angle_deg <= angle_static_deg)
     above_static = contact_mask & (angle_deg > angle_static_deg)
 
     return {
         "contact": contact_mask.sum(dim=1),
         "below_dynamic": below_dynamic.sum(dim=1),
+        "dynamic_band": dynamic_band.sum(dim=1),
         "slipping": slipping.sum(dim=1),
+        "dynamic_band_sticking": dynamic_band_sticking.sum(dim=1),
         "dynamic_to_static": dynamic_to_static.sum(dim=1),
         "above_static": above_static.sum(dim=1),
         "contact_by_foot": contact_mask.to(dtype=torch.long),
         "below_dynamic_by_foot": below_dynamic.to(dtype=torch.long),
+        "dynamic_band_by_foot": dynamic_band.to(dtype=torch.long),
         "slipping_by_foot": slipping.to(dtype=torch.long),
+        "dynamic_band_sticking_by_foot": dynamic_band_sticking.to(dtype=torch.long),
         "dynamic_to_static_by_foot": dynamic_to_static.to(dtype=torch.long),
         "above_static_by_foot": above_static.to(dtype=torch.long),
     }
@@ -667,22 +787,31 @@ def _pct_from_counts(numerator: int, denominator: int) -> float | None:
 def _slip_angle_contact_time_summary(
     episodes: list[dict[str, Any]],
     delta_deg: float,
+    speed_threshold: float,
     foot_labels: list[str] | None = None,
 ) -> dict[str, Any]:
     contact = int(sum(int(ep.get("slip_angle_contact_samples", 0)) for ep in episodes))
     below_dynamic = int(sum(int(ep.get("slip_angle_below_dynamic_minus_delta_samples", 0)) for ep in episodes))
+    dynamic_band = int(sum(int(ep.get("slip_angle_dynamic_band_samples", 0)) for ep in episodes))
     slipping = int(sum(int(ep.get("slip_angle_slipping_samples", 0)) for ep in episodes))
+    dynamic_band_sticking = int(sum(int(ep.get("slip_angle_dynamic_band_sticking_samples", 0)) for ep in episodes))
     dynamic_to_static = int(sum(int(ep.get("slip_angle_dynamic_plus_delta_to_static_samples", 0)) for ep in episodes))
     above_static = int(sum(int(ep.get("slip_angle_above_static_samples", 0)) for ep in episodes))
     summary = {
         "delta_deg": float(delta_deg),
+        "speed_threshold_mps": float(speed_threshold),
+        "slipping_definition": "angle inside the dynamic band and friction-opposed contact speed above threshold",
         "contact_samples": contact,
         "below_dynamic_minus_delta_samples": below_dynamic,
+        "dynamic_band_samples": dynamic_band,
         "slipping_samples": slipping,
+        "dynamic_band_sticking_samples": dynamic_band_sticking,
         "dynamic_plus_delta_to_static_samples": dynamic_to_static,
         "above_static_samples": above_static,
         "below_dynamic_minus_delta_pct": _pct_from_counts(below_dynamic, contact),
+        "dynamic_band_pct": _pct_from_counts(dynamic_band, contact),
         "slipping_pct": _pct_from_counts(slipping, contact),
+        "dynamic_band_sticking_pct": _pct_from_counts(dynamic_band_sticking, contact),
         "dynamic_plus_delta_to_static_pct": _pct_from_counts(dynamic_to_static, contact),
         "above_static_pct": _pct_from_counts(above_static, contact),
     }
@@ -692,7 +821,11 @@ def _slip_angle_contact_time_summary(
         foot_below_dynamic = int(
             sum(int(ep.get(f"{prefix}below_dynamic_minus_delta_samples", 0)) for ep in episodes)
         )
+        foot_dynamic_band = int(sum(int(ep.get(f"{prefix}dynamic_band_samples", 0)) for ep in episodes))
         foot_slipping = int(sum(int(ep.get(f"{prefix}slipping_samples", 0)) for ep in episodes))
+        foot_dynamic_band_sticking = int(
+            sum(int(ep.get(f"{prefix}dynamic_band_sticking_samples", 0)) for ep in episodes)
+        )
         foot_dynamic_to_static = int(
             sum(int(ep.get(f"{prefix}dynamic_plus_delta_to_static_samples", 0)) for ep in episodes)
         )
@@ -701,12 +834,16 @@ def _slip_angle_contact_time_summary(
             {
                 f"{label}_contact_samples": foot_contact,
                 f"{label}_below_dynamic_minus_delta_samples": foot_below_dynamic,
+                f"{label}_dynamic_band_samples": foot_dynamic_band,
                 f"{label}_slipping_samples": foot_slipping,
+                f"{label}_dynamic_band_sticking_samples": foot_dynamic_band_sticking,
                 f"{label}_dynamic_plus_delta_to_static_samples": foot_dynamic_to_static,
                 f"{label}_above_static_samples": foot_above_static,
                 f"{label}_contact_time_share_pct": _pct_from_counts(foot_contact, contact),
                 f"{label}_below_dynamic_minus_delta_pct": _pct_from_counts(foot_below_dynamic, foot_contact),
+                f"{label}_dynamic_band_pct": _pct_from_counts(foot_dynamic_band, foot_contact),
                 f"{label}_slipping_pct": _pct_from_counts(foot_slipping, foot_contact),
+                f"{label}_dynamic_band_sticking_pct": _pct_from_counts(foot_dynamic_band_sticking, foot_contact),
                 f"{label}_dynamic_plus_delta_to_static_pct": _pct_from_counts(
                     foot_dynamic_to_static,
                     foot_contact,
@@ -901,7 +1038,9 @@ def _evaluate_rollouts(
     pillar_events = torch.zeros(num_envs, dtype=torch.long, device=device)
     slip_contact_samples = torch.zeros(num_envs, dtype=torch.long, device=device)
     slip_below_dynamic_samples = torch.zeros(num_envs, dtype=torch.long, device=device)
+    slip_dynamic_band_samples = torch.zeros(num_envs, dtype=torch.long, device=device)
     slip_slipping_samples = torch.zeros(num_envs, dtype=torch.long, device=device)
+    slip_dynamic_band_sticking_samples = torch.zeros(num_envs, dtype=torch.long, device=device)
     slip_dynamic_to_static_samples = torch.zeros(num_envs, dtype=torch.long, device=device)
     slip_above_static_samples = torch.zeros(num_envs, dtype=torch.long, device=device)
     slip_feet_ids = getattr(raw_env, "_feet_robot_body_ids", None)
@@ -913,7 +1052,11 @@ def _evaluate_rollouts(
     slip_foot_labels = _slip_angle_foot_labels(raw_env, num_slip_feet)
     slip_contact_samples_by_foot = torch.zeros((num_envs, num_slip_feet), dtype=torch.long, device=device)
     slip_below_dynamic_samples_by_foot = torch.zeros((num_envs, num_slip_feet), dtype=torch.long, device=device)
+    slip_dynamic_band_samples_by_foot = torch.zeros((num_envs, num_slip_feet), dtype=torch.long, device=device)
     slip_slipping_samples_by_foot = torch.zeros((num_envs, num_slip_feet), dtype=torch.long, device=device)
+    slip_dynamic_band_sticking_samples_by_foot = torch.zeros(
+        (num_envs, num_slip_feet), dtype=torch.long, device=device
+    )
     slip_dynamic_to_static_samples_by_foot = torch.zeros((num_envs, num_slip_feet), dtype=torch.long, device=device)
     slip_above_static_samples_by_foot = torch.zeros((num_envs, num_slip_feet), dtype=torch.long, device=device)
     prev_floor = torch.zeros(num_envs, dtype=torch.bool, device=device)
@@ -933,24 +1076,35 @@ def _evaluate_rollouts(
         def _wrapped_scene_update(*args, **kwargs):
             nonlocal warned_slip_angle_metrics
             result = scene_update_original(*args, **kwargs)
-            slip_counts = _slip_angle_contact_counts(raw_env, num_envs, float(args_cli.slip_angle_delta_deg))
+            slip_counts = _slip_angle_contact_counts(
+                raw_env,
+                num_envs,
+                float(args_cli.slip_angle_delta_deg),
+                float(args_cli.slip_speed_threshold),
+            )
             if slip_counts is None:
                 if not warned_slip_angle_metrics:
                     print(
                         "[WARN] Slip-angle contact metrics are unavailable because the contact sensor did not expose "
-                        "foot contact-force data.",
+                        "foot contact-force data or the robot did not expose foot velocity data.",
                         flush=True,
                     )
                     warned_slip_angle_metrics = True
             else:
                 slip_contact_samples[:] += slip_counts["contact"].to(dtype=torch.long)
                 slip_below_dynamic_samples[:] += slip_counts["below_dynamic"].to(dtype=torch.long)
+                slip_dynamic_band_samples[:] += slip_counts["dynamic_band"].to(dtype=torch.long)
                 slip_slipping_samples[:] += slip_counts["slipping"].to(dtype=torch.long)
+                slip_dynamic_band_sticking_samples[:] += slip_counts["dynamic_band_sticking"].to(dtype=torch.long)
                 slip_dynamic_to_static_samples[:] += slip_counts["dynamic_to_static"].to(dtype=torch.long)
                 slip_above_static_samples[:] += slip_counts["above_static"].to(dtype=torch.long)
                 slip_contact_samples_by_foot[:] += slip_counts["contact_by_foot"].to(dtype=torch.long)
                 slip_below_dynamic_samples_by_foot[:] += slip_counts["below_dynamic_by_foot"].to(dtype=torch.long)
+                slip_dynamic_band_samples_by_foot[:] += slip_counts["dynamic_band_by_foot"].to(dtype=torch.long)
                 slip_slipping_samples_by_foot[:] += slip_counts["slipping_by_foot"].to(dtype=torch.long)
+                slip_dynamic_band_sticking_samples_by_foot[:] += slip_counts["dynamic_band_sticking_by_foot"].to(
+                    dtype=torch.long
+                )
                 slip_dynamic_to_static_samples_by_foot[:] += slip_counts["dynamic_to_static_by_foot"].to(
                     dtype=torch.long
                 )
@@ -961,7 +1115,8 @@ def _evaluate_rollouts(
         rate = (1.0 / sim_dt) if sim_dt > 0.0 else 0.0
         print(
             f"[INFO] Slip-angle contact metrics: sampling per scene.update at ~{rate:.0f} Hz with "
-            f"delta={float(args_cli.slip_angle_delta_deg):g} deg.",
+            f"delta={float(args_cli.slip_angle_delta_deg):g} deg and "
+            f"speed_threshold={float(args_cli.slip_speed_threshold):g} m/s.",
             flush=True,
         )
     else:
@@ -1056,14 +1211,20 @@ def _evaluate_rollouts(
             did_floor_terminal = bool(floor_terminal[env_id].item()) and not did_finish
             slip_contact = int(slip_contact_samples[env_id].item())
             slip_below_dynamic = int(slip_below_dynamic_samples[env_id].item())
+            slip_dynamic_band = int(slip_dynamic_band_samples[env_id].item())
             slip_slipping = int(slip_slipping_samples[env_id].item())
+            slip_dynamic_band_sticking = int(slip_dynamic_band_sticking_samples[env_id].item())
             slip_dynamic_to_static = int(slip_dynamic_to_static_samples[env_id].item())
             slip_above_static = int(slip_above_static_samples[env_id].item())
             slip_by_foot: dict[str, int | float | None] = {}
             for foot_idx, foot_label in enumerate(slip_foot_labels):
                 foot_contact = int(slip_contact_samples_by_foot[env_id, foot_idx].item())
                 foot_below_dynamic = int(slip_below_dynamic_samples_by_foot[env_id, foot_idx].item())
+                foot_dynamic_band = int(slip_dynamic_band_samples_by_foot[env_id, foot_idx].item())
                 foot_slipping = int(slip_slipping_samples_by_foot[env_id, foot_idx].item())
+                foot_dynamic_band_sticking = int(
+                    slip_dynamic_band_sticking_samples_by_foot[env_id, foot_idx].item()
+                )
                 foot_dynamic_to_static = int(slip_dynamic_to_static_samples_by_foot[env_id, foot_idx].item())
                 foot_above_static = int(slip_above_static_samples_by_foot[env_id, foot_idx].item())
                 prefix = f"slip_angle_{foot_label}_"
@@ -1071,7 +1232,9 @@ def _evaluate_rollouts(
                     {
                         f"{prefix}contact_samples": foot_contact,
                         f"{prefix}below_dynamic_minus_delta_samples": foot_below_dynamic,
+                        f"{prefix}dynamic_band_samples": foot_dynamic_band,
                         f"{prefix}slipping_samples": foot_slipping,
+                        f"{prefix}dynamic_band_sticking_samples": foot_dynamic_band_sticking,
                         f"{prefix}dynamic_plus_delta_to_static_samples": foot_dynamic_to_static,
                         f"{prefix}above_static_samples": foot_above_static,
                         f"{prefix}contact_time_share_pct": _pct_from_counts(foot_contact, slip_contact),
@@ -1079,7 +1242,12 @@ def _evaluate_rollouts(
                             foot_below_dynamic,
                             foot_contact,
                         ),
+                        f"{prefix}dynamic_band_pct": _pct_from_counts(foot_dynamic_band, foot_contact),
                         f"{prefix}slipping_pct": _pct_from_counts(foot_slipping, foot_contact),
+                        f"{prefix}dynamic_band_sticking_pct": _pct_from_counts(
+                            foot_dynamic_band_sticking,
+                            foot_contact,
+                        ),
                         f"{prefix}dynamic_plus_delta_to_static_pct": _pct_from_counts(
                             foot_dynamic_to_static,
                             foot_contact,
@@ -1102,11 +1270,18 @@ def _evaluate_rollouts(
                     "pillar_collision_events": int(pillar_events[env_id].item()),
                     "slip_angle_contact_samples": slip_contact,
                     "slip_angle_below_dynamic_minus_delta_samples": slip_below_dynamic,
+                    "slip_angle_dynamic_band_samples": slip_dynamic_band,
                     "slip_angle_slipping_samples": slip_slipping,
+                    "slip_angle_dynamic_band_sticking_samples": slip_dynamic_band_sticking,
                     "slip_angle_dynamic_plus_delta_to_static_samples": slip_dynamic_to_static,
                     "slip_angle_above_static_samples": slip_above_static,
                     "slip_angle_below_dynamic_minus_delta_pct": _pct_from_counts(slip_below_dynamic, slip_contact),
+                    "slip_angle_dynamic_band_pct": _pct_from_counts(slip_dynamic_band, slip_contact),
                     "slip_angle_slipping_pct": _pct_from_counts(slip_slipping, slip_contact),
+                    "slip_angle_dynamic_band_sticking_pct": _pct_from_counts(
+                        slip_dynamic_band_sticking,
+                        slip_contact,
+                    ),
                     "slip_angle_dynamic_plus_delta_to_static_pct": _pct_from_counts(
                         slip_dynamic_to_static,
                         slip_contact,
@@ -1125,12 +1300,16 @@ def _evaluate_rollouts(
         pillar_events[done_tensor_ids] = 0
         slip_contact_samples[done_tensor_ids] = 0
         slip_below_dynamic_samples[done_tensor_ids] = 0
+        slip_dynamic_band_samples[done_tensor_ids] = 0
         slip_slipping_samples[done_tensor_ids] = 0
+        slip_dynamic_band_sticking_samples[done_tensor_ids] = 0
         slip_dynamic_to_static_samples[done_tensor_ids] = 0
         slip_above_static_samples[done_tensor_ids] = 0
         slip_contact_samples_by_foot[done_tensor_ids] = 0
         slip_below_dynamic_samples_by_foot[done_tensor_ids] = 0
+        slip_dynamic_band_samples_by_foot[done_tensor_ids] = 0
         slip_slipping_samples_by_foot[done_tensor_ids] = 0
+        slip_dynamic_band_sticking_samples_by_foot[done_tensor_ids] = 0
         slip_dynamic_to_static_samples_by_foot[done_tensor_ids] = 0
         slip_above_static_samples_by_foot[done_tensor_ids] = 0
         prev_floor[done_tensor_ids] = False
@@ -1356,6 +1535,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         "slip_angle_contact_time": _slip_angle_contact_time_summary(
             all_episodes,
             float(args_cli.slip_angle_delta_deg),
+            float(args_cli.slip_speed_threshold),
             list(slip_angle_foot_labels),
         ),
         "episodes": all_episodes,
