@@ -1799,9 +1799,7 @@ class SlipConeVisualizer:
             tangential_speed_xy = float(np.linalg.norm(foot_vel[:2]))
             tangential_speed = self._friction_axis_speed(
                 foot_vel_tensor,
-                normal_forces_w[index],
                 friction_forces_w[index],
-                normal_force_norm[index],
                 friction_force_norm[index],
             )
             foot_vel_origin = foot_vel_origin_w[index].detach().cpu().numpy().astype(np.float64)
@@ -1846,31 +1844,23 @@ class SlipConeVisualizer:
     @staticmethod
     def _friction_axis_speed(
         foot_vel_w: torch.Tensor,
-        normal_force_w: torch.Tensor,
         friction_force_w: torch.Tensor,
-        normal_force_norm: torch.Tensor,
         friction_force_norm: torch.Tensor,
     ) -> float:
         """Velocity component opposed by the PhysX friction direction.
 
         The old slip-speed diagnostic used ``||v_xy||``. That is only approximately tied to the
         friction cone on flat ground, while the cone angle itself is computed from PhysX's
-        normal/friction force decomposition. This projects the contact-point velocity into the
-        contact tangent plane and then onto the measured friction-force axis. In sliding contact,
-        friction opposes relative motion, so only ``-dot(v_tangent, friction_dir)`` is slip speed.
+        normal/friction force decomposition. Since the measured friction force is already a
+        tangential vector, project directly onto that axis. In sliding contact, friction opposes
+        relative motion, so only ``-dot(v, friction_dir)`` is slip speed.
         """
         friction_norm = float(friction_force_norm.item())
         if friction_norm <= 1.0e-9:
             return 0.0
 
-        normal_norm = float(normal_force_norm.item())
-        tangent_vel = foot_vel_w
-        if normal_norm > 1.0e-9:
-            normal_dir = normal_force_w / normal_force_norm.clamp_min(1.0e-9)
-            tangent_vel = foot_vel_w - torch.dot(foot_vel_w, normal_dir) * normal_dir
-
         friction_dir = friction_force_w / friction_force_norm.clamp_min(1.0e-9)
-        return float(torch.clamp(-torch.dot(tangent_vel, friction_dir), min=0.0).item())
+        return float(torch.clamp(-torch.dot(foot_vel_w, friction_dir), min=0.0).item())
 
     @staticmethod
     def _select_display_sample(samples: list[dict[str, object]]) -> dict[str, object]:

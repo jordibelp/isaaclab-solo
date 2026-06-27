@@ -215,22 +215,8 @@ def _friction_axis_speed_from_columns(df, speed_col: str = SPEED_COL) -> tuple[n
             [_numeric_column(df, col) for col in ("friction_force_x", "friction_force_y", "friction_force_z")]
         )
         friction_norm = np.linalg.norm(friction, axis=1)
-        tangent_vel = vel
-        normal_cols = {"normal_force_x", "normal_force_y", "normal_force_z"}
-        if normal_cols.issubset(df.columns):
-            normal = np.column_stack(
-                [_numeric_column(df, col) for col in ("normal_force_x", "normal_force_y", "normal_force_z")]
-            )
-            normal_norm = np.linalg.norm(normal, axis=1)
-            normal_dir = np.divide(
-                normal,
-                normal_norm[:, None],
-                out=np.zeros_like(normal),
-                where=normal_norm[:, None] > 1.0e-9,
-            )
-            tangent_vel = vel - np.sum(vel * normal_dir, axis=1)[:, None] * normal_dir
         signed_speed = np.divide(
-            np.sum(tangent_vel * friction, axis=1),
+            np.sum(vel * friction, axis=1),
             friction_norm,
             out=np.zeros_like(friction_norm),
             where=friction_norm > 1.0e-9,
@@ -359,8 +345,8 @@ def build_slip_figure(
             )
 
         # Right axis: slip-speed magnitude. New logs include the PhysX friction-force vector, so
-        # project contact-point velocity onto the direction opposed by friction. This makes the
-        # speed curve use the same contact basis/sign convention as the dynamic friction limit.
+        # project contact-point velocity directly onto the direction opposed by friction. This
+        # makes the speed curve use the same contact basis/sign convention as the dynamic limit.
         # Older logs fall back to their stored speed column (historically ``||v_xy||``).
         ax2 = ax.twinx()
         tangential_speed, speed_label = _friction_axis_speed_from_columns(dff, speed_col=speed_col)
@@ -370,6 +356,10 @@ def build_slip_figure(
             color="tab:red",
             linestyle="--",
             linewidth=1.2,
+            marker=".",
+            markersize=5.6,
+            markerfacecolor="tab:red",
+            markeredgecolor="none",
             label=speed_label,
         )
         if "tangential_speed_xy" in dff.columns:
