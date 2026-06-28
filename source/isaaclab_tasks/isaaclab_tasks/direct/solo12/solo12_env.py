@@ -864,7 +864,7 @@ class Solo12Env(DirectRLEnv):
             "feet_air_time": feet_air_time * self.cfg.feet_air_time_reward_scale * self.step_dt,
             "undesired_contacts": undesired_contacts * self.cfg.undesired_contact_reward_scale * self.step_dt,
             "flat_orientation_l2": flat_orientation * self.cfg.base_tilt_penalty_reward_scale * self.step_dt,
-            "track_base_height_exp": torch.exp(-base_height_error)
+            "track_base_height_exp": torch.exp(-self.cfg.base_height_exp_scale * base_height_error)
             * self.cfg.track_base_height_reward_scale
             * self.step_dt,
             "force_transmited_through_joints": force_transmited_through_joints

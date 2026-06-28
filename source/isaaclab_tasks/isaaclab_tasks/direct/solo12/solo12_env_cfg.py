@@ -476,6 +476,7 @@ class Solo12EnvCfg(DirectRLEnvCfg):
 
     base_z_desired = 0.16
     track_base_height_reward_scale = 0.0
+    base_height_exp_scale = 80.0
 
     # observations noise. 
     enable_observation_corruption = True
