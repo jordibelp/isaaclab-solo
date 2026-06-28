@@ -110,6 +110,7 @@ class Solo12Env(DirectRLEnv):
                 "feet_air_time",
                 "undesired_contacts",
                 "flat_orientation_l2",
+                "track_base_height_exp",
                 "force_transmited_through_joints",
                 "foot_contact",
             ]
@@ -836,6 +837,8 @@ class Solo12Env(DirectRLEnv):
         joint_accel = torch.sum(torch.square(self._robot.data.joint_acc[:, self._joint_ids]), dim=1)
         action_rate = torch.sum(torch.square(self._actions - self._previous_actions), dim=1)
         flat_orientation = torch.sum(torch.square(self._robot.data.projected_gravity_b[:, :2]), dim=1)
+        base_height = self._robot.data.root_pos_w[:, 2] - self._terrain.env_origins[:, 2]
+        base_height_error = torch.square(base_height - self.cfg.base_z_desired)
 
         first_contact = self._contact_sensor.compute_first_contact(self.step_dt)[:, self._feet_body_ids]
         last_air_time = self._contact_sensor.data.last_air_time[:, self._feet_body_ids]
@@ -861,6 +864,9 @@ class Solo12Env(DirectRLEnv):
             "feet_air_time": feet_air_time * self.cfg.feet_air_time_reward_scale * self.step_dt,
             "undesired_contacts": undesired_contacts * self.cfg.undesired_contact_reward_scale * self.step_dt,
             "flat_orientation_l2": flat_orientation * self.cfg.base_tilt_penalty_reward_scale * self.step_dt,
+            "track_base_height_exp": torch.exp(-base_height_error)
+            * self.cfg.track_base_height_reward_scale
+            * self.step_dt,
             "force_transmited_through_joints": force_transmited_through_joints
             * self.cfg.force_transmited_through_joints_reward_scale
             * self.step_dt,

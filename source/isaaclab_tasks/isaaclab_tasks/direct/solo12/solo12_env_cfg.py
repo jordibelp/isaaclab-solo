@@ -472,7 +472,10 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     tracking_std = math.sqrt(0.25)
     feet_air_time_threshold = 0.5
     base_contact_threshold = 1.0
-    undesired_contact_threshold = 1.0
+    undesired_contact_threshold = 0.6
+
+    base_z_desired = 0.16
+    track_base_height_reward_scale = 0.0
 
     # observations noise. 
     enable_observation_corruption = True
