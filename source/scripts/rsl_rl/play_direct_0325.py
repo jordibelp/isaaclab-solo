@@ -605,6 +605,78 @@ def _sync_gain_preserving_shape(current_value, synced_value: float):
     return synced_value
 
 
+def _hydra_override_keys(raw_args: list[str]) -> set[str]:
+    keys = set()
+    for raw_arg in raw_args:
+        if "=" not in raw_arg:
+            continue
+        key = raw_arg.split("=", 1)[0].strip().lstrip("+~")
+        if key.endswith(":"):
+            key = key[:-1]
+        keys.add(key)
+    return keys
+
+
+def _capture_cli_actuator_gain_overrides(env_cfg, raw_hydra_args: list[str]) -> dict[str, float]:
+    """Capture explicit CLI gain overrides before W&B sync can modify the actuator config."""
+    override_keys = _hydra_override_keys(raw_hydra_args)
+    if not override_keys.intersection(
+        {
+            "env.kp",
+            "env.kd",
+            "env.robot.actuators.legs.stiffness",
+            "env.robot.actuators.legs.damping",
+        }
+    ):
+        return {}
+
+    legs_actuator = env_cfg.robot.actuators.get("legs")
+    if legs_actuator is None:
+        raise RuntimeError("Solo12 env config does not contain a 'legs' actuator for CLI KP/KD overrides.")
+
+    overrides = {}
+    if "env.kp" in override_keys:
+        overrides["stiffness"] = float(env_cfg.kp)
+    elif "env.robot.actuators.legs.stiffness" in override_keys:
+        overrides["stiffness"] = _actuator_gain_to_float(legs_actuator.stiffness, "stiffness")
+
+    if "env.kd" in override_keys:
+        overrides["damping"] = float(env_cfg.kd)
+    elif "env.robot.actuators.legs.damping" in override_keys:
+        overrides["damping"] = _actuator_gain_to_float(legs_actuator.damping, "damping")
+
+    return overrides
+
+
+def _apply_cli_actuator_gain_overrides(env_cfg, overrides: dict[str, float]) -> None:
+    """Apply explicit CLI gains after W&B sync so command-line values take precedence."""
+    if not overrides:
+        return
+
+    legs_actuator = env_cfg.robot.actuators.get("legs")
+    if legs_actuator is None:
+        raise RuntimeError("Solo12 env config does not contain a 'legs' actuator for CLI KP/KD overrides.")
+
+    messages = []
+    if "stiffness" in overrides:
+        previous = _actuator_gain_to_float(legs_actuator.stiffness, "stiffness")
+        value = float(overrides["stiffness"])
+        legs_actuator.stiffness = _sync_gain_preserving_shape(legs_actuator.stiffness, value)
+        if hasattr(env_cfg, "kp"):
+            env_cfg.kp = value
+        messages.append(f"stiffness(KP) {previous:g} -> {value:g}")
+
+    if "damping" in overrides:
+        previous = _actuator_gain_to_float(legs_actuator.damping, "damping")
+        value = float(overrides["damping"])
+        legs_actuator.damping = _sync_gain_preserving_shape(legs_actuator.damping, value)
+        if hasattr(env_cfg, "kd"):
+            env_cfg.kd = value
+        messages.append(f"damping(KD) {previous:g} -> {value:g}")
+
+    print("[INFO] Applied Solo12 actuator gains from CLI overrides: " + ", ".join(messages), flush=True)
+
+
 def _extract_training_kp_kd_from_wandb_config(run_config: dict) -> tuple[float, float]:
     env_cfg = run_config.get("env_cfg")
     if env_cfg is None:
@@ -1363,6 +1435,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 flush=True,
             )
     _sync_base_imu_policy_cfg_from_env_cfg(env_cfg, agent_cfg)
+    cli_actuator_gain_overrides = _capture_cli_actuator_gain_overrides(env_cfg, hydra_args)
 
     training_wandb_run_path = None
     training_kp = None
@@ -1396,6 +1469,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             f"damping(KD) {previous_kd:g} -> {training_kd:g}",
             flush=True,
         )
+
+    _apply_cli_actuator_gain_overrides(env_cfg, cli_actuator_gain_overrides)
 
     resume_path = os.path.abspath(args_cli.checkpoint)
     log_dir = os.path.dirname(os.path.dirname(resume_path))

@@ -320,7 +320,15 @@ def build_slip_figure(
             )
         # Keep the measured cone angle segmented at contact breaks, but join the cone-limit
         # samples across transitions so friction-limit changes are readable as one continuous trace.
-        ax.plot(t, dff["angle_dyn_deg"].to_numpy(dtype=float), color="tab:orange", label="angle_dyn")
+        ax.plot(
+            t,
+            dff["angle_dyn_deg"].to_numpy(dtype=float),
+            color="tab:orange",
+            linestyle="--",
+            linewidth=1.2,
+            alpha=0.9,
+            label="angle_dyn",
+        )
         ax.plot(t, dff["angle_static_deg"].to_numpy(dtype=float), color="tab:green", label="angle_static")
 
         ax.set_xlabel("concatenated contact time [s]")
@@ -433,7 +441,7 @@ def build_slip_figure(
         )
 
     stem = os.path.basename(csv_path).rsplit(".", 1)[0]
-    title = f"Per-foot: all contact episodes concatenated — friction cone angle vs limits + friction-opposed speed - {stem}"
+    title = f"Per-foot: all contact episodes concatenated — contact reaction force angle - {stem}"
     if title_extra:
         title = f"{title}\n{title_extra}"
     fig.suptitle(title)

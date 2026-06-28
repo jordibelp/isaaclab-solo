@@ -418,7 +418,7 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     base_imu_orientation_bias_init_std_rpy = tuple(math.radians(v) for v in (0.25, 0.25, 0.80))
     base_imu_orientation_bias_rw_std_per_step_rpy = (2.0e-6, 2.0e-6, 5.0e-6)
     # True reports the delayed/executed raw action; False reports the policy-commanded raw action.
-    action_obs_is_last_executed = True
+    action_obs_is_last_executed = False
 
     joint_names = JOINT_NAMES
     # None uses initial_position as the action/observation offset.
@@ -457,7 +457,7 @@ class Solo12EnvCfg(DirectRLEnvCfg):
 
     # Values larger than the available curriculum range are clipped to the final curriculum index.
     curriculum_tricky_terrain_idx: None | int = 2
-    tricky_terrain = True
+    tricky_terrain = False
     tricky_terrain_spawn_rows = SOLO12_TRICKY_TERRAIN_SPAWN_ROWS
     tricky_terrain_flat_cols = SOLO12_TRICKY_TERRAIN_FLAT_COLS
     tricky_terrain_cols = SOLO12_TRICKY_TERRAIN_COLS

@@ -4139,6 +4139,12 @@ def _slip_plot_friction_title(env_cfg) -> str | None:
     mu_dynamic_static_ratio = getattr(env_cfg, "mu_dynamic_static_ratio", None)
     if mu_dynamic_static_ratio is not None:
         pieces.append(r"$\mu_d = " + _format_slip_plot_float(mu_dynamic_static_ratio) + r"\,\mu_s$")
+    physics_dt = getattr(env_cfg.sim, "dt", None) if getattr(env_cfg, "sim", None) is not None else None
+    if physics_dt is not None:
+        pieces.append("physics_dt=" + _format_slip_plot_float(physics_dt))
+    decimation = getattr(env_cfg, "decimation", None)
+    if decimation is not None:
+        pieces.append("decimation=" + _format_slip_plot_float(decimation))
     return ", ".join(pieces) if pieces else None
 
 
