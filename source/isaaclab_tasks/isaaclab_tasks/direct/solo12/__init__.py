@@ -22,6 +22,16 @@ gym.register(
     },
 )
 
+gym.register(
+    id="Solo12-simple-dreamerV3",
+    entry_point=f"{__name__}.solo12_env:Solo12Env",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.solo12_env_cfg:Solo12SimpleDreamerV3EnvCfg",
+        "dreamer_cfg_entry_point": f"{agents.__name__}.dreamer_v3_cfg:Solo12DreamerV3RunnerCfg",
+    },
+)
+
 
 def _register(task_id: str, cfg_name: str, rsl_rl_cfg_name: str):
     gym.register(

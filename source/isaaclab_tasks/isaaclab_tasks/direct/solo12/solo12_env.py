@@ -752,6 +752,10 @@ class Solo12Env(DirectRLEnv):
             )
             self._previous_actions = self._actions.clone()
             return {"policy": policy_obs, "critic": teacher_obs}
+        if self.cfg.policy_model == "simple_dreamer_v3":
+            policy_obs = self._get_simple_proprioceptive_obs(corrupt=True)
+            self._previous_actions = self._actions.clone()
+            return {"policy": policy_obs, "command": self._commands}
 
         joint_pos = self._robot.data.joint_pos[:, self._joint_ids] - self._q_offset_action_and_obs
         joint_vel = self._robot.data.joint_vel[:, self._joint_ids]
@@ -774,6 +778,31 @@ class Solo12Env(DirectRLEnv):
 
         self._previous_actions = self._actions.clone()
         return {"policy": obs}
+
+    def _get_simple_proprioceptive_obs(self, corrupt: bool) -> torch.Tensor:
+        joint_pos = self._robot.data.joint_pos[:, self._joint_ids] - self._q_offset_action_and_obs
+        joint_vel = self._robot.data.joint_vel[:, self._joint_ids]
+
+        obs_terms = []
+        if not self.cfg.remove_root_lin_vel_b_from_obs:
+            obs_terms.append(
+                self._maybe_corrupt(self._robot.data.root_lin_vel_b, self.cfg.base_lin_vel_noise)
+                if corrupt
+                else self._robot.data.root_lin_vel_b
+            )
+        obs_terms.extend(
+            [
+                self._maybe_corrupt(self._robot.data.root_ang_vel_b, self.cfg.base_ang_vel_noise)
+                if corrupt
+                else self._robot.data.root_ang_vel_b,
+                self._maybe_corrupt(self._robot.data.projected_gravity_b, self.cfg.projected_gravity_noise)
+                if corrupt
+                else self._robot.data.projected_gravity_b,
+                self._maybe_corrupt(joint_pos, self.cfg.joint_pos_noise) if corrupt else joint_pos,
+                self._maybe_corrupt(joint_vel, self.cfg.joint_vel_noise) if corrupt else joint_vel,
+            ]
+        )
+        return torch.cat(tuple(obs_terms), dim=-1)
 
     def _get_joint_state_obs(self, corrupt: bool) -> torch.Tensor:
         joint_pos = self._robot.data.joint_pos[:, self._joint_ids] - self._q_offset_action_and_obs

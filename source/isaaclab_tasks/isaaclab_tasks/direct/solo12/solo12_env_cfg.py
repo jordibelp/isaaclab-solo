@@ -355,6 +355,7 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     remove_root_lin_vel_b_from_obs = False
     # Selects the policy/observation layout. Supported values:
     # - "simple_mlp": legacy flat observation.
+    # - "simple_dreamer_v3": proprioceptive observation only; command is returned separately.
     # - "base_imu_teacher": privileged encoder input -> latent -> actor.
     # - "base_imu_student_rl": base-IMU history TCN -> latent -> actor, privileged critic.
     # - "base_imu_student_dagger": exposes both teacher labels and student history for supervised DAgger.
@@ -555,7 +556,10 @@ class Solo12EnvCfg(DirectRLEnvCfg):
             ROOT_LIN_VEL_OBS_DIM if self.remove_root_lin_vel_b_from_obs else 0
         )
 
-        if self.policy_model not in {"base_imu_teacher", "base_imu_student_rl", "base_imu_student_dagger"}:
+        if self.policy_model == "simple_dreamer_v3":
+            self.observation_space = legacy_obs_dim - COMMAND_OBS_DIM - len(JOINT_NAMES)
+            self.state_space = 0
+        elif self.policy_model not in {"base_imu_teacher", "base_imu_student_rl", "base_imu_student_dagger"}:
             self.observation_space = legacy_obs_dim
         if self.tricky_terrain:
             self.terrain.terrain_type = "generator"
@@ -625,3 +629,10 @@ class Solo12BaseImuStudentRlEnvCfg(Solo12EnvCfg):
 class Solo12BaseImuStudentDaggerEnvCfg(Solo12EnvCfg):
     policy_model = "base_imu_student_dagger"
     imu_raw_inputs = True
+
+
+@configclass
+class Solo12SimpleDreamerV3EnvCfg(Solo12EnvCfg):
+    """Solo12 task variant for DreamerV3-style latent dynamics training."""
+
+    policy_model = "simple_dreamer_v3"

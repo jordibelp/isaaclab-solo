@@ -1,0 +1,53 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers.
+# SPDX-License-Identifier: BSD-3-Clause
+
+from isaaclab.utils import configclass
+
+
+@configclass
+class Solo12DreamerV3RunnerCfg:
+    """Small DreamerV3-style runner config for the direct Solo12 task."""
+
+    seed = 42
+    device = "cuda:0"
+    num_envs = 1024
+    max_iterations = 10000
+    steps_per_env = 4
+    train_steps_per_iteration = 16
+    prefill_steps = 8192
+    replay_size = 1_000_000
+    batch_size = 16
+    batch_length = 32
+
+    deter_dim = 128
+    stoch_dim = 16
+    discrete_dim = 16
+    encoder_hidden_dims = [128, 128]
+    model_hidden_dim = 256
+    actor_hidden_dims = [256, 128]
+    critic_hidden_dims = [256, 128]
+
+    imag_horizon = 15
+    discount = 0.997
+    lambda_ = 0.95
+    free_nats = 1.0
+    kl_dyn_scale = 0.5
+    kl_rep_scale = 0.1
+    reward_loss_scale = 1.0
+    continue_loss_scale = 1.0
+    obs_loss_scale = 1.0
+    actor_entropy_scale = 3.0e-4
+
+    model_lr = 1.0e-4
+    actor_lr = 3.0e-5
+    critic_lr = 1.0e-4
+    grad_clip = 100.0
+    slow_critic_tau = 0.01
+
+    log_interval = 10
+    save_interval = 100
+    experiment_name = "solo12_dreamer_v3"
+    run_name = "[Local]-Solo12 simple DreamerV3"
+    logger = "wandb"
+    wandb_project = "borinotIsaacLab"
+    wandb_entity = None
