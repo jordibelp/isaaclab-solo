@@ -19,7 +19,23 @@ from typing import Any
 from isaaclab.app import AppLauncher
 
 
-parser = argparse.ArgumentParser(description="Train a DreamerV3-style agent.")
+_HYDRA_OVERRIDE_HELP = """Hydra override examples:
+  agent.train_steps_per_iteration=32
+  agent.batch_size=1024
+  agent.stoch_dim=32 agent.num_bins_encoding=64
+  agent.model_lr=5e-5 agent.actor_entropy_scale=1e-4
+  'agent.actor_hidden_dims=[512,256,128]'
+  'agent.run_name="[Cluster]-dreamer-bins64"'
+
+Use the agent.<field>=<value> form for fields in dreamer_v3_cfg.py.
+Use env.<field>=<value> for environment config fields, matching normal IsaacLab commands.
+"""
+
+parser = argparse.ArgumentParser(
+    description="Train a DreamerV3-style agent.",
+    formatter_class=argparse.RawDescriptionHelpFormatter,
+    epilog=_HYDRA_OVERRIDE_HELP,
+)
 parser.add_argument("--task", type=str, default="Solo12-simple-dreamerV3", help="Name of the task.")
 parser.add_argument(
     "--agent", type=str, default="dreamer_cfg_entry_point", help="Name of the Dreamer config entry point."
@@ -136,8 +152,8 @@ class RSSMWorldModel(nn.Module):
         self.action_dim = action_dim
         self.deter_dim = int(_cfg_get(cfg, "deter_dim"))
         self.stoch_dim = int(_cfg_get(cfg, "stoch_dim"))
-        self.discrete_dim = int(_cfg_get(cfg, "discrete_dim"))
-        self.stoch_flat_dim = self.stoch_dim * self.discrete_dim
+        self.num_bins_encoding = int(_cfg_get(cfg, "num_bins_encoding"))
+        self.stoch_flat_dim = self.stoch_dim * self.num_bins_encoding
         hidden = int(_cfg_get(cfg, "model_hidden_dim"))
 
         encoder_hidden = list(_cfg_get(cfg, "encoder_hidden_dims"))
@@ -156,7 +172,7 @@ class RSSMWorldModel(nn.Module):
 
     def initial(self, batch_size: int, device: torch.device) -> RSSMState:
         deter = torch.zeros(batch_size, self.deter_dim, device=device)
-        stoch = torch.zeros(batch_size, self.stoch_dim, self.discrete_dim, device=device)
+        stoch = torch.zeros(batch_size, self.stoch_dim, self.num_bins_encoding, device=device)
         stoch[..., 0] = 1.0
         return RSSMState(deter=deter, stoch=stoch)
 
@@ -165,7 +181,7 @@ class RSSMWorldModel(nn.Module):
 
     def _posterior_from_embed(self, deter: torch.Tensor, embed: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         logits = self.posterior(torch.cat((deter, embed), dim=-1))
-        logits = logits.reshape(*logits.shape[:-1], self.stoch_dim, self.discrete_dim)
+        logits = logits.reshape(*logits.shape[:-1], self.stoch_dim, self.num_bins_encoding)
         stoch = straight_through_categorical(logits)
         return logits, stoch
 
@@ -184,7 +200,7 @@ class RSSMWorldModel(nn.Module):
     ) -> tuple[RSSMState, torch.Tensor, torch.Tensor]:
         prev_stoch = state.stoch.reshape(state.stoch.shape[0], self.stoch_flat_dim)
         deter = self.gru(torch.cat((prev_stoch, action), dim=-1), state.deter)
-        prior_logits = self.prior(deter).reshape(-1, self.stoch_dim, self.discrete_dim)
+        prior_logits = self.prior(deter).reshape(-1, self.stoch_dim, self.num_bins_encoding)
         embed = self._embed(next_obs)
         post_logits, stoch = self._posterior_from_embed(deter, embed)
         return RSSMState(deter=deter, stoch=stoch), prior_logits, post_logits
@@ -192,7 +208,7 @@ class RSSMWorldModel(nn.Module):
     def imagine_next(self, state: RSSMState, action: torch.Tensor) -> tuple[RSSMState, torch.Tensor]:
         prev_stoch = state.stoch.reshape(state.stoch.shape[0], self.stoch_flat_dim)
         deter = self.gru(torch.cat((prev_stoch, action), dim=-1), state.deter)
-        prior_logits = self.prior(deter).reshape(-1, self.stoch_dim, self.discrete_dim)
+        prior_logits = self.prior(deter).reshape(-1, self.stoch_dim, self.num_bins_encoding)
         stoch = straight_through_categorical(prior_logits)
         return RSSMState(deter=deter, stoch=stoch), prior_logits
 
@@ -331,7 +347,9 @@ class DreamerAgent(nn.Module):
 
         start_state = RSSMState(
             deter=torch.stack(states_deter, dim=1).detach().reshape(-1, self.world.deter_dim),
-            stoch=torch.stack(states_stoch, dim=1).detach().reshape(-1, self.world.stoch_dim, self.world.discrete_dim),
+            stoch=torch.stack(states_stoch, dim=1)
+            .detach()
+            .reshape(-1, self.world.stoch_dim, self.world.num_bins_encoding),
         )
         start_commands = next_commands.detach().reshape(-1, next_commands.shape[-1])
         denom = valid_count.clamp_min(1.0)
@@ -598,15 +616,18 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     random.seed(seed)
     torch.manual_seed(seed)
     env_cfg.seed = seed
+    _cfg_set(agent_cfg, "seed", seed)
 
     if args_cli.num_envs is not None:
         env_cfg.scene.num_envs = args_cli.num_envs
     else:
         env_cfg.scene.num_envs = int(_cfg_get(agent_cfg, "num_envs", env_cfg.scene.num_envs))
+    _cfg_set(agent_cfg, "num_envs", int(env_cfg.scene.num_envs))
     if args_cli.device is not None:
         env_cfg.sim.device = args_cli.device
     else:
         env_cfg.sim.device = str(_cfg_get(agent_cfg, "device", env_cfg.sim.device))
+    _cfg_set(agent_cfg, "device", str(env_cfg.sim.device))
     if args_cli.max_iterations is not None:
         _cfg_set(agent_cfg, "max_iterations", args_cli.max_iterations)
     if args_cli.run_name is not None:

@@ -12,23 +12,25 @@ class Solo12DreamerV3RunnerCfg:
     device = "cuda:0"
     num_envs = 1024
     max_iterations = 10000
-    steps_per_env = 4
+    steps_per_env = 24 # 4
     train_steps_per_iteration = 16
     prefill_steps = 8192
-    replay_size = 1_000_000
-    batch_size = 16
-    batch_length = 32
+    replay_size = 2_000_000
+    batch_size = 2048 # 16
+    batch_length = 24 # 32
 
     deter_dim = 128
-    stoch_dim = 16
-    discrete_dim = 16
+    stoch_dim = 32 #16
+    num_bins_encoding = 32 #16
     encoder_hidden_dims = [128, 128]
     model_hidden_dim = 256
-    actor_hidden_dims = [256, 128]
-    critic_hidden_dims = [256, 128]
+    actor_hidden_dims = [256, 128, 64]
+    critic_hidden_dims = [256, 128, 64]
 
     imag_horizon = 15
-    discount = 0.997
+    # discount = 0.997 == 6.67 seconds horizon
+    discount = 0.99 # 2 seconds effective horizon
+    # Discount used for imagination. I think for locomotion 2s is more than sufficient.
     lambda_ = 0.95
     free_nats = 1.0
     kl_dyn_scale = 0.5
