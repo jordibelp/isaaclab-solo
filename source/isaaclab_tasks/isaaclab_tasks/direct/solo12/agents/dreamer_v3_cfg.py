@@ -19,7 +19,7 @@ class Solo12DreamerV3RunnerCfg:
     batch_size = 2048 # 16
     batch_length = 24 # 32
 
-    deter_dim = 128
+    hidden_vector_deter_dims = 128
     stoch_dim = 32 #16
     num_bins_encoding = 32 #16
     encoder_hidden_dims = [128, 128]
@@ -45,6 +45,14 @@ class Solo12DreamerV3RunnerCfg:
     critic_lr = 1.0e-4
     grad_clip = 100.0
     slow_critic_tau = 0.01
+
+    use_cbp = False
+    cbp_replacement_rate = 1.0e-4
+    cbp_maturity_threshold = 10_000
+    cbp_decay_rate = 0.99
+    cbp_util_type = "contribution"
+    cbp_init = "kaiming"
+    cbp_accumulate = True
 
     log_interval = 10
     save_interval = 100

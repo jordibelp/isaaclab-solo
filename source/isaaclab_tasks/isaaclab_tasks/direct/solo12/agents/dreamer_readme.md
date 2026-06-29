@@ -50,6 +50,7 @@ repo diffs:
   --headless \
   agent.train_steps_per_iteration=32 \
   agent.batch_size=1024 \
+  agent.hidden_vector_deter_dims=128 \
   agent.stoch_dim=32 \
   agent.num_bins_encoding=64 \
   agent.model_lr=5e-5 \
@@ -91,12 +92,38 @@ Useful ratios:
 - Replay time depth per env: `replay_size // num_envs`.
 - Batch transitions per world-model update: `batch_size * batch_length`.
 - Updates per environment step: `train_steps_per_iteration / (num_envs * steps_per_env)`.
+- Replay training transitions per collected transition:
+  `(train_steps_per_iteration * batch_size * batch_length) / (num_envs * steps_per_env)`.
+  This is the main ratio to watch when scaling to large cluster GPUs: increasing
+  `batch_size` can silently turn a mostly data-collection-limited run into a
+  replay-heavy run.
+
+For a 45 GB cluster GPU, a practical first sweep is:
+
+```bash
+./isaaclab.sh -p source/scripts/dreamer/train.py \
+  --task Solo12-simple-dreamerV3 \
+  --headless \
+  --num_envs=10000 \
+  agent.steps_per_env=24 \
+  agent.train_steps_per_iteration=8 \
+  agent.batch_size=1024 \
+  agent.batch_length=24 \
+  'agent.run_name="[Cluster]-dreamer-bs1024-train8"'
+```
+
+Then compare against `agent.train_steps_per_iteration=16` and
+`agent.batch_size=2048` one at a time. A larger batch is useful if it lowers
+model/critic noise without slowing policy improvement, but using it together
+with many replay updates greatly increases replay reuse. If return improves
+slowly while `loss/model` looks good and `policy/entropy` stays high, reduce
+`train_steps_per_iteration` or `batch_size` before increasing model size.
 
 ## World Model Size
 
 | Parameter | Default | What it controls | When to change it |
 | --- | ---: | --- | --- |
-| `deter_dim` | `128` | Size of the deterministic GRU/RSSM state `h_t`. | Increase if the model cannot predict observations/rewards; decrease for speed. |
+| `hidden_vector_deter_dims` | `128` | Size of the deterministic GRU/RSSM state `h_t`. | Increase if the model cannot predict observations/rewards; decrease for speed. |
 | `stoch_dim` | `32` | Number of categorical stochastic variables in the RSSM state. The sampled latent has this many independent one-hot variables. | Increase for more latent capacity; decrease for speed/stability. |
 | `num_bins_encoding` | `32` | Number of classes/bins per stochastic variable. Total stochastic feature size is `stoch_dim * num_bins_encoding`. | Increase for richer discrete latents; decrease if KL/losses are unstable or memory is high. |
 | `encoder_hidden_dims` | `[128, 128]` | MLP hidden sizes for encoding symlog observations before posterior inference. | Increase if observation reconstruction is poor; decrease for faster training. |
@@ -169,6 +196,55 @@ During prefill, the trainer ignores the actor and samples uniform random actions
 Start by changing learning rates by factors of 2 to 3, not by orders of
 magnitude, unless the run is clearly diverging.
 
+## Continual Backpropagation
+
+Dreamer training supports the same Continual Backpropagation (CBP) defaults used
+in the RSL-RL Solo12 runs. Enable it with:
+
+```bash
+./isaaclab.sh -p source/scripts/dreamer/train.py \
+  --task Solo12-simple-dreamerV3 \
+  --headless \
+  --use-cbp
+```
+
+CBP is attached to hidden units in three separate optimizer groups:
+
+- `world`: encoder, prior, posterior, decoder, reward head, and continue head
+  MLPs.
+- `actor`: tanh-normal actor MLP.
+- `critic`: critic MLP. The slow target critic is not directly CBP-reset; it
+  follows the critic through the usual soft update.
+
+| Parameter / flag | Default | What it controls | When to change it |
+| --- | ---: | --- | --- |
+| `use_cbp` / `--use-cbp` | `False` | Enables CBP for Dreamer MLP hidden units. Can also be enabled with `agent.use_cbp=true`. | Use for plasticity experiments or long runs where stale hidden units may accumulate. |
+| `cbp_replacement_rate` / `--cbp-replacement-rate` | `1.0e-4` | Expected fraction of mature hidden units replaced per optimizer step. | Increase for stronger plasticity; decrease if training becomes too disruptive. |
+| `cbp_maturity_threshold` / `--cbp-maturity-threshold` | `10000` | Number of optimizer steps before a hidden unit can be replaced. | Lower for short smoke experiments; keep high for real runs to avoid early churn. |
+| `cbp_decay_rate` / `--cbp-decay-rate` | `0.99` | EMA decay for activation and utility estimates. | Lower for faster adaptation; raise for smoother utility estimates. |
+| `cbp_util_type` / `--cbp-util-type` | `"contribution"` | Utility rule used to choose low-utility mature units. | Keep `contribution` unless comparing CBP variants. |
+| `cbp_init` / `--cbp-init` | `"kaiming"` | Initialization bound for reset incoming weights. | Change only for ablations against the RSL-RL CBP setup. |
+| `cbp_accumulate` / `--cbp-accumulate` / `--no-cbp-accumulate` | `True` | Accumulates fractional expected replacements across optimizer steps. | Disable only for direct comparison with non-accumulating replacement schedules. |
+
+CBP settings can be provided either as parser flags or Hydra-style agent
+overrides. Explicit `--cbp-*` flags win over `agent.cbp_*` values:
+
+```bash
+./isaaclab.sh -p source/scripts/dreamer/train.py \
+  --task Solo12-simple-dreamerV3 \
+  --headless \
+  --use-cbp \
+  --cbp-replacement-rate 1e-4 \
+  agent.train_steps_per_iteration=32 \
+  'agent.run_name="[Cluster]-dreamer-cbp"'
+```
+
+Dreamer checkpoints save exact per-neuron CBP state under
+`continual_backprop_state_dict`, plus a summary under `continual_backprop`.
+Resume with `--use-cbp --checkpoint <path>` to restore utilities, activations,
+ages, replacement counters, and optimizer-step counts. The replay buffer is
+still not checkpointed.
+
 ## Logging And Checkpoints
 
 | Parameter | Default | What it controls | When to change it |
@@ -180,6 +256,10 @@ magnitude, unless the run is clearly diverging.
 | `logger` | `"wandb"` | Logging backend: `"wandb"`, `"tensorboard"`, or `"none"`. | Use `"none"` for fast smoke tests; `"tensorboard"` for local-only logging. |
 | `wandb_project` | `"borinotIsaacLab"` | W&B project name. | Change only if moving the run to another project. |
 | `wandb_entity` | `None` | Optional W&B entity/team. | Set if W&B needs a non-default entity. |
+
+When W&B is enabled, the run config includes the resolved `agent_cfg`, the
+resolved `env_cfg`, the parsed `cli` arguments, and the old top-level Dreamer
+agent fields for dashboard compatibility.
 
 Checkpoints are written to:
 
@@ -217,6 +297,12 @@ The trainer logs these scalar groups to W&B/TensorBoard when enabled:
 | `imag/continue` | Mean predicted continuation probability. |
 | `imag/return` | Mean lambda return in imagination. |
 | `policy/entropy` | Mean actor entropy in imagined rollouts. |
+| `CBP/world/optimizer_steps` | Number of world-model optimizer steps tracked by CBP. |
+| `CBP/world/replacements_total` | Total world-model hidden units replaced by CBP. |
+| `CBP/actor/optimizer_steps` | Number of actor optimizer steps tracked by CBP. |
+| `CBP/actor/replacements_total` | Total actor hidden units replaced by CBP. |
+| `CBP/critic/optimizer_steps` | Number of critic optimizer steps tracked by CBP. |
+| `CBP/critic/replacements_total` | Total critic hidden units replaced by CBP. |
 | `episode/return_mean_100` | Mean completed-episode return over the latest 100 completed episodes. |
 | `replay/steps` | Number of transitions inserted into replay. |
 | `train/fps` | Environment steps per second since run start. |

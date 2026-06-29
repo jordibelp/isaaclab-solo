@@ -16,12 +16,18 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+_THIS_DIR = Path(__file__).resolve().parent
+_RSL_RL_SCRIPT_DIR = _THIS_DIR.parent / "rsl_rl"
+if str(_RSL_RL_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(_RSL_RL_SCRIPT_DIR))
+
 from isaaclab.app import AppLauncher
 
 
 _HYDRA_OVERRIDE_HELP = """Hydra override examples:
   agent.train_steps_per_iteration=32
   agent.batch_size=1024
+  agent.hidden_vector_deter_dims=128
   agent.stoch_dim=32 agent.num_bins_encoding=64
   agent.model_lr=5e-5 agent.actor_entropy_scale=1e-4
   'agent.actor_hidden_dims=[512,256,128]'
@@ -46,7 +52,69 @@ parser.add_argument("--max_iterations", type=int, default=None, help="Number of 
 parser.add_argument("--run-name", type=str, default=None, help="Override the configured run name.")
 parser.add_argument("--logger", type=str, default=None, choices=["wandb", "tensorboard", "none"], help="Logger backend.")
 parser.add_argument("--checkpoint", type=str, default=None, help="Optional Dreamer checkpoint to resume.")
+parser.add_argument(
+    "--use-cbp",
+    "--cbp-enable",
+    "--cbp_enable",
+    dest="use_cbp",
+    action="store_true",
+    default=False,
+    help="Enable Continual Backpropagation neuron replacement for Dreamer MLPs.",
+)
+parser.add_argument(
+    "--cbp-replacement-rate",
+    "--cbp_replacement_rate",
+    type=float,
+    default=1.0e-4,
+    help="CBP replacement rate per mature hidden unit and optimizer step.",
+)
+parser.add_argument(
+    "--cbp-maturity-threshold",
+    "--cbp_maturity_threshold",
+    type=int,
+    default=10_000,
+    help="Number of optimizer steps before a hidden unit is eligible for CBP replacement.",
+)
+parser.add_argument(
+    "--cbp-decay-rate",
+    "--cbp_decay_rate",
+    type=float,
+    default=0.99,
+    help="Exponential decay rate for CBP feature-utility estimates.",
+)
+parser.add_argument(
+    "--cbp-util-type",
+    "--cbp_util_type",
+    type=str,
+    choices=(
+        "contribution",
+        "zero_contribution",
+        "adaptable_contribution",
+        "weight",
+        "adaptation",
+        "feature_by_input",
+        "random",
+    ),
+    default="contribution",
+    help="CBP utility score used to choose mature hidden units for replacement.",
+)
+parser.add_argument(
+    "--cbp-init",
+    "--cbp_init",
+    type=str,
+    choices=("default", "xavier", "lecun", "kaiming"),
+    default="kaiming",
+    help="Initialization bound used when CBP resets incoming weights.",
+)
+parser.add_argument(
+    "--cbp-accumulate",
+    "--cbp_accumulate",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+    help="Accumulate fractional CBP replacements across optimizer steps.",
+)
 AppLauncher.add_app_launcher_args(parser)
+_RAW_CLI_ARGS = tuple(sys.argv[1:])
 args_cli, hydra_args = parser.parse_known_args()
 
 sys.argv = [sys.argv[0]] + hydra_args
@@ -61,6 +129,8 @@ from gymnasium.spaces import flatdim  # noqa: E402
 
 from isaaclab.envs import DirectMARLEnv, DirectMARLEnvCfg, DirectRLEnvCfg, ManagerBasedRLEnvCfg, multi_agent_to_single_agent  # noqa: E402
 from isaaclab.utils.io import dump_yaml  # noqa: E402
+
+from continual_backprop import build_continual_backprop_manager, cbp_specs_for_sequential_mlp  # noqa: E402
 
 import isaaclab_tasks  # noqa: F401, E402
 from isaaclab_tasks.utils.hydra import hydra_task_config  # noqa: E402
@@ -81,12 +151,68 @@ def _cfg_set(cfg: Any, name: str, value: Any) -> None:
         setattr(cfg, name, value)
 
 
+def _cli_option_was_provided(*option_names: str) -> bool:
+    for arg in _RAW_CLI_ARGS:
+        for option_name in option_names:
+            if arg == option_name or arg.startswith(f"{option_name}="):
+                return True
+    return False
+
+
+def _cfg_or_cli(
+    cfg: Any,
+    cfg_name: str,
+    parsed_args: argparse.Namespace,
+    arg_name: str,
+    *option_names: str,
+) -> Any:
+    if _cli_option_was_provided(*option_names):
+        return getattr(parsed_args, arg_name)
+    return _cfg_get(cfg, cfg_name, getattr(parsed_args, arg_name))
+
+
 def _cfg_to_dict(cfg: Any) -> dict[str, Any]:
     if hasattr(cfg, "to_dict"):
         return cfg.to_dict()
     if isinstance(cfg, dict):
         return dict(cfg)
     return dict(vars(cfg))
+
+
+def _jsonify(obj: Any, max_str: int = 4000) -> Any:
+    """Convert nested config objects to values that W&B can store in run config."""
+    if obj is None or isinstance(obj, (bool, int, float, str)):
+        if isinstance(obj, str) and len(obj) > max_str:
+            return obj[:max_str] + "...(truncated)"
+        return obj
+    if isinstance(obj, (list, tuple)):
+        return [_jsonify(x, max_str=max_str) for x in obj]
+    if isinstance(obj, dict):
+        return {str(k): _jsonify(v, max_str=max_str) for k, v in obj.items()}
+    if hasattr(obj, "to_dict") and callable(getattr(obj, "to_dict")):
+        try:
+            return _jsonify(obj.to_dict(), max_str=max_str)
+        except Exception:
+            pass
+
+    value = repr(obj)
+    if len(value) > max_str:
+        value = value[:max_str] + "...(truncated)"
+    return value
+
+
+def _wandb_config_payload(agent_cfg: Any, env_cfg: Any, args_cli: argparse.Namespace, log_dir: Path) -> dict[str, Any]:
+    agent_dict = _jsonify(agent_cfg)
+    payload: dict[str, Any] = {
+        "log_dir": str(log_dir),
+        "cli": _jsonify(vars(args_cli)),
+        "agent_cfg": agent_dict,
+        "env_cfg": _jsonify(env_cfg),
+    }
+    if isinstance(agent_dict, dict):
+        # Keep the old top-level agent fields so existing W&B panels/sweeps keep working.
+        payload.update(agent_dict)
+    return payload
 
 
 def _sanitize_run_name(name: str) -> str:
@@ -112,6 +238,28 @@ def mlp(input_dim: int, hidden_dims: list[int], output_dim: int, *, layer_norm: 
         dim = hidden_dim
     layers.append(nn.Linear(dim, output_dim))
     return nn.Sequential(*layers)
+
+
+def _world_model_cbp_specs(world: "RSSMWorldModel") -> list[Any]:
+    specs = []
+    for name in ("encoder", "prior", "posterior", "decoder", "reward", "continue_head"):
+        specs.extend(cbp_specs_for_sequential_mlp(f"world.{name}", getattr(world, name)))
+    return specs
+
+
+def _build_cbp_manager(name: str, specs: list[Any], parsed_args: argparse.Namespace):
+    if not specs:
+        print(f"[WARN] CBP requested, but no eligible hidden groups were found for {name}; skipping.", flush=True)
+        return None
+    return build_continual_backprop_manager(
+        specs,
+        replacement_rate=float(parsed_args.cbp_replacement_rate),
+        maturity_threshold=int(parsed_args.cbp_maturity_threshold),
+        decay_rate=float(parsed_args.cbp_decay_rate),
+        util_type=str(parsed_args.cbp_util_type),
+        init=str(parsed_args.cbp_init),
+        accumulate=bool(parsed_args.cbp_accumulate),
+    )
 
 
 def unimix_logits(logits: torch.Tensor, unimix: float = 0.01) -> torch.Tensor:
@@ -150,7 +298,7 @@ class RSSMWorldModel(nn.Module):
         self.obs_dim = obs_dim
         self.command_dim = command_dim
         self.action_dim = action_dim
-        self.deter_dim = int(_cfg_get(cfg, "deter_dim"))
+        self.hidden_vector_deter_dims = int(_cfg_get(cfg, "hidden_vector_deter_dims"))
         self.stoch_dim = int(_cfg_get(cfg, "stoch_dim"))
         self.num_bins_encoding = int(_cfg_get(cfg, "num_bins_encoding"))
         self.stoch_flat_dim = self.stoch_dim * self.num_bins_encoding
@@ -158,9 +306,9 @@ class RSSMWorldModel(nn.Module):
 
         encoder_hidden = list(_cfg_get(cfg, "encoder_hidden_dims"))
         self.encoder = mlp(obs_dim, encoder_hidden, hidden)
-        self.gru = nn.GRUCell(self.stoch_flat_dim + action_dim, self.deter_dim)
-        self.prior = mlp(self.deter_dim, [hidden], self.stoch_flat_dim)
-        self.posterior = mlp(self.deter_dim + hidden, [hidden], self.stoch_flat_dim)
+        self.gru = nn.GRUCell(self.stoch_flat_dim + action_dim, self.hidden_vector_deter_dims)
+        self.prior = mlp(self.hidden_vector_deter_dims, [hidden], self.stoch_flat_dim)
+        self.posterior = mlp(self.hidden_vector_deter_dims + hidden, [hidden], self.stoch_flat_dim)
         feature_dim = self.feature_dim
         self.decoder = mlp(feature_dim, [hidden, hidden], obs_dim)
         self.reward = mlp(feature_dim, [hidden, hidden], 1)
@@ -168,10 +316,10 @@ class RSSMWorldModel(nn.Module):
 
     @property
     def feature_dim(self) -> int:
-        return self.deter_dim + self.stoch_flat_dim + self.command_dim
+        return self.hidden_vector_deter_dims + self.stoch_flat_dim + self.command_dim
 
     def initial(self, batch_size: int, device: torch.device) -> RSSMState:
-        deter = torch.zeros(batch_size, self.deter_dim, device=device)
+        deter = torch.zeros(batch_size, self.hidden_vector_deter_dims, device=device)
         stoch = torch.zeros(batch_size, self.stoch_dim, self.num_bins_encoding, device=device)
         stoch[..., 0] = 1.0
         return RSSMState(deter=deter, stoch=stoch)
@@ -250,10 +398,19 @@ class TanhNormalActor(nn.Module):
 
 
 class DreamerAgent(nn.Module):
-    def __init__(self, obs_dim: int, command_dim: int, action_dim: int, cfg: Any, device: torch.device):
+    def __init__(
+        self,
+        obs_dim: int,
+        command_dim: int,
+        action_dim: int,
+        cfg: Any,
+        device: torch.device,
+        cbp_args: argparse.Namespace | None = None,
+    ):
         super().__init__()
         self.cfg = cfg
         self.device = device
+        self.cbp_managers = {}
         self.world = RSSMWorldModel(obs_dim, command_dim, action_dim, cfg).to(device)
         self.actor = TanhNormalActor(self.world.feature_dim, action_dim, list(_cfg_get(cfg, "actor_hidden_dims"))).to(device)
         self.critic = mlp(self.world.feature_dim, list(_cfg_get(cfg, "critic_hidden_dims")), 1).to(device)
@@ -262,6 +419,94 @@ class DreamerAgent(nn.Module):
         self.model_opt = torch.optim.Adam(self.world.parameters(), lr=float(_cfg_get(cfg, "model_lr")))
         self.actor_opt = torch.optim.Adam(self.actor.parameters(), lr=float(_cfg_get(cfg, "actor_lr")))
         self.critic_opt = torch.optim.Adam(self.critic.parameters(), lr=float(_cfg_get(cfg, "critic_lr")))
+        if cbp_args is not None and bool(getattr(cbp_args, "use_cbp", False)):
+            self._attach_continual_backprop(cbp_args)
+
+    def _attach_continual_backprop(self, parsed_args: argparse.Namespace) -> None:
+        managers = {
+            "world": _build_cbp_manager("world", _world_model_cbp_specs(self.world), parsed_args),
+            "actor": _build_cbp_manager("actor", cbp_specs_for_sequential_mlp("actor.net", self.actor.net), parsed_args),
+            "critic": _build_cbp_manager("critic", cbp_specs_for_sequential_mlp("critic", self.critic), parsed_args),
+        }
+        self.cbp_managers = {name: manager for name, manager in managers.items() if manager is not None}
+        if not self.cbp_managers:
+            raise ValueError("--use-cbp was provided, but no eligible Dreamer MLP hidden groups were found.")
+        for name, manager in self.cbp_managers.items():
+            group_names = ", ".join(group.name for group in manager.groups)
+            print(
+                "[INFO] Continual Backpropagation enabled for "
+                f"{name} (replacement_rate={manager.replacement_rate:g}, "
+                f"maturity_threshold={manager.maturity_threshold}, decay_rate={manager.decay_rate:g}, "
+                f"util_type={manager.util_type}, init={manager.init}, accumulate={manager.accumulate}).",
+                flush=True,
+            )
+            print(f"[INFO] CBP {name} feature groups: {group_names}", flush=True)
+
+    def _after_optimizer_step(self, manager_name: str, optimizer: torch.optim.Optimizer) -> None:
+        manager = self.cbp_managers.get(manager_name)
+        if manager is not None:
+            manager.after_optimizer_step(optimizer)
+
+    def _cbp_metrics(self) -> dict[str, float]:
+        metrics = {}
+        for manager_name, manager in self.cbp_managers.items():
+            prefix = f"CBP/{manager_name}"
+            last_total = sum(manager.last_replacements.values())
+            total = sum(manager.total_replacements_by_group.values())
+            metrics[f"{prefix}/optimizer_steps"] = float(manager.optimizer_steps)
+            metrics[f"{prefix}/replacements_last_update"] = float(last_total)
+            metrics[f"{prefix}/replacements_total"] = float(total)
+            for group_name, group_total in manager.total_replacements_by_group.items():
+                metrics[f"{prefix}/replacements_total/{group_name}"] = float(group_total)
+        return metrics
+
+    def _cbp_state_dict(self) -> dict[str, Any]:
+        return {name: manager.state_dict() for name, manager in self.cbp_managers.items()}
+
+    def _cbp_summary(self) -> dict[str, Any]:
+        return {name: manager.summary() for name, manager in self.cbp_managers.items()}
+
+    def _restore_cbp_state(self, checkpoint: dict[str, Any], checkpoint_path: str) -> None:
+        if not self.cbp_managers:
+            return
+        state = checkpoint.get("continual_backprop_state_dict")
+        if isinstance(state, dict):
+            for name, manager in self.cbp_managers.items():
+                manager_state = state.get(name)
+                if isinstance(manager_state, dict):
+                    report = manager.load_state_dict(manager_state)
+                    print(
+                        "[INFO] Restored Dreamer CBP state "
+                        f"for {name} from {checkpoint_path} "
+                        f"(optimizer_steps={report['optimizer_steps']}, "
+                        f"groups={report['groups_loaded']}/{report['groups_total']}, "
+                        f"age_tensors={report['age_tensors_loaded']}/{report['groups_total']} exact, "
+                        f"fallback={report['age_tensors_from_optimizer_steps']}).",
+                        flush=True,
+                    )
+                else:
+                    print(f"[INFO] No CBP state for Dreamer {name}; starting that manager from scratch.", flush=True)
+            return
+
+        summary = checkpoint.get("continual_backprop", {})
+        if not isinstance(summary, dict):
+            print("[INFO] Checkpoint has no Dreamer CBP state; starting CBP ages/utilities from scratch.", flush=True)
+            return
+        for name, manager in self.cbp_managers.items():
+            component_summary = summary.get(name, {})
+            optimizer_steps = (
+                component_summary.get("optimizer_steps", None) if isinstance(component_summary, dict) else None
+            )
+            if optimizer_steps is None:
+                print(f"[INFO] No CBP optimizer-step summary for Dreamer {name}; starting from scratch.", flush=True)
+                continue
+            report = manager.initialize_ages_from_optimizer_steps(int(optimizer_steps))
+            print(
+                "[INFO] Checkpoint has only a Dreamer CBP summary, not exact per-neuron state; "
+                f"initialized {name} ages from optimizer_steps={report['optimizer_steps']} for "
+                f"{report['age_tensors_from_optimizer_steps']}/{report['groups_total']} groups.",
+                flush=True,
+            )
 
     @torch.no_grad()
     def act(self, state: RSSMState, command: torch.Tensor, deterministic: bool = False) -> torch.Tensor:
@@ -282,6 +527,7 @@ class DreamerAgent(nn.Module):
         metrics = {}
         metrics.update(model_metrics)
         metrics.update(actor_metrics)
+        metrics.update(self._cbp_metrics())
         return metrics
 
     def _train_world_model(self, batch: dict[str, torch.Tensor]) -> tuple[dict[str, float], tuple[RSSMState, torch.Tensor]]:
@@ -344,9 +590,10 @@ class DreamerAgent(nn.Module):
         model_loss.backward()
         nn.utils.clip_grad_norm_(self.world.parameters(), float(_cfg_get(self.cfg, "grad_clip")))
         self.model_opt.step()
+        self._after_optimizer_step("world", self.model_opt)
 
         start_state = RSSMState(
-            deter=torch.stack(states_deter, dim=1).detach().reshape(-1, self.world.deter_dim),
+            deter=torch.stack(states_deter, dim=1).detach().reshape(-1, self.world.hidden_vector_deter_dims),
             stoch=torch.stack(states_stoch, dim=1)
             .detach()
             .reshape(-1, self.world.stoch_dim, self.world.num_bins_encoding),
@@ -419,6 +666,7 @@ class DreamerAgent(nn.Module):
         actor_loss.backward()
         nn.utils.clip_grad_norm_(self.actor.parameters(), float(_cfg_get(self.cfg, "grad_clip")))
         self.actor_opt.step()
+        self._after_optimizer_step("actor", self.actor_opt)
 
         critic_values = self.critic(feats.detach().reshape(-1, feats.shape[-1])).reshape(horizon, -1)
         critic_loss = (weights * F.mse_loss(critic_values, returns.detach(), reduction="none")).mean()
@@ -426,6 +674,7 @@ class DreamerAgent(nn.Module):
         critic_loss.backward()
         nn.utils.clip_grad_norm_(self.critic.parameters(), float(_cfg_get(self.cfg, "grad_clip")))
         self.critic_opt.step()
+        self._after_optimizer_step("critic", self.critic_opt)
         self._update_target_critic()
 
         return {
@@ -445,21 +694,22 @@ class DreamerAgent(nn.Module):
 
     def save(self, path: Path, iteration: int, total_steps: int):
         path.parent.mkdir(parents=True, exist_ok=True)
-        torch.save(
-            {
-                "iteration": iteration,
-                "total_steps": total_steps,
-                "cfg": _cfg_to_dict(self.cfg),
-                "world": self.world.state_dict(),
-                "actor": self.actor.state_dict(),
-                "critic": self.critic.state_dict(),
-                "target_critic": self.target_critic.state_dict(),
-                "model_opt": self.model_opt.state_dict(),
-                "actor_opt": self.actor_opt.state_dict(),
-                "critic_opt": self.critic_opt.state_dict(),
-            },
-            path,
-        )
+        payload = {
+            "iteration": iteration,
+            "total_steps": total_steps,
+            "cfg": _cfg_to_dict(self.cfg),
+            "world": self.world.state_dict(),
+            "actor": self.actor.state_dict(),
+            "critic": self.critic.state_dict(),
+            "target_critic": self.target_critic.state_dict(),
+            "model_opt": self.model_opt.state_dict(),
+            "actor_opt": self.actor_opt.state_dict(),
+            "critic_opt": self.critic_opt.state_dict(),
+        }
+        if self.cbp_managers:
+            payload["continual_backprop"] = self._cbp_summary()
+            payload["continual_backprop_state_dict"] = self._cbp_state_dict()
+        torch.save(payload, path)
 
     def load(self, path: str) -> tuple[int, int]:
         checkpoint = torch.load(path, map_location=self.device, weights_only=False)
@@ -470,6 +720,7 @@ class DreamerAgent(nn.Module):
         self.model_opt.load_state_dict(checkpoint["model_opt"])
         self.actor_opt.load_state_dict(checkpoint["actor_opt"])
         self.critic_opt.load_state_dict(checkpoint["critic_opt"])
+        self._restore_cbp_state(checkpoint, path)
         return int(checkpoint.get("iteration", 0)), int(checkpoint.get("total_steps", 0))
 
 
@@ -557,7 +808,7 @@ class SequenceReplayBuffer:
 
 
 class ScalarLogger:
-    def __init__(self, log_dir: Path, cfg: Any):
+    def __init__(self, log_dir: Path, cfg: Any, env_cfg: Any, args_cli: argparse.Namespace):
         self.writer = None
         self.wandb = None
         logger_name = str(_cfg_get(cfg, "logger", "none")).lower()
@@ -574,7 +825,7 @@ class ScalarLogger:
                     project=str(_cfg_get(cfg, "wandb_project")),
                     entity=_cfg_get(cfg, "wandb_entity"),
                     name=log_dir.name,
-                    config=_cfg_to_dict(cfg),
+                    config=_wandb_config_payload(cfg, env_cfg, args_cli, log_dir),
                     sync_tensorboard=False,
                 )
             except Exception as exc:
@@ -634,6 +885,46 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         _cfg_set(agent_cfg, "run_name", args_cli.run_name)
     if args_cli.logger is not None:
         _cfg_set(agent_cfg, "logger", args_cli.logger)
+    cbp_enabled = bool(args_cli.use_cbp or _cfg_get(agent_cfg, "use_cbp", False))
+    cbp_replacement_rate = float(
+        _cfg_or_cli(agent_cfg, "cbp_replacement_rate", args_cli, "cbp_replacement_rate", "--cbp-replacement-rate", "--cbp_replacement_rate")
+    )
+    cbp_maturity_threshold = int(
+        _cfg_or_cli(agent_cfg, "cbp_maturity_threshold", args_cli, "cbp_maturity_threshold", "--cbp-maturity-threshold", "--cbp_maturity_threshold")
+    )
+    cbp_decay_rate = float(
+        _cfg_or_cli(agent_cfg, "cbp_decay_rate", args_cli, "cbp_decay_rate", "--cbp-decay-rate", "--cbp_decay_rate")
+    )
+    cbp_util_type = str(
+        _cfg_or_cli(agent_cfg, "cbp_util_type", args_cli, "cbp_util_type", "--cbp-util-type", "--cbp_util_type")
+    )
+    cbp_init = str(_cfg_or_cli(agent_cfg, "cbp_init", args_cli, "cbp_init", "--cbp-init", "--cbp_init"))
+    cbp_accumulate = bool(
+        _cfg_or_cli(
+            agent_cfg,
+            "cbp_accumulate",
+            args_cli,
+            "cbp_accumulate",
+            "--cbp-accumulate",
+            "--no-cbp-accumulate",
+            "--cbp_accumulate",
+            "--no-cbp_accumulate",
+        )
+    )
+    args_cli.use_cbp = cbp_enabled
+    args_cli.cbp_replacement_rate = cbp_replacement_rate
+    args_cli.cbp_maturity_threshold = cbp_maturity_threshold
+    args_cli.cbp_decay_rate = cbp_decay_rate
+    args_cli.cbp_util_type = cbp_util_type
+    args_cli.cbp_init = cbp_init
+    args_cli.cbp_accumulate = cbp_accumulate
+    _cfg_set(agent_cfg, "use_cbp", cbp_enabled)
+    _cfg_set(agent_cfg, "cbp_replacement_rate", cbp_replacement_rate)
+    _cfg_set(agent_cfg, "cbp_maturity_threshold", cbp_maturity_threshold)
+    _cfg_set(agent_cfg, "cbp_decay_rate", cbp_decay_rate)
+    _cfg_set(agent_cfg, "cbp_util_type", cbp_util_type)
+    _cfg_set(agent_cfg, "cbp_init", cbp_init)
+    _cfg_set(agent_cfg, "cbp_accumulate", cbp_accumulate)
 
     if getattr(env_cfg, "policy_model", None) != "simple_dreamer_v3":
         raise ValueError("Dreamer trainer expects a task with env.policy_model='simple_dreamer_v3'.")
@@ -660,7 +951,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         command_dim = command.shape[-1]
         action_dim = flatdim(env.unwrapped.single_action_space)
 
-        agent = DreamerAgent(obs_dim, command_dim, action_dim, agent_cfg, device)
+        agent = DreamerAgent(
+            obs_dim,
+            command_dim,
+            action_dim,
+            agent_cfg,
+            device,
+            cbp_args=args_cli if args_cli.use_cbp else None,
+        )
         start_iteration = 0
         total_steps = 0
         if args_cli.checkpoint:
@@ -677,7 +975,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         state, _ = agent.world.initial_from_obs(obs)
         episode_returns = torch.zeros(env.unwrapped.num_envs, device=device)
         recent_returns: list[float] = []
-        logger = ScalarLogger(log_dir, agent_cfg)
+        logger = ScalarLogger(log_dir, agent_cfg, env_cfg, args_cli)
         start_time = time.time()
 
         max_iterations = int(_cfg_get(agent_cfg, "max_iterations"))
