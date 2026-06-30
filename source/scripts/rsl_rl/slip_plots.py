@@ -37,7 +37,7 @@ FEET = ("FL", "FR", "RL", "RR")
 SPEED_COL = "tangential_speed"
 DEFAULT_GAP_S = None
 DEFAULT_MIN_SAMPLES = 1
-DEFAULT_EPS_DEG = 1.0
+DEFAULT_EPS_DEG = 0.1
 DEFAULT_SLIP_LOG_DIR = Path(__file__).resolve().parents[3] / "logs" / "skrl" / "slip_logs"
 
 
