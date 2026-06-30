@@ -48,7 +48,7 @@ repo diffs:
 ./isaaclab.sh -p source/scripts/dreamer/train.py \
   --task Solo12-simple-dreamerV3 \
   --headless \
-  agent.train_steps_per_iteration=32 \
+  agent.num_batches_trained_per_iteration=32 \
   agent.batch_size=1024 \
   agent.hidden_vector_deter_dims=128 \
   agent.stoch_dim=32 \
@@ -80,7 +80,7 @@ logs/dreamer/<experiment_name>/<timestamp>_<run_name>/params/agent.yaml
 | `num_envs` | `1024` | Number of parallel IsaacLab environments. | Increase for faster collection if GPU memory allows; decrease when PhysX or model training runs out of memory. |
 | `max_iterations` | `10000` | Number of collect/train loop iterations. | Increase for full runs; lower for smoke tests. |
 | `steps_per_env` | `24` | Environment steps collected per env before each training block. Total new transitions per iteration is `num_envs * steps_per_env`. | Increase to collect more fresh data per update; decrease if learning lags behind collection. |
-| `train_steps_per_iteration` | `16` | Number of replay batches trained after each collection block. | Increase when the replay buffer grows faster than the model learns; decrease if training dominates wall time or overfits stale data. |
+| `num_batches_trained_per_iteration` | `16` | Number of replay batches trained after each collection block. | Increase when the replay buffer grows faster than the model learns; decrease if training dominates wall time or overfits stale data. |
 | `prefill_steps` | `8192` | Minimum replay transitions before training starts. Before this, actions are random uniform actions. | Increase for more diverse initial data; decrease for faster first updates. Must be at least enough to sample `batch_length`. |
 | `replay_size` | `2_000_000` | Maximum stored transitions across all envs. Internally this is converted to `replay_size // num_envs` time steps per env. | Increase for more diverse replay and less forgetting; decrease to save host memory. |
 | `batch_size` | `2048` | Number of sequence snippets per training batch. | Increase for smoother gradients if memory allows; decrease if CUDA memory is tight. |
@@ -91,9 +91,9 @@ Useful ratios:
 - Collection per iteration: `num_envs * steps_per_env`.
 - Replay time depth per env: `replay_size // num_envs`.
 - Batch transitions per world-model update: `batch_size * batch_length`.
-- Updates per environment step: `train_steps_per_iteration / (num_envs * steps_per_env)`.
+- Updates per environment step: `num_batches_trained_per_iteration / (num_envs * steps_per_env)`.
 - Replay training transitions per collected transition:
-  `(train_steps_per_iteration * batch_size * batch_length) / (num_envs * steps_per_env)`.
+  `(num_batches_trained_per_iteration * batch_size * batch_length) / (num_envs * steps_per_env)`.
   This is the main ratio to watch when scaling to large cluster GPUs: increasing
   `batch_size` can silently turn a mostly data-collection-limited run into a
   replay-heavy run.
@@ -106,18 +106,18 @@ For a 45 GB cluster GPU, a practical first sweep is:
   --headless \
   --num_envs=10000 \
   agent.steps_per_env=24 \
-  agent.train_steps_per_iteration=8 \
+  agent.num_batches_trained_per_iteration=8 \
   agent.batch_size=1024 \
   agent.batch_length=24 \
   'agent.run_name="[Cluster]-dreamer-bs1024-train8"'
 ```
 
-Then compare against `agent.train_steps_per_iteration=16` and
+Then compare against `agent.num_batches_trained_per_iteration=16` and
 `agent.batch_size=2048` one at a time. A larger batch is useful if it lowers
 model/critic noise without slowing policy improvement, but using it together
 with many replay updates greatly increases replay reuse. If return improves
 slowly while `loss/model` looks good and `policy/entropy` stays high, reduce
-`train_steps_per_iteration` or `batch_size` before increasing model size.
+`num_batches_trained_per_iteration` or `batch_size` before increasing model size.
 
 ## World Model Size
 
@@ -139,9 +139,16 @@ imagined actor-critic are transformed back with `symexp`.
 | Parameter | Default | What it controls | When to change it |
 | --- | ---: | --- | --- |
 | `imag_horizon` | `15` | Number of imagined RSSM steps for actor/critic training. | Increase for longer-horizon behavior; decrease if imagined rollouts become unreliable or slow. |
+| `imag_last` | `0` | Number of replay sequence positions per sampled sequence used as actor/critic imagination starts. `0` means all `batch_length` positions, matching the upstream DreamerV3 default. | Set to a positive `K` such as `8` to train actor/critic only from the latest `K` posterior states in each replay sequence. |
+| `filter_done_imagination_starts` | `True` | Drops actor/critic imagination starts whose transition ended the IsaacLab episode, including true terminations and time-limit resets. This matters because IsaacLab resets envs before returning `next_obs`, so done-transition posteriors are built from reset observations. | Keep enabled for normal training. Disable only for a controlled ablation. |
 | `discount` | `0.99` | Base discount used with predicted continuation probability. | Lower for more short-sighted policies; raise for longer-horizon tracking if critic remains stable. |
 | `lambda_` | `0.95` | Lambda-return mixing factor. | Lower for lower-variance targets; raise for more long-horizon bootstrapping. |
 | `slow_critic_tau` | `0.01` | Soft-update rate from critic to target critic. | Lower for a slower, steadier target; higher for faster tracking of critic changes. |
+| `normalize_actor_returns` | `True` | Enables DreamerV3-style percentile return scaling for the actor update. The actor advantage is divided by a running return scale, while the critic still predicts raw lambda-return targets. | Keep enabled unless comparing against the previous local implementation. |
+| `return_norm_rate` | `0.01` | EMA rate for the actor return percentile range. | Increase for faster adaptation to changing reward scale; decrease for smoother scaling. |
+| `return_norm_limit` | `1.0` | Minimum denominator for return normalization. This prevents tiny return ranges from amplifying noise. | Keep at `1.0` for DreamerV3-style behavior. |
+| `return_norm_percentile_low` | `5.0` | Lower percentile used for the running return range. | Change only for ablations. |
+| `return_norm_percentile_high` | `95.0` | Upper percentile used for the running return range. | Change only for ablations. |
 
 In this implementation, imagined discounts are:
 
@@ -152,6 +159,11 @@ discount * sigmoid(continue_head(feature))
 So a low `imag/continue` metric shortens the effective imagination horizon even
 if `imag_horizon` is large.
 
+The trainer stores `terminated` and `truncated` separately. The continue target
+is `1 - terminated`, so time-limit resets do not teach the world model that the
+task itself ended. Both `terminated` and `truncated` are still treated as reset
+boundaries for RSSM state resets and actor-start filtering.
+
 ## World-Model Loss Weights
 
 | Parameter | Default | What it controls | When to change it |
@@ -161,7 +173,7 @@ if `imag_horizon` is large.
 | `kl_rep_scale` | `0.1` | Weight on `KL(posterior || stop_grad(prior))`, regularizing posterior representation. | Increase for more compact/stable representations; decrease if reconstruction/reward learning suffers. |
 | `obs_loss_scale` | `1.0` | Weight on symlog observation reconstruction MSE. | Increase if observations are poorly modeled; decrease if observation loss overwhelms reward/continue learning. |
 | `reward_loss_scale` | `1.0` | Weight on symlog reward prediction MSE. | Increase if reward prediction is poor and actor training is noisy; decrease if reward loss dominates. |
-| `continue_loss_scale` | `1.0` | Weight on continuation prediction BCE. Continue target is `1 - done`. | Increase if done/timeout prediction is wrong; decrease if continue loss dominates early training. |
+| `continue_loss_scale` | `1.0` | Weight on continuation prediction BCE. Continue target is `1 - terminated`, not `1 - (terminated \| truncated)`. | Increase if true terminal prediction is wrong; decrease if continue loss dominates early training. |
 
 The logged world-model loss is:
 
@@ -173,6 +185,12 @@ loss/model =
 + kl_dyn_scale * kl_dyn
 + kl_rep_scale * kl_rep
 ```
+
+Observation reconstruction and KL losses are masked on reset-boundary
+transitions because IsaacLab returns the reset observation after a done. Reward
+and continue losses use prior features on those boundary transitions so the
+heads are not trained on a posterior that mixed the previous action with a reset
+observation.
 
 ## Actor And Exploration
 
@@ -235,7 +253,7 @@ overrides. Explicit `--cbp-*` flags win over `agent.cbp_*` values:
   --headless \
   --use-cbp \
   --cbp-replacement-rate 1e-4 \
-  agent.train_steps_per_iteration=32 \
+  agent.num_batches_trained_per_iteration=32 \
   'agent.run_name="[Cluster]-dreamer-cbp"'
 ```
 
@@ -254,12 +272,14 @@ still not checkpointed.
 | `experiment_name` | `"solo12_dreamer_v3"` | Top-level folder under `logs/dreamer/`. | Change to separate experiment families. |
 | `run_name` | `"[Local]-Solo12 simple DreamerV3"` | Human-readable run suffix. The trainer prepends a timestamp and sanitizes slashes. | Change for each hypothesis so W&B/log folders are searchable. |
 | `logger` | `"wandb"` | Logging backend: `"wandb"`, `"tensorboard"`, or `"none"`. | Use `"none"` for fast smoke tests; `"tensorboard"` for local-only logging. |
-| `wandb_project` | `"borinotIsaacLab"` | W&B project name. | Change only if moving the run to another project. |
+| `wandb_project` | `"solo12-dreamer"` | W&B project name. | Change only if moving the run to another project. |
 | `wandb_entity` | `None` | Optional W&B entity/team. | Set if W&B needs a non-default entity. |
 
 When W&B is enabled, the run config includes the resolved `agent_cfg`, the
 resolved `env_cfg`, the parsed `cli` arguments, and the old top-level Dreamer
 agent fields for dashboard compatibility.
+The local run folder also appends the W&B run id, making it easy to match a
+folder with its W&B run.
 
 Checkpoints are written to:
 
@@ -303,7 +323,7 @@ The trainer logs these scalar groups to W&B/TensorBoard when enabled:
 | `CBP/actor/replacements_total` | Total actor hidden units replaced by CBP. |
 | `CBP/critic/optimizer_steps` | Number of critic optimizer steps tracked by CBP. |
 | `CBP/critic/replacements_total` | Total critic hidden units replaced by CBP. |
-| `episode/return_mean_100` | Mean completed-episode return over the latest 100 completed episodes. |
+| `episode/episodic_reward` | Mean undiscounted completed-episode reward over the latest `num_envs` completed episodes. |
 | `replay/steps` | Number of transitions inserted into replay. |
 | `train/fps` | Environment steps per second since run start. |
 | `env/RewardsPerStep/*` | Reward-term diagnostics emitted by the Solo12 env. |
@@ -321,13 +341,13 @@ replay/steps >= prefill_steps
    Watch `replay/steps`, `loss/model`, `loss/obs`, `loss/reward`, and
    `loss/continue`.
 2. If model losses are unstable, reduce `model_lr`, then consider lowering
-   `grad_clip`, `train_steps_per_iteration`, or model size.
+   `grad_clip`, `num_batches_trained_per_iteration`, or model size.
 3. If the model learns but returns stay flat, tune `actor_entropy_scale`,
    `actor_lr`, `critic_lr`, `imag_horizon`, and `discount`.
 4. If imagined metrics look unrealistic, prioritize `kl_dyn_scale`,
    `kl_rep_scale`, `free_nats`, `batch_length`, and world-model capacity before
    tuning the actor.
-5. If training is slow but stable, increase `num_envs`, `train_steps_per_iteration`,
+5. If training is slow but stable, increase `num_envs`, `num_batches_trained_per_iteration`,
    or `batch_size` one at a time, checking GPU memory and `train/fps`.
 
 Prefer changing one group of parameters per run and put the hypothesis in

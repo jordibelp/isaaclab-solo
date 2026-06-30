@@ -25,7 +25,7 @@ from isaaclab.app import AppLauncher
 
 
 _HYDRA_OVERRIDE_HELP = """Hydra override examples:
-  agent.train_steps_per_iteration=32
+  agent.num_batches_trained_per_iteration=32
   agent.batch_size=1024
   agent.hidden_vector_deter_dims=128
   agent.stoch_dim=32 agent.num_bins_encoding=64
@@ -205,6 +205,7 @@ def _wandb_config_payload(agent_cfg: Any, env_cfg: Any, args_cli: argparse.Names
     agent_dict = _jsonify(agent_cfg)
     payload: dict[str, Any] = {
         "log_dir": str(log_dir),
+        "wandb_run_id": os.environ.get("WANDB_RUN_ID"),
         "cli": _jsonify(vars(args_cli)),
         "agent_cfg": agent_dict,
         "env_cfg": _jsonify(env_cfg),
@@ -213,6 +214,22 @@ def _wandb_config_payload(agent_cfg: Any, env_cfg: Any, args_cli: argparse.Names
         # Keep the old top-level agent fields so existing W&B panels/sweeps keep working.
         payload.update(agent_dict)
     return payload
+
+
+def _generate_wandb_run_id_if_needed(agent_cfg: Any) -> str | None:
+    if str(_cfg_get(agent_cfg, "logger", "none")).lower() != "wandb":
+        return None
+
+    try:
+        import wandb
+    except Exception as exc:
+        print(f"[WARN] Could not pre-generate W&B run id ({exc}); log folder will not include it.", flush=True)
+        return None
+
+    wandb_run_id = wandb.util.generate_id()
+    os.environ["WANDB_RUN_ID"] = wandb_run_id
+    os.environ["WANDB_RESUME"] = "allow"
+    return wandb_run_id
 
 
 def _sanitize_run_name(name: str) -> str:
@@ -292,6 +309,49 @@ class RSSMState:
     stoch: torch.Tensor
 
 
+@dataclass
+class ImaginationStarts:
+    state: RSSMState
+    command: torch.Tensor
+
+
+class PercentileReturnNormalizer(nn.Module):
+    def __init__(
+        self,
+        *,
+        enabled: bool,
+        rate: float,
+        limit: float,
+        percentile_low: float,
+        percentile_high: float,
+        device: torch.device,
+    ):
+        super().__init__()
+        if percentile_low >= percentile_high:
+            raise ValueError("return_norm_percentile_low must be smaller than return_norm_percentile_high.")
+        self.enabled = enabled
+        self.rate = rate
+        self.limit = limit
+        self.percentile_low = percentile_low
+        self.percentile_high = percentile_high
+        self.register_buffer("low", torch.zeros((), device=device))
+        self.register_buffer("high", torch.zeros((), device=device))
+
+    @torch.no_grad()
+    def scale(self, returns: torch.Tensor, *, update: bool) -> torch.Tensor:
+        if not self.enabled:
+            return returns.new_tensor(1.0)
+        flat = returns.detach().reshape(-1).float()
+        if flat.numel() == 0:
+            return (self.high - self.low).clamp_min(self.limit).to(device=returns.device, dtype=returns.dtype)
+        if update:
+            low = torch.quantile(flat, self.percentile_low / 100.0).to(device=self.low.device, dtype=self.low.dtype)
+            high = torch.quantile(flat, self.percentile_high / 100.0).to(device=self.high.device, dtype=self.high.dtype)
+            self.low.mul_(1.0 - self.rate).add_(low, alpha=self.rate)
+            self.high.mul_(1.0 - self.rate).add_(high, alpha=self.rate)
+        return (self.high - self.low).clamp_min(self.limit).to(device=returns.device, dtype=returns.dtype)
+
+
 class RSSMWorldModel(nn.Module):
     def __init__(self, obs_dim: int, command_dim: int, action_dim: int, cfg: Any):
         super().__init__()
@@ -345,13 +405,15 @@ class RSSMWorldModel(nn.Module):
 
     def observe_next(
         self, state: RSSMState, action: torch.Tensor, next_obs: torch.Tensor
-    ) -> tuple[RSSMState, torch.Tensor, torch.Tensor]:
+    ) -> tuple[RSSMState, RSSMState, torch.Tensor, torch.Tensor]:
         prev_stoch = state.stoch.reshape(state.stoch.shape[0], self.stoch_flat_dim)
         deter = self.gru(torch.cat((prev_stoch, action), dim=-1), state.deter)
         prior_logits = self.prior(deter).reshape(-1, self.stoch_dim, self.num_bins_encoding)
+        prior_stoch = straight_through_categorical(prior_logits)
+        prior_state = RSSMState(deter=deter, stoch=prior_stoch)
         embed = self._embed(next_obs)
         post_logits, stoch = self._posterior_from_embed(deter, embed)
-        return RSSMState(deter=deter, stoch=stoch), prior_logits, post_logits
+        return RSSMState(deter=deter, stoch=stoch), prior_state, prior_logits, post_logits
 
     def imagine_next(self, state: RSSMState, action: torch.Tensor) -> tuple[RSSMState, torch.Tensor]:
         prev_stoch = state.stoch.reshape(state.stoch.shape[0], self.stoch_flat_dim)
@@ -416,6 +478,14 @@ class DreamerAgent(nn.Module):
         self.critic = mlp(self.world.feature_dim, list(_cfg_get(cfg, "critic_hidden_dims")), 1).to(device)
         self.target_critic = mlp(self.world.feature_dim, list(_cfg_get(cfg, "critic_hidden_dims")), 1).to(device)
         self.target_critic.load_state_dict(self.critic.state_dict())
+        self.return_normalizer = PercentileReturnNormalizer(
+            enabled=bool(_cfg_get(cfg, "normalize_actor_returns", True)),
+            rate=float(_cfg_get(cfg, "return_norm_rate", 0.01)),
+            limit=float(_cfg_get(cfg, "return_norm_limit", 1.0)),
+            percentile_low=float(_cfg_get(cfg, "return_norm_percentile_low", 5.0)),
+            percentile_high=float(_cfg_get(cfg, "return_norm_percentile_high", 95.0)),
+            device=device,
+        )
         self.model_opt = torch.optim.Adam(self.world.parameters(), lr=float(_cfg_get(cfg, "model_lr")))
         self.actor_opt = torch.optim.Adam(self.actor.parameters(), lr=float(_cfg_get(cfg, "actor_lr")))
         self.critic_opt = torch.optim.Adam(self.critic.parameters(), lr=float(_cfg_get(cfg, "critic_lr")))
@@ -518,23 +588,29 @@ class DreamerAgent(nn.Module):
 
     @torch.no_grad()
     def observe_next(self, state: RSSMState, action: torch.Tensor, obs: torch.Tensor, done: torch.Tensor) -> RSSMState:
-        next_state, _, _ = self.world.observe_next(state, action, obs)
+        next_state, _, _, _ = self.world.observe_next(state, action, obs)
         return self.world.reset_where(next_state, obs, done)
 
     def train_on_batch(self, batch: dict[str, torch.Tensor]) -> dict[str, float]:
         model_metrics, starts = self._train_world_model(batch)
-        actor_metrics = self._train_actor_critic(starts)
+        if starts.state.deter.shape[0] > 0:
+            actor_metrics = self._train_actor_critic(starts)
+        else:
+            actor_metrics = {"train/actor_skipped_no_valid_starts": 1.0}
         metrics = {}
         metrics.update(model_metrics)
         metrics.update(actor_metrics)
         metrics.update(self._cbp_metrics())
         return metrics
 
-    def _train_world_model(self, batch: dict[str, torch.Tensor]) -> tuple[dict[str, float], tuple[RSSMState, torch.Tensor]]:
+    def _train_world_model(self, batch: dict[str, torch.Tensor]) -> tuple[dict[str, float], ImaginationStarts]:
         obs = batch["obs"]
+        commands = batch["commands"]
         actions = batch["actions"]
         rewards = batch["rewards"]
-        dones = batch["dones"]
+        terminals = batch["terminals"] if "terminals" in batch else batch["dones"]
+        truncations = batch["truncations"] if "truncations" in batch else torch.zeros_like(terminals)
+        dones = terminals | truncations
         next_obs = batch["next_obs"]
         next_commands = batch["next_commands"]
 
@@ -551,14 +627,19 @@ class DreamerAgent(nn.Module):
 
         free_nats = float(_cfg_get(self.cfg, "free_nats"))
         for t in range(actions.shape[1]):
-            next_state, prior_logits, post_logits = self.world.observe_next(state, actions[:, t], next_obs[:, t])
-            features = self.world.feature(next_state, next_commands[:, t])
+            next_state, prior_state, prior_logits, post_logits = self.world.observe_next(
+                state, actions[:, t], next_obs[:, t]
+            )
+            command_for_loss = torch.where(dones[:, t].unsqueeze(-1), commands[:, t], next_commands[:, t])
+            features = self.world.feature(next_state, command_for_loss)
+            prior_features = self.world.feature(prior_state, command_for_loss)
             valid = (1.0 - dones[:, t].float()).unsqueeze(-1)
 
             obs_pred = self.world.decoder(features)
-            reward_pred = self.world.reward(features).squeeze(-1)
-            continue_logits = self.world.continue_head(features).squeeze(-1)
-            continue_target = 1.0 - dones[:, t].float()
+            reward_features = torch.where(dones[:, t].unsqueeze(-1), prior_features, features)
+            reward_pred = self.world.reward(reward_features).squeeze(-1)
+            continue_logits = self.world.continue_head(prior_features).squeeze(-1)
+            continue_target = 1.0 - terminals[:, t].float()
 
             obs_loss = F.mse_loss(obs_pred, symlog(next_obs[:, t]), reduction="none").mean(dim=-1, keepdim=True)
             reward_loss = F.mse_loss(reward_pred, symlog(rewards[:, t]), reduction="none")
@@ -592,13 +673,33 @@ class DreamerAgent(nn.Module):
         self.model_opt.step()
         self._after_optimizer_step("world", self.model_opt)
 
-        start_state = RSSMState(
-            deter=torch.stack(states_deter, dim=1).detach().reshape(-1, self.world.hidden_vector_deter_dims),
-            stoch=torch.stack(states_stoch, dim=1)
-            .detach()
-            .reshape(-1, self.world.stoch_dim, self.world.num_bins_encoding),
-        )
-        start_commands = next_commands.detach().reshape(-1, next_commands.shape[-1])
+        states_deter_t = torch.stack(states_deter, dim=1).detach()
+        states_stoch_t = torch.stack(states_stoch, dim=1).detach()
+        imag_last = int(_cfg_get(self.cfg, "imag_last", 0))
+        start_count_per_sequence = min(imag_last or actions.shape[1], actions.shape[1])
+        start_deter = states_deter_t[:, -start_count_per_sequence:]
+        start_stoch = states_stoch_t[:, -start_count_per_sequence:]
+        start_commands = next_commands[:, -start_count_per_sequence:].detach()
+        start_boundaries = dones[:, -start_count_per_sequence:]
+        if bool(_cfg_get(self.cfg, "filter_done_imagination_starts", True)):
+            start_mask = ~start_boundaries
+        else:
+            start_mask = torch.ones_like(start_boundaries, dtype=torch.bool)
+
+        total_start_candidates = start_mask.numel()
+        valid_start_candidates = int(start_mask.sum().detach().cpu())
+        if valid_start_candidates > 0:
+            start_state = RSSMState(
+                deter=start_deter[start_mask].reshape(-1, self.world.hidden_vector_deter_dims),
+                stoch=start_stoch[start_mask].reshape(-1, self.world.stoch_dim, self.world.num_bins_encoding),
+            )
+            start_commands = start_commands[start_mask].reshape(-1, start_commands.shape[-1])
+        else:
+            start_state = RSSMState(
+                deter=start_deter.reshape(-1, self.world.hidden_vector_deter_dims)[:0],
+                stoch=start_stoch.reshape(-1, self.world.stoch_dim, self.world.num_bins_encoding)[:0],
+            )
+            start_commands = start_commands.reshape(-1, start_commands.shape[-1])[:0]
         denom = valid_count.clamp_min(1.0)
         metrics = {
             "loss/model": float(model_loss.detach().cpu()),
@@ -607,11 +708,16 @@ class DreamerAgent(nn.Module):
             "loss/continue": float((continue_loss_sum / rewards.numel()).detach().cpu()),
             "loss/kl_dyn": float((kl_dyn_sum / denom).detach().cpu()),
             "loss/kl_rep": float((kl_rep_sum / denom).detach().cpu()),
+            "imag/start_candidates": float(total_start_candidates),
+            "imag/start_count": float(valid_start_candidates),
+            "imag/start_fraction": float(valid_start_candidates / max(total_start_candidates, 1)),
+            "imag/last": float(start_count_per_sequence),
         }
-        return metrics, (start_state, start_commands)
+        return metrics, ImaginationStarts(state=start_state, command=start_commands)
 
-    def _train_actor_critic(self, starts: tuple[RSSMState, torch.Tensor]) -> dict[str, float]:
-        start_state, command = starts
+    def _train_actor_critic(self, starts: ImaginationStarts) -> dict[str, float]:
+        start_state = starts.state
+        command = starts.command
         state = RSSMState(start_state.deter.detach(), start_state.stoch.detach())
         command = command.detach()
         horizon = int(_cfg_get(self.cfg, "imag_horizon"))
@@ -652,9 +758,11 @@ class DreamerAgent(nn.Module):
             weights = torch.cumprod(
                 torch.cat((torch.ones_like(discounts_t[:1]), discounts_t[:-1]), dim=0), dim=0
             ).detach()
+            return_scale = self.return_normalizer.scale(returns, update=True)
 
         critic_values_for_adv = self.critic(feats.reshape(-1, feats.shape[-1])).reshape(horizon, -1).detach()
-        advantages = returns - critic_values_for_adv
+        raw_advantages = returns - critic_values_for_adv
+        advantages = raw_advantages / return_scale
         actor_loss = -(
             weights
             * (
@@ -683,6 +791,9 @@ class DreamerAgent(nn.Module):
             "imag/reward": float(rewards_t.mean().detach().cpu()),
             "imag/continue": float((discounts_t / discount).mean().detach().cpu()),
             "imag/return": float(returns.mean().detach().cpu()),
+            "imag/return_norm_scale": float(return_scale.detach().cpu()),
+            "imag/advantage": float(raw_advantages.mean().detach().cpu()),
+            "imag/advantage_normed": float(advantages.mean().detach().cpu()),
             "policy/entropy": float(entropies_t.mean().detach().cpu()),
         }
 
@@ -705,6 +816,7 @@ class DreamerAgent(nn.Module):
             "model_opt": self.model_opt.state_dict(),
             "actor_opt": self.actor_opt.state_dict(),
             "critic_opt": self.critic_opt.state_dict(),
+            "return_normalizer": self.return_normalizer.state_dict(),
         }
         if self.cbp_managers:
             payload["continual_backprop"] = self._cbp_summary()
@@ -720,6 +832,10 @@ class DreamerAgent(nn.Module):
         self.model_opt.load_state_dict(checkpoint["model_opt"])
         self.actor_opt.load_state_dict(checkpoint["actor_opt"])
         self.critic_opt.load_state_dict(checkpoint["critic_opt"])
+        if "return_normalizer" in checkpoint:
+            self.return_normalizer.load_state_dict(checkpoint["return_normalizer"])
+        else:
+            print("[INFO] Checkpoint has no return normalizer state; starting it from scratch.", flush=True)
         self._restore_cbp_state(checkpoint, path)
         return int(checkpoint.get("iteration", 0)), int(checkpoint.get("total_steps", 0))
 
@@ -748,7 +864,8 @@ class SequenceReplayBuffer:
         self.commands = torch.empty(self.capacity_steps, num_envs, command_dim, dtype=torch.float32)
         self.actions = torch.empty(self.capacity_steps, num_envs, action_dim, dtype=torch.float32)
         self.rewards = torch.empty(self.capacity_steps, num_envs, dtype=torch.float32)
-        self.dones = torch.empty(self.capacity_steps, num_envs, dtype=torch.bool)
+        self.terminals = torch.empty(self.capacity_steps, num_envs, dtype=torch.bool)
+        self.truncations = torch.empty(self.capacity_steps, num_envs, dtype=torch.bool)
         self.next_obs = torch.empty(self.capacity_steps, num_envs, obs_dim, dtype=torch.float32)
         self.next_commands = torch.empty(self.capacity_steps, num_envs, command_dim, dtype=torch.float32)
         self.pos = 0
@@ -761,7 +878,8 @@ class SequenceReplayBuffer:
         command: torch.Tensor,
         action: torch.Tensor,
         reward: torch.Tensor,
-        done: torch.Tensor,
+        terminal: torch.Tensor,
+        truncation: torch.Tensor,
         next_obs: torch.Tensor,
         next_command: torch.Tensor,
     ):
@@ -770,7 +888,8 @@ class SequenceReplayBuffer:
         self.commands[idx].copy_(command.detach().cpu())
         self.actions[idx].copy_(action.detach().cpu())
         self.rewards[idx].copy_(reward.detach().cpu())
-        self.dones[idx].copy_(done.detach().cpu())
+        self.terminals[idx].copy_(terminal.detach().cpu())
+        self.truncations[idx].copy_(truncation.detach().cpu())
         self.next_obs[idx].copy_(next_obs.detach().cpu())
         self.next_commands[idx].copy_(next_command.detach().cpu())
         self.pos = (self.pos + 1) % self.capacity_steps
@@ -796,12 +915,16 @@ class SequenceReplayBuffer:
         def gather(tensor: torch.Tensor) -> torch.Tensor:
             return tensor[phys, env_ids[:, None]].to(device=device, non_blocking=True)
 
+        terminals = gather(self.terminals)
+        truncations = gather(self.truncations)
         return {
             "obs": gather(self.obs),
             "commands": gather(self.commands),
             "actions": gather(self.actions),
             "rewards": gather(self.rewards),
-            "dones": gather(self.dones),
+            "terminals": terminals,
+            "truncations": truncations,
+            "dones": terminals | truncations,
             "next_obs": gather(self.next_obs),
             "next_commands": gather(self.next_commands),
         }
@@ -825,6 +948,8 @@ class ScalarLogger:
                     project=str(_cfg_get(cfg, "wandb_project")),
                     entity=_cfg_get(cfg, "wandb_entity"),
                     name=log_dir.name,
+                    id=os.environ.get("WANDB_RUN_ID"),
+                    resume=os.environ.get("WANDB_RESUME", "allow"),
                     config=_wandb_config_payload(cfg, env_cfg, args_cli, log_dir),
                     sync_tensorboard=False,
                 )
@@ -933,6 +1058,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     log_root = log_root.resolve()
     run_prefix = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     run_name = _sanitize_run_name(f"{run_prefix}_{_cfg_get(agent_cfg, 'run_name')}")
+    wandb_run_id = _generate_wandb_run_id_if_needed(agent_cfg)
+    if wandb_run_id is not None:
+        run_name = _sanitize_run_name(f"{run_name}_{wandb_run_id}")
     log_dir = log_root / run_name
     dump_yaml(str(log_dir / "params" / "env.yaml"), env_cfg)
     dump_yaml(str(log_dir / "params" / "agent.yaml"), agent_cfg)
@@ -973,8 +1101,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             action_dim,
         )
         state, _ = agent.world.initial_from_obs(obs)
-        episode_returns = torch.zeros(env.unwrapped.num_envs, device=device)
-        recent_returns: list[float] = []
+        episode_rewards = torch.zeros(env.unwrapped.num_envs, device=device)
+        recent_episodic_rewards: list[float] = []
+        episodic_reward_window = int(env.unwrapped.num_envs)
         logger = ScalarLogger(log_dir, agent_cfg, env_cfg, args_cli)
         start_time = time.time()
 
@@ -983,7 +1112,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         batch_size = int(_cfg_get(agent_cfg, "batch_size"))
         batch_length = int(_cfg_get(agent_cfg, "batch_length"))
         prefill_steps = int(_cfg_get(agent_cfg, "prefill_steps"))
-        train_steps_per_iteration = int(_cfg_get(agent_cfg, "train_steps_per_iteration"))
+        num_batches_trained_per_iteration = int(_cfg_get(agent_cfg, "num_batches_trained_per_iteration"))
         log_interval = int(_cfg_get(agent_cfg, "log_interval"))
         save_interval = int(_cfg_get(agent_cfg, "save_interval"))
 
@@ -997,13 +1126,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 next_obs_dict, reward, terminated, truncated, extras = env.step(action)
                 done = terminated | truncated
                 next_obs, next_command = _obs_command(next_obs_dict, device)
-                replay.add(obs, command, action, reward, done, next_obs, next_command)
+                replay.add(obs, command, action, reward, terminated, truncated, next_obs, next_command)
 
-                episode_returns += reward
+                episode_rewards += reward
                 if torch.any(done):
-                    recent_returns.extend(episode_returns[done].detach().cpu().tolist())
-                    recent_returns = recent_returns[-100:]
-                    episode_returns[done] = 0.0
+                    recent_episodic_rewards.extend(episode_rewards[done].detach().cpu().tolist())
+                    recent_episodic_rewards = recent_episodic_rewards[-episodic_reward_window:]
+                    episode_rewards[done] = 0.0
 
                 state = agent.observe_next(state, action, next_obs, done)
                 obs, command = next_obs, next_command
@@ -1011,7 +1140,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
             train_metrics: dict[str, float] = {}
             if replay.can_sample(batch_length, prefill_steps):
-                for _ in range(train_steps_per_iteration):
+                for _ in range(num_batches_trained_per_iteration):
                     batch = replay.sample(batch_size, batch_length, device)
                     train_metrics = agent.train_on_batch(batch)
 
@@ -1022,8 +1151,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     "train/env_steps": float(total_steps),
                     "train/fps": float(total_steps / elapsed),
                     "replay/steps": float(replay.total),
-                    "episode/return_mean_100": float(sum(recent_returns) / len(recent_returns))
-                    if recent_returns
+                    "episode/episodic_reward": float(sum(recent_episodic_rewards) / len(recent_episodic_rewards))
+                    if recent_episodic_rewards
                     else 0.0,
                 }
                 metrics.update(train_metrics)
@@ -1034,7 +1163,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 logger.log(metrics, total_steps)
                 print(
                     f"[INFO] iter={iteration} steps={total_steps} "
-                    f"return100={metrics['episode/return_mean_100']:.3f} "
+                    f"episodic_reward={metrics['episode/episodic_reward']:.3f} "
                     f"model_loss={metrics.get('loss/model', 0.0):.4f} "
                     f"actor_loss={metrics.get('loss/actor', 0.0):.4f}",
                     flush=True,

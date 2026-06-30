@@ -13,7 +13,7 @@ class Solo12DreamerV3RunnerCfg:
     num_envs = 1024
     max_iterations = 10000
     steps_per_env = 24 # 4
-    train_steps_per_iteration = 16
+    num_batches_trained_per_iteration = 16
     prefill_steps = 8192
     replay_size = 2_000_000
     batch_size = 2048 # 16
@@ -27,7 +27,11 @@ class Solo12DreamerV3RunnerCfg:
     actor_hidden_dims = [256, 128, 64]
     critic_hidden_dims = [256, 128, 64]
 
+    # Upstream DreamerV3 name: imag_length. This local config keeps the older
+    # local name while imag_last below controls the K replay states used as starts.
     imag_horizon = 15
+    imag_last = 0
+    filter_done_imagination_starts = True
     # discount = 0.997 == 6.67 seconds horizon
     discount = 0.99 # 2 seconds effective horizon
     # Discount used for imagination. I think for locomotion 2s is more than sufficient.
@@ -39,6 +43,11 @@ class Solo12DreamerV3RunnerCfg:
     continue_loss_scale = 1.0
     obs_loss_scale = 1.0
     actor_entropy_scale = 3.0e-4
+    normalize_actor_returns = True
+    return_norm_rate = 0.01
+    return_norm_limit = 1.0
+    return_norm_percentile_low = 5.0
+    return_norm_percentile_high = 95.0
 
     model_lr = 1.0e-4
     actor_lr = 3.0e-5
@@ -59,5 +68,5 @@ class Solo12DreamerV3RunnerCfg:
     experiment_name = "solo12_dreamer_v3"
     run_name = "[Local]-Solo12 simple DreamerV3"
     logger = "wandb"
-    wandb_project = "borinotIsaacLab"
+    wandb_project = "solo12-dreamer"
     wandb_entity = None
