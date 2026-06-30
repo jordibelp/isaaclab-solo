@@ -130,9 +130,14 @@ slowly while `loss/model` looks good and `policy/entropy` stays high, reduce
 | `model_hidden_dim` | `256` | Shared hidden size for RSSM prior/posterior, decoder, reward head, and continue head. | Main world-model capacity knob. Increase before making all subnetworks custom. |
 | `actor_hidden_dims` | `[256, 128, 64]` | MLP hidden sizes for the tanh-normal actor. | Increase if policy seems underpowered after the model is learning; decrease for faster actor updates. |
 | `critic_hidden_dims` | `[256, 128, 64]` | MLP hidden sizes for critic and slow target critic. | Increase if critic loss/returns are noisy; decrease if critic dominates compute. |
+| `reward_value_num_bins` | `255` | Number of bins for the DreamerV3-style symexp-two-hot reward and value distributions. | Keep `255` unless explicitly ablating output distribution resolution. |
+| `reward_value_symlog_range` | `20.0` | Range used to create symlog-spaced raw-value bins: `symexp(linspace(-range, range))`. | Keep `20.0` to match DreamerV3; reduce only if a narrower value support is deliberately desired. |
 
-The model predicts symlog-transformed observations and rewards. Rewards used for
-imagined actor-critic are transformed back with `symexp`.
+The model predicts symlog-transformed observations with MSE. Reward and value
+heads use DreamerV3-style symexp-two-hot categorical distributions: the heads
+output logits over symlog-spaced raw-value bins, prediction is the expected raw
+reward/value, and training uses interpolated two-hot cross entropy against raw
+targets.
 
 ## Imagination And Value Learning
 
@@ -172,7 +177,7 @@ boundaries for RSSM state resets and actor-start filtering.
 | `kl_dyn_scale` | `0.5` | Weight on `KL(stop_grad(posterior) || prior)`, pushing the prior dynamics toward posterior states. | Increase when imagined dynamics drift; decrease if KL dominates model learning. |
 | `kl_rep_scale` | `0.1` | Weight on `KL(posterior || stop_grad(prior))`, regularizing posterior representation. | Increase for more compact/stable representations; decrease if reconstruction/reward learning suffers. |
 | `obs_loss_scale` | `1.0` | Weight on symlog observation reconstruction MSE. | Increase if observations are poorly modeled; decrease if observation loss overwhelms reward/continue learning. |
-| `reward_loss_scale` | `1.0` | Weight on symlog reward prediction MSE. | Increase if reward prediction is poor and actor training is noisy; decrease if reward loss dominates. |
+| `reward_loss_scale` | `1.0` | Weight on reward two-hot cross entropy. | Increase if reward prediction is poor and actor training is noisy; decrease if reward loss dominates. |
 | `continue_loss_scale` | `1.0` | Weight on continuation prediction BCE. Continue target is `1 - terminated`, not `1 - (terminated \| truncated)`. | Increase if true terminal prediction is wrong; decrease if continue loss dominates early training. |
 
 The logged world-model loss is:
@@ -287,6 +292,11 @@ Checkpoints are written to:
 logs/dreamer/<experiment_name>/<timestamp>_<run_name>/checkpoints/
 ```
 
+Checkpoints created before the symexp-two-hot reward/value change used scalar
+reward and critic heads, so they are not shape-compatible with the current
+reward/critic architecture. Start new Dreamer runs from scratch unless the
+checkpoint was created by this two-hot version or newer.
+
 Resume with:
 
 ```bash
@@ -307,12 +317,12 @@ The trainer logs these scalar groups to W&B/TensorBoard when enabled:
 | --- | --- |
 | `loss/model` | Combined world-model objective after loss weighting. |
 | `loss/obs` | Mean symlog observation reconstruction MSE on non-terminal valid steps. |
-| `loss/reward` | Mean symlog reward prediction MSE. |
+| `loss/reward` | Mean reward symexp-two-hot cross entropy. |
 | `loss/continue` | Binary cross-entropy for predicting `1 - done`. |
 | `loss/kl_dyn` | Prior dynamics KL term after free-nats clamp. |
 | `loss/kl_rep` | Posterior representation KL term after free-nats clamp. |
 | `loss/actor` | Imagined policy-gradient objective with entropy bonus. |
-| `loss/critic` | MSE between critic values and lambda returns. |
+| `loss/critic` | Value symexp-two-hot cross entropy against lambda returns. |
 | `imag/reward` | Mean imagined reward after `symexp`. |
 | `imag/continue` | Mean predicted continuation probability. |
 | `imag/return` | Mean lambda return in imagination. |

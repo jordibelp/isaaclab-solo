@@ -42,6 +42,8 @@ class Solo12DreamerV3RunnerCfg:
     reward_loss_scale = 1.0
     continue_loss_scale = 1.0
     obs_loss_scale = 1.0
+    reward_value_num_bins = 255
+    reward_value_symlog_range = 20.0
     actor_entropy_scale = 3.0e-4
     normalize_actor_returns = True
     return_norm_rate = 0.01

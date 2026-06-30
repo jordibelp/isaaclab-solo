@@ -259,8 +259,9 @@ def mlp(input_dim: int, hidden_dims: list[int], output_dim: int, *, layer_norm: 
 
 def _world_model_cbp_specs(world: "RSSMWorldModel") -> list[Any]:
     specs = []
-    for name in ("encoder", "prior", "posterior", "decoder", "reward", "continue_head"):
+    for name in ("encoder", "prior", "posterior", "decoder", "continue_head"):
         specs.extend(cbp_specs_for_sequential_mlp(f"world.{name}", getattr(world, name)))
+    specs.extend(cbp_specs_for_sequential_mlp("world.reward.net", world.reward.net))
     return specs
 
 
@@ -352,6 +353,80 @@ class PercentileReturnNormalizer(nn.Module):
         return (self.high - self.low).clamp_min(self.limit).to(device=returns.device, dtype=returns.dtype)
 
 
+class SymexpTwoHotHead(nn.Module):
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dims: list[int],
+        *,
+        num_bins: int,
+        symlog_range: float,
+        layer_norm: bool = True,
+    ):
+        super().__init__()
+        if num_bins < 3:
+            raise ValueError("reward_value_num_bins must be at least 3.")
+        self.num_bins = int(num_bins)
+        self.symlog_range = float(symlog_range)
+        self.net = mlp(input_dim, hidden_dims, self.num_bins, layer_norm=layer_norm)
+        last = self.net[-1]
+        if isinstance(last, nn.Linear):
+            nn.init.zeros_(last.weight)
+            nn.init.zeros_(last.bias)
+        self.register_buffer("bins", self._make_bins(self.num_bins, self.symlog_range))
+
+    @staticmethod
+    def _make_bins(num_bins: int, symlog_range: float) -> torch.Tensor:
+        if num_bins % 2 == 1:
+            half = torch.linspace(-symlog_range, 0.0, (num_bins - 1) // 2 + 1, dtype=torch.float32)
+            half = symexp(half)
+            return torch.cat((half, -half[:-1].flip(0)), dim=0)
+        half = torch.linspace(-symlog_range, 0.0, num_bins // 2, dtype=torch.float32)
+        half = symexp(half)
+        return torch.cat((half, -half.flip(0)), dim=0)
+
+    def logits(self, features: torch.Tensor) -> torch.Tensor:
+        return self.net(features)
+
+    def pred_from_logits(self, logits: torch.Tensor) -> torch.Tensor:
+        probs = torch.softmax(logits, dim=-1)
+        bins = self.bins.to(device=probs.device, dtype=probs.dtype)
+        n = bins.shape[0]
+        if n % 2 == 1:
+            mid = (n - 1) // 2
+            left = (probs[..., :mid] * bins[:mid]).flip(-1)
+            center = (probs[..., mid : mid + 1] * bins[mid : mid + 1]).sum(dim=-1)
+            right = probs[..., mid + 1 :] * bins[mid + 1 :]
+            return center + (left + right).sum(dim=-1)
+        left = (probs[..., : n // 2] * bins[: n // 2]).flip(-1)
+        right = probs[..., n // 2 :] * bins[n // 2 :]
+        return (left + right).sum(dim=-1)
+
+    def pred(self, features: torch.Tensor) -> torch.Tensor:
+        return self.pred_from_logits(self.logits(features))
+
+    def loss_from_logits(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        target = target.to(device=logits.device, dtype=logits.dtype).contiguous()
+        bins = self.bins.to(device=logits.device, dtype=logits.dtype)
+        above = torch.searchsorted(bins, target.detach(), right=True)
+        below = (above - 1).clamp(0, self.num_bins - 1)
+        above = above.clamp(0, self.num_bins - 1)
+        equal = below == above
+        dist_to_below = torch.where(equal, torch.ones_like(target), (bins[below] - target).abs())
+        dist_to_above = torch.where(equal, torch.ones_like(target), (bins[above] - target).abs())
+        total = dist_to_below + dist_to_above
+        weight_below = dist_to_above / total
+        weight_above = dist_to_below / total
+        twohot = (
+            F.one_hot(below, self.num_bins).to(dtype=logits.dtype) * weight_below.unsqueeze(-1)
+            + F.one_hot(above, self.num_bins).to(dtype=logits.dtype) * weight_above.unsqueeze(-1)
+        )
+        return -(twohot * F.log_softmax(logits, dim=-1)).sum(dim=-1)
+
+    def loss(self, features: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        return self.loss_from_logits(self.logits(features), target)
+
+
 class RSSMWorldModel(nn.Module):
     def __init__(self, obs_dim: int, command_dim: int, action_dim: int, cfg: Any):
         super().__init__()
@@ -371,7 +446,12 @@ class RSSMWorldModel(nn.Module):
         self.posterior = mlp(self.hidden_vector_deter_dims + hidden, [hidden], self.stoch_flat_dim)
         feature_dim = self.feature_dim
         self.decoder = mlp(feature_dim, [hidden, hidden], obs_dim)
-        self.reward = mlp(feature_dim, [hidden, hidden], 1)
+        self.reward = SymexpTwoHotHead(
+            feature_dim,
+            [hidden, hidden],
+            num_bins=int(_cfg_get(cfg, "reward_value_num_bins", 255)),
+            symlog_range=float(_cfg_get(cfg, "reward_value_symlog_range", 20.0)),
+        )
         self.continue_head = mlp(feature_dim, [hidden, hidden], 1)
 
     @property
@@ -475,8 +555,18 @@ class DreamerAgent(nn.Module):
         self.cbp_managers = {}
         self.world = RSSMWorldModel(obs_dim, command_dim, action_dim, cfg).to(device)
         self.actor = TanhNormalActor(self.world.feature_dim, action_dim, list(_cfg_get(cfg, "actor_hidden_dims"))).to(device)
-        self.critic = mlp(self.world.feature_dim, list(_cfg_get(cfg, "critic_hidden_dims")), 1).to(device)
-        self.target_critic = mlp(self.world.feature_dim, list(_cfg_get(cfg, "critic_hidden_dims")), 1).to(device)
+        self.critic = SymexpTwoHotHead(
+            self.world.feature_dim,
+            list(_cfg_get(cfg, "critic_hidden_dims")),
+            num_bins=int(_cfg_get(cfg, "reward_value_num_bins", 255)),
+            symlog_range=float(_cfg_get(cfg, "reward_value_symlog_range", 20.0)),
+        ).to(device)
+        self.target_critic = SymexpTwoHotHead(
+            self.world.feature_dim,
+            list(_cfg_get(cfg, "critic_hidden_dims")),
+            num_bins=int(_cfg_get(cfg, "reward_value_num_bins", 255)),
+            symlog_range=float(_cfg_get(cfg, "reward_value_symlog_range", 20.0)),
+        ).to(device)
         self.target_critic.load_state_dict(self.critic.state_dict())
         self.return_normalizer = PercentileReturnNormalizer(
             enabled=bool(_cfg_get(cfg, "normalize_actor_returns", True)),
@@ -496,7 +586,7 @@ class DreamerAgent(nn.Module):
         managers = {
             "world": _build_cbp_manager("world", _world_model_cbp_specs(self.world), parsed_args),
             "actor": _build_cbp_manager("actor", cbp_specs_for_sequential_mlp("actor.net", self.actor.net), parsed_args),
-            "critic": _build_cbp_manager("critic", cbp_specs_for_sequential_mlp("critic", self.critic), parsed_args),
+            "critic": _build_cbp_manager("critic", cbp_specs_for_sequential_mlp("critic.net", self.critic.net), parsed_args),
         }
         self.cbp_managers = {name: manager for name, manager in managers.items() if manager is not None}
         if not self.cbp_managers:
@@ -637,12 +727,11 @@ class DreamerAgent(nn.Module):
 
             obs_pred = self.world.decoder(features)
             reward_features = torch.where(dones[:, t].unsqueeze(-1), prior_features, features)
-            reward_pred = self.world.reward(reward_features).squeeze(-1)
+            reward_loss = self.world.reward.loss(reward_features, rewards[:, t])
             continue_logits = self.world.continue_head(prior_features).squeeze(-1)
             continue_target = 1.0 - terminals[:, t].float()
 
             obs_loss = F.mse_loss(obs_pred, symlog(next_obs[:, t]), reduction="none").mean(dim=-1, keepdim=True)
-            reward_loss = F.mse_loss(reward_pred, symlog(rewards[:, t]), reduction="none")
             continue_loss = F.binary_cross_entropy_with_logits(continue_logits, continue_target, reduction="none")
             kl_dyn = torch.clamp(categorical_kl(post_logits.detach(), prior_logits), min=free_nats)
             kl_rep = torch.clamp(categorical_kl(post_logits, prior_logits.detach()), min=free_nats)
@@ -736,7 +825,7 @@ class DreamerAgent(nn.Module):
             with torch.no_grad():
                 next_state, _ = self.world.imagine_next(state, action.detach())
                 next_feat = self.world.feature(next_state, command)
-                reward = symexp(self.world.reward(next_feat).squeeze(-1))
+                reward = self.world.reward.pred(next_feat)
                 cont = torch.sigmoid(self.world.continue_head(next_feat).squeeze(-1))
             features.append(feat)
             log_probs.append(log_prob)
@@ -752,15 +841,15 @@ class DreamerAgent(nn.Module):
         discounts_t = discount * torch.stack(continues, dim=0)
 
         with torch.no_grad():
-            target_values = self.target_critic(feats.reshape(-1, feats.shape[-1])).reshape(horizon, -1)
-            bootstrap = self.target_critic(self.world.feature(state, command).detach()).squeeze(-1)
+            target_values = self.target_critic.pred(feats.reshape(-1, feats.shape[-1])).reshape(horizon, -1)
+            bootstrap = self.target_critic.pred(self.world.feature(state, command).detach())
             returns = lambda_returns(rewards_t, discounts_t, target_values, bootstrap, lambda_)
             weights = torch.cumprod(
                 torch.cat((torch.ones_like(discounts_t[:1]), discounts_t[:-1]), dim=0), dim=0
             ).detach()
             return_scale = self.return_normalizer.scale(returns, update=True)
 
-        critic_values_for_adv = self.critic(feats.reshape(-1, feats.shape[-1])).reshape(horizon, -1).detach()
+        critic_values_for_adv = self.critic.pred(feats.reshape(-1, feats.shape[-1])).reshape(horizon, -1).detach()
         raw_advantages = returns - critic_values_for_adv
         advantages = raw_advantages / return_scale
         actor_loss = -(
@@ -776,8 +865,10 @@ class DreamerAgent(nn.Module):
         self.actor_opt.step()
         self._after_optimizer_step("actor", self.actor_opt)
 
-        critic_values = self.critic(feats.detach().reshape(-1, feats.shape[-1])).reshape(horizon, -1)
-        critic_loss = (weights * F.mse_loss(critic_values, returns.detach(), reduction="none")).mean()
+        critic_loss_per_step = self.critic.loss(
+            feats.detach().reshape(-1, feats.shape[-1]), returns.detach().reshape(-1)
+        ).reshape(horizon, -1)
+        critic_loss = (weights * critic_loss_per_step).mean()
         self.critic_opt.zero_grad(set_to_none=True)
         critic_loss.backward()
         nn.utils.clip_grad_norm_(self.critic.parameters(), float(_cfg_get(self.cfg, "grad_clip")))
@@ -823,12 +914,24 @@ class DreamerAgent(nn.Module):
             payload["continual_backprop_state_dict"] = self._cbp_state_dict()
         torch.save(payload, path)
 
+    def _load_component_state(self, component: nn.Module, name: str, state: dict[str, Any], checkpoint_path: str) -> None:
+        try:
+            component.load_state_dict(state)
+        except RuntimeError as exc:
+            raise RuntimeError(
+                f"Could not load Dreamer {name} weights from {checkpoint_path}. "
+                "If this checkpoint predates the symexp-two-hot reward/value heads, "
+                "start a fresh Dreamer run or resume from a two-hot checkpoint."
+            ) from exc
+
     def load(self, path: str) -> tuple[int, int]:
         checkpoint = torch.load(path, map_location=self.device, weights_only=False)
-        self.world.load_state_dict(checkpoint["world"])
-        self.actor.load_state_dict(checkpoint["actor"])
-        self.critic.load_state_dict(checkpoint["critic"])
-        self.target_critic.load_state_dict(checkpoint.get("target_critic", checkpoint["critic"]))
+        self._load_component_state(self.world, "world model", checkpoint["world"], path)
+        self._load_component_state(self.actor, "actor", checkpoint["actor"], path)
+        self._load_component_state(self.critic, "critic", checkpoint["critic"], path)
+        self._load_component_state(
+            self.target_critic, "target critic", checkpoint.get("target_critic", checkpoint["critic"]), path
+        )
         self.model_opt.load_state_dict(checkpoint["model_opt"])
         self.actor_opt.load_state_dict(checkpoint["actor_opt"])
         self.critic_opt.load_state_dict(checkpoint["critic_opt"])
