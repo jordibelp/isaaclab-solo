@@ -224,7 +224,8 @@ class DreamerAgent(nn.Module):
 
     # -------------------------------------------------------------- update
     def update(self, batch: dict[str, torch.Tensor], writeback, buffer) -> dict[str, torch.Tensor]:
-        torch.compiler.cudagraph_mark_step_begin()
+        if self.cfg.use_compile:
+            torch.compiler.cudagraph_mark_step_begin()
         self._update_slow_value()
         with autocast(device_type=self.device.type, dtype=torch.float16, enabled=self.cfg.use_amp):
             (post_stoch, post_deter), metrics = self._cal_grad_fn(batch)

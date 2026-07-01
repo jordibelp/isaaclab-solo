@@ -89,7 +89,9 @@ class Solo12DreamerV3RunnerCfg:
 
     # --- runtime efficiency ---
     use_amp = True            # fp16 autocast + GradScaler
-    use_compile = True        # torch.compile(reduce-overhead); keep on (eager is slower)
+    # Keep compile opt-in for cluster runs. On IRICluster, Torch Inductor can
+    # stall while querying nvidia-smi during the first compiled update.
+    use_compile = False
 
     use_cbp = False
     cbp_replacement_rate = 1.0e-4
