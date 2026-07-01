@@ -303,6 +303,13 @@ values as `train/replay_ratio` and `train/num_gradients_per_policy_step`.
 The local run folder also appends the W&B run id, making it easy to match a
 folder with its W&B run.
 
+The logger calls W&B/TensorBoard with the global environment-interaction count as
+the scalar step. In W&B, the default `Step` axis is therefore the number of env
+transitions collected across all parallel environments. The trainer also logs
+explicit `num_env_interactions` and `num_optimization_steps` scalars so plots can
+be read without relying on the UI label. `num_optimization_steps` counts actual
+`optimizer.step()` calls across world model, actor, and critic updates.
+
 Checkpoints are written to:
 
 ```text
@@ -349,6 +356,10 @@ The trainer logs these scalar groups to W&B/TensorBoard when enabled:
 | `imag/continue` | Mean predicted continuation probability. |
 | `imag/return` | Mean lambda return in imagination. |
 | `policy/entropy` | Mean actor entropy in imagined rollouts. |
+| `num_env_interactions` | Total environment transitions collected across all parallel envs. This is also the W&B/TensorBoard scalar step. |
+| `num_optimization_steps` | Total actual optimizer steps across the world model, actor, and critic. A normal trained batch adds 3; a batch with no valid actor/critic starts adds 1. |
+| `train/num_env_interactions` | Namespaced alias for `num_env_interactions`. |
+| `train/num_optimization_steps` | Namespaced alias for `num_optimization_steps`. |
 | `CBP/world/optimizer_steps` | Number of world-model optimizer steps tracked by CBP. |
 | `CBP/world/replacements_total` | Total world-model hidden units replaced by CBP. |
 | `CBP/actor/optimizer_steps` | Number of actor optimizer steps tracked by CBP. |

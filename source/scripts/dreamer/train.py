@@ -607,6 +607,7 @@ class DreamerAgent(nn.Module):
         self.model_opt = torch.optim.Adam(self.world.parameters(), lr=float(_cfg_get(cfg, "model_lr")))
         self.actor_opt = torch.optim.Adam(self.actor.parameters(), lr=float(_cfg_get(cfg, "actor_lr")))
         self.critic_opt = torch.optim.Adam(self.critic.parameters(), lr=float(_cfg_get(cfg, "critic_lr")))
+        self.num_optimization_steps = 0
         if cbp_args is not None and bool(getattr(cbp_args, "use_cbp", False)):
             self._attach_continual_backprop(cbp_args)
 
@@ -634,6 +635,22 @@ class DreamerAgent(nn.Module):
         manager = self.cbp_managers.get(manager_name)
         if manager is not None:
             manager.after_optimizer_step(optimizer)
+
+    @staticmethod
+    def _optimizer_step_count(optimizer: torch.optim.Optimizer) -> int:
+        max_step = 0
+        for state in optimizer.state.values():
+            step = state.get("step")
+            if step is None:
+                continue
+            if torch.is_tensor(step):
+                if step.numel() == 0:
+                    continue
+                step_value = int(step.detach().max().cpu().item())
+            else:
+                step_value = int(step)
+            max_step = max(max_step, step_value)
+        return max_step
 
     def _cbp_metrics(self) -> dict[str, float]:
         metrics = {}
@@ -788,6 +805,7 @@ class DreamerAgent(nn.Module):
         model_loss.backward()
         nn.utils.clip_grad_norm_(self.world.parameters(), float(_cfg_get(self.cfg, "grad_clip")))
         self.model_opt.step()
+        self.num_optimization_steps += 1
         self._after_optimizer_step("world", self.model_opt)
 
         states_deter_t = torch.stack(states_deter, dim=1).detach()
@@ -892,6 +910,7 @@ class DreamerAgent(nn.Module):
         actor_loss.backward()
         nn.utils.clip_grad_norm_(self.actor.parameters(), float(_cfg_get(self.cfg, "grad_clip")))
         self.actor_opt.step()
+        self.num_optimization_steps += 1
         self._after_optimizer_step("actor", self.actor_opt)
 
         critic_loss_per_step = self.critic.loss(
@@ -902,6 +921,7 @@ class DreamerAgent(nn.Module):
         critic_loss.backward()
         nn.utils.clip_grad_norm_(self.critic.parameters(), float(_cfg_get(self.cfg, "grad_clip")))
         self.critic_opt.step()
+        self.num_optimization_steps += 1
         self._after_optimizer_step("critic", self.critic_opt)
         self._update_target_critic()
 
@@ -928,6 +948,7 @@ class DreamerAgent(nn.Module):
         payload = {
             "iteration": iteration,
             "total_steps": total_steps,
+            "num_optimization_steps": self.num_optimization_steps,
             "cfg": _cfg_to_dict(self.cfg),
             "world": self.world.state_dict(),
             "actor": self.actor.state_dict(),
@@ -966,6 +987,20 @@ class DreamerAgent(nn.Module):
         self.model_opt.load_state_dict(checkpoint["model_opt"])
         self.actor_opt.load_state_dict(checkpoint["actor_opt"])
         self.critic_opt.load_state_dict(checkpoint["critic_opt"])
+        if "num_optimization_steps" in checkpoint:
+            self.num_optimization_steps = int(checkpoint["num_optimization_steps"])
+        else:
+            self.num_optimization_steps = (
+                self._optimizer_step_count(self.model_opt)
+                + self._optimizer_step_count(self.actor_opt)
+                + self._optimizer_step_count(self.critic_opt)
+            )
+            if self.num_optimization_steps:
+                print(
+                    "[INFO] Checkpoint has no explicit num_optimization_steps; "
+                    f"inferred {self.num_optimization_steps} from optimizer states.",
+                    flush=True,
+                )
         if "return_normalizer" in checkpoint:
             self.return_normalizer.load_state_dict(checkpoint["return_normalizer"])
         else:
@@ -1183,7 +1218,15 @@ class ScalarLogger:
                     sync_tensorboard=False,
                 )
             except Exception as exc:
+                self.wandb = None
                 print(f"[WARN] Could not initialize W&B ({exc}); continuing with stdout logging.", flush=True)
+            if self.wandb is not None:
+                try:
+                    self.wandb.define_metric("num_env_interactions")
+                    self.wandb.define_metric("num_optimization_steps")
+                    self.wandb.define_metric("*", step_metric="num_env_interactions")
+                except Exception as exc:
+                    print(f"[WARN] Could not define W&B step metrics ({exc}); continuing.", flush=True)
 
     def log(self, metrics: dict[str, float], step: int):
         if self.writer is not None:
@@ -1395,8 +1438,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     online_sequences_sampled / total_sequences_sampled if total_sequences_sampled else 0.0
                 )
                 metrics = {
+                    "num_env_interactions": float(total_steps),
+                    "num_optimization_steps": float(agent.num_optimization_steps),
                     "train/iteration": float(iteration),
                     "train/env_steps": float(total_steps),
+                    "train/num_env_interactions": float(total_steps),
+                    "train/num_optimization_steps": float(agent.num_optimization_steps),
                     "train/fps": float(total_steps / elapsed),
                     "replay/steps": float(replay.total),
                     "replay/use_online_queue": float(use_online_replay_queue),
@@ -1419,6 +1466,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 logger.log(metrics, total_steps)
                 print(
                     f"[INFO] iter={iteration} steps={total_steps} "
+                    f"opt_steps={agent.num_optimization_steps} "
                     f"episodic_reward={metrics['episode/episodic_reward']:.3f} "
                     f"model_loss={metrics.get('loss/model', 0.0):.4f} "
                     f"actor_loss={metrics.get('loss/actor', 0.0):.4f}",
