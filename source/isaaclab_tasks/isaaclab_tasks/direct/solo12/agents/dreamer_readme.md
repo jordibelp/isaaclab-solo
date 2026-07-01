@@ -1,5 +1,40 @@
 # Solo12 DreamerV3 Tuning Guide
 
+> **High-performance rewrite (branch `high-performance-dreamerV3`).** The learning
+> core was reimplemented in `source/scripts/dreamer/dreamer_core/` following the
+> efficient PyTorch DreamerV3 reproduction from the R2-Dreamer codebase (using the
+> plain `rep_loss=dreamer` objective — no decoder-free / augmentation variants).
+> `train.py` keeps all the Isaac Lab glue (env stepping, command handling,
+> W&B/TensorBoard, checkpoint/best, optional Continual-Backprop).
+>
+> **Efficiency techniques** (all in `dreamer_core`):
+> block-diagonal GRU + RMSNorm RSSM; a single **fused backward** over the combined
+> world-model+actor+critic loss with imagination rolled out through **frozen
+> network views** (up-to-date weights, no autograd graph through the rollout);
+> **AMP** fp16 + `torch.compile(reduce-overhead)` with CUDA graphs; **LaProp**
+> optimizer with **adaptive gradient clipping**; and a **GPU-resident replay
+> buffer with latent caching** (compact int16/fp16 replay-context, warm-starting
+> the RSSM instead of a cold zero state each batch).
+>
+> **DreamerV3 pieces added that the previous single-file version omitted:**
+> the slow-critic EMA regularizer (`slowreg`), replay-based critic learning
+> (`repval`), replay-context latent carry, and the faithful bounded-normal actor.
+>
+> **Microbenchmark** (RTX 5070 Laptop, 8 GB; synthetic Solo12-shaped update, no
+> Isaac Sim — see `source/scripts/dreamer/benchmark_update.py`):
+>
+> | batch | legacy ms/update | new (AMP+compile) | speedup | legacy mem | new mem |
+> |------:|-----------------:|------------------:|--------:|-----------:|--------:|
+> | 256   | 269              | 163               | 1.66x   | 3.0 GB     | 1.5 GB  |
+> | 512   | 562              | 323               | 1.74x   | 5.7 GB     | 3.0 GB  |
+> | 1024  | OOM              | 666               | —       | OOM        | 5.8 GB  |
+>
+> The new core is both faster and ~2x more memory-efficient, so it fits batches
+> (B=1024) that the previous implementation cannot on the same GPU. Keep
+> `agent.use_compile=true` — the eager block-GRU path is intentionally slower.
+> On small GPUs set `agent.replay_storage_device=cpu` or lower `agent.replay_size`
+> if the on-GPU replay does not fit alongside Isaac Sim.
+
 This file documents the tunable parameters in `dreamer_v3_cfg.py` for the
 `Solo12-simple-dreamerV3` task and the local trainer at
 `source/scripts/dreamer/train.py`.
