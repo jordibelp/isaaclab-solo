@@ -769,6 +769,7 @@ class DreamerAgent(nn.Module):
         start_deter = states_deter_t[:, -start_count_per_sequence:]
         start_stoch = states_stoch_t[:, -start_count_per_sequence:]
         start_commands = next_commands[:, -start_count_per_sequence:].detach()
+        start_command_dim = start_commands.shape[-1]
         start_boundaries = dones[:, -start_count_per_sequence:]
         if bool(_cfg_get(self.cfg, "filter_done_imagination_starts", True)):
             start_mask = ~start_boundaries
@@ -782,13 +783,13 @@ class DreamerAgent(nn.Module):
                 deter=start_deter[start_mask].reshape(-1, self.world.hidden_vector_deter_dims),
                 stoch=start_stoch[start_mask].reshape(-1, self.world.stoch_dim, self.world.num_bins_encoding),
             )
-            start_commands = start_commands[start_mask].reshape(-1, start_commands.shape[-1])
+            start_commands = start_commands[start_mask].reshape(valid_start_candidates, start_command_dim)
         else:
             start_state = RSSMState(
                 deter=start_deter.reshape(-1, self.world.hidden_vector_deter_dims)[:0],
                 stoch=start_stoch.reshape(-1, self.world.stoch_dim, self.world.num_bins_encoding)[:0],
             )
-            start_commands = start_commands.reshape(-1, start_commands.shape[-1])[:0]
+            start_commands = start_commands.new_empty((0, start_command_dim))
         denom = valid_count.clamp_min(1.0)
         metrics = {
             "loss/model": float(model_loss.detach().cpu()),
@@ -920,8 +921,10 @@ class DreamerAgent(nn.Module):
         except RuntimeError as exc:
             raise RuntimeError(
                 f"Could not load Dreamer {name} weights from {checkpoint_path}. "
-                "If this checkpoint predates the symexp-two-hot reward/value heads, "
-                "start a fresh Dreamer run or resume from a two-hot checkpoint."
+                "This usually means the checkpoint architecture does not match the current run "
+                "(for example old scalar reward/value heads, or a different "
+                "env.command_outside_observation layout). Start a fresh run or resume with "
+                "matching config overrides."
             ) from exc
 
     def load(self, path: str) -> tuple[int, int]:
@@ -1156,6 +1159,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     if getattr(env_cfg, "policy_model", None) != "simple_dreamer_v3":
         raise ValueError("Dreamer trainer expects a task with env.policy_model='simple_dreamer_v3'.")
+    if hasattr(env_cfg, "refresh_observation_dimensions"):
+        env_cfg.refresh_observation_dimensions()
 
     log_root = Path("logs") / "dreamer" / str(_cfg_get(agent_cfg, "experiment_name"))
     log_root = log_root.resolve()

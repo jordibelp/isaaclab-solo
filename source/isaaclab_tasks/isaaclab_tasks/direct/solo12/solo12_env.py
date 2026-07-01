@@ -23,6 +23,7 @@ class Solo12Env(DirectRLEnv):
     cfg: Solo12EnvCfg
 
     def __init__(self, cfg: Solo12EnvCfg, render_mode: str | None = None, **kwargs):
+        cfg.refresh_observation_dimensions()
         super().__init__(cfg, render_mode, **kwargs)
 
         action_dim = gym.spaces.flatdim(self.single_action_space)
@@ -755,7 +756,9 @@ class Solo12Env(DirectRLEnv):
         if self.cfg.policy_model == "simple_dreamer_v3":
             policy_obs = self._get_simple_proprioceptive_obs(corrupt=True)
             self._previous_actions = self._actions.clone()
-            return {"policy": policy_obs, "command": self._commands}
+            if self.cfg.command_outside_observation:
+                return {"policy": policy_obs, "command": self._commands}
+            return {"policy": torch.cat((policy_obs, self._commands), dim=-1)}
 
         joint_pos = self._robot.data.joint_pos[:, self._joint_ids] - self._q_offset_action_and_obs
         joint_vel = self._robot.data.joint_vel[:, self._joint_ids]

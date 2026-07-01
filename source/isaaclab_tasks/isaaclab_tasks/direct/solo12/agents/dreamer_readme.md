@@ -6,18 +6,24 @@ This file documents the tunable parameters in `dreamer_v3_cfg.py` for the
 
 The Dreamer task exposes:
 
-- `obs["policy"]`: 33D proprioception: base linear velocity, base angular
-  velocity, projected gravity, joint positions, and joint velocities.
-- `obs["command"]`: 3D command: `vx_cmd`, `vy_cmd`, `wz_cmd`.
+- `obs["policy"]`: by default, 36D = 33D proprioception plus 3D command
+  (`vx_cmd`, `vy_cmd`, `wz_cmd`). This full observation is symlog-transformed by
+  the encoder and reconstructed by the decoder.
+- `obs["command"]`: absent by default. Set `env.command_outside_observation=true`
+  to restore the old layout with 33D proprioception in `obs["policy"]` and 3D
+  command returned separately here.
 - Actions: 12D joint-position action targets, squashed to `[-1, 1]` by the actor
   and then handled by the Solo12 environment action path.
 
-The Dreamer feature used by reward prediction, continue prediction, actor, and
-critic is:
+With the default layout, the Dreamer feature used by reward prediction, continue
+prediction, actor, and critic is:
 
 ```text
-[deterministic RSSM state, discrete stochastic RSSM state, command]
+[deterministic RSSM state, discrete stochastic RSSM state]
 ```
+
+With `env.command_outside_observation=true`, the old feature layout is restored:
+`[deterministic RSSM state, discrete stochastic RSSM state, command]`.
 
 ## Where To Tune
 
@@ -296,6 +302,11 @@ Checkpoints created before the symexp-two-hot reward/value change used scalar
 reward and critic heads, so they are not shape-compatible with the current
 reward/critic architecture. Start new Dreamer runs from scratch unless the
 checkpoint was created by this two-hot version or newer.
+
+The default Dreamer observation layout changed from separate command conditioning
+to command-inside-`obs["policy"]`. To resume a checkpoint from the old layout,
+run with `env.command_outside_observation=true`; otherwise start a fresh run so
+the encoder, decoder, actor, critic, and optimizer shapes all match.
 
 Resume with:
 
