@@ -87,11 +87,18 @@ logs/dreamer/<experiment_name>/<timestamp>_<run_name>/params/agent.yaml
 | `max_iterations` | `10000` | Number of collect/train loop iterations. | Increase for full runs; lower for smoke tests. |
 | `steps_per_env` | `24` | Environment steps collected per env before each training block. Total new transitions per iteration is `num_envs * steps_per_env`. | Increase to collect more fresh data per update; decrease if learning lags behind collection. |
 | `num_batches_trained_per_iteration` | `16` | Number of replay batches trained after each collection block. | Increase when the replay buffer grows faster than the model learns; decrease if training dominates wall time or overfits stale data. |
+| `use_uniform_replay_buffer_with_online_queue` | `True` | Selects the DreamerV3-style replay sampler. `True` queues fresh non-overlapping `batch_length` chunks and drains them into train batches before filling the rest uniformly from replay. `False` samples every train batch uniformly from the whole replay buffer, matching the previous local trainer. | Keep `True` for DreamerV3-style runs; set `False` for ablations against the previous pure-uniform replay behavior. |
 | `command_outside_observation` | `False` | Selects the Dreamer observation contract. `False` puts the command inside `obs["policy"]`; `True` restores the old separate `obs["command"]` conditioning. | Keep `False` for new runs; use `True` only for old-layout ablations or checkpoint compatibility. |
 | `prefill_steps` | `8192` | Minimum replay transitions before training starts. Before this, actions are random uniform actions. | Increase for more diverse initial data; decrease for faster first updates. Must be at least enough to sample `batch_length`. |
 | `replay_size` | `2_000_000` | Maximum stored transitions across all envs. Internally this is converted to `replay_size // num_envs` time steps per env. | Increase for more diverse replay and less forgetting; decrease to save host memory. |
 | `batch_size` | `2048` | Number of sequence snippets per training batch. | Increase for smoother gradients if memory allows; decrease if CUDA memory is tight. |
 | `batch_length` | `24` | Length of each replay sequence used to train the world model. | Increase for longer temporal credit/dynamics; decrease for faster updates and lower memory. |
+
+With `use_uniform_replay_buffer_with_online_queue=True`, every environment stream
+adds one online chunk after each non-overlapping `batch_length` block. During
+training, each batch consumes available online chunks first, then fills any
+remaining batch slots with uniform replay samples. This matches the DreamerV3
+paper setup of an online queue plus uniform replay without prioritization.
 
 Useful ratios:
 
@@ -350,6 +357,10 @@ The trainer logs these scalar groups to W&B/TensorBoard when enabled:
 | `CBP/critic/replacements_total` | Total critic hidden units replaced by CBP. |
 | `episode/episodic_reward` | Mean undiscounted completed-episode reward over the latest `num_envs` completed episodes. |
 | `replay/steps` | Number of transitions inserted into replay. |
+| `replay/use_online_queue` | `1` when DreamerV3-style online-queue replay is enabled, else `0`. |
+| `replay/online_queue_size` | Number of fresh non-overlapping sequence chunks still waiting in the online queue. |
+| `replay/online_sequences_sampled` | Number of online queue sequence chunks consumed in the latest logged collect/train iteration. |
+| `replay/online_sample_fraction` | Fraction of sampled train-batch sequence chunks that came from the online queue in the latest logged collect/train iteration. |
 | `train/fps` | Environment steps per second since run start. |
 | `env/RewardsPerStep/*` | Reward-term diagnostics emitted by the Solo12 env. |
 

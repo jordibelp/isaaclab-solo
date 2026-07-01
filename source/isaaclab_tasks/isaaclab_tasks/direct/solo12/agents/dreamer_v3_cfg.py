@@ -28,6 +28,7 @@ class Solo12DreamerV3RunnerCfg:
     critic_hidden_dims = [256, 128, 64]
 
     command_outside_observation = False
+    use_uniform_replay_buffer_with_online_queue = True
 
     # Upstream DreamerV3 name: imag_length. This local config keeps the older
     # local name while imag_last below controls the K replay states used as starts.

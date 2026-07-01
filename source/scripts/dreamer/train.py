@@ -11,6 +11,7 @@ import random
 import re
 import sys
 import time
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -990,7 +991,17 @@ def lambda_returns(
 
 
 class SequenceReplayBuffer:
-    def __init__(self, capacity: int, num_envs: int, obs_dim: int, command_dim: int, action_dim: int):
+    def __init__(
+        self,
+        capacity: int,
+        num_envs: int,
+        obs_dim: int,
+        command_dim: int,
+        action_dim: int,
+        *,
+        use_online_queue: bool = False,
+        online_sequence_length: int | None = None,
+    ):
         self.num_envs = num_envs
         self.capacity_steps = max(2, int(capacity) // num_envs)
         self.obs = torch.empty(self.capacity_steps, num_envs, obs_dim, dtype=torch.float32)
@@ -1004,6 +1015,12 @@ class SequenceReplayBuffer:
         self.pos = 0
         self.filled = 0
         self.total = 0
+        self.step = 0
+        self.use_online_queue = bool(use_online_queue)
+        self.online_sequence_length = int(online_sequence_length or 0)
+        if self.use_online_queue and self.online_sequence_length < 1:
+            raise ValueError("online_sequence_length must be positive when the online replay queue is enabled.")
+        self.online_queue: deque[tuple[int, int]] = deque()
 
     def add(
         self,
@@ -1016,6 +1033,7 @@ class SequenceReplayBuffer:
         next_obs: torch.Tensor,
         next_command: torch.Tensor,
     ):
+        step = self.step
         idx = self.pos
         self.obs[idx].copy_(obs.detach().cpu())
         self.commands[idx].copy_(command.detach().cpu())
@@ -1028,6 +1046,15 @@ class SequenceReplayBuffer:
         self.pos = (self.pos + 1) % self.capacity_steps
         self.filled = min(self.filled + 1, self.capacity_steps)
         self.total += self.num_envs
+        self.step += 1
+
+        if (
+            self.use_online_queue
+            and self.step >= self.online_sequence_length
+            and self.step % self.online_sequence_length == 0
+        ):
+            start = step + 1 - self.online_sequence_length
+            self.online_queue.extend((start, env_id) for env_id in range(self.num_envs))
 
     def can_sample(self, batch_length: int, min_steps: int) -> bool:
         return self.total >= min_steps and self.filled >= batch_length
@@ -1037,20 +1064,48 @@ class SequenceReplayBuffer:
             return logical
         return (self.pos + logical) % self.capacity_steps
 
-    def sample(self, batch_size: int, batch_length: int, device: torch.device) -> dict[str, torch.Tensor]:
-        max_start = self.filled - batch_length
-        starts = torch.randint(0, max_start + 1, (batch_size,))
-        env_ids = torch.randint(0, self.num_envs, (batch_size,))
-        offsets = torch.arange(batch_length)
-        logical = starts[:, None] + offsets[None, :]
-        phys = self._physical_indices(logical)
+    def _absolute_to_physical_indices(self, absolute: torch.Tensor) -> torch.Tensor:
+        oldest = self.step - self.filled
+        logical = absolute - oldest
+        return self._physical_indices(logical)
 
+    def _is_valid_online_ref(self, start: int, batch_length: int) -> bool:
+        oldest = self.step - self.filled
+        return oldest <= start and start + batch_length <= self.step
+
+    def _drop_stale_online_refs(self, batch_length: int | None = None):
+        length = batch_length or self.online_sequence_length
+        while self.online_queue and not self._is_valid_online_ref(self.online_queue[0][0], length):
+            self.online_queue.popleft()
+
+    def online_queue_size(self, batch_length: int | None = None) -> int:
+        if not self.use_online_queue:
+            return 0
+        self._drop_stale_online_refs(batch_length)
+        return len(self.online_queue)
+
+    def _pop_online_refs(self, count: int, batch_length: int) -> list[tuple[int, int]]:
+        refs = []
+        while self.online_queue and len(refs) < count:
+            start, env_id = self.online_queue.popleft()
+            if self._is_valid_online_ref(start, batch_length):
+                refs.append((start, env_id))
+        return refs
+
+    def _gather_batch(
+        self,
+        phys: torch.Tensor,
+        env_ids: torch.Tensor,
+        device: torch.device,
+        *,
+        is_online: bool,
+    ) -> dict[str, torch.Tensor]:
         def gather(tensor: torch.Tensor) -> torch.Tensor:
             return tensor[phys, env_ids[:, None]].to(device=device, non_blocking=True)
 
         terminals = gather(self.terminals)
         truncations = gather(self.truncations)
-        return {
+        batch = {
             "obs": gather(self.obs),
             "commands": gather(self.commands),
             "actions": gather(self.actions),
@@ -1061,6 +1116,47 @@ class SequenceReplayBuffer:
             "next_obs": gather(self.next_obs),
             "next_commands": gather(self.next_commands),
         }
+        batch["is_online"] = torch.full((env_ids.shape[0],), is_online, dtype=torch.bool, device=device)
+        return batch
+
+    def _sample_uniform(self, batch_size: int, batch_length: int, device: torch.device) -> dict[str, torch.Tensor]:
+        max_start = self.filled - batch_length
+        starts = torch.randint(0, max_start + 1, (batch_size,))
+        env_ids = torch.randint(0, self.num_envs, (batch_size,))
+        offsets = torch.arange(batch_length)
+        logical = starts[:, None] + offsets[None, :]
+        phys = self._physical_indices(logical)
+        return self._gather_batch(phys, env_ids, device, is_online=False)
+
+    def _sample_online_refs(
+        self, refs: list[tuple[int, int]], batch_length: int, device: torch.device
+    ) -> dict[str, torch.Tensor]:
+        starts = torch.tensor([start for start, _ in refs], dtype=torch.long)
+        env_ids = torch.tensor([env_id for _, env_id in refs], dtype=torch.long)
+        offsets = torch.arange(batch_length)
+        absolute = starts[:, None] + offsets[None, :]
+        phys = self._absolute_to_physical_indices(absolute)
+        return self._gather_batch(phys, env_ids, device, is_online=True)
+
+    def sample(self, batch_size: int, batch_length: int, device: torch.device) -> dict[str, torch.Tensor]:
+        if not self.use_online_queue:
+            return self._sample_uniform(batch_size, batch_length, device)
+        if batch_length != self.online_sequence_length:
+            raise ValueError(
+                "Online replay queue was configured for sequence length "
+                f"{self.online_sequence_length}, but sample() received batch_length={batch_length}."
+            )
+
+        online_refs = self._pop_online_refs(batch_size, batch_length)
+        batches = []
+        if online_refs:
+            batches.append(self._sample_online_refs(online_refs, batch_length, device))
+        uniform_count = batch_size - len(online_refs)
+        if uniform_count:
+            batches.append(self._sample_uniform(uniform_count, batch_length, device))
+        if len(batches) == 1:
+            return batches[0]
+        return {key: torch.cat([batch[key] for batch in batches], dim=0) for key in batches[0].keys()}
 
 
 class ScalarLogger:
@@ -1232,20 +1328,6 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             start_iteration, total_steps = agent.load(args_cli.checkpoint)
             print(f"[INFO] Resumed Dreamer checkpoint from {args_cli.checkpoint}", flush=True)
 
-        replay = SequenceReplayBuffer(
-            int(_cfg_get(agent_cfg, "replay_size")),
-            env.unwrapped.num_envs,
-            obs_dim,
-            command_dim,
-            action_dim,
-        )
-        state, _ = agent.world.initial_from_obs(obs)
-        episode_rewards = torch.zeros(env.unwrapped.num_envs, device=device)
-        recent_episodic_rewards: list[float] = []
-        episodic_reward_window = int(env.unwrapped.num_envs)
-        logger = ScalarLogger(log_dir, agent_cfg, env_cfg, args_cli)
-        start_time = time.time()
-
         max_iterations = int(_cfg_get(agent_cfg, "max_iterations"))
         steps_per_env = int(_cfg_get(agent_cfg, "steps_per_env"))
         batch_size = int(_cfg_get(agent_cfg, "batch_size"))
@@ -1254,7 +1336,24 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         num_batches_trained_per_iteration = int(_cfg_get(agent_cfg, "num_batches_trained_per_iteration"))
         log_interval = int(_cfg_get(agent_cfg, "log_interval"))
         save_interval = int(_cfg_get(agent_cfg, "save_interval"))
+        use_online_replay_queue = bool(_cfg_get(agent_cfg, "use_uniform_replay_buffer_with_online_queue", False))
         replay_ratio_metrics = _replay_ratio_metrics(agent_cfg)
+
+        replay = SequenceReplayBuffer(
+            int(_cfg_get(agent_cfg, "replay_size")),
+            env.unwrapped.num_envs,
+            obs_dim,
+            command_dim,
+            action_dim,
+            use_online_queue=use_online_replay_queue,
+            online_sequence_length=batch_length,
+        )
+        state, _ = agent.world.initial_from_obs(obs)
+        episode_rewards = torch.zeros(env.unwrapped.num_envs, device=device)
+        recent_episodic_rewards: list[float] = []
+        episodic_reward_window = int(env.unwrapped.num_envs)
+        logger = ScalarLogger(log_dir, agent_cfg, env_cfg, args_cli)
+        start_time = time.time()
 
         for iteration in range(start_iteration + 1, max_iterations + 1):
             for _ in range(steps_per_env):
@@ -1279,18 +1378,31 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 total_steps += env.unwrapped.num_envs
 
             train_metrics: dict[str, float] = {}
+            online_sequences_sampled = 0
+            total_sequences_sampled = 0
             if replay.can_sample(batch_length, prefill_steps):
                 for _ in range(num_batches_trained_per_iteration):
                     batch = replay.sample(batch_size, batch_length, device)
+                    is_online = batch.get("is_online")
+                    if is_online is not None:
+                        online_sequences_sampled += int(is_online.sum().detach().cpu())
+                        total_sequences_sampled += int(is_online.numel())
                     train_metrics = agent.train_on_batch(batch)
 
             if iteration % log_interval == 0 or iteration == 1:
                 elapsed = max(time.time() - start_time, 1e-6)
+                online_fraction = (
+                    online_sequences_sampled / total_sequences_sampled if total_sequences_sampled else 0.0
+                )
                 metrics = {
                     "train/iteration": float(iteration),
                     "train/env_steps": float(total_steps),
                     "train/fps": float(total_steps / elapsed),
                     "replay/steps": float(replay.total),
+                    "replay/use_online_queue": float(use_online_replay_queue),
+                    "replay/online_queue_size": float(replay.online_queue_size(batch_length)),
+                    "replay/online_sequences_sampled": float(online_sequences_sampled),
+                    "replay/online_sample_fraction": float(online_fraction),
                     "train/replay_ratio": replay_ratio_metrics["replay_ratio"],
                     "train/num_gradients_per_policy_step": replay_ratio_metrics[
                         "num_gradients_per_policy_step"
