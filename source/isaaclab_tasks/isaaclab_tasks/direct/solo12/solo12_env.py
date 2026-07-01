@@ -756,7 +756,7 @@ class Solo12Env(DirectRLEnv):
         if self.cfg.policy_model == "simple_dreamer_v3":
             policy_obs = self._get_simple_proprioceptive_obs(corrupt=True)
             self._previous_actions = self._actions.clone()
-            if self.cfg.command_outside_observation:
+            if getattr(self.cfg, "_dreamer_command_outside_observation", False):
                 return {"policy": policy_obs, "command": self._commands}
             return {"policy": torch.cat((policy_obs, self._commands), dim=-1)}
 

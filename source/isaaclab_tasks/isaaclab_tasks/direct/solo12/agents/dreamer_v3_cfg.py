@@ -27,6 +27,8 @@ class Solo12DreamerV3RunnerCfg:
     actor_hidden_dims = [256, 128, 64]
     critic_hidden_dims = [256, 128, 64]
 
+    command_outside_observation = False
+
     # Upstream DreamerV3 name: imag_length. This local config keeps the older
     # local name while imag_last below controls the K replay states used as starts.
     imag_horizon = 15

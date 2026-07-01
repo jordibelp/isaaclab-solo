@@ -9,7 +9,7 @@ The Dreamer task exposes:
 - `obs["policy"]`: by default, 36D = 33D proprioception plus 3D command
   (`vx_cmd`, `vy_cmd`, `wz_cmd`). This full observation is symlog-transformed by
   the encoder and reconstructed by the decoder.
-- `obs["command"]`: absent by default. Set `env.command_outside_observation=true`
+- `obs["command"]`: absent by default. Set `agent.command_outside_observation=true`
   to restore the old layout with 33D proprioception in `obs["policy"]` and 3D
   command returned separately here.
 - Actions: 12D joint-position action targets, squashed to `[-1, 1]` by the actor
@@ -22,7 +22,7 @@ prediction, actor, and critic is:
 [deterministic RSSM state, discrete stochastic RSSM state]
 ```
 
-With `env.command_outside_observation=true`, the old feature layout is restored:
+With `agent.command_outside_observation=true`, the old feature layout is restored:
 `[deterministic RSSM state, discrete stochastic RSSM state, command]`.
 
 ## Where To Tune
@@ -87,6 +87,7 @@ logs/dreamer/<experiment_name>/<timestamp>_<run_name>/params/agent.yaml
 | `max_iterations` | `10000` | Number of collect/train loop iterations. | Increase for full runs; lower for smoke tests. |
 | `steps_per_env` | `24` | Environment steps collected per env before each training block. Total new transitions per iteration is `num_envs * steps_per_env`. | Increase to collect more fresh data per update; decrease if learning lags behind collection. |
 | `num_batches_trained_per_iteration` | `16` | Number of replay batches trained after each collection block. | Increase when the replay buffer grows faster than the model learns; decrease if training dominates wall time or overfits stale data. |
+| `command_outside_observation` | `False` | Selects the Dreamer observation contract. `False` puts the command inside `obs["policy"]`; `True` restores the old separate `obs["command"]` conditioning. | Keep `False` for new runs; use `True` only for old-layout ablations or checkpoint compatibility. |
 | `prefill_steps` | `8192` | Minimum replay transitions before training starts. Before this, actions are random uniform actions. | Increase for more diverse initial data; decrease for faster first updates. Must be at least enough to sample `batch_length`. |
 | `replay_size` | `2_000_000` | Maximum stored transitions across all envs. Internally this is converted to `replay_size // num_envs` time steps per env. | Increase for more diverse replay and less forgetting; decrease to save host memory. |
 | `batch_size` | `2048` | Number of sequence snippets per training batch. | Increase for smoother gradients if memory allows; decrease if CUDA memory is tight. |
@@ -305,7 +306,7 @@ checkpoint was created by this two-hot version or newer.
 
 The default Dreamer observation layout changed from separate command conditioning
 to command-inside-`obs["policy"]`. To resume a checkpoint from the old layout,
-run with `env.command_outside_observation=true`; otherwise start a fresh run so
+run with `agent.command_outside_observation=true`; otherwise start a fresh run so
 the encoder, decoder, actor, critic, and optimizer shapes all match.
 
 Resume with:

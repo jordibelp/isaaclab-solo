@@ -151,6 +151,13 @@ def _cfg_set(cfg: Any, name: str, value: Any) -> None:
         setattr(cfg, name, value)
 
 
+def _cfg_delete(cfg: Any, name: str) -> None:
+    if isinstance(cfg, dict):
+        cfg.pop(name, None)
+    elif hasattr(cfg, name):
+        delattr(cfg, name)
+
+
 def _cli_option_was_provided(*option_names: str) -> bool:
     for arg in _RAW_CLI_ARGS:
         for option_name in option_names:
@@ -923,7 +930,7 @@ class DreamerAgent(nn.Module):
                 f"Could not load Dreamer {name} weights from {checkpoint_path}. "
                 "This usually means the checkpoint architecture does not match the current run "
                 "(for example old scalar reward/value heads, or a different "
-                "env.command_outside_observation layout). Start a fresh run or resume with "
+                "agent.command_outside_observation layout). Start a fresh run or resume with "
                 "matching config overrides."
             ) from exc
 
@@ -1159,8 +1166,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     if getattr(env_cfg, "policy_model", None) != "simple_dreamer_v3":
         raise ValueError("Dreamer trainer expects a task with env.policy_model='simple_dreamer_v3'.")
+    command_outside_observation = bool(_cfg_get(agent_cfg, "command_outside_observation", False))
+    _cfg_set(env_cfg, "_dreamer_command_outside_observation", command_outside_observation)
     if hasattr(env_cfg, "refresh_observation_dimensions"):
         env_cfg.refresh_observation_dimensions()
+    _cfg_delete(env_cfg, "_dreamer_command_outside_observation")
 
     log_root = Path("logs") / "dreamer" / str(_cfg_get(agent_cfg, "experiment_name"))
     log_root = log_root.resolve()
@@ -1175,6 +1185,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     print(f"[INFO] Logging experiment in directory: {log_dir}", flush=True)
 
     env_cfg.log_dir = str(log_dir)
+    _cfg_set(env_cfg, "_dreamer_command_outside_observation", command_outside_observation)
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode=None)
     if isinstance(env.unwrapped, DirectMARLEnv):
         env = multi_agent_to_single_agent(env)

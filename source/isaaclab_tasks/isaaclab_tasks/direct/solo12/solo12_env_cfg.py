@@ -355,14 +355,13 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     remove_root_lin_vel_b_from_obs = False
     # Selects the policy/observation layout. Supported values:
     # - "simple_mlp": legacy flat observation.
-    # - "simple_dreamer_v3": Dreamer observation layout controlled by command_outside_observation.
+    # - "simple_dreamer_v3": Dreamer observation layout controlled by the Dreamer runner config.
     # - "base_imu_teacher": privileged encoder input -> latent -> actor.
     # - "base_imu_student_rl": base-IMU history TCN -> latent -> actor, privileged critic.
     # - "base_imu_student_dagger": exposes both teacher labels and student history for supervised DAgger.
     policy_model = "simple_mlp"
     # ``imu_raw_inputs`` enables the physics-rate history buffer for the student tasks.
     # ``imu_ekf_processed_inputs`` selects the signal contract inside that history.
-    command_outside_observation = False
     imu_raw_inputs = False
     imu_processed_inputs = False  # Deprecated compatibility field; use imu_ekf_processed_inputs.
     imu_ekf_processed_inputs = True
@@ -566,7 +565,8 @@ class Solo12EnvCfg(DirectRLEnvCfg):
         )
 
         if self.policy_model == "simple_dreamer_v3":
-            command_dim = 0 if self.command_outside_observation else COMMAND_OBS_DIM
+            command_outside_observation = bool(getattr(self, "_dreamer_command_outside_observation", False))
+            command_dim = 0 if command_outside_observation else COMMAND_OBS_DIM
             self.observation_space = legacy_obs_dim - COMMAND_OBS_DIM - len(JOINT_NAMES) + command_dim
             self.state_space = 0
         elif self.policy_model not in {"base_imu_teacher", "base_imu_student_rl", "base_imu_student_dagger"}:
