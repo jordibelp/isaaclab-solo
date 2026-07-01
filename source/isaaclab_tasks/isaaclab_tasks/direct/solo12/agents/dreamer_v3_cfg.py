@@ -70,6 +70,7 @@ class Solo12DreamerV3RunnerCfg:
 
     log_interval = 10
     save_interval = 100
+    save_best_checkpoint = True
     experiment_name = "solo12_dreamer_v3"
     run_name = "[Local]-Solo12 simple DreamerV3"
     logger = "wandb"

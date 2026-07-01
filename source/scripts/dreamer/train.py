@@ -943,7 +943,7 @@ class DreamerAgent(nn.Module):
             for target_param, param in zip(self.target_critic.parameters(), self.critic.parameters()):
                 target_param.data.mul_(1.0 - tau).add_(param.data, alpha=tau)
 
-    def save(self, path: Path, iteration: int, total_steps: int):
+    def save(self, path: Path, iteration: int, total_steps: int, infos: dict[str, Any] | None = None):
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "iteration": iteration,
@@ -959,6 +959,8 @@ class DreamerAgent(nn.Module):
             "critic_opt": self.critic_opt.state_dict(),
             "return_normalizer": self.return_normalizer.state_dict(),
         }
+        if infos:
+            payload.update(infos)
         if self.cbp_managers:
             payload["continual_backprop"] = self._cbp_summary()
             payload["continual_backprop_state_dict"] = self._cbp_state_dict()
@@ -1379,6 +1381,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         num_batches_trained_per_iteration = int(_cfg_get(agent_cfg, "num_batches_trained_per_iteration"))
         log_interval = int(_cfg_get(agent_cfg, "log_interval"))
         save_interval = int(_cfg_get(agent_cfg, "save_interval"))
+        save_best_checkpoint = bool(_cfg_get(agent_cfg, "save_best_checkpoint", True))
         use_online_replay_queue = bool(_cfg_get(agent_cfg, "use_uniform_replay_buffer_with_online_queue", False))
         replay_ratio_metrics = _replay_ratio_metrics(agent_cfg)
 
@@ -1395,6 +1398,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         episode_rewards = torch.zeros(env.unwrapped.num_envs, device=device)
         recent_episodic_rewards: list[float] = []
         episodic_reward_window = int(env.unwrapped.num_envs)
+        best_episodic_reward = float("-inf")
+        best_iteration = 0
         logger = ScalarLogger(log_dir, agent_cfg, env_cfg, args_cli)
         start_time = time.time()
 
@@ -1432,6 +1437,37 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         total_sequences_sampled += int(is_online.numel())
                     train_metrics = agent.train_on_batch(batch)
 
+            episodic_reward_metric = (
+                float(sum(recent_episodic_rewards) / len(recent_episodic_rewards))
+                if recent_episodic_rewards
+                else None
+            )
+            if (
+                save_best_checkpoint
+                and episodic_reward_metric is not None
+                and episodic_reward_metric > best_episodic_reward
+            ):
+                best_episodic_reward = episodic_reward_metric
+                best_iteration = iteration
+                agent.save(
+                    log_dir / "checkpoints" / "best_model.pt",
+                    iteration,
+                    total_steps,
+                    infos={
+                        "best_model_metric": "episode/episodic_reward",
+                        "best_model_value": best_episodic_reward,
+                        "best_model_iteration": iteration,
+                        "best_model_total_steps": total_steps,
+                        "best_model_num_optimization_steps": agent.num_optimization_steps,
+                    },
+                )
+                print(
+                    "[INFO] Saved new Dreamer best checkpoint "
+                    f"episode/episodic_reward={best_episodic_reward:.3f} "
+                    f"at iteration={iteration} steps={total_steps}",
+                    flush=True,
+                )
+
             if iteration % log_interval == 0 or iteration == 1:
                 elapsed = max(time.time() - start_time, 1e-6)
                 online_fraction = (
@@ -1454,9 +1490,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     "train/num_gradients_per_policy_step": replay_ratio_metrics[
                         "num_gradients_per_policy_step"
                     ],
-                    "episode/episodic_reward": float(sum(recent_episodic_rewards) / len(recent_episodic_rewards))
-                    if recent_episodic_rewards
-                    else 0.0,
+                    "episode/episodic_reward": episodic_reward_metric if episodic_reward_metric is not None else 0.0,
+                    "checkpoint/best_episodic_reward": best_episodic_reward if best_iteration else 0.0,
+                    "checkpoint/best_iteration": float(best_iteration),
                 }
                 metrics.update(train_metrics)
                 env_logs = extras.get("log", {}) if isinstance(extras, dict) else {}

@@ -292,6 +292,7 @@ still not checkpointed.
 | `experiment_name` | `"solo12_dreamer_v3"` | Top-level folder under `logs/dreamer/`. | Change to separate experiment families. |
 | `run_name` | `"[Local]-Solo12 simple DreamerV3"` | Human-readable run suffix. The trainer prepends a timestamp and sanitizes slashes. | Change for each hypothesis so W&B/log folders are searchable. |
 | `logger` | `"wandb"` | Logging backend: `"wandb"`, `"tensorboard"`, or `"none"`. | Use `"none"` for fast smoke tests; `"tensorboard"` for local-only logging. |
+| `save_best_checkpoint` | `True` | Saves `checkpoints/best_model.pt` whenever `episode/episodic_reward` improves after at least one completed episode. | Disable only for storage-constrained ablations with `agent.save_best_checkpoint=false`. |
 | `wandb_project` | `"solo12-dreamer"` | W&B project name. | Change only if moving the run to another project. |
 | `wandb_entity` | `None` | Optional W&B entity/team. | Set if W&B needs a non-default entity. |
 
@@ -315,6 +316,20 @@ Checkpoints are written to:
 ```text
 logs/dreamer/<experiment_name>/<timestamp>_<run_name>/checkpoints/
 ```
+
+`save_interval` is measured in training-loop iterations. For example,
+`agent.save_interval=100` writes `model_100.pt`, `model_200.pt`,
+`model_300.pt`, and so on. Since each iteration collects
+`num_envs * steps_per_env` environment interactions, a run with
+`num_envs=4096` and `steps_per_env=24` saves numbered checkpoints every
+`9,830,400` env interactions when `save_interval=100`. Use a command-line
+override such as `agent.save_interval=25` for denser checkpointing.
+
+When `save_best_checkpoint=True`, the trainer also writes
+`checkpoints/best_model.pt` whenever `episode/episodic_reward` improves. The
+best checkpoint payload stores `best_model_metric`, `best_model_value`,
+`best_model_iteration`, `best_model_total_steps`, and
+`best_model_num_optimization_steps`.
 
 Checkpoints created before the symexp-two-hot reward/value change used scalar
 reward and critic heads, so they are not shape-compatible with the current
@@ -372,6 +387,8 @@ The trainer logs these scalar groups to W&B/TensorBoard when enabled:
 | `replay/online_queue_size` | Number of fresh non-overlapping sequence chunks still waiting in the online queue. |
 | `replay/online_sequences_sampled` | Number of online queue sequence chunks consumed in the latest logged collect/train iteration. |
 | `replay/online_sample_fraction` | Fraction of sampled train-batch sequence chunks that came from the online queue in the latest logged collect/train iteration. |
+| `checkpoint/best_episodic_reward` | Best `episode/episodic_reward` value that has triggered `best_model.pt` so far. |
+| `checkpoint/best_iteration` | Training iteration where the current `best_model.pt` was saved. |
 | `train/fps` | Environment steps per second since run start. |
 | `env/RewardsPerStep/*` | Reward-term diagnostics emitted by the Solo12 env. |
 
