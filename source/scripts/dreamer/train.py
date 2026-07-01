@@ -208,8 +208,27 @@ def _jsonify(obj: Any, max_str: int = 4000) -> Any:
     return value
 
 
+def _replay_ratio_metrics(agent_cfg: Any) -> dict[str, float]:
+    num_envs = int(_cfg_get(agent_cfg, "num_envs"))
+    steps_per_env = int(_cfg_get(agent_cfg, "steps_per_env"))
+    num_batches = int(_cfg_get(agent_cfg, "num_batches_trained_per_iteration"))
+    batch_size = int(_cfg_get(agent_cfg, "batch_size"))
+    batch_length = int(_cfg_get(agent_cfg, "batch_length"))
+
+    batch_timesteps = batch_size * batch_length
+    env_timesteps = num_envs * steps_per_env
+    replay_ratio = (num_batches * batch_timesteps) / env_timesteps
+    return {
+        "replay_ratio": float(replay_ratio),
+        "num_gradients_per_policy_step": float(replay_ratio / batch_timesteps),
+    }
+
+
 def _wandb_config_payload(agent_cfg: Any, env_cfg: Any, args_cli: argparse.Namespace, log_dir: Path) -> dict[str, Any]:
+    replay_ratio_metrics = _replay_ratio_metrics(agent_cfg)
     agent_dict = _jsonify(agent_cfg)
+    if isinstance(agent_dict, dict):
+        agent_dict.update(replay_ratio_metrics)
     payload: dict[str, Any] = {
         "log_dir": str(log_dir),
         "wandb_run_id": os.environ.get("WANDB_RUN_ID"),
@@ -220,6 +239,7 @@ def _wandb_config_payload(agent_cfg: Any, env_cfg: Any, args_cli: argparse.Names
     if isinstance(agent_dict, dict):
         # Keep the old top-level agent fields so existing W&B panels/sweeps keep working.
         payload.update(agent_dict)
+    payload.update(replay_ratio_metrics)
     return payload
 
 
@@ -1234,6 +1254,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         num_batches_trained_per_iteration = int(_cfg_get(agent_cfg, "num_batches_trained_per_iteration"))
         log_interval = int(_cfg_get(agent_cfg, "log_interval"))
         save_interval = int(_cfg_get(agent_cfg, "save_interval"))
+        replay_ratio_metrics = _replay_ratio_metrics(agent_cfg)
 
         for iteration in range(start_iteration + 1, max_iterations + 1):
             for _ in range(steps_per_env):
@@ -1270,6 +1291,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     "train/env_steps": float(total_steps),
                     "train/fps": float(total_steps / elapsed),
                     "replay/steps": float(replay.total),
+                    "train/replay_ratio": replay_ratio_metrics["replay_ratio"],
+                    "train/num_gradients_per_policy_step": replay_ratio_metrics[
+                        "num_gradients_per_policy_step"
+                    ],
                     "episode/episodic_reward": float(sum(recent_episodic_rewards) / len(recent_episodic_rewards))
                     if recent_episodic_rewards
                     else 0.0,

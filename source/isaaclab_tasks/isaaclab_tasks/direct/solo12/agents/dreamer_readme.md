@@ -98,8 +98,9 @@ Useful ratios:
 - Collection per iteration: `num_envs * steps_per_env`.
 - Replay time depth per env: `replay_size // num_envs`.
 - Batch transitions per world-model update: `batch_size * batch_length`.
-- Updates per environment step: `num_batches_trained_per_iteration / (num_envs * steps_per_env)`.
-- Replay training transitions per collected transition:
+- Gradient updates per policy/control step (`num_gradients_per_policy_step`):
+  `num_batches_trained_per_iteration / (num_envs * steps_per_env)`.
+- Replay training transitions per collected transition (`replay_ratio`):
   `(num_batches_trained_per_iteration * batch_size * batch_length) / (num_envs * steps_per_env)`.
   This is the main ratio to watch when scaling to large cluster GPUs: increasing
   `batch_size` can silently turn a mostly data-collection-limited run into a
@@ -289,7 +290,9 @@ still not checkpointed.
 
 When W&B is enabled, the run config includes the resolved `agent_cfg`, the
 resolved `env_cfg`, the parsed `cli` arguments, and the old top-level Dreamer
-agent fields for dashboard compatibility.
+agent fields for dashboard compatibility. It also includes derived
+`replay_ratio` and `num_gradients_per_policy_step` fields, and logs the same
+values as `train/replay_ratio` and `train/num_gradients_per_policy_step`.
 The local run folder also appends the W&B run id, making it easy to match a
 folder with its W&B run.
 
