@@ -143,6 +143,7 @@ from isaaclab_tasks.utils.hydra import hydra_task_config  # noqa: E402
 
 import borinotIsaacLab.tasks  # noqa: F401, E402
 
+from deferred_reset import patch_deferred_reset  # noqa: E402
 from dreamer_core import DreamerAgent, SequenceReplayBuffer  # noqa: E402
 from dreamer_core.agent import DreamerConfig  # noqa: E402
 from dreamer_core.rssm import RSSMState  # noqa: E402
@@ -519,6 +520,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode=None)
     if isinstance(env.unwrapped, DirectMARLEnv):
         env = multi_agent_to_single_agent(env)
+    # Defer auto-resets by one step so terminal observations are preserved and the
+    # replay stream is arrival-aligned (obs_t together with the reward/terminal flags
+    # produced by the transition *into* obs_t), matching DreamerV3/r2dreamer.
+    patch_deferred_reset(env.unwrapped)
 
     try:
         device = torch.device(env.unwrapped.device)
@@ -575,11 +580,23 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             storage_device=torch.device(str(_cfg_get(agent_cfg, "replay_storage_device", device))),
             recent_fraction=recent_fraction,
         )
+        max_episode_length = int(env.unwrapped.max_episode_length)
+        if replay.capacity_steps < 2 * max_episode_length:
+            print(
+                f"[WARN] Replay depth is only {replay.capacity_steps} steps/env "
+                f"(< 2 episodes of {max_episode_length} steps at num_envs={num_envs}). "
+                "The world model can quickly forget failure modes, which destabilizes training; "
+                "consider raising agent.replay_size.",
+                flush=True,
+            )
 
-        # ---- collection state ------------------------------------------
+        # ---- collection state (arrival-aligned: reward/terminal flags describe obs) ----
         state = agent.initial_state(num_envs)
         prev_action = torch.zeros(num_envs, action_dim, device=device)
         is_first = torch.ones(num_envs, dtype=torch.bool, device=device)
+        is_terminal = torch.zeros(num_envs, dtype=torch.bool, device=device)
+        is_last = torch.zeros(num_envs, dtype=torch.bool, device=device)
+        arrival_reward = torch.zeros(num_envs, device=device)
         episode_rewards = torch.zeros(num_envs, device=device)
         recent_episodic_rewards: list[float] = []
         best_episodic_reward = float("-inf")
@@ -590,32 +607,45 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
         for iteration in range(start_iteration + 1, max_iterations + 1):
             # ---- collect --------------------------------------------------
+            # Each stored slot holds obs_t together with the reward/terminal flags that
+            # *arrived* with obs_t and the action chosen from obs_t (zeroed on terminal
+            # observations, which are preserved by the deferred-reset env patch).
             for _ in range(steps_per_env):
                 action_policy, state = agent.act(state, prev_action, command, is_first, obs, eval=False)
                 if replay.total < prefill_steps:
                     action = torch.empty(num_envs, action_dim, device=device).uniform_(-1.0, 1.0)
                 else:
                     action = action_policy
-
-                next_obs_dict, reward, terminated, truncated, extras = env.step(action)
-                done = terminated | truncated
-                next_obs, next_command = _obs_command(next_obs_dict, device)
+                # No action leaves a last-of-episode observation; the env resets instead.
+                action = torch.where(is_last.unsqueeze(-1), torch.zeros_like(action), action)
 
                 replay.add(
-                    obs=obs, command=command, action=action, reward=reward.float(),
-                    is_first=is_first, is_terminal=terminated, is_last=done,
+                    obs=obs, command=command, action=action, reward=arrival_reward,
+                    is_first=is_first, is_terminal=is_terminal, is_last=is_last,
                     stoch=state.stoch, deter=state.deter,
                 )
 
-                episode_rewards += reward
-                if torch.any(done):
-                    recent_episodic_rewards.extend(episode_rewards[done].detach().cpu().tolist())
+                episode_rewards += arrival_reward
+                if torch.any(is_last):
+                    recent_episodic_rewards.extend(episode_rewards[is_last].detach().cpu().tolist())
                     recent_episodic_rewards = recent_episodic_rewards[-num_envs:]
-                    episode_rewards[done] = 0.0
+                    episode_rewards[is_last] = 0.0
 
+                # Step; envs flagged is_last are internally reset by the deferred-reset
+                # patch, so their returned obs is a fresh initial obs (is_first) and their
+                # junk-step reward is discarded below.
+                next_obs_dict, reward, terminated, truncated, extras = env.unwrapped.step(action, done=is_last)
+                next_obs, next_command = _obs_command(next_obs_dict, device)
+
+                is_first = is_last
+                reward = reward.float()
+                arrival_reward = torch.where(is_first, torch.zeros_like(reward), reward)
+                # terminated/truncated alias env-internal buffers that are overwritten
+                # in place on the next step; clone what we carry across the boundary.
+                is_terminal = terminated.clone()
+                is_last = terminated | truncated
                 obs, command = next_obs, next_command
                 prev_action = action
-                is_first = done
                 total_steps += num_envs
 
             # ---- train ----------------------------------------------------

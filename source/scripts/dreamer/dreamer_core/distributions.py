@@ -86,7 +86,18 @@ class TwoHotSymexp:
 
     def mean(self) -> torch.Tensor:
         probs = torch.softmax(self.logits, dim=-1)
-        return (probs * self.bins).sum(-1)
+        # Pair the symmetric +/- bins before reducing (as r2dreamer does): the outer
+        # bins reach +/-4.9e8, so a naive dot product leaves O(0.1-1) fp32 cancellation
+        # noise in the expectation - larger than a typical per-step locomotion reward.
+        n = self.bins.shape[0]
+        weighted = probs * self.bins
+        if n % 2 == 1:
+            m = (n - 1) // 2
+            paired = weighted[..., :m].flip(-1) + weighted[..., m + 1 :]
+            return weighted[..., m] + paired.sum(-1)
+        m = n // 2
+        paired = weighted[..., :m].flip(-1) + weighted[..., m:]
+        return paired.sum(-1)
 
     # Alias used interchangeably by the agent.
     mode = mean

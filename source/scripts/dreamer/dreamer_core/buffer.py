@@ -7,6 +7,13 @@ Transitions from all vectorized envs are stored in a single ring buffer that can
 live on the GPU, so collection is a plain in-place tensor write with no
 host<->device traffic (the main throughput win for Isaac Lab's on-GPU envs).
 
+Stored slots are *arrival-aligned* (DreamerV3/r2dreamer convention): slot ``t``
+holds ``obs_t`` together with the reward and ``is_terminal``/``is_last`` flags
+produced by the transition *into* ``obs_t``, plus the action chosen *from*
+``obs_t`` (zeroed on terminal observations) and ``is_first`` marking fresh reset
+observations.  The trainer's deferred-reset env patch preserves true terminal
+observations so this alignment is exact.
+
 Each stored step also carries the RSSM posterior latent produced when the action
 was chosen.  Sampling returns the latent at the first step of every sampled slice
 as an RSSM warm-start ("replay context"), and :meth:`update_latents` writes the
