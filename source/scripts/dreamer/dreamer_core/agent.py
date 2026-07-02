@@ -21,6 +21,9 @@ continuous actor.
 from __future__ import annotations
 
 import copy
+import functools
+import os
+import socket
 from dataclasses import dataclass, field
 
 import torch
@@ -31,6 +34,47 @@ from . import networks
 from .distributions import symlog
 from .optim import LaProp, clip_grad_agc_
 from .rssm import RSSM, RSSMState
+
+
+def _truthy_env(value: str | None) -> bool:
+    return value is not None and value.lower() not in {"0", "false", "no", "off"}
+
+
+def _should_use_cluster_compile_workaround() -> bool:
+    override = os.environ.get("DREAMER_INDUCTOR_NVIDIA_SMI_WORKAROUND")
+    if override is not None:
+        return _truthy_env(override)
+    hostname = socket.gethostname().lower()
+    return bool(os.environ.get("SLURM_JOB_ID")) or "drslurm" in hostname
+
+
+def _configure_cluster_torch_compile() -> None:
+    """Avoid Inductor's slow/hanging nvidia-smi clock query on IRICluster."""
+    if not _should_use_cluster_compile_workaround():
+        return
+
+    compile_threads = int(os.environ.get("DREAMER_INDUCTOR_COMPILE_THREADS", "1"))
+    max_clock_mhz = int(os.environ.get("DREAMER_INDUCTOR_MAX_CLOCK_MHZ", "2520"))
+
+    try:
+        import torch._inductor.config as inductor_config
+
+        inductor_config.compile_threads = compile_threads
+    except Exception as exc:
+        print(f"[WARN] Could not configure Inductor compile threads ({exc}).", flush=True)
+
+    try:
+        import torch._utils_internal as torch_utils_internal
+
+        torch_utils_internal.max_clock_rate = functools.lru_cache(None)(lambda: max_clock_mhz)
+    except Exception as exc:
+        print(f"[WARN] Could not configure Inductor max clock workaround ({exc}).", flush=True)
+
+    print(
+        "[INFO] Torch compile cluster workaround enabled "
+        f"(compile_threads={compile_threads}, max_clock_mhz={max_clock_mhz}).",
+        flush=True,
+    )
 
 
 @dataclass
@@ -160,6 +204,7 @@ class DreamerAgent(nn.Module):
 
         self._cal_grad_fn = self._cal_grad
         if cfg.use_compile:
+            _configure_cluster_torch_compile()
             self._cal_grad_fn = torch.compile(self._cal_grad, mode="reduce-overhead")
 
     # ------------------------------------------------------------- frozen
