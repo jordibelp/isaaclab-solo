@@ -35,12 +35,12 @@ class Solo12DreamerV3RunnerCfg:
     actor_hidden_dims = [256, 128, 64]
     critic_hidden_dims = [256, 128, 64]
 
-    # --- block-GRU / RSSM structure (DreamerV3) ---
+    # 🔴 --- block-GRU / RSSM structure (DreamerV3) ---
     blocks = 8            # block-diagonal groups in the recurrent core
     obs_layers = 1        # posterior MLP depth
     img_layers = 2        # prior MLP depth
     dyn_layers = 1        # block-GRU hidden layers
-    unimix = 0.01         # uniform mixture on discrete latents
+    unimix = 0.01         # uniform mixture on discrete latents (1% uniform, 99% NN output)
 
     command_outside_observation = False
     # Mix a fraction of most-recent sequences into each batch (replaces the old
@@ -62,7 +62,7 @@ class Solo12DreamerV3RunnerCfg:
     policy_loss_scale = 1.0
     value_loss_scale = 1.0
     repval_loss_scale = 0.3   # DreamerV3 replay-based critic loss (0 disables)
-    slowreg = 1.0             # slow-critic EMA regularizer strength
+    slowreg = 1.0             # slow-critic EMA regularizer strength (weight loss for the slow Critic regularization) - https://chatgpt.com/s/t_6a4631e5e57081918df90f67d27c5edd
     reward_value_num_bins = 255
     reward_value_symlog_range = 20.0
     actor_entropy_scale = 3.0e-4
@@ -75,7 +75,7 @@ class Solo12DreamerV3RunnerCfg:
     return_norm_percentile_high = 95.0
 
     # --- optimization (LaProp + adaptive gradient clipping, DreamerV3) ---
-    model_lr = 1.0e-4
+    model_lr = 4.0e-5
     actor_lr = 3.0e-5
     critic_lr = 1.0e-4
     laprop_beta1 = 0.9
@@ -84,7 +84,7 @@ class Solo12DreamerV3RunnerCfg:
     agc_clip = 0.3            # adaptive gradient clip ratio
     agc_pmin = 1.0e-3
     warmup_steps = 1000
-    slow_critic_tau = 0.01
+    slow_critic_tau = 0.02
     grad_clip = 100.0         # kept for reference; AGC is used instead
 
     # --- runtime efficiency ---
