@@ -121,6 +121,17 @@ parser.add_argument(
     default=True,
     help="Accumulate fractional CBP replacements across optimizer steps.",
 )
+parser.add_argument(
+    "--plasticity-metrics",
+    "--plasticity_metrics",
+    dest="plasticity_metrics",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+    help=(
+        "Log plasticity diagnostics (feature rank, %% dormant units, weight norm, gradient kurtosis; "
+        "arXiv:2506.03404 Appendix B) for the encoder, actor and critic MLPs at every log interval."
+    ),
+)
 AppLauncher.add_app_launcher_args(parser)
 _RAW_CLI_ARGS = tuple(sys.argv[1:])
 args_cli, hydra_args = parser.parse_known_args()
@@ -143,9 +154,11 @@ from isaaclab_tasks.utils.hydra import hydra_task_config  # noqa: E402
 
 import borinotIsaacLab.tasks  # noqa: F401, E402
 
+import plasticity_metrics  # noqa: E402  (shared with the rsl_rl scripts dir)
 from deferred_reset import patch_deferred_reset  # noqa: E402
 from dreamer_core import DreamerAgent, SequenceReplayBuffer  # noqa: E402
 from dreamer_core.agent import DreamerConfig  # noqa: E402
+from dreamer_core.distributions import symlog  # noqa: E402
 from dreamer_core.rssm import RSSMState  # noqa: E402
 
 
@@ -378,6 +391,58 @@ def _attach_dreamer_cbp(agent: DreamerAgent, parsed_args: argparse.Namespace) ->
         )
 
 
+def _attach_dreamer_plasticity(agent: DreamerAgent) -> plasticity_metrics.GradKurtosisCapture:
+    """Wire gradient-kurtosis capture (arXiv:2506.03404 Appendix B) onto the Dreamer optimizer."""
+    param_groups = {
+        "world": [
+            p
+            for net in (agent.encoder, agent.rssm, agent.decoder, agent.reward, agent.cont)
+            for p in net.parameters()
+        ],
+        "actor": list(agent.actor.parameters()),
+        "critic": list(agent.value.parameters()),
+    }
+    capture = plasticity_metrics.GradKurtosisCapture(param_groups)
+    capture.wrap_optimizer(agent._optimizer)
+    print("[INFO] Plasticity metrics enabled for world/actor/critic (logged every log_interval).", flush=True)
+    return capture
+
+
+def _plasticity_metrics(
+    agent: DreamerAgent,
+    obs: torch.Tensor,
+    command: torch.Tensor,
+    state: RSSMState,
+    capture: plasticity_metrics.GradKurtosisCapture,
+) -> dict[str, float]:
+    """Plasticity diagnostics per network group.
+
+    Weight norm and gradient kurtosis cover the whole group; feature rank and
+    dormant units come from a measurement forward pass on the group's MLP with the
+    current on-policy batch (the world group uses its observation encoder). The
+    plain eager walk keeps hooks away from modules used inside torch.compile.
+    """
+    metrics: dict[str, float] = {}
+    with torch.no_grad():
+        feat = agent._feature(state, command)
+        walks = {
+            "world": (agent.encoder, symlog(obs)),
+            "actor": (agent.actor.net, feat),
+            "critic": (agent.value.net, feat),
+        }
+        for name, (net, x) in walks.items():
+            scalars = {"weight_norm": plasticity_metrics.weight_norm(capture.param_groups[name])}
+            kurtosis = capture.last.get(name)
+            if kurtosis is not None:
+                scalars["grad_kurtosis"] = kurtosis
+            activations = plasticity_metrics.mlp_hidden_activations(net, x)
+            scalars.update(plasticity_metrics.activation_plasticity_metrics(activations))
+            for key, value in scalars.items():
+                if value == value:  # skip NaN
+                    metrics[f"Plasticity/{name}/{key}"] = float(value)
+    return metrics
+
+
 def _cbp_metrics(agent: DreamerAgent) -> dict[str, float]:
     metrics: dict[str, float] = {}
     for name, manager in agent.cbp_managers.items():
@@ -542,6 +607,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
               f"stoch={cfg.stoch}x{cfg.discrete}, amp={cfg.use_amp}, compile={cfg.use_compile}).", flush=True)
         if cbp_enabled:
             _attach_dreamer_cbp(agent, args_cli)
+        plasticity_capture = _attach_dreamer_plasticity(agent) if args_cli.plasticity_metrics else None
 
         start_iteration = 0
         total_steps = 0
@@ -606,6 +672,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         start_time = time.time()
 
         for iteration in range(start_iteration + 1, max_iterations + 1):
+            will_log = iteration % log_interval == 0 or iteration == 1
+            if plasticity_capture is not None and will_log:
+                plasticity_capture.arm()  # capture gradient kurtosis on this iteration's first update
             # ---- collect --------------------------------------------------
             # Each stored slot holds obs_t together with the reward/terminal flags that
             # *arrived* with obs_t and the action chosen from obs_t (zeroed on terminal
@@ -676,7 +745,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                       f"at iteration={iteration} steps={total_steps}", flush=True)
 
             # ---- logging --------------------------------------------------
-            if iteration % log_interval == 0 or iteration == 1:
+            if will_log:
                 elapsed = max(time.time() - start_time, 1e-6)
                 metrics = {
                     "num_env_interactions": float(total_steps),
@@ -693,6 +762,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     "checkpoint/best_iteration": float(best_iteration),
                 }
                 metrics.update(last_metrics)
+                if plasticity_capture is not None:
+                    metrics.update(_plasticity_metrics(agent, obs, command, state, plasticity_capture))
                 env_logs = extras.get("log", {}) if isinstance(extras, dict) else {}
                 for key, value in env_logs.items():
                     if isinstance(value, (int, float)):

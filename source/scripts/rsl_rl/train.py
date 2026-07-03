@@ -228,6 +228,25 @@ parser.add_argument(
     default=True,
     help="Accumulate fractional CBP replacements across optimizer steps.",
 )
+parser.add_argument(
+    "--plasticity-metrics",
+    "--plasticity_metrics",
+    dest="plasticity_metrics",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+    help=(
+        "Log plasticity diagnostics (feature rank, %% dormant units, weight norm, gradient kurtosis; "
+        "arXiv:2506.03404 Appendix B) for the actor and critic MLPs as W&B/TensorBoard scalars."
+    ),
+)
+parser.add_argument(
+    "--plasticity-metrics-interval",
+    "--plasticity_metrics_interval",
+    dest="plasticity_metrics_interval",
+    type=int,
+    default=10,
+    help="Learning iterations between plasticity-metric measurements.",
+)
 parser.add_argument("--distributed", action="store_true", default=False, help="Run training with multiple GPUs or nodes.")
 parser.add_argument("--export_io_descriptors", action="store_true", default=False, help="Export IO descriptors.")
 parser.add_argument(
@@ -349,6 +368,7 @@ import gymnasium as gym
 import torch
 from rsl_rl.runners import DistillationRunner, OnPolicyRunner
 
+import plasticity_metrics
 from continual_backprop import build_continual_backprop_manager, collect_actor_critic_cbp_specs
 from isaaclab.envs import DirectMARLEnv, DirectMARLEnvCfg, DirectRLEnvCfg, ManagerBasedRLEnvCfg, multi_agent_to_single_agent
 from isaaclab.utils.dict import print_dict
@@ -615,6 +635,79 @@ def _log_cbp_stats(runner, iteration: int) -> None:
     runner.writer.add_scalar("CBP/replacements_total", sum(total_replacements_by_group.values()), iteration)
     for group_name, total_replacements in total_replacements_by_group.items():
         runner.writer.add_scalar(f"CBP/replacements_total/{group_name}", total_replacements, iteration)
+
+
+def _attach_plasticity_metrics_to_runner(runner, parsed_args) -> None:
+    """Track plasticity diagnostics (arXiv:2506.03404 Appendix B) for the actor/critic MLPs."""
+
+    if not bool(getattr(parsed_args, "plasticity_metrics", False)):
+        return
+
+    policy = getattr(runner.alg, "policy", None)
+    groups = {
+        name: module
+        for name in ("actor", "critic")
+        if isinstance(module := getattr(policy, name, None), torch.nn.Module)
+    }
+    if not groups or not hasattr(runner.alg, "optimizer"):
+        print("[WARN]: Plasticity metrics disabled: policy has no actor/critic modules or no optimizer.", flush=True)
+        return
+
+    grad_capture = plasticity_metrics.GradKurtosisCapture(
+        {name: list(module.parameters()) for name, module in groups.items()}
+    )
+    grad_capture.wrap_optimizer(runner.alg.optimizer)
+    runner._borinot_plasticity_groups = groups
+    runner._borinot_plasticity_grad_capture = grad_capture
+    runner._borinot_plasticity_activation_ok = dict.fromkeys(groups, True)
+    print(
+        "[INFO]: Plasticity metrics enabled for "
+        f"{', '.join(groups)} (every {int(parsed_args.plasticity_metrics_interval)} iterations).",
+        flush=True,
+    )
+
+
+def _log_plasticity_metrics(runner, locs: dict, interval: int) -> None:
+    groups = getattr(runner, "_borinot_plasticity_groups", None)
+    grad_capture = getattr(runner, "_borinot_plasticity_grad_capture", None)
+    if not groups or getattr(runner, "writer", None) is None:
+        return
+
+    it = int(locs.get("it", 0))
+    interval = max(1, int(interval))
+    if (it + 1) % interval == 0:
+        # Captured during the next iteration's PPO update, logged at that iteration below.
+        grad_capture.arm()
+    if it % interval != 0:
+        return
+
+    policy = runner.alg.policy
+    obs = locs.get("obs")
+    activation_ok = runner._borinot_plasticity_activation_ok
+    forward_fns = {
+        "actor": (lambda: policy.act_inference(obs)),
+        "critic": (lambda: policy.evaluate(obs)),
+    }
+    for name, module in groups.items():
+        scalars = {"weight_norm": plasticity_metrics.weight_norm(module.parameters())}
+        kurtosis = grad_capture.last.get(name)
+        if kurtosis is not None:
+            scalars["grad_kurtosis"] = kurtosis
+        forward_fn = forward_fns.get(name)
+        if obs is not None and forward_fn is not None and activation_ok.get(name, False):
+            try:
+                activations = plasticity_metrics.collect_hidden_activations(module, forward_fn)
+                scalars.update(plasticity_metrics.activation_plasticity_metrics(activations))
+            except Exception as exc:
+                activation_ok[name] = False
+                print(
+                    f"[WARN]: Plasticity activation metrics disabled for '{name}' "
+                    f"({type(exc).__name__}: {exc}); weight norm and gradient kurtosis stay enabled.",
+                    flush=True,
+                )
+        for key, value in scalars.items():
+            if value == value:  # skip NaN
+                runner.writer.add_scalar(f"Plasticity/{name}/{key}", value, it)
 
 
 def _infer_checkpoint_history_dim(checkpoint_state: dict) -> int | None:
@@ -1550,6 +1643,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     cbp_manager = _attach_continual_backprop_to_runner(runner, args_cli)
     if cbp_manager is not None and should_resume and not args_cli.reuse_mlp:
         _restore_cbp_state_from_checkpoint(cbp_manager, resume_path)
+    _attach_plasticity_metrics_to_runner(runner, args_cli)
 
     dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
     dump_yaml(os.path.join(log_dir, "params", "agent.yaml"), agent_cfg)
@@ -1569,7 +1663,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 env_cfg_py=env_cfg_py,
                 env_py=env_py,
                 extra_files=[
-                    path for path in [agent_cfg_py, symmetry_py, __file__, _THIS_DIR / "continual_backprop.py"] if path
+                    path
+                    for path in [
+                        agent_cfg_py,
+                        symmetry_py,
+                        __file__,
+                        _THIS_DIR / "continual_backprop.py",
+                        _THIS_DIR / "plasticity_metrics.py",
+                    ]
+                    if path
                 ],
             )
             if input_checkpoint_name is not None:
@@ -1639,6 +1741,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             return
 
         locs = log_args[0]
+        if getattr(runner, "writer", None) is not None:
+            _log_plasticity_metrics(runner, locs, args_cli.plasticity_metrics_interval)
         rewbuffer = locs.get("rewbuffer")
         if rewbuffer is None or len(rewbuffer) == 0:
             return
