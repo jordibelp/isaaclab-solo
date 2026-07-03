@@ -328,10 +328,15 @@ losses.
 The actor is a DreamerV3 **bounded-normal** continuous policy. Its network
 outputs a mean and a std: the mean is `tanh`-squashed, and the std is mapped to
 `[actor_min_std, actor_max_std]` via `min_std + (max_std - min_std) * sigmoid(x + 2)`.
-Samples are drawn from a diagonal Gaussian and soft-clipped with `x / max(1, |x|)`,
-keeping actions in roughly `[-1, 1]` while preserving a simple diagonal-Gaussian
-log-prob (unlike a tanh squash). During prefill, the trainer ignores the actor
-and samples uniform random actions in `[-1, 1]`.
+Samples are **raw** diagonal-Gaussian draws; bounding to roughly `[-1, 1]` happens
+at the consumers (the env-facing `act()` soft-clips with `x / max(1, |x|)`, and the
+RSSM applies the same clip to actions inside its dynamics). The actor's `log_prob`
+is always evaluated at the raw sample — evaluating it at the *clipped* sample
+biases the REINFORCE score function (`E[∇ log π] ≠ 0`) and couples the mean
+advantage level to a systematic drift of std/mean toward saturation, which showed
+up as `action_entropy` pinning at its max (17.03 for 12 dims at std 1.0). During
+prefill, the trainer ignores the actor and samples uniform random actions in
+`[-1, 1]`.
 
 | Parameter | Default | What it controls | When to change it |
 | --- | ---: | --- | --- |

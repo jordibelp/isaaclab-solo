@@ -139,12 +139,22 @@ class SymlogMSE:
         return -distance.sum(-1)
 
 
-class BoundedNormal:
-    """DreamerV3 continuous actor: tanh mean, sigmoid-bounded std, soft-clipped samples.
+def soft_clip(x: torch.Tensor) -> torch.Tensor:
+    """Differentiable bound to roughly [-1, 1]: ``x / max(1, |x|)`` (r2dreamer)."""
+    return x / torch.clip(torch.abs(x), min=1.0).detach()
 
-    The soft clip ``x / max(1, |x|)`` keeps actions in roughly ``[-1, 1]`` while
-    remaining differentiable and, unlike a tanh squash, keeping a simple diagonal
-    Gaussian log-prob (matching DreamerV3's `bounded_normal`).
+
+class BoundedNormal:
+    """DreamerV3 continuous actor: tanh mean, sigmoid-bounded std, *raw* samples.
+
+    ``rsample()`` must return the raw Gaussian sample that ``log_prob`` is later
+    evaluated at, otherwise the REINFORCE score function is biased:
+    E[d log pi(soft_clip(x)) / d std] < 0 instead of exactly 0, which couples the
+    *mean* advantage level to a systematic drift of std (pins at max_std whenever
+    the critic overestimates) and of the mean toward saturation.  Bounding is the
+    consumer's job: the RSSM soft-clips actions inside its dynamics and the
+    env-facing ``act`` soft-clips before execution (r2dreamer's un-``Bound``ed
+    ``bounded_normal`` + in-GRU clip; danijar clips at the env boundary).
     """
 
     def __init__(self, params: torch.Tensor, min_std: float, max_std: float):
@@ -153,16 +163,12 @@ class BoundedNormal:
         std = (max_std - min_std) * torch.sigmoid(std + 2.0) + min_std
         self._dist = torchd.independent.Independent(torchd.normal.Normal(mean, std), 1)
 
-    @staticmethod
-    def _soft_clip(x: torch.Tensor) -> torch.Tensor:
-        return x / torch.clip(torch.abs(x), min=1.0).detach()
-
     @property
     def mode(self) -> torch.Tensor:
-        return self._soft_clip(self._dist.mean)
+        return self._dist.mean
 
     def rsample(self, sample_shape=()) -> torch.Tensor:
-        return self._soft_clip(self._dist.rsample(sample_shape))
+        return self._dist.rsample(sample_shape)
 
     def log_prob(self, value: torch.Tensor) -> torch.Tensor:
         return self._dist.log_prob(value)

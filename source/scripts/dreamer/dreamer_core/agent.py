@@ -31,7 +31,7 @@ from torch import nn
 from torch.amp import GradScaler, autocast
 
 from . import networks
-from .distributions import symlog
+from .distributions import soft_clip, symlog
 from .optim import LaProp, clip_grad_agc_
 from .rssm import RSSM, RSSMState
 
@@ -265,7 +265,10 @@ class DreamerAgent(nn.Module):
         feat = self._frozen_feature(state, command)
         dist = self._frozen_actor(feat)
         action = dist.mode if eval else dist.rsample()
-        return action, state
+        # The env executes (and the buffer stores) bounded targets, matching the
+        # soft clip the RSSM applies to actions inside its dynamics.  Imagination
+        # actions stay raw instead: log_prob must see the actual sample.
+        return soft_clip(action), state
 
     # -------------------------------------------------------------- update
     def update(self, batch: dict[str, torch.Tensor], writeback, buffer) -> dict[str, torch.Tensor]:
@@ -405,6 +408,8 @@ class DreamerAgent(nn.Module):
         feats, actions = [], []
         for _ in range(horizon):
             feat = self._frozen_feature(state, command)
+            # Raw sample on purpose: the RSSM clips inside its dynamics, and the
+            # actor's log_prob must be evaluated at the true sample (unbiased score).
             action = self._frozen_actor(feat).rsample()
             feats.append(feat)
             actions.append(action)
