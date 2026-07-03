@@ -160,8 +160,8 @@ class RSSM(nn.Module):
         return torch.cat([stoch, state.deter], dim=-1)
 
     def kl_loss(self, post_logit: torch.Tensor, prior_logit: torch.Tensor, free: float) -> tuple[torch.Tensor, torch.Tensor]:
-        dyn = dists.categorical_kl(post_logit.detach(), prior_logit).sum(-1)
-        rep = dists.categorical_kl(post_logit, prior_logit.detach()).sum(-1)
+        dyn = dists.categorical_kl(post_logit.detach(), prior_logit, self.unimix_ratio).sum(-1)
+        rep = dists.categorical_kl(post_logit, prior_logit.detach(), self.unimix_ratio).sum(-1)
         return torch.clip(dyn, min=free), torch.clip(rep, min=free)
 
 

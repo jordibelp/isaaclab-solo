@@ -63,8 +63,10 @@ class OneHotDist(torchd.one_hot_categorical.OneHotCategorical):
         return F.gumbel_softmax(self.logits, tau=1.0, hard=True, dim=-1)
 
 
-def categorical_kl(logits_left: torch.Tensor, logits_right: torch.Tensor) -> torch.Tensor:
-    """KL(softmax(left) || softmax(right)) summed over the last (class) dim."""
+def categorical_kl(logits_left: torch.Tensor, logits_right: torch.Tensor, unimix_ratio: float = 0.0) -> torch.Tensor:
+    """KL between the same unimixed categoricals used for RSSM sampling."""
+    logits_left = unimix_logits(logits_left, unimix_ratio)
+    logits_right = unimix_logits(logits_right, unimix_ratio)
     logp_left = torch.log_softmax(logits_left, dim=-1)
     logp_right = torch.log_softmax(logits_right, dim=-1)
     prob = torch.softmax(logits_left, dim=-1)
