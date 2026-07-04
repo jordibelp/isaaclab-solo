@@ -144,6 +144,9 @@ class RslRlBaseRunnerCfg:
     device: str = "cuda:0"
     """The device for the rl-agent. Default is cuda:0."""
 
+    weight_decay: float = 0.0
+    """The Adam optimizer weight decay for trainable parameters. Default is 0.0."""
+
     num_steps_per_env: int = MISSING
     """The number of steps per environment per update."""
 

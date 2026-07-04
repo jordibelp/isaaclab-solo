@@ -579,6 +579,28 @@ def _sanitize_policy_action_std(runner) -> None:
         sanitize()
 
 
+def _apply_agent_weight_decay_to_optimizer(runner, agent_cfg: RslRlBaseRunnerCfg) -> None:
+    weight_decay = float(getattr(agent_cfg, "weight_decay", 0.0) or 0.0)
+    if weight_decay < 0.0:
+        raise ValueError(f"agent.weight_decay must be non-negative, got {weight_decay}.")
+
+    optimizer = getattr(getattr(runner, "alg", None), "optimizer", None)
+    if optimizer is None:
+        if weight_decay == 0.0:
+            return
+        raise ValueError("agent.weight_decay was set, but the selected RSL-RL runner has no optimizer.")
+
+    previous_values = {float(group.get("weight_decay", 0.0)) for group in optimizer.param_groups}
+    for group in optimizer.param_groups:
+        group["weight_decay"] = weight_decay
+
+    if weight_decay != 0.0 or previous_values != {0.0}:
+        print(
+            "[INFO]: Set RSL-RL optimizer weight_decay="
+            f"{weight_decay:g} on {len(optimizer.param_groups)} parameter group(s)."
+        )
+
+
 def _attach_continual_backprop_to_runner(runner, parsed_args):
     if not bool(getattr(parsed_args, "use_cbp", False)):
         return None
@@ -1640,6 +1662,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         loaded_checkpoint_infos = runner.load(resume_path)
     if resume_path is not None:
         _sanitize_policy_action_std(runner)
+    _apply_agent_weight_decay_to_optimizer(runner, agent_cfg)
     cbp_manager = _attach_continual_backprop_to_runner(runner, args_cli)
     if cbp_manager is not None and should_resume and not args_cli.reuse_mlp:
         _restore_cbp_state_from_checkpoint(cbp_manager, resume_path)
