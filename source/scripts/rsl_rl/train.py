@@ -590,14 +590,31 @@ def _apply_agent_weight_decay_to_optimizer(runner, agent_cfg: RslRlBaseRunnerCfg
             return
         raise ValueError("agent.weight_decay was set, but the selected RSL-RL runner has no optimizer.")
 
+    # The action-noise std/log_std is exploration state, not a network weight: decaying it
+    # toward zero silently shrinks exploration, so it must stay in a decay-free group.
+    policy = getattr(runner.alg, "policy", None) or getattr(runner.alg, "actor_critic", None)
+    noise_param_ids = {
+        id(param)
+        for name, param in (policy.named_parameters() if policy is not None else ())
+        if name.rsplit(".", 1)[-1] in ("std", "log_std")
+    }
+
     previous_values = {float(group.get("weight_decay", 0.0)) for group in optimizer.param_groups}
+    excluded_groups = []
     for group in optimizer.param_groups:
+        excluded = [p for p in group["params"] if id(p) in noise_param_ids]
+        if excluded:
+            group["params"] = [p for p in group["params"] if id(p) not in noise_param_ids]
+            excluded_groups.append({**{k: v for k, v in group.items() if k != "params"}, "params": excluded, "weight_decay": 0.0})
         group["weight_decay"] = weight_decay
+    for group in excluded_groups:
+        optimizer.add_param_group(group)
 
     if weight_decay != 0.0 or previous_values != {0.0}:
         print(
             "[INFO]: Set RSL-RL optimizer weight_decay="
-            f"{weight_decay:g} on {len(optimizer.param_groups)} parameter group(s)."
+            f"{weight_decay:g} on {len(optimizer.param_groups) - len(excluded_groups)} parameter group(s); "
+            f"kept {sum(len(g['params']) for g in excluded_groups)} action-noise std parameter(s) decay-free."
         )
 
 
