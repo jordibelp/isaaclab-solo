@@ -579,6 +579,75 @@ def _sanitize_policy_action_std(runner) -> None:
         sanitize()
 
 
+def _policy_action_noise_param_ids(policy) -> set[int]:
+    return {
+        id(param)
+        for name, param in (policy.named_parameters() if policy is not None else ())
+        if name.rsplit(".", 1)[-1] in ("std", "log_std")
+    }
+
+
+def _split_action_noise_optimizer_group(optimizer: torch.optim.Optimizer, noise_param_ids: set[int]) -> int:
+    """Keep action-noise std/log_std params in decay-free groups, without duplicating groups."""
+
+    if not noise_param_ids:
+        return 0
+
+    excluded_groups = []
+    moved_params = 0
+    for group in optimizer.param_groups:
+        params = list(group["params"])
+        excluded = [p for p in params if id(p) in noise_param_ids]
+        if not excluded:
+            continue
+
+        kept = [p for p in params if id(p) not in noise_param_ids]
+        if kept:
+            group["params"] = kept
+            excluded_groups.append({**{k: v for k, v in group.items() if k != "params"}, "params": excluded})
+            moved_params += len(excluded)
+        else:
+            group["weight_decay"] = 0.0
+
+    for group in excluded_groups:
+        group["weight_decay"] = 0.0
+        optimizer.add_param_group(group)
+
+    return moved_params
+
+
+def _checkpoint_optimizer_param_group_count(checkpoint_path: str | None) -> int | None:
+    if checkpoint_path is None:
+        return None
+    checkpoint = torch.load(checkpoint_path, weights_only=False, map_location="cpu")
+    if not isinstance(checkpoint, dict):
+        return None
+    optimizer_state = checkpoint.get("optimizer_state_dict")
+    if not isinstance(optimizer_state, dict):
+        return None
+    param_groups = optimizer_state.get("param_groups")
+    if not isinstance(param_groups, list):
+        return None
+    return len(param_groups)
+
+
+def _match_optimizer_param_groups_to_checkpoint(runner, checkpoint_path: str | None) -> None:
+    """Pre-shape optimizer groups so RSL-RL can restore optimizer state from recent checkpoints."""
+
+    target_groups = _checkpoint_optimizer_param_group_count(checkpoint_path)
+    optimizer = getattr(getattr(runner, "alg", None), "optimizer", None)
+    if target_groups is None or optimizer is None or len(optimizer.param_groups) == target_groups:
+        return
+
+    policy = getattr(runner.alg, "policy", None) or getattr(runner.alg, "actor_critic", None)
+    moved_params = _split_action_noise_optimizer_group(optimizer, _policy_action_noise_param_ids(policy))
+    if len(optimizer.param_groups) == target_groups:
+        print(
+            "[INFO]: Matched RSL-RL optimizer param groups to checkpoint before resume "
+            f"({target_groups} groups; moved {moved_params} action-noise std parameter(s))."
+        )
+
+
 def _apply_agent_weight_decay_to_optimizer(runner, agent_cfg: RslRlBaseRunnerCfg) -> None:
     weight_decay = float(getattr(agent_cfg, "weight_decay", 0.0) or 0.0)
     if weight_decay < 0.0:
@@ -593,28 +662,22 @@ def _apply_agent_weight_decay_to_optimizer(runner, agent_cfg: RslRlBaseRunnerCfg
     # The action-noise std/log_std is exploration state, not a network weight: decaying it
     # toward zero silently shrinks exploration, so it must stay in a decay-free group.
     policy = getattr(runner.alg, "policy", None) or getattr(runner.alg, "actor_critic", None)
-    noise_param_ids = {
-        id(param)
-        for name, param in (policy.named_parameters() if policy is not None else ())
-        if name.rsplit(".", 1)[-1] in ("std", "log_std")
-    }
+    noise_param_ids = _policy_action_noise_param_ids(policy)
 
     previous_values = {float(group.get("weight_decay", 0.0)) for group in optimizer.param_groups}
-    excluded_groups = []
+    _split_action_noise_optimizer_group(optimizer, noise_param_ids)
     for group in optimizer.param_groups:
-        excluded = [p for p in group["params"] if id(p) in noise_param_ids]
-        if excluded:
-            group["params"] = [p for p in group["params"] if id(p) not in noise_param_ids]
-            excluded_groups.append({**{k: v for k, v in group.items() if k != "params"}, "params": excluded, "weight_decay": 0.0})
-        group["weight_decay"] = weight_decay
-    for group in excluded_groups:
-        optimizer.add_param_group(group)
+        if any(id(p) in noise_param_ids for p in group["params"]):
+            group["weight_decay"] = 0.0
+        else:
+            group["weight_decay"] = weight_decay
 
     if weight_decay != 0.0 or previous_values != {0.0}:
         print(
             "[INFO]: Set RSL-RL optimizer weight_decay="
-            f"{weight_decay:g} on {len(optimizer.param_groups) - len(excluded_groups)} parameter group(s); "
-            f"kept {sum(len(g['params']) for g in excluded_groups)} action-noise std parameter(s) decay-free."
+            f"{weight_decay:g} on "
+            f"{sum(not any(id(p) in noise_param_ids for p in group['params']) for group in optimizer.param_groups)} "
+            f"parameter group(s); kept {len(noise_param_ids)} action-noise std parameter(s) decay-free."
         )
 
 
@@ -1676,6 +1739,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         _initialize_student_from_dagger_adapter(runner, resume_path)
     elif should_resume:
         print(f"[INFO]: Loading model checkpoint from: {resume_path}")
+        _match_optimizer_param_groups_to_checkpoint(runner, resume_path)
         loaded_checkpoint_infos = runner.load(resume_path)
     if resume_path is not None:
         _sanitize_policy_action_std(runner)

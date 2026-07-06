@@ -1604,12 +1604,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     elif agent_cfg.class_name == "OnPolicyRunner":
         runner = OnPolicyRunner(vec_env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
         print(f"[INFO] Loading model checkpoint from: {resume_path}")
-        runner.load(resume_path)
+        runner.load(resume_path, load_optimizer=False)
         policy = runner.get_inference_policy(device=vec_env.unwrapped.device)
     elif agent_cfg.class_name == "DistillationRunner":
         runner = DistillationRunner(vec_env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
         print(f"[INFO] Loading model checkpoint from: {resume_path}")
-        runner.load(resume_path)
+        runner.load(resume_path, load_optimizer=False)
         policy = runner.get_inference_policy(device=vec_env.unwrapped.device)
     else:
         raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
