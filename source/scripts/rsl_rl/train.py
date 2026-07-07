@@ -247,6 +247,17 @@ parser.add_argument(
     default=10,
     help="Learning iterations between plasticity-metric measurements.",
 )
+parser.add_argument(
+    "--plasticity-metrics-sample-cap",
+    "--plasticity_metrics_sample_cap",
+    dest="plasticity_metrics_sample_cap",
+    type=int,
+    default=None,
+    help=(
+        "Maximum number of current environment observations used for activation-based plasticity metrics. "
+        "Defaults to the training environment count."
+    ),
+)
 parser.add_argument("--distributed", action="store_true", default=False, help="Run training with multiple GPUs or nodes.")
 parser.add_argument("--export_io_descriptors", action="store_true", default=False, help="Export IO descriptors.")
 parser.add_argument(
@@ -755,6 +766,15 @@ def _attach_plasticity_metrics_to_runner(runner, parsed_args) -> None:
         print("[WARN]: Plasticity metrics disabled: policy has no actor/critic modules or no optimizer.", flush=True)
         return
 
+    sample_cap = getattr(parsed_args, "plasticity_metrics_sample_cap", None)
+    if sample_cap is None:
+        sample_cap = getattr(getattr(runner, "env", None), "num_envs", None)
+    if sample_cap is None:
+        sample_cap = plasticity_metrics.DEFAULT_SAMPLE_CAP
+    sample_cap = int(sample_cap)
+    if sample_cap < 1:
+        raise ValueError("--plasticity-metrics-sample-cap must be a positive integer.")
+
     grad_capture = plasticity_metrics.GradKurtosisCapture(
         {name: list(module.parameters()) for name, module in groups.items()}
     )
@@ -762,9 +782,11 @@ def _attach_plasticity_metrics_to_runner(runner, parsed_args) -> None:
     runner._borinot_plasticity_groups = groups
     runner._borinot_plasticity_grad_capture = grad_capture
     runner._borinot_plasticity_activation_ok = dict.fromkeys(groups, True)
+    runner._borinot_plasticity_sample_cap = sample_cap
     print(
         "[INFO]: Plasticity metrics enabled for "
-        f"{', '.join(groups)} (every {int(parsed_args.plasticity_metrics_interval)} iterations).",
+        f"{', '.join(groups)} (every {int(parsed_args.plasticity_metrics_interval)} iterations; "
+        f"sample_cap={sample_cap}).",
         flush=True,
     )
 
@@ -786,6 +808,7 @@ def _log_plasticity_metrics(runner, locs: dict, interval: int) -> None:
     policy = runner.alg.policy
     obs = locs.get("obs")
     activation_ok = runner._borinot_plasticity_activation_ok
+    sample_cap = int(getattr(runner, "_borinot_plasticity_sample_cap", plasticity_metrics.DEFAULT_SAMPLE_CAP))
     forward_fns = {
         "actor": (lambda: policy.act_inference(obs)),
         "critic": (lambda: policy.evaluate(obs)),
@@ -798,7 +821,7 @@ def _log_plasticity_metrics(runner, locs: dict, interval: int) -> None:
         forward_fn = forward_fns.get(name)
         if obs is not None and forward_fn is not None and activation_ok.get(name, False):
             try:
-                activations = plasticity_metrics.collect_hidden_activations(module, forward_fn)
+                activations = plasticity_metrics.collect_hidden_activations(module, forward_fn, sample_cap=sample_cap)
                 scalars.update(plasticity_metrics.activation_plasticity_metrics(activations))
             except Exception as exc:
                 activation_ok[name] = False
