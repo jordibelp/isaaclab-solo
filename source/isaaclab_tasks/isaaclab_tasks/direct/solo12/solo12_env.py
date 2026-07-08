@@ -23,7 +23,7 @@ class Solo12Env(DirectRLEnv):
     cfg: Solo12EnvCfg
 
     def __init__(self, cfg: Solo12EnvCfg, render_mode: str | None = None, **kwargs):
-        cfg.refresh_observation_dimensions()
+        cfg.refresh_runtime_dependent_config()
         super().__init__(cfg, render_mode, **kwargs)
 
         action_dim = gym.spaces.flatdim(self.single_action_space)
@@ -48,8 +48,15 @@ class Solo12Env(DirectRLEnv):
 
         self._joint_ids, _ = self._robot.find_joints(self.cfg.joint_names, preserve_order=True)
         self._base_body_ids, _ = self._contact_sensor.find_bodies("base")
-        self._feet_body_ids, _ = self._contact_sensor.find_bodies(".*_calf")
-        self._feet_robot_body_ids, _ = self._robot.find_bodies(".*_calf")
+        self._feet_body_ids, self._feet_body_names = self._contact_sensor.find_bodies(".*_calf")
+        self._feet_robot_body_ids, self._feet_robot_body_names = self._robot.find_bodies(".*_calf")
+        self._front_feet_contact_indices = self._find_feet_indices(self._feet_body_names, ("FL", "FR"))
+        self._rear_feet_contact_indices = self._find_feet_indices(self._feet_body_names, ("RL", "RR"))
+        self._front_feet_robot_indices = self._find_feet_indices(self._feet_robot_body_names, ("FL", "FR"))
+        self._rear_feet_robot_indices = self._find_feet_indices(self._feet_robot_body_names, ("RL", "RR"))
+        self._feet_robot_body_to_foot_offsets_b = self._build_feet_robot_body_to_foot_offsets_b(
+            self._feet_robot_body_names
+        )
         self._thigh_body_ids, _ = self._contact_sensor.find_bodies(".*_thigh")
         self._base_wrench_body_ids, _ = self._robot.find_bodies("base")
         self._joint_wrench_body_ids, _ = self._robot.find_bodies([".*_thigh", ".*_calf"])
@@ -109,6 +116,8 @@ class Solo12Env(DirectRLEnv):
                 "dof_acc_l2",
                 "action_rate_l2",
                 "feet_air_time",
+                "two_feet_above_height",
+                "three_or_more_feet_contact",
                 "undesired_contacts",
                 "flat_orientation_l2",
                 "track_base_height_exp",
@@ -164,8 +173,43 @@ class Solo12Env(DirectRLEnv):
         mass_cfg = sim_utils.MassPropertiesCfg(mass=self.cfg.base_mass)
         sim_schemas.define_mass_properties(source_base_path, mass_cfg)
 
+    @staticmethod
+    def _find_feet_indices(body_names: list[str], labels: tuple[str, ...]) -> tuple[int, ...]:
+        indices_by_label = {}
+        for index, body_name in enumerate(body_names):
+            short_name = str(body_name).split("/")[-1]
+            for label in labels:
+                if short_name.startswith(f"{label}_"):
+                    indices_by_label[label] = index
+
+        missing_labels = [label for label in labels if label not in indices_by_label]
+        if missing_labels:
+            raise ValueError(
+                f"Could not find Solo12 feet {missing_labels} in body names: "
+                f"{[str(name).split('/')[-1] for name in body_names]}"
+            )
+        return tuple(indices_by_label[label] for label in labels)
+
+    def _build_feet_robot_body_to_foot_offsets_b(self, foot_body_names: list[str]) -> torch.Tensor:
+        foot_offsets_by_body_name = {
+            "FL_calf": (0.0, 0.009000003337860107, -0.1599999964237213),
+            "FR_calf": (0.0, -0.009000003337860107, -0.1599999964237213),
+            "RL_calf": (0.0, 0.009000003337860107, -0.1599999964237213),
+            "RR_calf": (0.0, -0.009000003337860107, -0.1599999964237213),
+        }
+        offsets = []
+        for body_name in foot_body_names:
+            short_name = str(body_name).split("/")[-1]
+            if short_name not in foot_offsets_by_body_name:
+                raise ValueError(f"No foot offset is configured for robot body '{body_name}'.")
+            offsets.append(foot_offsets_by_body_name[short_name])
+        return torch.tensor(offsets, dtype=torch.float32, device=self.device)
+
     def _build_terrain_height_query_mesh(self):
-        if not self.cfg.include_foot_height_obs:
+        needs_foot_height_query = (
+            self.cfg.include_foot_height_obs or self.cfg.two_feet_above_height_reward_scale != 0.0
+        )
+        if not needs_foot_height_query:
             return None
 
         terrain_prim_paths = getattr(self._terrain, "terrain_prim_paths", None)
@@ -820,6 +864,20 @@ class Solo12Env(DirectRLEnv):
         terrain_z = self._get_terrain_height_below_feet(foot_pos_w)
         return foot_pos_w[..., 2] - terrain_z
 
+    def _get_foot_positions_w(self) -> torch.Tensor:
+        calf_pos_w = self._robot.data.body_pos_w[:, self._feet_robot_body_ids, :]
+        calf_quat_w = self._robot.data.body_quat_w[:, self._feet_robot_body_ids, :]
+        foot_offsets_b = self._feet_robot_body_to_foot_offsets_b.to(dtype=calf_pos_w.dtype)
+        foot_offsets_w = math_utils.quat_apply(
+            calf_quat_w, foot_offsets_b.unsqueeze(0).expand(self.num_envs, -1, -1)
+        )
+        return calf_pos_w + foot_offsets_w
+
+    def _get_reward_foot_heights(self) -> torch.Tensor:
+        foot_pos_w = self._get_foot_positions_w()
+        terrain_z = self._get_terrain_height_below_feet(foot_pos_w)
+        return foot_pos_w[..., 2] - terrain_z
+
     def _get_terrain_height_below_feet(self, foot_pos_w: torch.Tensor) -> torch.Tensor:
         fallback_z = self._terrain.env_origins[:, 2].reshape(-1, 1).expand(-1, foot_pos_w.shape[1])
         if self._terrain_height_wp_mesh is None:
@@ -877,6 +935,9 @@ class Solo12Env(DirectRLEnv):
         feet_air_time = torch.sum((last_air_time - self.cfg.feet_air_time_threshold) * first_contact, dim=1)
         feet_air_time *= torch.norm(self._commands[:, :2], dim=1) > 0.1
 
+        feet_contact_mask = self._get_feet_contact_mask(self.cfg.feet_ground_contact_threshold)
+        two_feet_above_height = self._compute_two_feet_above_height_reward(feet_contact_mask)
+        three_or_more_feet_contact = (torch.sum(feet_contact_mask, dim=1) >= 3).float()
         undesired_contacts = self._compute_contact_count(self._thigh_body_ids, self.cfg.undesired_contact_threshold)
         force_transmited_through_joints = self._compute_force_transmited_through_joints()
         foot_contact = self._compute_foot_contact_penalty()
@@ -894,6 +955,12 @@ class Solo12Env(DirectRLEnv):
             "dof_acc_l2": joint_accel * self.cfg.joint_accel_reward_scale * self.step_dt,
             "action_rate_l2": action_rate * self.cfg.action_rate_reward_scale * self.step_dt,
             "feet_air_time": feet_air_time * self.cfg.feet_air_time_reward_scale * self.step_dt,
+            "two_feet_above_height": two_feet_above_height
+            * self.cfg.two_feet_above_height_reward_scale
+            * self.step_dt,
+            "three_or_more_feet_contact": three_or_more_feet_contact
+            * self.cfg.three_or_more_feet_contact_penalty_reward_scale
+            * self.step_dt,
             "undesired_contacts": undesired_contacts * self.cfg.undesired_contact_reward_scale * self.step_dt,
             "flat_orientation_l2": flat_orientation * self.cfg.base_tilt_penalty_reward_scale * self.step_dt,
             "track_base_height_exp": torch.exp(-self.cfg.base_height_exp_scale * base_height_error)
@@ -1048,6 +1115,30 @@ class Solo12Env(DirectRLEnv):
         net_contact_forces = self._contact_sensor.data.net_forces_w_history
         is_contact = torch.max(torch.norm(net_contact_forces[:, :, body_ids], dim=-1), dim=1)[0] > threshold
         return torch.sum(is_contact, dim=1)
+
+    def _get_feet_contact_mask(self, threshold: float) -> torch.Tensor:
+        contact_forces_history = self._contact_sensor.data.net_forces_w_history
+        if contact_forces_history is not None:
+            contact_force_norm = torch.norm(contact_forces_history[:, :, self._feet_body_ids], dim=-1)
+            return torch.amax(contact_force_norm, dim=1) > threshold
+
+        contact_forces = self._contact_sensor.data.net_forces_w[:, self._feet_body_ids, :]
+        return torch.norm(contact_forces, dim=-1) > threshold
+
+    def _compute_two_feet_above_height_reward(self, feet_contact_mask: torch.Tensor) -> torch.Tensor:
+        foot_heights = self._get_reward_foot_heights()
+        front_airborne = torch.all(~feet_contact_mask[:, self._front_feet_contact_indices], dim=1)
+        rear_airborne = torch.all(~feet_contact_mask[:, self._rear_feet_contact_indices], dim=1)
+        front_avg_height = torch.mean(foot_heights[:, self._front_feet_robot_indices], dim=1)
+        rear_avg_height = torch.mean(foot_heights[:, self._rear_feet_robot_indices], dim=1)
+        front_reward = self._two_feet_height_kernel(front_avg_height) * front_airborne.float()
+        rear_reward = self._two_feet_height_kernel(rear_avg_height) * rear_airborne.float()
+        return torch.maximum(front_reward, rear_reward)
+
+    def _two_feet_height_kernel(self, avg_height: torch.Tensor) -> torch.Tensor:
+        threshold = self.cfg.two_feet_above_height_threshold
+        below_threshold = torch.exp(-self.cfg.two_feet_above_height_alpha * torch.square(threshold - avg_height))
+        return torch.where(avg_height >= threshold, torch.ones_like(avg_height), below_threshold)
 
     def _compute_force_transmited_through_joints(self) -> torch.Tensor:
         incoming_joint_wrench_b = self._robot.data.body_incoming_joint_wrench_b[:, self._joint_wrench_body_ids]

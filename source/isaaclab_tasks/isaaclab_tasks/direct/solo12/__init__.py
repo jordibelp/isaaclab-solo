@@ -33,6 +33,21 @@ gym.register(
 )
 
 
+gym.register(
+    id="solo12-two-feet",
+    entry_point=f"{__name__}.solo12_env:Solo12Env",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.solo12_env_cfg:Solo12TwoFeetEnvCfg",
+        "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg_fast.yaml",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:Solo12PPORunnerCfg",
+        "rsl_rl_with_symmetry_cfg_entry_point": (
+            f"{agents.__name__}.rsl_rl_ppo_cfg:Solo12PPORunnerWithSymmetryCfg"
+        ),
+    },
+)
+
+
 def _register(task_id: str, cfg_name: str, rsl_rl_cfg_name: str):
     gym.register(
         id=task_id,

@@ -474,6 +474,9 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     feet_air_time_threshold = 0.5
     base_contact_threshold = 1.0
     undesired_contact_threshold = 0.6
+    feet_ground_contact_threshold = 1.0
+    two_feet_above_height_threshold = 0.6
+    two_feet_above_height_alpha = 10.0
 
     base_z_desired = 0.16
     track_base_height_reward_scale = 0.0
@@ -539,6 +542,8 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     ang_vel_xy_reward_scale = 0.00
     joint_accel_reward_scale = 0.0
     feet_air_time_reward_scale = 0.0
+    two_feet_above_height_reward_scale = 0.0
+    three_or_more_feet_contact_penalty_reward_scale = 0.0
     undesired_contact_reward_scale = -2.25
     base_tilt_penalty_reward_scale = -0.33
     # Penalize force transmitted through thigh/calf joints.
@@ -551,11 +556,21 @@ class Solo12EnvCfg(DirectRLEnvCfg):
 
     def __post_init__(self):
         super().__post_init__()
+        self.refresh_runtime_dependent_config()
+
+    def refresh_runtime_dependent_config(self):
         self.refresh_observation_dimensions()
+        self._apply_runtime_overrides_to_nested_cfg()
         if self.tricky_terrain:
             self.terrain.terrain_type = "generator"
             self.terrain.terrain_generator = SOLO12_TRICKY_TERRAINS_CFG.copy()
             self.terrain.use_terrain_origins = True
+
+    def _apply_runtime_overrides_to_nested_cfg(self):
+        self.robot.actuators["legs"].stiffness = self.kp
+        self.robot.actuators["legs"].damping = self.kd
+        self.terrain.physics_material.compliant_contact_stiffness = self.compliant_contact_stiffness
+        self.terrain.physics_material.compliant_contact_damping = self.compliant_contact_damping
 
     def refresh_observation_dimensions(self):
         """Recompute observation dimensions after Hydra overrides."""
@@ -642,3 +657,30 @@ class Solo12SimpleDreamerV3EnvCfg(Solo12EnvCfg):
     """Solo12 task variant for DreamerV3-style latent dynamics training."""
 
     policy_model = "simple_dreamer_v3"
+
+
+@configclass
+class Solo12TwoFeetEnvCfg(Solo12EnvCfg):
+    """Solo12 task variant that rewards walking with either front or rear feet airborne."""
+
+    track_lin_vel_xy_reward_scale = 1.0
+    track_ang_vel_z_reward_scale = 0.5
+    two_feet_above_height_reward_scale = 1.5
+    three_or_more_feet_contact_penalty_reward_scale = -0.1
+
+    command_ang_vel_z_range = (-0.5, 0.5)
+    command_lin_vel_y_range = (-0.3, 0.3)
+    command_lin_vel_x_range = (-0.6, 0.6)
+    max_velx_range_curriculum = [0.6]
+
+    initial_position = "safe"
+    track_base_height_reward_scale = 0.0
+    enable_observation_corruption = False
+    tricky_terrain = False
+    base_push_force_z_range = (0.0, 0.0)
+    forces_applied_to_base_curriculum = [0.0]
+    actuation_delay_range = (0, 0)
+    opposite_direction_cmd_prob = 0.0
+    kp = 15.0
+    kd = 0.5
+    episode_length_s = 10.0
