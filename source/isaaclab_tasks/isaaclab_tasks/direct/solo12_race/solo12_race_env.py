@@ -298,6 +298,13 @@ class Solo12RaceEnv(DirectRLEnv):
                 numbered_waypoints.append((int(match.group(1)), name))
 
         if not numbered_waypoints:
+            endpoint_waypoints = []
+            if has_start:
+                endpoint_waypoints.append("waypoint_start")
+            if has_end:
+                endpoint_waypoints.append("waypoint_end")
+            if len(endpoint_waypoints) >= 2:
+                return tuple(endpoint_waypoints)
             return tuple(self._track_waypoint_names)
 
         numbered_waypoints.sort(key=lambda item: item[0])
