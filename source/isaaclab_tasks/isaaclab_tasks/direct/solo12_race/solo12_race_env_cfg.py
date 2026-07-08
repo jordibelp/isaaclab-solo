@@ -75,8 +75,9 @@ SOLO12_RACE_SCENE_USD_FILES = {
     "simple_zigzag": "solo_IMU_race_waypoints_simple_zigzag.usd",
     "simple_zigzag_01": "solo_IMU_race_waypoints_simple_zigzag_01.usd",
     "old": "solo_IMU_race_waypoints_old.usd",
+    "straightSimple": "solo_IMU_race_straightLine.usd"
 }
-SOLO12_RACE_DEFAULT_SCENE = "simple_zigzag_01"
+SOLO12_RACE_DEFAULT_SCENE = "straightSimple"
 
 
 def resolve_solo12_race_scene_usd_path(race_scene: str | Path) -> Path:
