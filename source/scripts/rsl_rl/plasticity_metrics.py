@@ -10,7 +10,8 @@ Parallelized Data Collection on Deep Reinforcement Learning Networks"
   (a) feature rank      - approximate rank (Yang et al. 2019): smallest k such
                           that the top-k squared singular values of the feature
                           matrix retain >= 99% of the total squared-singular-value
-                          energy. Computed on the last hidden activation.
+                          energy. ``feature_rank`` keeps the legacy last-hidden-
+                          activation value; ``feature_rank_i`` reports layer i.
   (b) % dormant units   - percentage of hidden units whose mean |activation| over
                           a batch is below eps=1e-5 (the paper's reading of
                           Sokar et al. 2023). The Sokar-normalized variant
@@ -173,11 +174,13 @@ def activation_plasticity_metrics(
     dormant_eps: float = DEFAULT_DORMANT_EPS,
     dormant_tau: float = DEFAULT_DORMANT_TAU,
 ) -> dict[str, float]:
-    """Feature rank (on the last hidden activation) and dormant-unit percentages."""
+    """Feature rank and dormant-unit percentages over collected hidden activations."""
     if not activations:
         return {}
     metrics = dormant_metrics(activations, eps=dormant_eps, tau=dormant_tau)
-    metrics["feature_rank"] = feature_rank(activations[-1], threshold=rank_threshold)
+    layer_ranks = [feature_rank(act, threshold=rank_threshold) for act in activations]
+    metrics["feature_rank"] = layer_ranks[-1]
+    metrics.update({f"feature_rank_{i}": rank for i, rank in enumerate(layer_ranks)})
     return metrics
 
 
