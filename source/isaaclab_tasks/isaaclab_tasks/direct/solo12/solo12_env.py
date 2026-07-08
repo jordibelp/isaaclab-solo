@@ -119,6 +119,7 @@ class Solo12Env(DirectRLEnv):
                 "two_feet_above_height",
                 "three_or_more_feet_contact",
                 "undesired_contacts",
+                "base_collision_terminal",
                 "flat_orientation_l2",
                 "track_base_height_exp",
                 "force_transmited_through_joints",
@@ -126,6 +127,7 @@ class Solo12Env(DirectRLEnv):
             ]
         }
         self._episode_reward_sums = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self._base_collision_terminated = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self._base_imu_history_len = self.cfg.base_imu_history_length if self.cfg.imu_raw_inputs else 0
         self._base_imu_history_sample_dim = self.cfg.base_imu_history_sample_dim
         self._base_imu_history = torch.zeros(
@@ -966,6 +968,8 @@ class Solo12Env(DirectRLEnv):
             * self.cfg.three_or_more_feet_contact_penalty_reward_scale
             * self.step_dt,
             "undesired_contacts": undesired_contacts * self.cfg.undesired_contact_reward_scale * self.step_dt,
+            "base_collision_terminal": self._base_collision_terminated.float()
+            * self.cfg.base_collision_terminal_penalty,
             "flat_orientation_l2": flat_orientation * self.cfg.base_tilt_penalty_reward_scale * self.step_dt,
             "track_base_height_exp": self._scale_bounded_positive_reward(
                 track_base_height, self.cfg.track_base_height_reward_scale
@@ -997,8 +1001,8 @@ class Solo12Env(DirectRLEnv):
         time_out = self.episode_length_buf >= self.max_episode_length - 1
         net_contact_forces = self._contact_sensor.data.net_forces_w_history
         base_contacts = torch.max(torch.norm(net_contact_forces[:, :, self._base_body_ids], dim=-1), dim=1)[0]
-        terminated = torch.any(base_contacts > self.cfg.base_contact_threshold, dim=1)
-        return terminated, time_out
+        self._base_collision_terminated = torch.any(base_contacts > self.cfg.base_contact_threshold, dim=1)
+        return self._base_collision_terminated, time_out
 
     def _reset_idx(self, env_ids: torch.Tensor | None):
         if env_ids is None or len(env_ids) == self.num_envs:

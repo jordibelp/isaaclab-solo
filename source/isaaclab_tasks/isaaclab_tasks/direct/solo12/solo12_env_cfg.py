@@ -547,6 +547,7 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     two_feet_above_height_reward_scale = 0.0
     three_or_more_feet_contact_penalty_reward_scale = 0.0
     undesired_contact_reward_scale = -2.25
+    base_collision_terminal_penalty = 0.0
     base_tilt_penalty_reward_scale = -0.33
     # Penalize force transmitted through thigh/calf joints.
     force_transmited_through_joints_reward_scale = 0.0
