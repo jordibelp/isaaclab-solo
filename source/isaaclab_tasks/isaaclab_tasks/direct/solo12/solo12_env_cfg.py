@@ -667,6 +667,7 @@ class Solo12TwoFeetEnvCfg(Solo12EnvCfg):
     track_ang_vel_z_reward_scale = 0.5
     two_feet_above_height_reward_scale = 1.5
     three_or_more_feet_contact_penalty_reward_scale = -0.1
+    base_tilt_penalty_reward_scale = 0.0
 
     command_ang_vel_z_range = (-0.5, 0.5)
     command_lin_vel_y_range = (-0.3, 0.3)
