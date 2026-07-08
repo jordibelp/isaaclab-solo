@@ -303,6 +303,7 @@ def _is_solo12_race_task_name(task_name: str | None) -> bool:
 
 _SOLO12_DIRECT_SYMMETRY_TASKS = {
     "solo12-v0",
+    "solo12-two-feet",
     "Isaac-Solo12-Laas-Direct-v0",
     "solo12-IMU-based-teacher",
     "solo12-IMU-student-rl",
