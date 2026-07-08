@@ -536,6 +536,8 @@ class Solo12EnvCfg(DirectRLEnvCfg):
         offset=ImuCfg.OffsetCfg(pos=(0.01, 0.0, 0.0)),
         gravity_bias=(0.0, 0.0, 9.81),
     )
+    # Map bounded positive rewards from [0, w * dt] to [-w * dt, 0].
+    negate_positive_rewards = False
     track_lin_vel_xy_reward_scale = 1.5
     track_ang_vel_z_reward_scale = 0.75
     lin_vel_z_reward_scale = 0.0

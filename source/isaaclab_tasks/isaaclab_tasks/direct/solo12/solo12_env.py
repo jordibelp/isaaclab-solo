@@ -942,30 +942,34 @@ class Solo12Env(DirectRLEnv):
         force_transmited_through_joints = self._compute_force_transmited_through_joints()
         foot_contact = self._compute_foot_contact_penalty()
 
+        track_lin_vel_xy = torch.exp(-lin_vel_error / self.cfg.tracking_std**2)
+        track_ang_vel_z = torch.exp(-yaw_rate_error / self.cfg.tracking_std**2)
+        track_base_height = torch.exp(-self.cfg.base_height_exp_scale * base_height_error)
+
         rewards = {
-            "track_lin_vel_xy_exp": torch.exp(-lin_vel_error / self.cfg.tracking_std**2)
-            * self.cfg.track_lin_vel_xy_reward_scale
-            * self.step_dt,
-            "track_ang_vel_z_exp": torch.exp(-yaw_rate_error / self.cfg.tracking_std**2)
-            * self.cfg.track_ang_vel_z_reward_scale
-            * self.step_dt,
+            "track_lin_vel_xy_exp": self._scale_bounded_positive_reward(
+                track_lin_vel_xy, self.cfg.track_lin_vel_xy_reward_scale
+            ),
+            "track_ang_vel_z_exp": self._scale_bounded_positive_reward(
+                track_ang_vel_z, self.cfg.track_ang_vel_z_reward_scale
+            ),
             "lin_vel_z_l2": z_vel_error * self.cfg.lin_vel_z_reward_scale * self.step_dt,
             "ang_vel_xy_l2": ang_vel_error * self.cfg.ang_vel_xy_reward_scale * self.step_dt,
             "dof_torques_l2": joint_torques * self.cfg.joint_torque_reward_scale * self.step_dt,
             "dof_acc_l2": joint_accel * self.cfg.joint_accel_reward_scale * self.step_dt,
             "action_rate_l2": action_rate * self.cfg.action_rate_reward_scale * self.step_dt,
             "feet_air_time": feet_air_time * self.cfg.feet_air_time_reward_scale * self.step_dt,
-            "two_feet_above_height": two_feet_above_height
-            * self.cfg.two_feet_above_height_reward_scale
-            * self.step_dt,
+            "two_feet_above_height": self._scale_bounded_positive_reward(
+                two_feet_above_height, self.cfg.two_feet_above_height_reward_scale
+            ),
             "three_or_more_feet_contact": three_or_more_feet_contact
             * self.cfg.three_or_more_feet_contact_penalty_reward_scale
             * self.step_dt,
             "undesired_contacts": undesired_contacts * self.cfg.undesired_contact_reward_scale * self.step_dt,
             "flat_orientation_l2": flat_orientation * self.cfg.base_tilt_penalty_reward_scale * self.step_dt,
-            "track_base_height_exp": torch.exp(-self.cfg.base_height_exp_scale * base_height_error)
-            * self.cfg.track_base_height_reward_scale
-            * self.step_dt,
+            "track_base_height_exp": self._scale_bounded_positive_reward(
+                track_base_height, self.cfg.track_base_height_reward_scale
+            ),
             "force_transmited_through_joints": force_transmited_through_joints
             * self.cfg.force_transmited_through_joints_reward_scale
             * self.step_dt,
@@ -983,6 +987,11 @@ class Solo12Env(DirectRLEnv):
             self._episode_sums[key] += value
         self._episode_reward_sums += reward
         return reward
+
+    def _scale_bounded_positive_reward(self, reward: torch.Tensor, scale: float) -> torch.Tensor:
+        if self.cfg.negate_positive_rewards and scale > 0.0:
+            reward = reward - 1.0
+        return reward * scale * self.step_dt
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         time_out = self.episode_length_buf >= self.max_episode_length - 1
