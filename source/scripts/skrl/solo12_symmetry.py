@@ -236,6 +236,25 @@ def _get_base_imu_history_sample_dim(env: Any) -> int | None:
     return None
 
 
+def _uses_front_back_symmetry(env: Any) -> bool:
+    visited = set()
+    candidates = [env]
+    while candidates:
+        current = candidates.pop(0)
+        if current is None or id(current) in visited:
+            continue
+        visited.add(id(current))
+        cfg = getattr(current, "cfg", None)
+        if cfg is not None and hasattr(cfg, "front_back_asymetry"):
+            return bool(getattr(cfg, "front_back_asymetry"))
+        candidates.extend(
+            getattr(current, name, None)
+            for name in ("unwrapped", "env", "_env", "venv")
+            if getattr(current, name, None) is not current
+        )
+    return True
+
+
 def _as_device_tensor(values: torch.Tensor, device: torch.device) -> torch.Tensor:
     return values.to(device=device)
 
@@ -507,15 +526,23 @@ def _transform_obs_rotate_180(
 
 
 def _augment_obs_tensor(
-    obs: torch.Tensor, policy_model: str | None, history_sample_dim: int | None
+    obs: torch.Tensor,
+    policy_model: str | None,
+    history_sample_dim: int | None,
+    use_front_back_symmetry: bool,
 ) -> torch.Tensor:
-    return torch.cat(
-        (
+    transforms = (
+        (obs, _transform_obs_reflect_x(obs, policy_model, history_sample_dim))
+        if not use_front_back_symmetry
+        else (
             obs,
             _transform_obs_reflect_x(obs, policy_model, history_sample_dim),
             _transform_obs_reflect_y(obs, policy_model, history_sample_dim),
             _transform_obs_rotate_180(obs, policy_model, history_sample_dim),
-        ),
+        )
+    )
+    return torch.cat(
+        transforms,
         dim=0,
     )
 
@@ -537,6 +564,7 @@ def _pack_policy_obs(
     was_tensordict: bool,
     policy_model: str | None,
     history_sample_dim: int | None,
+    use_front_back_symmetry: bool,
 ):
     if not was_tensordict:
         return obs_policy_aug
@@ -548,7 +576,9 @@ def _pack_policy_obs(
         if key == obs_type:
             data[key] = obs_policy_aug
         elif isinstance(value, torch.Tensor) and value.ndim == 2:
-            data[key] = _augment_obs_tensor(value, policy_model, history_sample_dim)
+            data[key] = _augment_obs_tensor(
+                value, policy_model, history_sample_dim, use_front_back_symmetry
+            )
         else:
             repeat_factor = batch_dim // value.shape[0]
             data[key] = torch.cat([value] * repeat_factor, dim=0)
@@ -565,7 +595,7 @@ def compute_symmetric_observations_actions(
     actions: torch.Tensor | None = None,
     obs_type: str = "policy",
 ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
-    """Apply the four quadruped symmetries to Solo12 observations and/or actions.
+    """Apply quadruped symmetries to Solo12 observations and/or actions.
 
     Args:
         env: Isaac Lab env or wrapper. Used to disambiguate legacy 48D observations from base-IMU teacher 48D observations.
@@ -575,7 +605,8 @@ def compute_symmetric_observations_actions(
 
     Returns:
         A tuple ``(obs_aug, actions_aug)`` where each non-``None`` tensor has the batch dimension
-        multiplied by 4 in the order ``[identity, reflect_x, reflect_y, rotate_180]``.
+        multiplied by 4 in the order ``[identity, reflect_x, reflect_y, rotate_180]``. If
+        ``env.cfg.front_back_asymetry`` is false, only ``[identity, reflect_x]`` is used.
     """
     if obs_type != "policy":
         raise ValueError(f"Solo12 symmetry only supports obs_type='policy'. Got: {obs_type}")
@@ -583,11 +614,20 @@ def compute_symmetric_observations_actions(
     obs_aug = None
     policy_model = _get_policy_model(env)
     history_sample_dim = _get_base_imu_history_sample_dim(env)
+    use_front_back_symmetry = _uses_front_back_symmetry(env)
     if obs is not None:
         obs_policy, was_tensordict = _extract_policy_obs_tensor(obs, obs_type)
-        obs_policy_aug = _augment_obs_tensor(obs_policy, policy_model, history_sample_dim)
+        obs_policy_aug = _augment_obs_tensor(
+            obs_policy, policy_model, history_sample_dim, use_front_back_symmetry
+        )
         obs_aug = _pack_policy_obs(
-            obs, obs_policy_aug, obs_type, was_tensordict, policy_model, history_sample_dim
+            obs,
+            obs_policy_aug,
+            obs_type,
+            was_tensordict,
+            policy_model,
+            history_sample_dim,
+            use_front_back_symmetry,
         )
 
     actions_aug = None
@@ -596,14 +636,16 @@ def compute_symmetric_observations_actions(
             raise TypeError(f"Expected actions to be a torch.Tensor, got {type(actions)!r}")
         if actions.shape[-1] != ACTION_SIZE:
             raise ValueError(f"Expected Solo12 actions with size {ACTION_SIZE}, got {actions.shape[-1]}")
-        actions_aug = torch.cat(
-            (
+        transforms = (
+            (actions, transform_actions_reflect_x(actions))
+            if not use_front_back_symmetry
+            else (
                 actions,
                 transform_actions_reflect_x(actions),
                 transform_actions_reflect_y(actions),
                 transform_actions_rotate_180(actions),
-            ),
-            dim=0,
+            )
         )
+        actions_aug = torch.cat(transforms, dim=0)
 
     return obs_aug, actions_aug

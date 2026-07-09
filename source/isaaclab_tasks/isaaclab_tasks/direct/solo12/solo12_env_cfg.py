@@ -462,6 +462,9 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     forces_curriculum_threshold_reward = 28.0
     forces_curriculum_smoothing = 0.05
     curriculum_two_feet = False
+    # False makes front/back behavior task-asymmetric: symmetry augmentation drops front/back transforms,
+    # and the two-feet lift reward targets the front feet only.
+    front_back_asymetry = True
     two_feet_curriculum_advance_metric_keys = ("two_feet_above_height", "track_lin_vel_xy_exp")
     two_feet_curriculum_advance_thresholds = (1.5, 1.44)
     two_feet_above_height_reward_scale_curriculum = (1.8, 1.3, 1.5)
@@ -693,7 +696,7 @@ class Solo12SimpleDreamerV3EnvCfg(Solo12EnvCfg):
 
 @configclass
 class Solo12TwoFeetEnvCfg(Solo12EnvCfg):
-    """Solo12 task variant that rewards walking with either front or rear feet airborne."""
+    """Solo12 task variant that rewards walking with two feet airborne."""
 
     track_lin_vel_xy_reward_scale = 1.3
     track_ang_vel_z_reward_scale = 0.5
@@ -713,6 +716,7 @@ class Solo12TwoFeetEnvCfg(Solo12EnvCfg):
     enable_observation_corruption = True
     tricky_terrain = True
     curriculum_two_feet = True
+    front_back_asymetry = False
     base_push_force_z_range = (0.0, 0.0)
     forces_applied_to_base_curriculum = [0.0]
     actuation_delay_range = (0, 0)

@@ -1253,6 +1253,7 @@ class Solo12Env(DirectRLEnv):
         extras["Curriculum/two_feet_above_height_threshold"] = self.cfg.two_feet_above_height_threshold
         extras["Curriculum/actuation_delay_max"] = self.cfg.actuation_delay_range[1]
         extras["Curriculum/opposite_direction_cmd_prob"] = self.cfg.opposite_direction_cmd_prob
+        extras["Curriculum/front_back_asymetry"] = float(self.cfg.front_back_asymetry)
         curriculum_idx = self.get_curriculum_global_idx()
         if curriculum_idx is not None:
             extras["Curriculum/global_idx"] = curriculum_idx
@@ -1298,10 +1299,14 @@ class Solo12Env(DirectRLEnv):
     def _compute_two_feet_above_height_reward(self, feet_contact_mask: torch.Tensor) -> torch.Tensor:
         foot_heights = self._get_reward_foot_heights()
         front_airborne = torch.all(~feet_contact_mask[:, self._front_feet_contact_indices], dim=1)
-        rear_airborne = torch.all(~feet_contact_mask[:, self._rear_feet_contact_indices], dim=1)
         front_avg_height = torch.mean(foot_heights[:, self._front_feet_robot_indices], dim=1)
-        rear_avg_height = torch.mean(foot_heights[:, self._rear_feet_robot_indices], dim=1)
         front_reward = self._two_feet_height_kernel(front_avg_height) * front_airborne.float()
+        if not self.cfg.front_back_asymetry:
+            rear_grounded = torch.all(feet_contact_mask[:, self._rear_feet_contact_indices], dim=1)
+            return front_reward * rear_grounded.float()
+
+        rear_airborne = torch.all(~feet_contact_mask[:, self._rear_feet_contact_indices], dim=1)
+        rear_avg_height = torch.mean(foot_heights[:, self._rear_feet_robot_indices], dim=1)
         rear_reward = self._two_feet_height_kernel(rear_avg_height) * rear_airborne.float()
         return torch.maximum(front_reward, rear_reward)
 
