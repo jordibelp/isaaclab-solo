@@ -28,6 +28,12 @@ from isaaclab.utils import configclass
 
 SOLO12_USD_PATH = Path(__file__).parents[4] / "isaaclab_assets/data/Robots/Solo12/SoloFlat.usd"
 
+
+def _optional_compliant_contact_value(value: float | None) -> float | None:
+    """Use ``None`` to leave PhysX compliant-contact attributes unauthored."""
+    return None if value == 0.0 else value
+
+
 ROOT_LIN_VEL_OBS_DIM = 3
 BASE_OBSERVATION_SPACE = 48
 COMMAND_OBS_DIM = 3
@@ -455,14 +461,17 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     max_velx_range_curriculum = [1.0, 1.5]
     forces_curriculum_threshold_reward = 28.0
     forces_curriculum_smoothing = 0.05
-    two_feet_curriculum_enabled = False
-    two_feet_curriculum_two_feet_reward_threshold = 1.6
-    two_feet_curriculum_tracking_reward_threshold = 1.2
-    two_feet_curriculum_phase2_two_feet_above_height_reward_scale = 1.0
-    two_feet_curriculum_phase2_track_lin_vel_xy_reward_scale = 1.5
-    two_feet_curriculum_phase3_tricky_terrain = True
-    two_feet_curriculum_phase3_actuation_delay_range = (0, 0)
-    two_feet_curriculum_phase3_opposite_direction_cmd_prob = 0.05
+    curriculum_two_feet = False
+    two_feet_curriculum_advance_metric_keys = ("two_feet_above_height", "track_lin_vel_xy_exp")
+    two_feet_curriculum_advance_thresholds = (1.5, 1.44)
+    two_feet_above_height_reward_scale_curriculum = (1.8, 1.3, 1.5)
+    track_lin_vel_xy_reward_scale_curriculum = (1.3, 1.8, 1.5)
+    three_or_more_feet_contact_penalty_reward_scale_curriculum = (-0.3, -0.3, -0.3)
+    two_feet_above_height_alpha_curriculum = (7.0, 8.0, 8.0)
+    two_feet_above_height_threshold_curriculum = (0.5, 0.6, 0.6)
+    actuation_delay_range_curriculum = ((0, 0), (0, 0), (0, 3))
+    tricky_terrain_curriculum = (False, False, True)
+    opposite_direction_cmd_prob_curriculum = (0.0, 0.0, 0.05)
 
     # Values larger than the available curriculum range are clipped to the final curriculum index.
     curriculum_tricky_terrain_idx: None | int = 2
@@ -474,9 +483,8 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     # _proportional_tricky_spawn_columns). None falls back to uniform sampling over the columns.
     tricky_terrain_col_weights = SOLO12_TRICKY_TERRAIN_COL_WEIGHTS
     # terrain damping
-    compliant_contact_stiffness = 0.0 #3_005.0
-    compliant_contact_damping = 0.0 #60.0
-
+    compliant_contact_stiffness: float | None = 0.0  # 3_005.0
+    compliant_contact_damping: float | None = 0.0  # 60.0
 
     tracking_std = math.sqrt(0.25)
     feet_air_time_threshold = 0.5
@@ -519,8 +527,12 @@ class Solo12EnvCfg(DirectRLEnvCfg):
             static_friction=1.0,
             dynamic_friction=1.0,
             restitution=0.0,
-            compliant_contact_stiffness=compliant_contact_stiffness,
-            compliant_contact_damping=compliant_contact_damping,
+            compliant_contact_stiffness=_optional_compliant_contact_value(
+                compliant_contact_stiffness
+            ),
+            compliant_contact_damping=_optional_compliant_contact_value(
+                compliant_contact_damping
+            ),
         ),
         debug_vis=False,
     )
@@ -569,13 +581,15 @@ class Solo12EnvCfg(DirectRLEnvCfg):
         super().__post_init__()
         self.refresh_runtime_dependent_config()
 
+    def two_feet_curriculum_uses_tricky_terrain(self) -> bool:
+        return bool(self.curriculum_two_feet and any(self.tricky_terrain_curriculum))
+
     def refresh_runtime_dependent_config(self):
         self.refresh_observation_dimensions()
         self._apply_runtime_overrides_to_nested_cfg()
-        # Phase-3 terrain must exist before simulation starts; origins stay on flat tiles until activation.
-        if self.tricky_terrain or (
-            self.two_feet_curriculum_enabled and self.two_feet_curriculum_phase3_tricky_terrain
-        ):
+        # If a later curriculum phase needs tricky terrain, the generator must exist from startup.
+        # Early phases keep spawning on the configured flat terrain columns.
+        if self.tricky_terrain or self.two_feet_curriculum_uses_tricky_terrain():
             self.terrain.terrain_type = "generator"
             self.terrain.terrain_generator = SOLO12_TRICKY_TERRAINS_CFG.copy()
             self.terrain.use_terrain_origins = True
@@ -583,8 +597,12 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     def _apply_runtime_overrides_to_nested_cfg(self):
         self.robot.actuators["legs"].stiffness = self.kp
         self.robot.actuators["legs"].damping = self.kd
-        self.terrain.physics_material.compliant_contact_stiffness = self.compliant_contact_stiffness
-        self.terrain.physics_material.compliant_contact_damping = self.compliant_contact_damping
+        self.terrain.physics_material.compliant_contact_stiffness = _optional_compliant_contact_value(
+            self.compliant_contact_stiffness
+        )
+        self.terrain.physics_material.compliant_contact_damping = _optional_compliant_contact_value(
+            self.compliant_contact_damping
+        )
 
     def refresh_observation_dimensions(self):
         """Recompute observation dimensions after Hydra overrides."""
@@ -677,7 +695,7 @@ class Solo12SimpleDreamerV3EnvCfg(Solo12EnvCfg):
 class Solo12TwoFeetEnvCfg(Solo12EnvCfg):
     """Solo12 task variant that rewards walking with either front or rear feet airborne."""
 
-    track_lin_vel_xy_reward_scale = 1.0
+    track_lin_vel_xy_reward_scale = 1.3
     track_ang_vel_z_reward_scale = 0.5
     two_feet_above_height_reward_scale = 1.8
     three_or_more_feet_contact_penalty_reward_scale = -0.3
@@ -693,8 +711,8 @@ class Solo12TwoFeetEnvCfg(Solo12EnvCfg):
     initial_position = "safe"
     track_base_height_reward_scale = 0.0
     enable_observation_corruption = True
-    tricky_terrain = False
-    two_feet_curriculum_enabled = True
+    tricky_terrain = True
+    curriculum_two_feet = True
     base_push_force_z_range = (0.0, 0.0)
     forces_applied_to_base_curriculum = [0.0]
     actuation_delay_range = (0, 0)

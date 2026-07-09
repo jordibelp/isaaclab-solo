@@ -19,6 +19,26 @@ from isaaclab.utils.buffers import DelayBuffer
 from .solo12_env_cfg import Solo12EnvCfg
 
 
+_EPISODE_REWARD_KEYS = (
+    "track_lin_vel_xy_exp",
+    "track_ang_vel_z_exp",
+    "lin_vel_z_l2",
+    "ang_vel_xy_l2",
+    "dof_torques_l2",
+    "dof_acc_l2",
+    "action_rate_l2",
+    "feet_air_time",
+    "two_feet_above_height",
+    "three_or_more_feet_contact",
+    "undesired_contacts",
+    "base_collision_terminal",
+    "flat_orientation_l2",
+    "track_base_height_exp",
+    "force_transmited_through_joints",
+    "foot_contact",
+)
+
+
 class Solo12Env(DirectRLEnv):
     cfg: Solo12EnvCfg
 
@@ -33,13 +53,14 @@ class Solo12Env(DirectRLEnv):
         self._delayed_processed_actions = torch.zeros_like(self._actions)
         self._applied_actions = torch.zeros_like(self._actions)
 
+        curriculum_two_feet = self._curriculum_two_feet_enabled()
         self._validate_actuation_delay_range(self.cfg.actuation_delay_range, "actuation_delay_range")
-        if self.cfg.two_feet_curriculum_enabled:
+        if curriculum_two_feet:
             self._validate_two_feet_curriculum_config()
 
         max_action_delay = self.cfg.actuation_delay_range[1]
-        if self.cfg.two_feet_curriculum_enabled:
-            max_action_delay = max(max_action_delay, self.cfg.two_feet_curriculum_phase3_actuation_delay_range[1])
+        if curriculum_two_feet:
+            max_action_delay = max(max_action_delay, self._max_two_feet_curriculum_action_delay())
         self._action_delay_buffer = DelayBuffer(max_action_delay, self.num_envs, device=self.device)
         self._action_delay_steps = torch.zeros(self.num_envs, dtype=torch.int, device=self.device)
 
@@ -104,34 +125,19 @@ class Solo12Env(DirectRLEnv):
         self._base_push_force_curriculum_idx = 0
         self._base_push_mean_reward_smooth: float | None = None
         self._base_push_last_curriculum_step = 0
-        self._two_feet_curriculum_phase = 1 if self.cfg.two_feet_curriculum_enabled else 0
+        self._two_feet_curriculum_phase = 1 if curriculum_two_feet else 0
+        self._tricky_terrain_active = False
+        if curriculum_two_feet:
+            self._set_two_feet_curriculum_phase(1)
         if self._max_velx_range_curriculum_values:
             self._set_max_velx_range_curriculum_level(0)
         if self._base_push_force_curriculum_values:
             self._set_base_push_force_curriculum_level(0)
-        self._tricky_terrain_active = False
         self._refresh_tricky_terrain_origins(force=True)
 
         self._episode_sums = {
             key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
-            for key in [
-                "track_lin_vel_xy_exp",
-                "track_ang_vel_z_exp",
-                "lin_vel_z_l2",
-                "ang_vel_xy_l2",
-                "dof_torques_l2",
-                "dof_acc_l2",
-                "action_rate_l2",
-                "feet_air_time",
-                "two_feet_above_height",
-                "three_or_more_feet_contact",
-                "undesired_contacts",
-                "base_collision_terminal",
-                "flat_orientation_l2",
-                "track_base_height_exp",
-                "force_transmited_through_joints",
-                "foot_contact",
-            ]
+            for key in _EPISODE_REWARD_KEYS
         }
         self._episode_reward_sums = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         self._base_collision_terminated = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
@@ -324,26 +330,79 @@ class Solo12Env(DirectRLEnv):
         if low < 0 or high < low:
             raise ValueError(f"{name} must be a non-negative ordered range, got {delay_range}.")
 
+    def _curriculum_two_feet_enabled(self) -> bool:
+        return bool(getattr(self.cfg, "curriculum_two_feet", False))
+
+    @staticmethod
+    def _curriculum_values(values) -> tuple:
+        return tuple(values)
+
+    def _two_feet_curriculum_phase_count(self) -> int:
+        return len(self._curriculum_values(self.cfg.two_feet_above_height_reward_scale_curriculum))
+
+    def _two_feet_curriculum_phase_index(self, phase: int | None = None) -> int:
+        phase = self._two_feet_curriculum_phase if phase is None else phase
+        return int(phase) - 1
+
+    def _two_feet_curriculum_value(self, name: str, phase: int | None = None):
+        values = self._curriculum_values(getattr(self.cfg, f"{name}_curriculum"))
+        return values[self._two_feet_curriculum_phase_index(phase)]
+
+    def _max_two_feet_curriculum_action_delay(self) -> int:
+        return max(int(delay_range[1]) for delay_range in self.cfg.actuation_delay_range_curriculum)
+
     def _validate_two_feet_curriculum_config(self):
-        if self.cfg.two_feet_curriculum_two_feet_reward_threshold < 0.0:
+        phase_fields = {
+            "two_feet_above_height_reward_scale_curriculum": self.cfg.two_feet_above_height_reward_scale_curriculum,
+            "track_lin_vel_xy_reward_scale_curriculum": self.cfg.track_lin_vel_xy_reward_scale_curriculum,
+            "three_or_more_feet_contact_penalty_reward_scale_curriculum": (
+                self.cfg.three_or_more_feet_contact_penalty_reward_scale_curriculum
+            ),
+            "two_feet_above_height_alpha_curriculum": self.cfg.two_feet_above_height_alpha_curriculum,
+            "two_feet_above_height_threshold_curriculum": self.cfg.two_feet_above_height_threshold_curriculum,
+            "actuation_delay_range_curriculum": self.cfg.actuation_delay_range_curriculum,
+            "tricky_terrain_curriculum": self.cfg.tricky_terrain_curriculum,
+            "opposite_direction_cmd_prob_curriculum": self.cfg.opposite_direction_cmd_prob_curriculum,
+        }
+        phase_count = self._two_feet_curriculum_phase_count()
+        if phase_count < 1:
+            raise ValueError("two_feet_above_height_reward_scale_curriculum must contain at least one phase.")
+        for name, values in phase_fields.items():
+            if len(values) != phase_count:
+                raise ValueError(f"{name} must have {phase_count} values, got {len(values)}.")
+
+        advance_metric_keys = self._curriculum_values(self.cfg.two_feet_curriculum_advance_metric_keys)
+        advance_thresholds = self._curriculum_values(self.cfg.two_feet_curriculum_advance_thresholds)
+        if len(advance_metric_keys) != phase_count - 1:
             raise ValueError(
-                "two_feet_curriculum_two_feet_reward_threshold must be non-negative, "
-                f"got {self.cfg.two_feet_curriculum_two_feet_reward_threshold}."
+                "two_feet_curriculum_advance_metric_keys must have one value per phase transition, "
+                f"got {len(advance_metric_keys)} for {phase_count} phases."
             )
-        if self.cfg.two_feet_curriculum_tracking_reward_threshold < 0.0:
+        if len(advance_thresholds) != phase_count - 1:
             raise ValueError(
-                "two_feet_curriculum_tracking_reward_threshold must be non-negative, "
-                f"got {self.cfg.two_feet_curriculum_tracking_reward_threshold}."
+                "two_feet_curriculum_advance_thresholds must have one value per phase transition, "
+                f"got {len(advance_thresholds)} for {phase_count} phases."
             )
-        self._validate_actuation_delay_range(
-            self.cfg.two_feet_curriculum_phase3_actuation_delay_range,
-            "two_feet_curriculum_phase3_actuation_delay_range",
-        )
-        if not 0.0 <= self.cfg.two_feet_curriculum_phase3_opposite_direction_cmd_prob <= 1.0:
-            raise ValueError(
-                "two_feet_curriculum_phase3_opposite_direction_cmd_prob must be between 0 and 1, "
-                f"got {self.cfg.two_feet_curriculum_phase3_opposite_direction_cmd_prob}."
-            )
+        invalid_metrics = [key for key in advance_metric_keys if key not in _EPISODE_REWARD_KEYS]
+        if invalid_metrics:
+            raise ValueError(f"Unknown two-feet curriculum advance metrics: {invalid_metrics}.")
+        for i, threshold in enumerate(advance_thresholds):
+            if threshold < 0.0:
+                raise ValueError(f"two_feet_curriculum_advance_thresholds[{i}] must be non-negative, got {threshold}.")
+
+        for i, threshold in enumerate(self.cfg.two_feet_above_height_threshold_curriculum):
+            if threshold < 0.0:
+                raise ValueError(f"two_feet_above_height_threshold_curriculum[{i}] must be non-negative, got {threshold}.")
+        for i, alpha in enumerate(self.cfg.two_feet_above_height_alpha_curriculum):
+            if alpha < 0.0:
+                raise ValueError(f"two_feet_above_height_alpha_curriculum[{i}] must be non-negative, got {alpha}.")
+        for i, delay_range in enumerate(self.cfg.actuation_delay_range_curriculum):
+            self._validate_actuation_delay_range(tuple(delay_range), f"actuation_delay_range_curriculum[{i}]")
+        for i, opposite_prob in enumerate(self.cfg.opposite_direction_cmd_prob_curriculum):
+            if not 0.0 <= opposite_prob <= 1.0:
+                raise ValueError(
+                    f"opposite_direction_cmd_prob_curriculum[{i}] must be between 0 and 1, got {opposite_prob}."
+                )
 
     def _fill_uniform_range(self, tensor: torch.Tensor, value_range: tuple[float, float]):
         low, high = value_range
@@ -410,14 +469,14 @@ class Solo12Env(DirectRLEnv):
         return min(int(start_idx), max_idx)
 
     def _two_feet_curriculum_uses_tricky_terrain(self) -> bool:
-        return bool(self.cfg.two_feet_curriculum_enabled and self.cfg.two_feet_curriculum_phase3_tricky_terrain)
+        return bool(self._curriculum_two_feet_enabled() and any(self.cfg.tricky_terrain_curriculum))
 
     def _tricky_terrain_is_available(self) -> bool:
         return bool(getattr(self.cfg, "tricky_terrain", False) or self._two_feet_curriculum_uses_tricky_terrain())
 
     def _tricky_terrain_should_be_active(self) -> bool:
         if self._two_feet_curriculum_uses_tricky_terrain():
-            return self._two_feet_curriculum_phase >= 3
+            return bool(self._two_feet_curriculum_value("tricky_terrain"))
         if not getattr(self.cfg, "tricky_terrain", False):
             return False
         start_idx = getattr(self.cfg, "curriculum_tricky_terrain_idx", None)
@@ -543,38 +602,46 @@ class Solo12Env(DirectRLEnv):
         return torch.mean(self._episode_sums[key][env_ids]).abs().item() / self.max_episode_length_s
 
     def _set_two_feet_curriculum_phase(self, phase: int):
+        if phase < 1 or phase > self._two_feet_curriculum_phase_count():
+            raise ValueError(
+                f"Two-feet curriculum phase must be in [1, {self._two_feet_curriculum_phase_count()}], got {phase}."
+            )
         self._two_feet_curriculum_phase = phase
-        if phase >= 2:
-            self.cfg.two_feet_above_height_reward_scale = (
-                self.cfg.two_feet_curriculum_phase2_two_feet_above_height_reward_scale
-            )
-            self.cfg.track_lin_vel_xy_reward_scale = (
-                self.cfg.two_feet_curriculum_phase2_track_lin_vel_xy_reward_scale
-            )
-        if phase >= 3:
-            self.cfg.actuation_delay_range = tuple(self.cfg.two_feet_curriculum_phase3_actuation_delay_range)
-            self.cfg.opposite_direction_cmd_prob = self.cfg.two_feet_curriculum_phase3_opposite_direction_cmd_prob
-            if self.cfg.two_feet_curriculum_phase3_tricky_terrain:
-                self.cfg.tricky_terrain = True
-            self._refresh_tricky_terrain_origins(force=True)
+        self.cfg.two_feet_above_height_reward_scale = self._two_feet_curriculum_value(
+            "two_feet_above_height_reward_scale", phase
+        )
+        self.cfg.track_lin_vel_xy_reward_scale = self._two_feet_curriculum_value(
+            "track_lin_vel_xy_reward_scale", phase
+        )
+        self.cfg.three_or_more_feet_contact_penalty_reward_scale = self._two_feet_curriculum_value(
+            "three_or_more_feet_contact_penalty_reward_scale", phase
+        )
+        self.cfg.two_feet_above_height_alpha = self._two_feet_curriculum_value(
+            "two_feet_above_height_alpha", phase
+        )
+        self.cfg.two_feet_above_height_threshold = self._two_feet_curriculum_value(
+            "two_feet_above_height_threshold", phase
+        )
+        self.cfg.actuation_delay_range = tuple(self._two_feet_curriculum_value("actuation_delay_range", phase))
+        self.cfg.opposite_direction_cmd_prob = self._two_feet_curriculum_value(
+            "opposite_direction_cmd_prob", phase
+        )
+        self._refresh_tricky_terrain_origins(force=True)
 
     def _update_two_feet_curriculum(self, completed_env_ids: torch.Tensor):
         if (
-            not self.cfg.two_feet_curriculum_enabled
+            not self._curriculum_two_feet_enabled()
             or len(completed_env_ids) == 0
-            or self._two_feet_curriculum_phase >= 3
+            or self._two_feet_curriculum_phase >= self._two_feet_curriculum_phase_count()
         ):
             return
 
-        if self._two_feet_curriculum_phase == 1:
-            two_feet_reward = self._episode_reward_metric("two_feet_above_height", completed_env_ids)
-            if two_feet_reward > self.cfg.two_feet_curriculum_two_feet_reward_threshold:
-                self._set_two_feet_curriculum_phase(2)
-            return
-
-        track_reward = self._episode_reward_metric("track_lin_vel_xy_exp", completed_env_ids)
-        if track_reward > self.cfg.two_feet_curriculum_tracking_reward_threshold:
-            self._set_two_feet_curriculum_phase(3)
+        transition_idx = self._two_feet_curriculum_phase_index()
+        metric_key = self.cfg.two_feet_curriculum_advance_metric_keys[transition_idx]
+        threshold = self.cfg.two_feet_curriculum_advance_thresholds[transition_idx]
+        reward_metric = self._episode_reward_metric(metric_key, completed_env_ids)
+        if reward_metric > threshold:
+            self._set_two_feet_curriculum_phase(self._two_feet_curriculum_phase + 1)
 
     def _reset_base_pushes(self, env_ids: torch.Tensor):
         self._base_push_steps_left[env_ids] = 0
@@ -1179,6 +1246,13 @@ class Solo12Env(DirectRLEnv):
         extras["Curriculum/two_feet_phase"] = self._two_feet_curriculum_phase
         extras["Curriculum/two_feet_above_height_reward_scale"] = self.cfg.two_feet_above_height_reward_scale
         extras["Curriculum/track_lin_vel_xy_reward_scale"] = self.cfg.track_lin_vel_xy_reward_scale
+        extras["Curriculum/three_or_more_feet_contact_penalty_reward_scale"] = (
+            self.cfg.three_or_more_feet_contact_penalty_reward_scale
+        )
+        extras["Curriculum/two_feet_above_height_alpha"] = self.cfg.two_feet_above_height_alpha
+        extras["Curriculum/two_feet_above_height_threshold"] = self.cfg.two_feet_above_height_threshold
+        extras["Curriculum/actuation_delay_max"] = self.cfg.actuation_delay_range[1]
+        extras["Curriculum/opposite_direction_cmd_prob"] = self.cfg.opposite_direction_cmd_prob
         curriculum_idx = self.get_curriculum_global_idx()
         if curriculum_idx is not None:
             extras["Curriculum/global_idx"] = curriculum_idx

@@ -693,6 +693,36 @@ def _apply_agent_weight_decay_to_optimizer(runner, agent_cfg: RslRlBaseRunnerCfg
         )
 
 
+def _apply_agent_adam_betas_to_optimizer(runner, agent_cfg: RslRlBaseRunnerCfg) -> None:
+    beta1 = float(getattr(agent_cfg, "adam_beta1", 0.9))
+    beta2 = float(getattr(agent_cfg, "adam_beta2", 0.999))
+    if not 0.0 <= beta1 < 1.0:
+        raise ValueError(f"agent.adam_beta1 must be in [0, 1), got {beta1}.")
+    if not 0.0 <= beta2 < 1.0:
+        raise ValueError(f"agent.adam_beta2 must be in [0, 1), got {beta2}.")
+
+    optimizer = getattr(getattr(runner, "alg", None), "optimizer", None)
+    if optimizer is None:
+        if (beta1, beta2) == (0.9, 0.999):
+            return
+        raise ValueError(
+            "agent.adam_beta1/agent.adam_beta2 were set, but the selected RSL-RL runner has no optimizer."
+        )
+
+    betas = (beta1, beta2)
+    previous_values = {
+        tuple(float(beta) for beta in group.get("betas", (0.9, 0.999))) for group in optimizer.param_groups
+    }
+    for group in optimizer.param_groups:
+        group["betas"] = betas
+
+    if betas != (0.9, 0.999) or previous_values != {(0.9, 0.999)}:
+        print(
+            "[INFO]: Set RSL-RL optimizer Adam betas="
+            f"({beta1:g}, {beta2:g}) on {len(optimizer.param_groups)} parameter group(s)."
+        )
+
+
 def _attach_continual_backprop_to_runner(runner, parsed_args):
     if not bool(getattr(parsed_args, "use_cbp", False)):
         return None
@@ -1768,6 +1798,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if resume_path is not None:
         _sanitize_policy_action_std(runner)
     _apply_agent_weight_decay_to_optimizer(runner, agent_cfg)
+    _apply_agent_adam_betas_to_optimizer(runner, agent_cfg)
     cbp_manager = _attach_continual_backprop_to_runner(runner, args_cli)
     if cbp_manager is not None and should_resume and not args_cli.reuse_mlp:
         _restore_cbp_state_from_checkpoint(cbp_manager, resume_path)

@@ -147,6 +147,12 @@ class RslRlBaseRunnerCfg:
     weight_decay: float = 0.0
     """The Adam optimizer weight decay for trainable parameters. Default is 0.0."""
 
+    adam_beta1: float = 0.9
+    """The first Adam optimizer beta coefficient. Default is 0.9."""
+
+    adam_beta2: float = 0.999
+    """The second Adam optimizer beta coefficient. Default is 0.999."""
+
     num_steps_per_env: int = MISSING
     """The number of steps per environment per update."""
 

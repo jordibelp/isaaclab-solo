@@ -7,11 +7,13 @@ Implements the four metrics of Appendix B in "The Impact of On-Policy
 Parallelized Data Collection on Deep Reinforcement Learning Networks"
 (arXiv:2506.03404):
 
-  (a) feature rank      - approximate rank (Yang et al. 2019): smallest k such
-                          that the top-k squared singular values of the feature
-                          matrix retain >= 99% of the total squared-singular-value
-                          energy. ``feature_rank`` keeps the legacy last-hidden-
-                          activation value; ``feature_rank_i`` reports layer i.
+  (a) feature rank      - approximate rank fraction (Yang et al. 2019): smallest k
+                          such that the top-k squared singular values of the
+                          feature matrix retain >= 99% of the total squared-
+                          singular-value energy, divided by that layer's feature
+                          count. ``feature_rank`` keeps the last-hidden-activation
+                          value; ``feature_rank_i`` reports layer i. ``feature_num``
+                          and ``feature_num_i`` report the layer widths.
   (b) % dormant units   - percentage of hidden units whose mean |activation| over
                           a batch is below eps=1e-5 (the paper's reading of
                           Sokar et al. 2023). The Sokar-normalized variant
@@ -74,6 +76,12 @@ def feature_rank(features: torch.Tensor, threshold: float = DEFAULT_RANK_THRESHO
     cumulative = torch.cumsum(energy, dim=0) / total
     k = int((cumulative < threshold).sum().item()) + 1
     return float(min(k, sigma.numel()))
+
+
+def _feature_count(features: torch.Tensor) -> int:
+    if features.ndim == 0:
+        return 0
+    return int(features.shape[-1])
 
 
 def dormant_metrics(
@@ -174,13 +182,20 @@ def activation_plasticity_metrics(
     dormant_eps: float = DEFAULT_DORMANT_EPS,
     dormant_tau: float = DEFAULT_DORMANT_TAU,
 ) -> dict[str, float]:
-    """Feature rank and dormant-unit percentages over collected hidden activations."""
+    """Feature-rank fractions and dormant-unit percentages over collected hidden activations."""
     if not activations:
         return {}
     metrics = dormant_metrics(activations, eps=dormant_eps, tau=dormant_tau)
+    layer_nums = [_feature_count(act) for act in activations]
     layer_ranks = [feature_rank(act, threshold=rank_threshold) for act in activations]
-    metrics["feature_rank"] = layer_ranks[-1]
-    metrics.update({f"feature_rank_{i}": rank for i, rank in enumerate(layer_ranks)})
+    layer_rank_fractions = [
+        rank / float(num_features) if num_features > 0 else float("nan")
+        for rank, num_features in zip(layer_ranks, layer_nums)
+    ]
+    metrics["feature_rank"] = layer_rank_fractions[-1]
+    metrics["feature_num"] = float(layer_nums[-1])
+    metrics.update({f"feature_rank_{i}": rank for i, rank in enumerate(layer_rank_fractions)})
+    metrics.update({f"feature_num_{i}": float(num_features) for i, num_features in enumerate(layer_nums)})
     return metrics
 
 
