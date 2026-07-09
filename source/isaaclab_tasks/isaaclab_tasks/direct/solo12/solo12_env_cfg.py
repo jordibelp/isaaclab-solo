@@ -455,6 +455,14 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     max_velx_range_curriculum = [1.0, 1.5]
     forces_curriculum_threshold_reward = 28.0
     forces_curriculum_smoothing = 0.05
+    two_feet_curriculum_enabled = False
+    two_feet_curriculum_two_feet_reward_threshold = 1.6
+    two_feet_curriculum_tracking_reward_threshold = 1.2
+    two_feet_curriculum_phase2_two_feet_above_height_reward_scale = 1.0
+    two_feet_curriculum_phase2_track_lin_vel_xy_reward_scale = 1.5
+    two_feet_curriculum_phase3_tricky_terrain = True
+    two_feet_curriculum_phase3_actuation_delay_range = (0, 0)
+    two_feet_curriculum_phase3_opposite_direction_cmd_prob = 0.05
 
     # Values larger than the available curriculum range are clipped to the final curriculum index.
     curriculum_tricky_terrain_idx: None | int = 2
@@ -564,7 +572,10 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     def refresh_runtime_dependent_config(self):
         self.refresh_observation_dimensions()
         self._apply_runtime_overrides_to_nested_cfg()
-        if self.tricky_terrain:
+        # Phase-3 terrain must exist before simulation starts; origins stay on flat tiles until activation.
+        if self.tricky_terrain or (
+            self.two_feet_curriculum_enabled and self.two_feet_curriculum_phase3_tricky_terrain
+        ):
             self.terrain.terrain_type = "generator"
             self.terrain.terrain_generator = SOLO12_TRICKY_TERRAINS_CFG.copy()
             self.terrain.use_terrain_origins = True
@@ -668,9 +679,11 @@ class Solo12TwoFeetEnvCfg(Solo12EnvCfg):
 
     track_lin_vel_xy_reward_scale = 1.0
     track_ang_vel_z_reward_scale = 0.5
-    two_feet_above_height_reward_scale = 1.5
-    three_or_more_feet_contact_penalty_reward_scale = -0.1
+    two_feet_above_height_reward_scale = 1.8
+    three_or_more_feet_contact_penalty_reward_scale = -0.3
     base_tilt_penalty_reward_scale = 0.0
+    two_feet_above_height_threshold = 0.5
+    two_feet_above_height_alpha = 7.0
 
     command_ang_vel_z_range = (-0.5, 0.5)
     command_lin_vel_y_range = (-0.3, 0.3)
@@ -679,12 +692,13 @@ class Solo12TwoFeetEnvCfg(Solo12EnvCfg):
 
     initial_position = "safe"
     track_base_height_reward_scale = 0.0
-    enable_observation_corruption = False
+    enable_observation_corruption = True
     tricky_terrain = False
+    two_feet_curriculum_enabled = True
     base_push_force_z_range = (0.0, 0.0)
     forces_applied_to_base_curriculum = [0.0]
     actuation_delay_range = (0, 0)
     opposite_direction_cmd_prob = 0.0
     kp = 15.0
     kd = 0.5
-    episode_length_s = 10.0
+    episode_length_s = 20.0

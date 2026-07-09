@@ -33,7 +33,13 @@ class Solo12Env(DirectRLEnv):
         self._delayed_processed_actions = torch.zeros_like(self._actions)
         self._applied_actions = torch.zeros_like(self._actions)
 
+        self._validate_actuation_delay_range(self.cfg.actuation_delay_range, "actuation_delay_range")
+        if self.cfg.two_feet_curriculum_enabled:
+            self._validate_two_feet_curriculum_config()
+
         max_action_delay = self.cfg.actuation_delay_range[1]
+        if self.cfg.two_feet_curriculum_enabled:
+            max_action_delay = max(max_action_delay, self.cfg.two_feet_curriculum_phase3_actuation_delay_range[1])
         self._action_delay_buffer = DelayBuffer(max_action_delay, self.num_envs, device=self.device)
         self._action_delay_steps = torch.zeros(self.num_envs, dtype=torch.int, device=self.device)
 
@@ -98,6 +104,7 @@ class Solo12Env(DirectRLEnv):
         self._base_push_force_curriculum_idx = 0
         self._base_push_mean_reward_smooth: float | None = None
         self._base_push_last_curriculum_step = 0
+        self._two_feet_curriculum_phase = 1 if self.cfg.two_feet_curriculum_enabled else 0
         if self._max_velx_range_curriculum_values:
             self._set_max_velx_range_curriculum_level(0)
         if self._base_push_force_curriculum_values:
@@ -311,6 +318,33 @@ class Solo12Env(DirectRLEnv):
             return torch.full((count,), low, dtype=torch.long, device=self.device)
         return torch.randint(low, high + 1, (count,), dtype=torch.long, device=self.device)
 
+    @staticmethod
+    def _validate_actuation_delay_range(delay_range: tuple[int, int], name: str):
+        low, high = delay_range
+        if low < 0 or high < low:
+            raise ValueError(f"{name} must be a non-negative ordered range, got {delay_range}.")
+
+    def _validate_two_feet_curriculum_config(self):
+        if self.cfg.two_feet_curriculum_two_feet_reward_threshold < 0.0:
+            raise ValueError(
+                "two_feet_curriculum_two_feet_reward_threshold must be non-negative, "
+                f"got {self.cfg.two_feet_curriculum_two_feet_reward_threshold}."
+            )
+        if self.cfg.two_feet_curriculum_tracking_reward_threshold < 0.0:
+            raise ValueError(
+                "two_feet_curriculum_tracking_reward_threshold must be non-negative, "
+                f"got {self.cfg.two_feet_curriculum_tracking_reward_threshold}."
+            )
+        self._validate_actuation_delay_range(
+            self.cfg.two_feet_curriculum_phase3_actuation_delay_range,
+            "two_feet_curriculum_phase3_actuation_delay_range",
+        )
+        if not 0.0 <= self.cfg.two_feet_curriculum_phase3_opposite_direction_cmd_prob <= 1.0:
+            raise ValueError(
+                "two_feet_curriculum_phase3_opposite_direction_cmd_prob must be between 0 and 1, "
+                f"got {self.cfg.two_feet_curriculum_phase3_opposite_direction_cmd_prob}."
+            )
+
     def _fill_uniform_range(self, tensor: torch.Tensor, value_range: tuple[float, float]):
         low, high = value_range
         if low == high:
@@ -375,7 +409,15 @@ class Solo12Env(DirectRLEnv):
             return int(start_idx)
         return min(int(start_idx), max_idx)
 
+    def _two_feet_curriculum_uses_tricky_terrain(self) -> bool:
+        return bool(self.cfg.two_feet_curriculum_enabled and self.cfg.two_feet_curriculum_phase3_tricky_terrain)
+
+    def _tricky_terrain_is_available(self) -> bool:
+        return bool(getattr(self.cfg, "tricky_terrain", False) or self._two_feet_curriculum_uses_tricky_terrain())
+
     def _tricky_terrain_should_be_active(self) -> bool:
+        if self._two_feet_curriculum_uses_tricky_terrain():
+            return self._two_feet_curriculum_phase >= 3
         if not getattr(self.cfg, "tricky_terrain", False):
             return False
         start_idx = getattr(self.cfg, "curriculum_tricky_terrain_idx", None)
@@ -431,7 +473,7 @@ class Solo12Env(DirectRLEnv):
         self._terrain.env_origins[env_ids] = origin_pool[selected_ids]
 
     def _refresh_tricky_terrain_origins(self, env_ids: torch.Tensor | None = None, force: bool = False):
-        if not getattr(self.cfg, "tricky_terrain", False):
+        if not self._tricky_terrain_is_available():
             return
         if getattr(self._terrain, "terrain_origins", None) is None:
             return
@@ -496,6 +538,43 @@ class Solo12Env(DirectRLEnv):
         self._base_push_mean_reward_smooth = None
         self._base_push_last_curriculum_step = self.common_step_counter
         self._refresh_tricky_terrain_origins()
+
+    def _episode_reward_metric(self, key: str, env_ids: torch.Tensor) -> float:
+        return torch.mean(self._episode_sums[key][env_ids]).abs().item() / self.max_episode_length_s
+
+    def _set_two_feet_curriculum_phase(self, phase: int):
+        self._two_feet_curriculum_phase = phase
+        if phase >= 2:
+            self.cfg.two_feet_above_height_reward_scale = (
+                self.cfg.two_feet_curriculum_phase2_two_feet_above_height_reward_scale
+            )
+            self.cfg.track_lin_vel_xy_reward_scale = (
+                self.cfg.two_feet_curriculum_phase2_track_lin_vel_xy_reward_scale
+            )
+        if phase >= 3:
+            self.cfg.actuation_delay_range = tuple(self.cfg.two_feet_curriculum_phase3_actuation_delay_range)
+            self.cfg.opposite_direction_cmd_prob = self.cfg.two_feet_curriculum_phase3_opposite_direction_cmd_prob
+            if self.cfg.two_feet_curriculum_phase3_tricky_terrain:
+                self.cfg.tricky_terrain = True
+            self._refresh_tricky_terrain_origins(force=True)
+
+    def _update_two_feet_curriculum(self, completed_env_ids: torch.Tensor):
+        if (
+            not self.cfg.two_feet_curriculum_enabled
+            or len(completed_env_ids) == 0
+            or self._two_feet_curriculum_phase >= 3
+        ):
+            return
+
+        if self._two_feet_curriculum_phase == 1:
+            two_feet_reward = self._episode_reward_metric("two_feet_above_height", completed_env_ids)
+            if two_feet_reward > self.cfg.two_feet_curriculum_two_feet_reward_threshold:
+                self._set_two_feet_curriculum_phase(2)
+            return
+
+        track_reward = self._episode_reward_metric("track_lin_vel_xy_exp", completed_env_ids)
+        if track_reward > self.cfg.two_feet_curriculum_tracking_reward_threshold:
+            self._set_two_feet_curriculum_phase(3)
 
     def _reset_base_pushes(self, env_ids: torch.Tensor):
         self._base_push_steps_left[env_ids] = 0
@@ -1018,6 +1097,7 @@ class Solo12Env(DirectRLEnv):
             if len(completed_env_ids) > 0
             else 0.0
         )
+        self._update_two_feet_curriculum(completed_env_ids)
         self._update_base_push_force_curriculum(completed_episode_returns)
         self._refresh_tricky_terrain_origins(env_ids)
 
@@ -1096,6 +1176,9 @@ class Solo12Env(DirectRLEnv):
         extras["Curriculum/base_push_force_xy_abs"] = max(abs(force_low), abs(force_high))
         extras["Curriculum/base_push_force_idx"] = self._base_push_force_curriculum_idx
         extras["Curriculum/tricky_terrain_active"] = float(self._tricky_terrain_active)
+        extras["Curriculum/two_feet_phase"] = self._two_feet_curriculum_phase
+        extras["Curriculum/two_feet_above_height_reward_scale"] = self.cfg.two_feet_above_height_reward_scale
+        extras["Curriculum/track_lin_vel_xy_reward_scale"] = self.cfg.track_lin_vel_xy_reward_scale
         curriculum_idx = self.get_curriculum_global_idx()
         if curriculum_idx is not None:
             extras["Curriculum/global_idx"] = curriculum_idx
