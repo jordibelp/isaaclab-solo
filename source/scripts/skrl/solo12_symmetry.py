@@ -246,7 +246,7 @@ def _uses_front_back_symmetry(env: Any) -> bool:
         visited.add(id(current))
         cfg = getattr(current, "cfg", None)
         if cfg is not None and hasattr(cfg, "front_back_asymetry"):
-            return bool(getattr(cfg, "front_back_asymetry"))
+            return not bool(getattr(cfg, "front_back_asymetry"))
         candidates.extend(
             getattr(current, name, None)
             for name in ("unwrapped", "env", "_env", "venv")
@@ -606,7 +606,7 @@ def compute_symmetric_observations_actions(
     Returns:
         A tuple ``(obs_aug, actions_aug)`` where each non-``None`` tensor has the batch dimension
         multiplied by 4 in the order ``[identity, reflect_x, reflect_y, rotate_180]``. If
-        ``env.cfg.front_back_asymetry`` is false, only ``[identity, reflect_x]`` is used.
+        ``env.cfg.front_back_asymetry`` is true, only ``[identity, reflect_x]`` is used.
     """
     if obs_type != "policy":
         raise ValueError(f"Solo12 symmetry only supports obs_type='policy'. Got: {obs_type}")
