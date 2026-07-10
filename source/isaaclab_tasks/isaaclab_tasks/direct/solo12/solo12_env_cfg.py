@@ -488,6 +488,7 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     # terrain damping
     compliant_contact_stiffness: float | None = 0.0  # 3_005.0
     compliant_contact_damping: float | None = 0.0  # 60.0
+    enabled_self_collisions = False
 
     tracking_std = math.sqrt(0.25)
     feet_air_time_threshold = 0.5
@@ -598,6 +599,7 @@ class Solo12EnvCfg(DirectRLEnvCfg):
             self.terrain.use_terrain_origins = True
 
     def _apply_runtime_overrides_to_nested_cfg(self):
+        self.robot.spawn.articulation_props.enabled_self_collisions = bool(self.enabled_self_collisions)
         self.robot.actuators["legs"].stiffness = self.kp
         self.robot.actuators["legs"].damping = self.kd
         self.terrain.physics_material.compliant_contact_stiffness = _optional_compliant_contact_value(
