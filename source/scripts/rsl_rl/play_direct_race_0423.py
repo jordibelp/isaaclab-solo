@@ -2079,6 +2079,9 @@ class SlipConeVisualizer:
             "vx",
             "vy",
             "vz",
+            "contact_x",
+            "contact_y",
+            "contact_z",
             "normal_force_x",
             "normal_force_y",
             "normal_force_z",
@@ -2118,6 +2121,9 @@ class SlipConeVisualizer:
         friction_force = state.get("friction_force_w")
         if friction_force is None:
             friction_force = np.zeros(3, dtype=np.float64)
+        contact_pos = state.get("foot_pos_w")
+        if contact_pos is None:
+            contact_pos = np.zeros(3, dtype=np.float64)
         self._csv_writer.writerow(
             [
                 int(policy_step),
@@ -2133,6 +2139,9 @@ class SlipConeVisualizer:
                 f"{float(vel[0]):.6f}",
                 f"{float(vel[1]):.6f}",
                 f"{float(vel[2]):.6f}",
+                f"{float(contact_pos[0]):.6f}",
+                f"{float(contact_pos[1]):.6f}",
+                f"{float(contact_pos[2]):.6f}",
                 f"{float(normal_force[0]):.6f}",
                 f"{float(normal_force[1]):.6f}",
                 f"{float(normal_force[2]):.6f}",
@@ -5097,7 +5106,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
 
         print(f"[INFO] Loading model checkpoint from: {resume_path}")
-        runner.load(resume_path)
+        # Play mode never steps the optimizer; skipping it avoids param-group mismatches with
+        # checkpoints trained under agent.weight_decay (std params split into a decay-free group).
+        runner.load(resume_path, load_optimizer=False)
         policy = runner.get_inference_policy(device=vec_env.unwrapped.device)
 
     obs = vec_env.get_observations()
