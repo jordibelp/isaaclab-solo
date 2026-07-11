@@ -482,7 +482,7 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     track_lin_vel_xy_reward_scale_curriculum = (1.3, 1.8, 1.5, 1.5)
     three_or_more_feet_contact_penalty_reward_scale_curriculum = (-0.3, -0.3, -1.0, -1.2)
     two_feet_above_height_alpha_curriculum = (7.0, 8.0, 8.0,8.0)
-    two_feet_above_height_threshold_curriculum = (0.5, 0.5, 0.5,0.5)
+    two_feet_above_height_threshold_curriculum = (0.5,0.5, 0.5,0.5)
     actuation_delay_range_curriculum = ((0, 0), (0, 0), (0, 2),(0, 3))
     tricky_terrain_curriculum = (False, False, False,True)
     opposite_direction_cmd_prob_curriculum = (0.0, 0.0, 0.03, 0.05)

@@ -7,13 +7,14 @@ Implements the four metrics of Appendix B in "The Impact of On-Policy
 Parallelized Data Collection on Deep Reinforcement Learning Networks"
 (arXiv:2506.03404):
 
-  (a) feature rank      - approximate rank fraction (Yang et al. 2019): smallest k
-                          such that the top-k squared singular values of the
-                          feature matrix retain >= 99% of the total squared-
-                          singular-value energy, divided by that layer's feature
-                          count. ``feature_rank`` keeps the last-hidden-activation
-                          value; ``feature_rank_i`` reports layer i. ``feature_num``
-                          and ``feature_num_i`` report the layer widths.
+  (a) feature rank      - approximate rank (Yang et al. 2019): smallest k such
+                          that the top-k squared singular values of the feature
+                          matrix retain >= 99% of the total squared-singular-
+                          value energy. ``feature_rank`` reports the median raw
+                          rank (in units/neurons) across the hidden layers;
+                          ``feature_rank_i`` reports layer i's rank divided by
+                          that layer's feature count. ``feature_num`` and
+                          ``feature_num_i`` report the layer widths.
   (b) % dormant units   - percentage of hidden units whose mean |activation| over
                           a batch is below eps=1e-5 (the paper's reading of
                           Sokar et al. 2023). The Sokar-normalized variant
@@ -192,7 +193,13 @@ def activation_plasticity_metrics(
         rank / float(num_features) if num_features > 0 else float("nan")
         for rank, num_features in zip(layer_ranks, layer_nums)
     ]
-    metrics["feature_rank"] = layer_rank_fractions[-1]
+    finite_ranks = sorted(rank for rank in layer_ranks if rank == rank)
+    if finite_ranks:
+        mid = len(finite_ranks) // 2
+        median_rank = finite_ranks[mid] if len(finite_ranks) % 2 else 0.5 * (finite_ranks[mid - 1] + finite_ranks[mid])
+    else:
+        median_rank = float("nan")
+    metrics["feature_rank"] = median_rank
     metrics["feature_num"] = float(layer_nums[-1])
     metrics.update({f"feature_rank_{i}": rank for i, rank in enumerate(layer_rank_fractions)})
     metrics.update({f"feature_num_{i}": float(num_features) for i, num_features in enumerate(layer_nums)})
