@@ -351,6 +351,10 @@ class Solo12Env(DirectRLEnv):
     def _max_two_feet_curriculum_action_delay(self) -> int:
         return max(int(delay_range[1]) for delay_range in self.cfg.actuation_delay_range_curriculum)
 
+    def _two_feet_curriculum_advance_metric_key(self, transition_idx: int) -> str:
+        use_vx = self._curriculum_values(self.cfg.two_feet_curriculum_advance_thresholds_vx_indicator)[transition_idx]
+        return "track_lin_vel_xy_exp" if use_vx else "two_feet_above_height"
+
     def _validate_two_feet_curriculum_config(self):
         phase_fields = {
             "two_feet_above_height_reward_scale_curriculum": self.cfg.two_feet_above_height_reward_scale_curriculum,
@@ -363,6 +367,7 @@ class Solo12Env(DirectRLEnv):
             "actuation_delay_range_curriculum": self.cfg.actuation_delay_range_curriculum,
             "tricky_terrain_curriculum": self.cfg.tricky_terrain_curriculum,
             "opposite_direction_cmd_prob_curriculum": self.cfg.opposite_direction_cmd_prob_curriculum,
+            "front_back_asymetry_curriculum": self.cfg.front_back_asymetry_curriculum,
         }
         phase_count = self._two_feet_curriculum_phase_count()
         if phase_count < 1:
@@ -371,21 +376,18 @@ class Solo12Env(DirectRLEnv):
             if len(values) != phase_count:
                 raise ValueError(f"{name} must have {phase_count} values, got {len(values)}.")
 
-        advance_metric_keys = self._curriculum_values(self.cfg.two_feet_curriculum_advance_metric_keys)
         advance_thresholds = self._curriculum_values(self.cfg.two_feet_curriculum_advance_thresholds)
-        if len(advance_metric_keys) != phase_count - 1:
-            raise ValueError(
-                "two_feet_curriculum_advance_metric_keys must have one value per phase transition, "
-                f"got {len(advance_metric_keys)} for {phase_count} phases."
-            )
+        advance_vx_indicators = self._curriculum_values(self.cfg.two_feet_curriculum_advance_thresholds_vx_indicator)
         if len(advance_thresholds) != phase_count - 1:
             raise ValueError(
                 "two_feet_curriculum_advance_thresholds must have one value per phase transition, "
                 f"got {len(advance_thresholds)} for {phase_count} phases."
             )
-        invalid_metrics = [key for key in advance_metric_keys if key not in _EPISODE_REWARD_KEYS]
-        if invalid_metrics:
-            raise ValueError(f"Unknown two-feet curriculum advance metrics: {invalid_metrics}.")
+        if len(advance_vx_indicators) != phase_count - 1:
+            raise ValueError(
+                "two_feet_curriculum_advance_thresholds_vx_indicator must have one value per phase transition, "
+                f"got {len(advance_vx_indicators)} for {phase_count} phases."
+            )
         for i, threshold in enumerate(advance_thresholds):
             if threshold < 0.0:
                 raise ValueError(f"two_feet_curriculum_advance_thresholds[{i}] must be non-negative, got {threshold}.")
@@ -626,6 +628,7 @@ class Solo12Env(DirectRLEnv):
         self.cfg.opposite_direction_cmd_prob = self._two_feet_curriculum_value(
             "opposite_direction_cmd_prob", phase
         )
+        self.cfg.front_back_asymetry = bool(self._two_feet_curriculum_value("front_back_asymetry", phase))
         self._refresh_tricky_terrain_origins(force=True)
 
     def _update_two_feet_curriculum(self, completed_env_ids: torch.Tensor):
@@ -637,7 +640,7 @@ class Solo12Env(DirectRLEnv):
             return
 
         transition_idx = self._two_feet_curriculum_phase_index()
-        metric_key = self.cfg.two_feet_curriculum_advance_metric_keys[transition_idx]
+        metric_key = self._two_feet_curriculum_advance_metric_key(transition_idx)
         threshold = self.cfg.two_feet_curriculum_advance_thresholds[transition_idx]
         reward_metric = self._episode_reward_metric(metric_key, completed_env_ids)
         if reward_metric > threshold:

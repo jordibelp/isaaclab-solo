@@ -464,17 +464,21 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     curriculum_two_feet = False
     # True makes front/back behavior task-asymmetric: symmetry augmentation drops front/back transforms,
     # and the two-feet lift reward targets the front feet only.
+    # When curriculum_two_feet is enabled, front_back_asymetry_curriculum overrides this per phase.
     front_back_asymetry = False
-    two_feet_curriculum_advance_metric_keys = ("two_feet_above_height", "track_lin_vel_xy_exp")
-    two_feet_curriculum_advance_thresholds = (1.5, 1.44)
-    two_feet_above_height_reward_scale_curriculum = (1.8, 1.3, 1.5)
-    track_lin_vel_xy_reward_scale_curriculum = (1.3, 1.8, 1.5)
-    three_or_more_feet_contact_penalty_reward_scale_curriculum = (-0.3, -0.3, -0.3)
-    two_feet_above_height_alpha_curriculum = (7.0, 8.0, 8.0)
-    two_feet_above_height_threshold_curriculum = (0.5, 0.6, 0.6)
-    actuation_delay_range_curriculum = ((0, 0), (0, 0), (0, 3))
-    tricky_terrain_curriculum = (False, False, True)
-    opposite_direction_cmd_prob_curriculum = (0.0, 0.0, 0.05)
+    front_back_asymetry_curriculum = [False, False, True, True]
+    two_feet_curriculum_advance_thresholds = (1.5, 1.44, 1.2)
+    # Per phase transition: True gates on Episode_Reward/track_lin_vel_xy_exp,
+    # False on Episode_Reward/two_feet_above_height.
+    two_feet_curriculum_advance_thresholds_vx_indicator = (False, True, False)
+    two_feet_above_height_reward_scale_curriculum = (1.8, 1.3, 1.5, 1.5)
+    track_lin_vel_xy_reward_scale_curriculum = (1.3, 1.8, 1.5, 1.5)
+    three_or_more_feet_contact_penalty_reward_scale_curriculum = (-0.3, -0.3, -1.0, -1.2)
+    two_feet_above_height_alpha_curriculum = (7.0, 8.0, 8.0,8.0)
+    two_feet_above_height_threshold_curriculum = (0.5, 0.5, 0.5,0.5)
+    actuation_delay_range_curriculum = ((0, 0), (0, 0), (0, 2),(0, 3))
+    tricky_terrain_curriculum = (False, False, False,True)
+    opposite_direction_cmd_prob_curriculum = (0.0, 0.0, 0.03, 0.05)
 
     # Values larger than the available curriculum range are clipped to the final curriculum index.
     curriculum_tricky_terrain_idx: None | int = 2
