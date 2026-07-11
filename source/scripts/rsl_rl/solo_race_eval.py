@@ -1004,7 +1004,9 @@ def _load_policy(
         raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
 
     print(f"[INFO] Loading model checkpoint from: {resume_path}", flush=True)
-    runner.load(resume_path)
+    # Eval never steps the optimizer; skipping it avoids param-group mismatches with
+    # checkpoints trained under agent.weight_decay (std params split into a decay-free group).
+    runner.load(resume_path, load_optimizer=False)
     return runner, runner.get_inference_policy(device=vec_env.unwrapped.device)
 
 
