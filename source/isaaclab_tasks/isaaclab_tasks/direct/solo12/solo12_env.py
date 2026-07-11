@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import math
+
 import gymnasium as gym
 import torch
 
@@ -171,6 +173,7 @@ class Solo12Env(DirectRLEnv):
         self.cfg.terrain.env_spacing = self.scene.cfg.env_spacing
         self._terrain = self.cfg.terrain.class_type(self.cfg.terrain)
         self._terrain_height_wp_mesh = self._build_terrain_height_query_mesh()
+        self._spawn_flat_terrain_grid_overlay()
 
         self.scene.clone_environments(copy_from_source=False)
         if self.device == "cpu":
@@ -178,6 +181,126 @@ class Solo12Env(DirectRLEnv):
 
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
+
+    def _spawn_flat_terrain_grid_overlay(self):
+        if not bool(getattr(self.cfg, "flat_terrain_grid_enabled", False)):
+            return
+
+        terrain_origins = getattr(self._terrain, "terrain_origins", None)
+        terrain_generator_cfg = getattr(self.cfg.terrain, "terrain_generator", None)
+
+        if terrain_origins is not None and terrain_generator_cfg is not None:
+            rows = tuple(int(row) for row in self.cfg.flat_terrain_grid_rows)
+            cols = tuple(int(col) for col in self.cfg.flat_terrain_grid_cols)
+            if not rows or not cols:
+                return
+
+            num_rows, num_cols = terrain_origins.shape[:2]
+            invalid_rows = [row for row in rows if row < 0 or row >= num_rows]
+            invalid_cols = [col for col in cols if col < 0 or col >= num_cols]
+            if invalid_rows or invalid_cols:
+                raise ValueError(
+                    "flat_terrain_grid_rows/cols must index generated terrain origins; "
+                    f"invalid rows={invalid_rows}, invalid cols={invalid_cols}, origins_shape={terrain_origins.shape}."
+                )
+            tile_size_x, tile_size_y = (float(value) for value in terrain_generator_cfg.size)
+        else:
+            # Fallback for plane terrain: spawn a large grid centered at the origin.
+            rows = (0,)
+            cols = (0,)
+            terrain_origins = torch.zeros((1, 1, 3))
+            tile_size_x, tile_size_y = (100.0, 100.0)
+
+        tile_size_x, tile_size_y = (float(value) for value in (tile_size_x, tile_size_y))
+        spacing = float(self.cfg.flat_terrain_grid_spacing)
+        line_width = float(self.cfg.flat_terrain_grid_line_width)
+        z_offset = float(self.cfg.flat_terrain_grid_z_offset)
+        if spacing <= 0.0 or line_width <= 0.0:
+            raise ValueError(
+                "flat_terrain_grid_spacing and flat_terrain_grid_line_width must be positive, "
+                f"got spacing={spacing}, line_width={line_width}."
+            )
+
+        grid_color = tuple(float(channel) for channel in self.cfg.flat_terrain_grid_color)
+        if len(grid_color) != 3 or any(channel < 0.0 or channel > 1.0 for channel in grid_color):
+            raise ValueError(f"flat_terrain_grid_color must contain three values in [0, 1], got {grid_color}.")
+
+        grid_prim_path = f"{self.cfg.terrain.prim_path}/flat_grid_overlay"
+        stage = sim_utils.get_current_stage()
+        if stage.GetPrimAtPath(grid_prim_path).IsValid():
+            return
+
+        import numpy as np
+        import trimesh
+        from isaaclab.terrains import create_prim_from_mesh
+
+        def line_offsets(length: float) -> list[float]:
+            offsets = [min(i * spacing, length) for i in range(int(math.floor(length / spacing)) + 1)]
+            if not math.isclose(offsets[-1], length):
+                offsets.append(length)
+            return offsets
+
+        vertices: list[tuple[float, float, float]] = []
+        faces: list[tuple[int, int, int]] = []
+        rectangle_keys: set[tuple[float, float, float, float, float]] = set()
+
+        def add_rectangle(x_min: float, x_max: float, y_min: float, y_max: float, z: float):
+            key = tuple(round(value, 6) for value in (x_min, x_max, y_min, y_max, z))
+            if key in rectangle_keys:
+                return
+            rectangle_keys.add(key)
+
+            vertex_start = len(vertices)
+            vertices.extend(
+                (
+                    (x_min, y_min, z),
+                    (x_max, y_min, z),
+                    (x_max, y_max, z),
+                    (x_min, y_max, z),
+                )
+            )
+            faces.extend(
+                (
+                    (vertex_start, vertex_start + 1, vertex_start + 2),
+                    (vertex_start, vertex_start + 2, vertex_start + 3),
+                )
+            )
+
+        x_offsets = line_offsets(tile_size_x)
+        y_offsets = line_offsets(tile_size_y)
+        half_width = 0.5 * line_width
+
+        for row in rows:
+            for col in cols:
+                origin = terrain_origins[row, col]
+                if isinstance(origin, torch.Tensor):
+                    origin = origin.detach().cpu().tolist()
+                center_x, center_y, center_z = (float(value) for value in origin)
+                x_min = center_x - 0.5 * tile_size_x
+                y_min = center_y - 0.5 * tile_size_y
+                z = center_z + z_offset
+
+                for x_offset in x_offsets:
+                    x = x_min + x_offset
+                    add_rectangle(x - half_width, x + half_width, y_min, y_min + tile_size_y, z)
+                for y_offset in y_offsets:
+                    y = y_min + y_offset
+                    add_rectangle(x_min, x_min + tile_size_x, y - half_width, y + half_width, z)
+
+        if not vertices:
+            return
+
+        grid_mesh = trimesh.Trimesh(
+            vertices=np.asarray(vertices, dtype=np.float32),
+            faces=np.asarray(faces, dtype=np.int64),
+            process=False,
+        )
+        grid_material = sim_utils.PreviewSurfaceCfg(diffuse_color=grid_color, roughness=0.8, metallic=0.0)
+
+        create_prim_from_mesh(grid_prim_path, grid_mesh, visual_material=grid_material)
+        sim_utils.define_collision_properties(
+            f"{grid_prim_path}/mesh", sim_utils.CollisionPropertiesCfg(collision_enabled=False)
+        )
 
     def _apply_configured_base_mass(self):
         if self.cfg.base_mass is None:

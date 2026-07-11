@@ -248,6 +248,13 @@ def _proportional_tricky_spawn_columns(
 SOLO12_TRICKY_TERRAIN_SPAWN_ROWS = (4, 5)
 # Inactive-curriculum fallback: spawn on the inner flat column (index 2), away from the world edge.
 SOLO12_TRICKY_TERRAIN_FLAT_COLS = (2,)
+# Visual grid defaults cover the generated flat terrain columns, so inference has motion cues on the floor.
+SOLO12_TRICKY_TERRAIN_GRID_ROWS = tuple(range(SOLO12_TRICKY_TERRAINS_CFG.num_rows))
+SOLO12_TRICKY_TERRAIN_GRID_COLS = tuple(
+    col
+    for col, terrain_name in enumerate(_curriculum_subterrain_per_column(SOLO12_TRICKY_TERRAINS_CFG))
+    if terrain_name == "flat"
+)
 # Active curriculum: spawn on the tricky (non-flat) columns, dropping the outer two columns on each
 # side (fall-off-world risk). Per-column weights make the spawn share of each terrain type follow its
 # proportion, so the higher-proportion terrain receives proportionally more spawns.
@@ -489,6 +496,13 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     # Per-column spawn weights aligned with tricky_terrain_cols; proportion-matched (see
     # _proportional_tricky_spawn_columns). None falls back to uniform sampling over the columns.
     tricky_terrain_col_weights = SOLO12_TRICKY_TERRAIN_COL_WEIGHTS
+    flat_terrain_grid_enabled = False
+    flat_terrain_grid_rows = SOLO12_TRICKY_TERRAIN_GRID_ROWS
+    flat_terrain_grid_cols = SOLO12_TRICKY_TERRAIN_GRID_COLS
+    flat_terrain_grid_spacing = 1.0
+    flat_terrain_grid_line_width = 0.025
+    flat_terrain_grid_z_offset = 0.006
+    flat_terrain_grid_color = (0.85, 0.92, 1.0)
     # terrain damping
     compliant_contact_stiffness: float | None = 0.0  # 3_005.0
     compliant_contact_damping: float | None = 0.0  # 60.0
@@ -722,6 +736,7 @@ class Solo12TwoFeetEnvCfg(Solo12EnvCfg):
     enable_observation_corruption = True
     tricky_terrain = True
     curriculum_two_feet = True
+    flat_terrain_grid_enabled = True
     front_back_asymetry = False
     base_push_force_z_range = (0.0, 0.0)
     forces_applied_to_base_curriculum = [0.0]
