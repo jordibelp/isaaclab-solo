@@ -13,6 +13,7 @@ Adds:
 """
 
 import argparse
+import copy
 import inspect
 import importlib.metadata as metadata
 import os
@@ -269,6 +270,17 @@ parser.add_argument(
         "Run the round-wise observation permutation experiment from arXiv:2405.19153. "
         "Round duration and count come from env.duration_plasticity_exp_iteration and "
         "env.num_plasticity_exp_iterations."
+    ),
+)
+parser.add_argument(
+    "--plasticity-loss-exp-reset-all",
+    "--plasticity_loss_exp_reset_all",
+    dest="plasticity_loss_exp_reset_all",
+    action="store_true",
+    default=False,
+    help=(
+        "Reset the full actor-critic and optimizer at every observation-permutation boundary. "
+        "Requires --plasticity-loss-exp and provides the paper's reset-all control."
     ),
 )
 parser.add_argument("--distributed", action="store_true", default=False, help="Run training with multiple GPUs or nodes.")
@@ -1616,6 +1628,8 @@ def _patch_runner_learn_with_periodic_eval_video(runner, recorder) -> None:
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     agent_cfg = cli_args.update_rsl_rl_cfg(agent_cfg, args_cli)
+    if args_cli.plasticity_loss_exp_reset_all and not args_cli.plasticity_loss_exp:
+        raise ValueError("--plasticity-loss-exp-reset-all requires --plasticity-loss-exp.")
     if args_cli.run_name is not None:
         agent_cfg.run_name = args_cli.run_name
     if args_cli.shared_networks:
@@ -1649,6 +1663,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     elif args_cli.checkpoint is not None and not agent_cfg.resume:
         print("[INFO]: --checkpoint was provided; enabling resume automatically.")
         agent_cfg.resume = True
+    if args_cli.plasticity_loss_exp_reset_all and (
+        args_cli.reuse_mlp or dagger_adapter_checkpoint_arg is not None
+    ):
+        raise ValueError(
+            "--plasticity-loss-exp-reset-all is a from-scratch control and cannot be combined with "
+            "--reuse-mlp or DAgger-adapter initialization."
+        )
 
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
     agent_cfg.max_iterations = args_cli.max_iterations if args_cli.max_iterations is not None else agent_cfg.max_iterations
@@ -1763,6 +1784,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         full_run_name += "_cbp"
     if args_cli.plasticity_loss_exp:
         full_run_name += "_permute-plasticity"
+    if args_cli.plasticity_loss_exp_reset_all:
+        full_run_name += "_reset-all"
     if getattr(agent_cfg.policy, "shared_networks", False):
         full_run_name += "_shared-networks"
 
@@ -1859,6 +1882,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
 
     runner.add_git_repo_to_log(__file__)
+    reset_all_initial_policy_state = (
+        observation_permutation.clone_state_dict(runner.alg.policy.state_dict())
+        if args_cli.plasticity_loss_exp_reset_all
+        else None
+    )
     loaded_checkpoint_infos = None
     if args_cli.reuse_mlp:
         print(f"[INFO]: Reusing actor/critic MLP weights from checkpoint: {resume_path}")
@@ -1877,9 +1905,28 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     _apply_agent_weight_decay_to_optimizer(runner, agent_cfg)
     _apply_agent_adam_betas_to_optimizer(runner, agent_cfg)
     cbp_manager = _attach_continual_backprop_to_runner(runner, args_cli)
+    reset_all_initial_cbp_state = (
+        copy.deepcopy(cbp_manager.state_dict())
+        if args_cli.plasticity_loss_exp_reset_all and cbp_manager is not None
+        else None
+    )
     if cbp_manager is not None and should_resume and not args_cli.reuse_mlp:
         _restore_cbp_state_from_checkpoint(cbp_manager, resume_path)
     _attach_plasticity_metrics_to_runner(runner, args_cli)
+    reset_all_controller = None
+    if args_cli.plasticity_loss_exp_reset_all:
+        reset_all_controller = observation_permutation.ResetAllController(
+            runner,
+            initial_policy_state=reset_all_initial_policy_state,
+            learning_rate=float(agent_cfg.algorithm.learning_rate),
+            initial_cbp_state=reset_all_initial_cbp_state,
+        )
+        print(
+            "[INFO]: Plasticity reset-all control enabled: actor/critic layers, observation normalizers, "
+            "action-noise state, optimizer state, learning rate, and CBP state (when enabled) will reset "
+            "at every permutation boundary.",
+            flush=True,
+        )
 
     dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
     dump_yaml(os.path.join(log_dir, "params", "agent.yaml"), agent_cfg)
@@ -2061,15 +2108,37 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
             locs = log_args[0]
             iteration = int(locs["it"])
+            permutation_boundary = (
+                (iteration + 1) % env.round_duration == 0
+                and env.round_index < env.num_rounds - 1
+            )
             if getattr(runner, "writer", None) is not None:
                 for name, value in env.logging_values(iteration).items():
                     runner.writer.add_scalar(f"PlasticityExperiment/{name}", value, iteration)
+                runner.writer.add_scalar(
+                    "PlasticityExperiment/reset_all_enabled",
+                    int(reset_all_controller is not None),
+                    iteration,
+                )
+                runner.writer.add_scalar(
+                    "PlasticityExperiment/network_resets_total",
+                    0 if reset_all_controller is None else reset_all_controller.reset_count,
+                    iteration,
+                )
+                runner.writer.add_scalar(
+                    "PlasticityExperiment/network_reset_event",
+                    int(permutation_boundary and reset_all_controller is not None),
+                    iteration,
+                )
 
             if env.finish_learning_iteration(iteration, locs["obs"]):
+                if reset_all_controller is not None:
+                    reset_all_controller.reset()
                 print(
                     "[INFO]: Plasticity experiment switched observation mapping after learning iteration "
                     f"{iteration} (next permutation index={env.round_index}, "
-                    f"permutations seen={env.round_index + 1}/{env.num_rounds}).",
+                    f"permutations seen={env.round_index + 1}/{env.num_rounds}, "
+                    f"network reset={'yes' if reset_all_controller is not None else 'no'}).",
                     flush=True,
                 )
 

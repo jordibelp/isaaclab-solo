@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
+from torch import nn
 from rsl_rl.env import VecEnv
 from tensordict import TensorDict
 
@@ -15,6 +17,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from observation_permutation import (  # noqa: E402
     ObservationPermutationVecEnv,
+    ResetAllController,
     compute_permutation_aware_symmetry,
 )
 
@@ -123,6 +126,55 @@ def test_symmetry_sees_semantic_order_then_reapplies_permutation() -> None:
     torch.testing.assert_close(semantic["policy"][:3], canonical["policy"])
     torch.testing.assert_close(semantic["policy"][3:], -canonical["policy"])
     torch.testing.assert_close(symmetric_actions, torch.cat((actions, -actions), dim=0))
+
+
+class TinyActorCritic(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.actor = nn.Sequential(nn.Linear(4, 8), nn.ELU(), nn.Linear(8, 2))
+        self.critic = nn.Sequential(nn.Linear(4, 8), nn.ELU(), nn.Linear(8, 1))
+        self.log_std = nn.Parameter(torch.zeros(2))
+        self.register_buffer("normalizer_mean", torch.zeros(4))
+
+
+def test_reset_all_freshly_initializes_network_and_clears_training_state() -> None:
+    torch.manual_seed(7)
+    policy = TinyActorCritic()
+    optimizer = torch.optim.Adam(policy.parameters(), lr=3.0e-4)
+    algorithm = SimpleNamespace(policy=policy, optimizer=optimizer, learning_rate=3.0e-4, rnd=None)
+    runner = SimpleNamespace(alg=algorithm)
+    controller = ResetAllController(runner)
+
+    initial_actor_weight = policy.actor[0].weight.detach().clone()
+    initial_log_std = policy.log_std.detach().clone()
+    initial_normalizer_mean = policy.normalizer_mean.detach().clone()
+
+    loss = sum(parameter.square().sum() for parameter in policy.parameters())
+    loss.backward()
+    optimizer.step()
+    policy.normalizer_mean.fill_(5.0)
+    algorithm.learning_rate = 1.0e-5
+    for group in optimizer.param_groups:
+        group["lr"] = 1.0e-5
+    learned_actor_weight = policy.actor[0].weight.detach().clone()
+    assert optimizer.state
+
+    controller.reset()
+
+    assert controller.reset_count == 1
+    assert not torch.equal(policy.actor[0].weight, learned_actor_weight)
+    assert not torch.equal(policy.actor[0].weight, initial_actor_weight)
+    torch.testing.assert_close(policy.log_std, initial_log_std)
+    torch.testing.assert_close(policy.normalizer_mean, initial_normalizer_mean)
+    assert not optimizer.state
+    assert algorithm.learning_rate == pytest.approx(3.0e-4)
+    assert optimizer.param_groups[0]["lr"] == pytest.approx(3.0e-4)
+    assert all(parameter.grad is None for parameter in policy.parameters())
+
+    first_reset_weight = policy.actor[0].weight.detach().clone()
+    controller.reset()
+    assert controller.reset_count == 2
+    assert not torch.equal(policy.actor[0].weight, first_reset_weight)
 
 
 @pytest.mark.parametrize("duration,rounds", [(0, 2), (2, 0), (-1, 2), (2, -1)])

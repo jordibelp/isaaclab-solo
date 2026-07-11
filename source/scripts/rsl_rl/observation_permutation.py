@@ -5,12 +5,91 @@
 
 from __future__ import annotations
 
+import copy
 from collections.abc import Callable
 from typing import Any
 
 import torch
 from rsl_rl.env import VecEnv
 from tensordict import TensorDict
+
+
+def clone_state_dict(state_dict: dict[str, Any]) -> dict[str, Any]:
+    """Clone a module state without retaining references to live tensors."""
+
+    return {
+        key: value.detach().clone() if isinstance(value, torch.Tensor) else copy.deepcopy(value)
+        for key, value in state_dict.items()
+    }
+
+
+class ResetAllController:
+    """Implement the paper's fresh-network reset-all control between rounds."""
+
+    def __init__(
+        self,
+        runner: Any,
+        *,
+        initial_policy_state: dict[str, Any] | None = None,
+        learning_rate: float | None = None,
+        initial_cbp_state: dict[str, Any] | None = None,
+    ) -> None:
+        if getattr(runner.alg, "rnd", None):
+            raise ValueError("Reset-all does not yet support RND auxiliary networks.")
+        self.runner = runner
+        self.policy = runner.alg.policy
+        self.optimizer = runner.alg.optimizer
+        self.initial_policy_state = clone_state_dict(
+            self.policy.state_dict() if initial_policy_state is None else initial_policy_state
+        )
+        self.learning_rate = float(
+            runner.alg.learning_rate if learning_rate is None else learning_rate
+        )
+        self.initial_group_lrs = [self.learning_rate for _ in self.optimizer.param_groups]
+        self.cbp_manager = getattr(runner, "_borinot_cbp_manager", None)
+        if initial_cbp_state is None and self.cbp_manager is not None:
+            initial_cbp_state = self.cbp_manager.state_dict()
+        self.initial_cbp_state = copy.deepcopy(initial_cbp_state)
+        self.reset_count = 0
+
+    @staticmethod
+    def _reset_leaf_modules(module: torch.nn.Module) -> int:
+        reset_count = 0
+        with torch.no_grad():
+            for child in module.modules():
+                if child is module or any(child.children()):
+                    continue
+                reset_parameters = getattr(child, "reset_parameters", None)
+                if callable(reset_parameters):
+                    reset_parameters()
+                    reset_count += 1
+        return reset_count
+
+    def reset(self) -> None:
+        # Restore non-layer state (normalizers, exploration parameters, and any
+        # custom buffers), then freshly sample every resettable leaf layer.
+        # RSL updates empirical-normalizer buffers inside inference mode, so
+        # those buffers must also be restored under inference mode.
+        with torch.inference_mode():
+            self.policy.load_state_dict(self.initial_policy_state)
+            reset_modules = self._reset_leaf_modules(self.policy)
+        if reset_modules == 0:
+            raise RuntimeError("Reset-all found no resettable actor-critic layers.")
+
+        self.optimizer.state.clear()
+        for parameter in self.policy.parameters():
+            parameter.grad = None
+        self.runner.alg.learning_rate = self.learning_rate
+        self.optimizer.defaults["lr"] = self.learning_rate
+        for group, initial_lr in zip(self.optimizer.param_groups, self.initial_group_lrs, strict=True):
+            group["lr"] = initial_lr
+
+        if self.cbp_manager is not None and self.initial_cbp_state is not None:
+            self.cbp_manager.load_state_dict(copy.deepcopy(self.initial_cbp_state))
+            for group in self.cbp_manager.groups:
+                group._last_features = None
+
+        self.reset_count += 1
 
 
 class ObservationPermutationVecEnv(VecEnv):
