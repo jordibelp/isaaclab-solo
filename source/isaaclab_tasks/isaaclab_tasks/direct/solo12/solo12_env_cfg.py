@@ -384,6 +384,12 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     teacher_encoder_hidden_dims = [256, 128, 64]
     feed_history_encoding_to_critic = False
 
+    # Round-wise input-permutation experiment (arXiv:2405.19153). These values
+    # are used only when train.py receives --plasticity-loss-exp. A "step" here
+    # is one RSL-RL learning iteration, matching the default W&B x-axis.
+    duration_plasticity_exp_iteration = 300
+    num_plasticity_exp_iterations = 20
+
     # Base IMU history for student TCN: one sample per physics step.
     # With decimation=4 and policy_steps=3, this gives 13 samples covering t-3 ... t.
     base_imu_history_policy_steps = 3

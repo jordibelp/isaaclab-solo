@@ -8,6 +8,7 @@ Adds:
 - borinot-style W&B init naming/config
 - code/config snapshot artifact upload
 - Solo12 symmetry mode toggles (none / augmentation / loss / both)
+- round-wise observation permutations for plasticity-loss experiments
 - run naming compatible with the current skrl conventions
 """
 
@@ -258,6 +259,18 @@ parser.add_argument(
         "Defaults to the training environment count."
     ),
 )
+parser.add_argument(
+    "--plasticity-loss-exp",
+    "--plasticity_loss_exp",
+    dest="plasticity_loss_exp",
+    action="store_true",
+    default=False,
+    help=(
+        "Run the round-wise observation permutation experiment from arXiv:2405.19153. "
+        "Round duration and count come from env.duration_plasticity_exp_iteration and "
+        "env.num_plasticity_exp_iterations."
+    ),
+)
 parser.add_argument("--distributed", action="store_true", default=False, help="Run training with multiple GPUs or nodes.")
 parser.add_argument("--export_io_descriptors", action="store_true", default=False, help="Export IO descriptors.")
 parser.add_argument(
@@ -340,6 +353,25 @@ def _sync_base_imu_policy_cfg_from_env_cfg(env_cfg, agent_cfg) -> None:
             setattr(policy_cfg, policy_field, getattr(env_cfg, env_field))
 
 
+def _plasticity_permutation_cfg(env_cfg) -> tuple[int, int]:
+    """Read and validate the round schedule requested through the environment config."""
+
+    required_fields = ("duration_plasticity_exp_iteration", "num_plasticity_exp_iterations")
+    missing = [name for name in required_fields if not hasattr(env_cfg, name)]
+    if missing:
+        raise ValueError(
+            "--plasticity-loss-exp requires an environment config with " + ", ".join(missing) + "."
+        )
+    duration = int(env_cfg.duration_plasticity_exp_iteration)
+    num_rounds = int(env_cfg.num_plasticity_exp_iterations)
+    if duration < 1 or num_rounds < 1:
+        raise ValueError(
+            "Plasticity experiment duration/count must be positive, got "
+            f"duration={duration}, num_rounds={num_rounds}."
+        )
+    return duration, num_rounds
+
+
 def _periodic_eval_video_requested(parsed_args) -> bool:
     return (
         _is_solo12_race_task_name(getattr(parsed_args, "task", None))
@@ -381,6 +413,7 @@ import torch
 from rsl_rl.runners import DistillationRunner, OnPolicyRunner
 
 import plasticity_metrics
+import observation_permutation
 from continual_backprop import build_continual_backprop_manager, collect_actor_critic_cbp_specs
 from isaaclab.envs import DirectMARLEnv, DirectMARLEnvCfg, DirectRLEnvCfg, ManagerBasedRLEnvCfg, multi_agent_to_single_agent
 from isaaclab.utils.dict import print_dict
@@ -1620,6 +1653,20 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
     agent_cfg.max_iterations = args_cli.max_iterations if args_cli.max_iterations is not None else agent_cfg.max_iterations
 
+    plasticity_exp_duration = None
+    plasticity_exp_num_rounds = None
+    if args_cli.plasticity_loss_exp:
+        plasticity_exp_duration, plasticity_exp_num_rounds = _plasticity_permutation_cfg(env_cfg)
+        scheduled_iterations = plasticity_exp_duration * plasticity_exp_num_rounds
+        if args_cli.max_iterations is None:
+            agent_cfg.max_iterations = scheduled_iterations
+        elif int(args_cli.max_iterations) != scheduled_iterations:
+            print(
+                "[WARN]: --max_iterations overrides the full plasticity experiment duration "
+                f"({int(args_cli.max_iterations)} requested vs {scheduled_iterations} configured).",
+                flush=True,
+            )
+
     env_cfg.seed = agent_cfg.seed
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
     if args_cli.within_episode_fric_resample is not None and hasattr(env_cfg, "within_episode_fric_resample"):
@@ -1637,6 +1684,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if args_cli.use_cbp and args_cli.distributed:
         raise ValueError("--use-cbp is currently single-process only; CBP replacement events are not synchronized across ranks.")
 
+    if args_cli.plasticity_loss_exp and args_cli.distributed:
+        raise ValueError(
+            "--plasticity-loss-exp is currently single-process only so every environment and optimizer "
+            "uses exactly the same permutation boundary."
+        )
+
     if args_cli.distributed and args_cli.device is not None and "cpu" in args_cli.device:
         raise ValueError(
             "Distributed training is not supported when using CPU device. Please use GPU device (e.g., --device cuda)."
@@ -1652,6 +1705,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     _sync_base_imu_policy_cfg_from_env_cfg(env_cfg, agent_cfg)
 
     symmetry_enabled = args_cli.symmetry_mode != "none"
+    symmetry_fn = None
     if symmetry_enabled:
         if agent_cfg.class_name != "OnPolicyRunner":
             raise ValueError("Symmetry mode currently requires the OnPolicyRunner / PPO path in RSL-RL.")
@@ -1678,11 +1732,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 "Symmetry mode is implemented for Solo12 direct locomotion/base-IMU tasks "
                 "and the Isaac-Solo12-Race-* direct tasks only."
             )
+        configured_symmetry_fn = (
+            observation_permutation.compute_permutation_aware_symmetry
+            if args_cli.plasticity_loss_exp
+            else symmetry_fn
+        )
         agent_cfg.algorithm.symmetry_cfg = RslRlSymmetryCfg(
             use_data_augmentation=args_cli.symmetry_mode in ("augmentation", "both"),
             use_mirror_loss=args_cli.symmetry_mode in ("loss", "both"),
             mirror_loss_coeff=args_cli.symmetry_loss_coeff,
-            data_augmentation_func=symmetry_fn,
+            data_augmentation_func=configured_symmetry_fn,
         )
 
     log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)
@@ -1702,6 +1761,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         full_run_name += f"_{symmetry_tag}"
     if args_cli.use_cbp:
         full_run_name += "_cbp"
+    if args_cli.plasticity_loss_exp:
+        full_run_name += "_permute-plasticity"
     if getattr(agent_cfg.policy, "shared_networks", False):
         full_run_name += "_shared-networks"
 
@@ -1775,6 +1836,20 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if agent_cfg.logger == "wandb":
         _patch_rsl_rl_wandb_writer_for_single_stream()
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
+    if args_cli.plasticity_loss_exp:
+        env = observation_permutation.ObservationPermutationVecEnv(
+            env,
+            round_duration=plasticity_exp_duration,
+            num_rounds=plasticity_exp_num_rounds,
+            seed=agent_cfg.seed,
+            symmetry_fn=symmetry_fn,
+        )
+        print(
+            "[INFO]: Plasticity-loss permutation experiment enabled "
+            f"({plasticity_exp_num_rounds} mappings x {plasticity_exp_duration} learning iterations; "
+            f"{env.total_learning_iterations} configured iterations total; seed={agent_cfg.seed}).",
+            flush=True,
+        )
 
     if agent_cfg.class_name == "OnPolicyRunner":
         runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
@@ -1795,6 +1870,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         print(f"[INFO]: Loading model checkpoint from: {resume_path}")
         _match_optimizer_param_groups_to_checkpoint(runner, resume_path)
         loaded_checkpoint_infos = runner.load(resume_path)
+    if args_cli.plasticity_loss_exp:
+        env.set_learning_iteration(runner.current_learning_iteration)
     if resume_path is not None:
         _sanitize_policy_action_std(runner)
     _apply_agent_weight_decay_to_optimizer(runner, agent_cfg)
@@ -1829,6 +1906,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         __file__,
                         _THIS_DIR / "continual_backprop.py",
                         _THIS_DIR / "plasticity_metrics.py",
+                        _THIS_DIR / "observation_permutation.py" if args_cli.plasticity_loss_exp else None,
                     ]
                     if path
                 ],
@@ -1973,6 +2051,30 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     runner.log = _log_with_best_model
 
+    if args_cli.plasticity_loss_exp:
+        log_before_permutation_update = runner.log
+
+        def _log_with_permutation_update(*log_args, **log_kwargs):
+            log_before_permutation_update(*log_args, **log_kwargs)
+            if not log_args:
+                return
+
+            locs = log_args[0]
+            iteration = int(locs["it"])
+            if getattr(runner, "writer", None) is not None:
+                for name, value in env.logging_values(iteration).items():
+                    runner.writer.add_scalar(f"PlasticityExperiment/{name}", value, iteration)
+
+            if env.finish_learning_iteration(iteration, locs["obs"]):
+                print(
+                    "[INFO]: Plasticity experiment switched observation mapping after learning iteration "
+                    f"{iteration} (next permutation index={env.round_index}, "
+                    f"permutations seen={env.round_index + 1}/{env.num_rounds}).",
+                    flush=True,
+                )
+
+        runner.log = _log_with_permutation_update
+
     if PERIODIC_EVAL_VIDEO_REQUESTED:
         if not isinstance(runner, OnPolicyRunner):
             print("[WARN]: Periodic eval videos are currently supported only for OnPolicyRunner; disabling.", flush=True)
@@ -2019,7 +2121,18 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 flush=True,
             )
 
-    runner.learn(num_learning_iterations=agent_cfg.max_iterations, init_at_random_ep_len=True)
+    num_learning_iterations = int(agent_cfg.max_iterations)
+    if args_cli.plasticity_loss_exp and should_resume:
+        num_learning_iterations = max(0, num_learning_iterations - int(runner.current_learning_iteration))
+        print(
+            "[INFO]: Resuming permutation experiment with "
+            f"{num_learning_iterations} learning iterations remaining.",
+            flush=True,
+        )
+    if num_learning_iterations > 0:
+        runner.learn(num_learning_iterations=num_learning_iterations, init_at_random_ep_len=True)
+    else:
+        print("[INFO]: Plasticity permutation schedule is already complete; no training iterations remain.")
 
     print(f"Training time: {round(time.time() - start_time, 2)} seconds")
     env.close()
