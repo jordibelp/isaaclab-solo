@@ -475,6 +475,9 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     forces_curriculum_threshold_reward = 28.0
     forces_curriculum_smoothing = 0.05
     curriculum_two_feet = False
+    # Track planar commands against the world velocity expressed in a gravity-aligned heading frame.
+    # The standard quadruped task keeps the original full-base-frame tracking behavior.
+    track_commands_in_world_heading_frame = False
     # True makes front/back behavior task-asymmetric: symmetry augmentation drops front/back transforms,
     # and the two-feet lift reward targets the front feet only.
     # When curriculum_two_feet is enabled, front_back_asymetry_curriculum overrides this per phase.
@@ -742,6 +745,7 @@ class Solo12TwoFeetEnvCfg(Solo12EnvCfg):
     enable_observation_corruption = True
     tricky_terrain = True
     curriculum_two_feet = True
+    track_commands_in_world_heading_frame = True
     flat_terrain_grid_enabled = True
     front_back_asymetry = False
     base_push_force_z_range = (0.0, 0.0)

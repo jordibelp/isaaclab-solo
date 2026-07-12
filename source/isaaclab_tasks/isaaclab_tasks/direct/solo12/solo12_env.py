@@ -41,6 +41,32 @@ _EPISODE_REWARD_KEYS = (
 )
 
 
+def _world_velocity_in_heading_frame_xy(
+    root_lin_vel_w: torch.Tensor, root_quat_w: torch.Tensor
+) -> torch.Tensor:
+    """Express horizontal world velocity in the base heading frame.
+
+    The projected base lateral axis defines heading without extracting Euler yaw, which is
+    singular when the two-feet robot approaches 90 degrees of pitch. Both resulting axes are
+    parallel to the world XY plane, so vertical motion cannot satisfy a planar command.
+    """
+    base_lateral_axis_b = torch.zeros_like(root_lin_vel_w)
+    base_lateral_axis_b[:, 1] = 1.0
+    lateral_axis_xy_w = math_utils.quat_apply(root_quat_w, base_lateral_axis_b)[:, :2]
+    lateral_axis_xy_w = lateral_axis_xy_w / torch.linalg.vector_norm(
+        lateral_axis_xy_w, dim=1, keepdim=True
+    ).clamp_min(torch.finfo(root_lin_vel_w.dtype).eps)
+    forward_axis_xy_w = torch.stack((lateral_axis_xy_w[:, 1], -lateral_axis_xy_w[:, 0]), dim=1)
+    root_lin_vel_xy_w = root_lin_vel_w[:, :2]
+    return torch.stack(
+        (
+            torch.sum(root_lin_vel_xy_w * forward_axis_xy_w, dim=1),
+            torch.sum(root_lin_vel_xy_w * lateral_axis_xy_w, dim=1),
+        ),
+        dim=1,
+    )
+
+
 class Solo12Env(DirectRLEnv):
     cfg: Solo12EnvCfg
 
@@ -1193,8 +1219,16 @@ class Solo12Env(DirectRLEnv):
         return torch.cat((self._get_teacher_encoder_obs(corrupt=corrupt), self._commands), dim=-1)
 
     def _get_rewards(self) -> torch.Tensor:
-        lin_vel_error = torch.sum(torch.square(self._commands[:, :2] - self._robot.data.root_lin_vel_b[:, :2]), dim=1)
-        yaw_rate_error = torch.square(self._commands[:, 2] - self._robot.data.root_ang_vel_b[:, 2])
+        if self.cfg.track_commands_in_world_heading_frame:
+            tracked_lin_vel_xy = _world_velocity_in_heading_frame_xy(
+                self._robot.data.root_lin_vel_w, self._robot.data.root_quat_w
+            )
+            tracked_yaw_rate = self._robot.data.root_ang_vel_w[:, 2]
+        else:
+            tracked_lin_vel_xy = self._robot.data.root_lin_vel_b[:, :2]
+            tracked_yaw_rate = self._robot.data.root_ang_vel_b[:, 2]
+        lin_vel_error = torch.sum(torch.square(self._commands[:, :2] - tracked_lin_vel_xy), dim=1)
+        yaw_rate_error = torch.square(self._commands[:, 2] - tracked_yaw_rate)
         z_vel_error = torch.square(self._robot.data.root_lin_vel_b[:, 2])
         ang_vel_error = torch.sum(torch.square(self._robot.data.root_ang_vel_b[:, :2]), dim=1)
         joint_torques = torch.sum(torch.square(self._robot.data.applied_torque[:, self._joint_ids]), dim=1)
