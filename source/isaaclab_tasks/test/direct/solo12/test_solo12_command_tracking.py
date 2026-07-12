@@ -61,10 +61,15 @@ def test_accepted_pose_is_enabled_only_for_two_feet_task():
 
     assert two_feet.initial_position == "two_feet"
     assert two_feet.initial_joint_pos_by_name["two_feet"] == TWO_FEET_INITIAL_JOINT_POS
+    assert TWO_FEET_INITIAL_JOINT_POS["FL_thigh_joint"] == 1.1
+    assert TWO_FEET_INITIAL_JOINT_POS["FR_thigh_joint"] == 1.1
+    assert TWO_FEET_INITIAL_JOINT_POS["RL_thigh_joint"] == 0.6
+    assert TWO_FEET_INITIAL_JOINT_POS["RR_thigh_joint"] == 0.6
     assert two_feet.reset_x_pos == 0.0
     assert two_feet.reset_y_pos == 0.0
     assert two_feet.reset_root_height == 0.53
-    assert two_feet.reset_root_pitch == math.radians(-59.37)
+    assert two_feet.reset_root_pitch == math.radians(-73.32)
+    assert two_feet.reset_root_rpy_noise == tuple(math.radians(value) for value in (3.0, 5.0, 5.0))
     assert two_feet.flexed_initial_joint_pos_noise_range == (-0.05, 0.05)
     assert two_feet.reset_base_lin_vel_range == (0.0, 0.0)
     assert two_feet.reset_base_ang_vel_range == (0.0, 0.0)

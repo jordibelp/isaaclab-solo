@@ -108,16 +108,16 @@ SAFE_INITIAL_JOINT_POS = dict(
 
 TWO_FEET_INITIAL_JOINT_POS = {
     "FL_hip_joint": 0.0,
-    "FL_thigh_joint": 0.4,
+    "FL_thigh_joint": 1.1,
     "FL_calf_joint": -0.8,
     "FR_hip_joint": 0.0,
-    "FR_thigh_joint": 0.4,
+    "FR_thigh_joint": 1.1,
     "FR_calf_joint": -0.8,
     "RL_hip_joint": 0.0,
-    "RL_thigh_joint": 0.56,
+    "RL_thigh_joint": 0.6,
     "RL_calf_joint": 0.8,
     "RR_hip_joint": 0.0,
-    "RR_thigh_joint": 0.56,
+    "RR_thigh_joint": 0.6,
     "RR_calf_joint": 0.8,
 }
 
@@ -769,9 +769,9 @@ class Solo12TwoFeetEnvCfg(Solo12EnvCfg):
     reset_y_pos = 0.0
     reset_root_height = 0.53
     reset_root_roll = 0.0
-    reset_root_pitch = math.radians(-59.37)
+    reset_root_pitch = math.radians(-73.32)
     reset_yaw = math.pi
-    reset_root_rpy_noise = tuple(math.radians(value) for value in (12.69, 14.75, 5.0))
+    reset_root_rpy_noise = tuple(math.radians(value) for value in (3.0, 5.0, 5.0))
     flexed_initial_joint_pos_noise_range = (-0.05, 0.05)
     reset_base_lin_vel_range = (0.0, 0.0)
     reset_base_ang_vel_range = (0.0, 0.0)

@@ -8,28 +8,28 @@
   },
   "root_rpy_deg": {
     "roll": 0.0,
-    "pitch": -59.36999867297709,
+    "pitch": -73.31999836117029,
     "yaw": 180.0
   },
   "joint_position_rad": {
     "FL_hip_joint": 0.0,
-    "FL_thigh_joint": 0.4,
+    "FL_thigh_joint": 1.099999975413084,
     "FL_calf_joint": -0.8,
     "FR_hip_joint": 0.0,
-    "FR_thigh_joint": 0.4000000059604645,
+    "FR_thigh_joint": 1.100000023841858,
     "FR_calf_joint": -0.8,
     "RL_hip_joint": 0.0,
-    "RL_thigh_joint": 0.5599999874830246,
+    "RL_thigh_joint": 0.6000000238418579,
     "RL_calf_joint": 0.8,
     "RR_hip_joint": 0.0,
-    "RR_thigh_joint": 0.5600000023841858,
+    "RR_thigh_joint": 0.6000000238418579,
     "RR_calf_joint": 0.8
   },
   "randomization": {
     "joint_position_uniform_plus_minus_rad": 0.05,
     "root_rpy_uniform_plus_minus_deg": {
-      "roll": 12.689999716356397,
-      "pitch": 14.749999670311809,
+      "roll": 3.0,
+      "pitch": 5.0,
       "yaw": 5.0
     },
     "root_linear_velocity_uniform_m_s": [
