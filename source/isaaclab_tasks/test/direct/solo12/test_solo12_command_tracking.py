@@ -14,8 +14,12 @@ simulation_app = AppLauncher(headless=True).app
 import torch
 
 import isaaclab.utils.math as math_utils
-from isaaclab_tasks.direct.solo12.solo12_env import _world_velocity_in_heading_frame_xy
-from isaaclab_tasks.direct.solo12.solo12_env_cfg import Solo12EnvCfg, Solo12TwoFeetEnvCfg
+from isaaclab_tasks.direct.solo12.solo12_env import _sample_reset_root_rpy, _world_velocity_in_heading_frame_xy
+from isaaclab_tasks.direct.solo12.solo12_env_cfg import (
+    TWO_FEET_INITIAL_JOINT_POS,
+    Solo12EnvCfg,
+    Solo12TwoFeetEnvCfg,
+)
 
 
 def test_heading_frame_tracking_is_enabled_only_for_two_feet_config():
@@ -44,3 +48,37 @@ def test_world_velocity_in_heading_frame_uses_inverse_heading_rotation():
 
     expected = torch.tensor(((math.sqrt(0.5), -math.sqrt(0.5)),))
     torch.testing.assert_close(actual, expected, atol=1.0e-6, rtol=0.0)
+
+
+def test_accepted_pose_is_enabled_only_for_two_feet_task():
+    standard = Solo12EnvCfg()
+    two_feet = Solo12TwoFeetEnvCfg()
+
+    assert standard.initial_position == "safe"
+    assert standard.reset_root_height is None
+    assert standard.reset_root_pitch == 0.0
+    assert standard.reset_root_rpy_noise == (0.0, 0.0, 0.0)
+
+    assert two_feet.initial_position == "two_feet"
+    assert two_feet.initial_joint_pos_by_name["two_feet"] == TWO_FEET_INITIAL_JOINT_POS
+    assert two_feet.reset_x_pos == 0.0
+    assert two_feet.reset_y_pos == 0.0
+    assert two_feet.reset_root_height == 0.53
+    assert two_feet.reset_root_pitch == math.radians(-59.37)
+    assert two_feet.flexed_initial_joint_pos_noise_range == (-0.05, 0.05)
+    assert two_feet.reset_base_lin_vel_range == (0.0, 0.0)
+    assert two_feet.reset_base_ang_vel_range == (0.0, 0.0)
+
+
+def test_root_orientation_noise_stays_inside_accepted_ranges():
+    cfg = Solo12TwoFeetEnvCfg()
+    nominal = (cfg.reset_root_roll, cfg.reset_root_pitch, cfg.reset_yaw)
+    torch.manual_seed(7)
+
+    samples = _sample_reset_root_rpy(10_000, nominal, cfg.reset_root_rpy_noise, "cpu")
+    offsets = samples - torch.tensor(nominal)
+    limits = torch.tensor(cfg.reset_root_rpy_noise)
+
+    assert torch.all(offsets.abs() <= limits + 1.0e-7)
+    assert torch.all(offsets.amin(dim=0) < -0.95 * limits)
+    assert torch.all(offsets.amax(dim=0) > 0.95 * limits)

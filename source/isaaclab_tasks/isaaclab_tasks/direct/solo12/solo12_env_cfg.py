@@ -106,10 +106,26 @@ SAFE_INITIAL_JOINT_POS = dict(
     )
 )
 
+TWO_FEET_INITIAL_JOINT_POS = {
+    "FL_hip_joint": 0.0,
+    "FL_thigh_joint": 0.4,
+    "FL_calf_joint": -0.8,
+    "FR_hip_joint": 0.0,
+    "FR_thigh_joint": 0.4,
+    "FR_calf_joint": -0.8,
+    "RL_hip_joint": 0.0,
+    "RL_thigh_joint": 0.56,
+    "RL_calf_joint": 0.8,
+    "RR_hip_joint": 0.0,
+    "RR_thigh_joint": 0.56,
+    "RR_calf_joint": 0.8,
+}
+
 INITIAL_JOINT_POS_BY_NAME = {
     "flexed": FLEXED_INITIAL_JOINT_POS,
     "crab": CRAB_INITIAL_JOINT_POS,
     "safe": SAFE_INITIAL_JOINT_POS,
+    "two_feet": TWO_FEET_INITIAL_JOINT_POS,
 }
 
 KP = 9.0
@@ -453,11 +469,18 @@ class Solo12EnvCfg(DirectRLEnvCfg):
 
     reset_x_pos = 0.5
     reset_y_pos = 0.5
+    # None preserves the articulation's default root height.
+    reset_root_height: float | None = None
+    reset_root_roll = 0.0
+    reset_root_pitch = 0.0
     reset_yaw = math.pi
+    # Independent symmetric uniform noise half-ranges for roll, pitch, and yaw, in radians.
+    reset_root_rpy_noise = (0.0, 0.0, 0.0)
     base_mass: float | None = 1.75124
-    initial_position = "safe"  # Options: "rigid", "flexed", "crab", "safe".
+    initial_position = "safe"  # Options: "rigid", "flexed", "crab", "safe", "two_feet".
     initial_joint_pos_by_name = INITIAL_JOINT_POS_BY_NAME
     flexed_initial_joint_pos = FLEXED_INITIAL_JOINT_POS
+    # Applied to every non-rigid named preset; legacy name retained for CLI compatibility.
     flexed_initial_joint_pos_noise_range = (-0.07, 0.07)
     reset_base_lin_vel_range = (-0.3, 0.3)
     reset_base_ang_vel_range = (-0.1, 0.1)
@@ -740,7 +763,18 @@ class Solo12TwoFeetEnvCfg(Solo12EnvCfg):
     command_lin_vel_x_range = (-0.6, 0.6)
     max_velx_range_curriculum = [0.6]
 
-    initial_position = "safe"
+    # Accepted with solo12_two_feet_pose_editor.py; values are relative to each terrain origin.
+    initial_position = "two_feet"
+    reset_x_pos = 0.0
+    reset_y_pos = 0.0
+    reset_root_height = 0.53
+    reset_root_roll = 0.0
+    reset_root_pitch = math.radians(-59.37)
+    reset_yaw = math.pi
+    reset_root_rpy_noise = tuple(math.radians(value) for value in (12.69, 14.75, 5.0))
+    flexed_initial_joint_pos_noise_range = (-0.05, 0.05)
+    reset_base_lin_vel_range = (0.0, 0.0)
+    reset_base_ang_vel_range = (0.0, 0.0)
     track_base_height_reward_scale = 0.0
     enable_observation_corruption = True
     tricky_terrain = True

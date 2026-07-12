@@ -67,6 +67,20 @@ def _world_velocity_in_heading_frame_xy(
     )
 
 
+def _sample_reset_root_rpy(
+    num_resets: int,
+    nominal_rpy: tuple[float, float, float],
+    noise_half_ranges: tuple[float, float, float],
+    device: str,
+) -> torch.Tensor:
+    """Sample independent symmetric uniform reset noise around a nominal root orientation."""
+    rpy = torch.tensor(nominal_rpy, dtype=torch.float32, device=device).expand(num_resets, -1).clone()
+    noise = torch.tensor(noise_half_ranges, dtype=torch.float32, device=device)
+    if any(value != 0.0 for value in noise_half_ranges):
+        rpy += torch.empty_like(rpy).uniform_(-1.0, 1.0) * noise
+    return rpy
+
+
 class Solo12Env(DirectRLEnv):
     cfg: Solo12EnvCfg
 
@@ -1359,9 +1373,17 @@ class Solo12Env(DirectRLEnv):
         root_pose[:, :3] += self._terrain.env_origins[env_ids]
         root_pose[:, 0] += self.cfg.reset_x_pos
         root_pose[:, 1] += self.cfg.reset_y_pos
-        yaw = torch.full((num_resets,), self.cfg.reset_yaw, device=self.device)
+        if self.cfg.reset_root_height is not None:
+            root_pose[:, 2] = self._terrain.env_origins[env_ids, 2] + self.cfg.reset_root_height
+        root_rpy = _sample_reset_root_rpy(
+            num_resets,
+            (self.cfg.reset_root_roll, self.cfg.reset_root_pitch, self.cfg.reset_yaw),
+            self.cfg.reset_root_rpy_noise,
+            self.device,
+        )
+        roll, pitch, yaw = root_rpy.unbind(dim=1)
+        root_pose[:, 3:7] = math_utils.quat_from_euler_xyz(roll, pitch, yaw)
         zeros = torch.zeros_like(yaw)
-        root_pose[:, 3:7] = math_utils.quat_from_euler_xyz(zeros, zeros, yaw)
         self._base_imu_heading_reference[env_ids] = math_utils.quat_from_euler_xyz(zeros, zeros, -yaw)
 
         root_velocity = torch.zeros_like(self._robot.data.default_root_state[env_ids, 7:])
