@@ -283,6 +283,17 @@ parser.add_argument(
         "Requires --plasticity-loss-exp and provides the paper's reset-all control."
     ),
 )
+parser.add_argument(
+    "--plasticity-exp-first-layer-only",
+    "--plasticity_exp_first_layer_only",
+    dest="plasticity_exp_first_layer_only",
+    action="store_true",
+    default=False,
+    help=(
+        "After the first observation-permutation phase, freeze the continued actor-critic except "
+        "for the actor and critic input Linear layers. Requires --plasticity-loss-exp."
+    ),
+)
 parser.add_argument("--distributed", action="store_true", default=False, help="Run training with multiple GPUs or nodes.")
 parser.add_argument("--export_io_descriptors", action="store_true", default=False, help="Export IO descriptors.")
 parser.add_argument(
@@ -1630,6 +1641,21 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     agent_cfg = cli_args.update_rsl_rl_cfg(agent_cfg, args_cli)
     if args_cli.plasticity_loss_exp_reset_all and not args_cli.plasticity_loss_exp:
         raise ValueError("--plasticity-loss-exp-reset-all requires --plasticity-loss-exp.")
+    if args_cli.plasticity_exp_first_layer_only and not args_cli.plasticity_loss_exp:
+        raise ValueError("--plasticity-exp-first-layer-only requires --plasticity-loss-exp.")
+    if args_cli.plasticity_exp_first_layer_only and args_cli.plasticity_loss_exp_reset_all:
+        raise ValueError(
+            "--plasticity-exp-first-layer-only and --plasticity-loss-exp-reset-all are mutually exclusive."
+        )
+    if args_cli.plasticity_exp_first_layer_only and args_cli.use_cbp:
+        raise ValueError(
+            "--plasticity-exp-first-layer-only cannot be combined with --use-cbp because CBP would "
+            "modify frozen hidden layers."
+        )
+    if args_cli.plasticity_exp_first_layer_only and args_cli.shared_networks:
+        raise ValueError(
+            "--plasticity-exp-first-layer-only currently supports separate actor/critic MLPs, not --shared-networks."
+        )
     if args_cli.run_name is not None:
         agent_cfg.run_name = args_cli.run_name
     if args_cli.shared_networks:
@@ -1786,6 +1812,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         full_run_name += "_permute-plasticity"
     if args_cli.plasticity_loss_exp_reset_all:
         full_run_name += "_reset-all"
+    if args_cli.plasticity_exp_first_layer_only:
+        full_run_name += "_first-layer-only"
     if getattr(agent_cfg.policy, "shared_networks", False):
         full_run_name += "_shared-networks"
 
@@ -1925,6 +1953,20 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             "[INFO]: Plasticity reset-all control enabled: actor/critic layers, observation normalizers, "
             "action-noise state, optimizer state, learning rate, and CBP state (when enabled) will reset "
             "at every permutation boundary.",
+            flush=True,
+        )
+    first_layer_only_controller = None
+    if args_cli.plasticity_exp_first_layer_only:
+        first_layer_only_controller = observation_permutation.FirstLayerOnlyController(runner)
+        if env.round_index > 0:
+            first_layer_only_controller.activate()
+        print(
+            "[INFO]: Plasticity first-layer-only control enabled: phase 1 trains the full actor-critic; "
+            "after its first permutation boundary, only "
+            f"{', '.join(first_layer_only_controller.trainable_parameter_names)} remain trainable "
+            f"({first_layer_only_controller.trainable_parameter_count}/"
+            f"{first_layer_only_controller.total_parameter_count} parameters; "
+            f"active now={'yes' if first_layer_only_controller.active else 'no'}).",
             flush=True,
         )
 
@@ -2112,6 +2154,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 (iteration + 1) % env.round_duration == 0
                 and env.round_index < env.num_rounds - 1
             )
+            first_layer_freeze_event = bool(
+                permutation_boundary
+                and first_layer_only_controller is not None
+                and not first_layer_only_controller.active
+            )
             if getattr(runner, "writer", None) is not None:
                 for name, value in env.logging_values(iteration).items():
                     runner.writer.add_scalar(f"PlasticityExperiment/{name}", value, iteration)
@@ -2130,15 +2177,42 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     int(permutation_boundary and reset_all_controller is not None),
                     iteration,
                 )
+                runner.writer.add_scalar(
+                    "PlasticityExperiment/first_layer_only_enabled",
+                    int(first_layer_only_controller is not None),
+                    iteration,
+                )
+                runner.writer.add_scalar(
+                    "PlasticityExperiment/first_layer_only_active",
+                    int(first_layer_only_controller is not None and first_layer_only_controller.active),
+                    iteration,
+                )
+                runner.writer.add_scalar(
+                    "PlasticityExperiment/first_layer_only_freeze_event",
+                    int(first_layer_freeze_event),
+                    iteration,
+                )
+                if first_layer_only_controller is not None:
+                    runner.writer.add_scalar(
+                        "PlasticityExperiment/first_layer_trainable_parameter_fraction",
+                        first_layer_only_controller.trainable_parameter_fraction,
+                        iteration,
+                    )
 
             if env.finish_learning_iteration(iteration, locs["obs"]):
                 if reset_all_controller is not None:
                     reset_all_controller.reset()
+                first_layer_activated = (
+                    first_layer_only_controller.activate()
+                    if first_layer_only_controller is not None
+                    else False
+                )
                 print(
                     "[INFO]: Plasticity experiment switched observation mapping after learning iteration "
                     f"{iteration} (next permutation index={env.round_index}, "
                     f"permutations seen={env.round_index + 1}/{env.num_rounds}, "
-                    f"network reset={'yes' if reset_all_controller is not None else 'no'}).",
+                    f"network reset={'yes' if reset_all_controller is not None else 'no'}, "
+                    f"first-layer-only activated={'yes' if first_layer_activated else 'no'}).",
                     flush=True,
                 )
 

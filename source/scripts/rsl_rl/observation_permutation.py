@@ -23,6 +23,89 @@ def clone_state_dict(state_dict: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+class FirstLayerOnlyController:
+    """Freeze a continued actor-critic except for its two input layers."""
+
+    def __init__(self, runner: Any) -> None:
+        self.runner = runner
+        self.policy = runner.alg.policy
+        self._input_layers = {
+            "actor": self._first_linear(self.policy, "actor"),
+            "critic": self._first_linear(self.policy, "critic"),
+        }
+        self._trainable_parameter_ids = {
+            id(parameter)
+            for layer in self._input_layers.values()
+            for parameter in layer.parameters(recurse=False)
+        }
+        self.trainable_parameter_names = tuple(
+            name
+            for name, parameter in self.policy.named_parameters()
+            if id(parameter) in self._trainable_parameter_ids
+        )
+        if not self.trainable_parameter_names:
+            raise RuntimeError("First-layer-only mode found no actor/critic input-layer parameters.")
+
+        self.total_parameter_count = sum(parameter.numel() for parameter in self.policy.parameters())
+        self.trainable_parameter_count = sum(
+            parameter.numel()
+            for parameter in self.policy.parameters()
+            if id(parameter) in self._trainable_parameter_ids
+        )
+        self._normalizers = tuple(
+            module
+            for name in ("actor_obs_normalizer", "critic_obs_normalizer")
+            if isinstance((module := getattr(self.policy, name, None)), torch.nn.Module)
+        )
+        self.active = False
+        self._patch_runner_train_mode()
+
+    @staticmethod
+    def _first_linear(policy: torch.nn.Module, branch_name: str) -> torch.nn.Linear:
+        branch = getattr(policy, branch_name, None)
+        if not isinstance(branch, torch.nn.Module):
+            raise ValueError(
+                f"First-layer-only mode requires a policy with a torch module named '{branch_name}'."
+            )
+        for module in branch.modules():
+            if isinstance(module, torch.nn.Linear):
+                return module
+        raise ValueError(f"First-layer-only mode found no Linear layer in policy.{branch_name}.")
+
+    @property
+    def trainable_parameter_fraction(self) -> float:
+        return self.trainable_parameter_count / self.total_parameter_count
+
+    def _freeze_normalizers(self) -> None:
+        if self.active:
+            for normalizer in self._normalizers:
+                normalizer.eval()
+
+    def _patch_runner_train_mode(self) -> None:
+        original_train_mode = getattr(self.runner, "train_mode", None)
+        if not callable(original_train_mode):
+            return
+
+        def _train_mode_with_frozen_normalizers(*args, **kwargs):
+            result = original_train_mode(*args, **kwargs)
+            self._freeze_normalizers()
+            return result
+
+        self.runner.train_mode = _train_mode_with_frozen_normalizers
+
+    def activate(self) -> bool:
+        """Freeze all but the actor/critic input layers; return whether this changed state."""
+
+        if self.active:
+            return False
+        for parameter in self.policy.parameters():
+            parameter.requires_grad_(id(parameter) in self._trainable_parameter_ids)
+            parameter.grad = None
+        self.active = True
+        self._freeze_normalizers()
+        return True
+
+
 class ResetAllController:
     """Implement the paper's fresh-network reset-all control between rounds."""
 

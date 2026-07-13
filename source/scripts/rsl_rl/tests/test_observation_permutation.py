@@ -16,6 +16,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from observation_permutation import (  # noqa: E402
+    FirstLayerOnlyController,
     ObservationPermutationVecEnv,
     ResetAllController,
     compute_permutation_aware_symmetry,
@@ -135,6 +136,62 @@ class TinyActorCritic(nn.Module):
         self.critic = nn.Sequential(nn.Linear(4, 8), nn.ELU(), nn.Linear(8, 1))
         self.log_std = nn.Parameter(torch.zeros(2))
         self.register_buffer("normalizer_mean", torch.zeros(4))
+
+
+class UpdatingNormalizer(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.register_buffer("updates", torch.tensor(0))
+
+    def forward(self, value: torch.Tensor) -> torch.Tensor:
+        if self.training:
+            self.updates += 1
+        return value
+
+
+def test_first_layer_only_freezes_every_other_parameter_after_activation() -> None:
+    torch.manual_seed(11)
+    policy = TinyActorCritic()
+    policy.actor_obs_normalizer = UpdatingNormalizer()
+    policy.critic_obs_normalizer = UpdatingNormalizer()
+    optimizer = torch.optim.Adam(policy.parameters(), lr=3.0e-3)
+    algorithm = SimpleNamespace(policy=policy, optimizer=optimizer)
+
+    def train_mode() -> None:
+        policy.train()
+
+    runner = SimpleNamespace(alg=algorithm, train_mode=train_mode)
+    controller = FirstLayerOnlyController(runner)
+
+    assert not controller.active
+    assert all(parameter.requires_grad for parameter in policy.parameters())
+    assert controller.activate()
+    assert not controller.activate()
+    assert controller.trainable_parameter_names == (
+        "actor.0.weight",
+        "actor.0.bias",
+        "critic.0.weight",
+        "critic.0.bias",
+    )
+
+    before = {name: parameter.detach().clone() for name, parameter in policy.named_parameters()}
+    loss = policy.actor(torch.ones(3, 4)).sum() + policy.critic(torch.ones(3, 4)).sum()
+    loss.backward()
+    optimizer.step()
+
+    changed = {
+        name for name, parameter in policy.named_parameters() if not torch.equal(parameter, before[name])
+    }
+    assert changed == set(controller.trainable_parameter_names)
+    assert all(
+        parameter.requires_grad == (name in controller.trainable_parameter_names)
+        for name, parameter in policy.named_parameters()
+    )
+
+    # A later runner.train_mode() call must not resume empirical-normalizer updates.
+    runner.train_mode()
+    assert not policy.actor_obs_normalizer.training
+    assert not policy.critic_obs_normalizer.training
 
 
 def test_reset_all_freshly_initializes_network_and_clears_training_state() -> None:
