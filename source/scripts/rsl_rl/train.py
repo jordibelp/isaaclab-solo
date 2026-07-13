@@ -9,6 +9,7 @@ Adds:
 - code/config snapshot artifact upload
 - Solo12 symmetry mode toggles (none / augmentation / loss / both)
 - round-wise observation permutations for plasticity-loss experiments
+- paper-style plasticity mitigation (LayerNorm, regenerative L2, shrink+perturb)
 - run naming compatible with the current skrl conventions
 """
 
@@ -294,6 +295,46 @@ parser.add_argument(
         "for the actor and critic input Linear layers. Requires --plasticity-loss-exp."
     ),
 )
+parser.add_argument(
+    "--plasticity-mitigation-strategy",
+    "--plasticity_mitigation_strategy",
+    type=str,
+    default="none",
+    help=(
+        "Paper-style mitigation strategy: none, layernorm, regenerative-l2, "
+        "regenerative-l2-layernorm, shrink-perturb, soft-shrink-perturb, or "
+        "soft-shrink-perturb-layernorm. The boundary shrink-perturb strategy requires "
+        "--plasticity-loss-exp; continuous strategies and LayerNorm may also be used in ordinary runs."
+    ),
+)
+parser.add_argument(
+    "--plasticity-regen-l2-coef",
+    "--plasticity_regen_l2_coef",
+    type=float,
+    default=1.0e-2,
+    help="Coefficient for the paper's global unsquared L2 distance to initialization (default: 0.01).",
+)
+parser.add_argument(
+    "--plasticity-soft-sp-beta",
+    "--plasticity_soft_sp_beta",
+    type=float,
+    default=1.0e-6,
+    help="Fresh-initialization mixture beta applied after every optimizer step by soft shrink+perturb.",
+)
+parser.add_argument(
+    "--plasticity-sp-beta",
+    "--plasticity_sp_beta",
+    type=float,
+    default=0.5,
+    help="Fresh-initialization mixture beta applied at each distribution shift by shrink+perturb.",
+)
+parser.add_argument(
+    "--plasticity-mitigation-seed",
+    "--plasticity_mitigation_seed",
+    type=int,
+    default=None,
+    help="Independent fresh-initialization RNG seed. Defaults deterministically to the agent seed plus an offset.",
+)
 parser.add_argument("--distributed", action="store_true", default=False, help="Run training with multiple GPUs or nodes.")
 parser.add_argument("--export_io_descriptors", action="store_true", default=False, help="Export IO descriptors.")
 parser.add_argument(
@@ -436,6 +477,7 @@ import torch
 from rsl_rl.runners import DistillationRunner, OnPolicyRunner
 
 import plasticity_metrics
+import plasticity_mitigation
 import observation_permutation
 from continual_backprop import build_continual_backprop_manager, collect_actor_critic_cbp_specs
 from isaaclab.envs import DirectMARLEnv, DirectMARLEnvCfg, DirectRLEnvCfg, ManagerBasedRLEnvCfg, multi_agent_to_single_agent
@@ -638,6 +680,67 @@ def _restore_cbp_state_from_checkpoint(cbp_manager, checkpoint_path: str | None)
             )
         else:
             print("[INFO]: Checkpoint has no continual backprop state; starting CBP ages/utilities from scratch.")
+
+
+def _patch_runner_save_with_plasticity_mitigation(runner, controller) -> None:
+    """Patch RSL-RL checkpoint saving with exact mitigation reference/RNG state."""
+
+    if getattr(runner, "_borinot_plasticity_mitigation_save_patch", False):
+        return
+
+    def _save_with_plasticity_mitigation(path: str, infos: dict | None = None) -> None:
+        save_infos = infos
+        if isinstance(save_infos, dict):
+            save_infos = dict(save_infos)
+            save_infos["plasticity_mitigation"] = controller.summary()
+        elif save_infos is None:
+            save_infos = {"plasticity_mitigation": controller.summary()}
+
+        saved_dict = {
+            "model_state_dict": runner.alg.policy.state_dict(),
+            "optimizer_state_dict": runner.alg.optimizer.state_dict(),
+            "iter": runner.current_learning_iteration,
+            "infos": save_infos,
+            "plasticity_mitigation_state_dict": controller.state_dict(),
+        }
+        if hasattr(runner.alg, "rnd") and runner.alg.rnd:
+            saved_dict["rnd_state_dict"] = runner.alg.rnd.state_dict()
+            saved_dict["rnd_optimizer_state_dict"] = runner.alg.rnd_optimizer.state_dict()
+        torch.save(saved_dict, path)
+
+        if getattr(runner, "logger_type", None) in ["neptune", "wandb"] and not getattr(
+            runner, "disable_logs", False
+        ):
+            runner.writer.save_model(path, runner.current_learning_iteration)
+
+    runner.save = _save_with_plasticity_mitigation
+    runner._borinot_plasticity_mitigation_save_patch = True
+
+
+def _restore_plasticity_mitigation_state(controller, checkpoint_path: str | None) -> bool:
+    """Restore the initialization reference, intervention RNG, and counters when available."""
+
+    if checkpoint_path is None:
+        return False
+    checkpoint = torch.load(checkpoint_path, weights_only=False, map_location="cpu")
+    state = checkpoint.get("plasticity_mitigation_state_dict")
+    if not isinstance(state, dict):
+        print(
+            "[WARN]: Resume checkpoint has no plasticity mitigation state. Treating the loaded policy "
+            "as the start of a new mitigation run (new L2 reference/RNG stream).",
+            flush=True,
+        )
+        return False
+    controller.load_state_dict(state)
+    print(
+        "[INFO]: Restored plasticity mitigation state from "
+        f"{checkpoint_path} (strategy={controller.spec.name}, "
+        f"optimizer_steps={controller.optimizer_steps}, "
+        f"soft_events={controller.soft_perturbations}, "
+        f"boundary_events={controller.boundary_perturbations}).",
+        flush=True,
+    )
+    return True
 
 
 def _sanitize_policy_action_std(runner) -> None:
@@ -1639,6 +1742,8 @@ def _patch_runner_learn_with_periodic_eval_video(runner, recorder) -> None:
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     agent_cfg = cli_args.update_rsl_rl_cfg(agent_cfg, args_cli)
+    mitigation_spec = plasticity_mitigation.resolve_strategy(args_cli.plasticity_mitigation_strategy)
+    args_cli.plasticity_mitigation_strategy = mitigation_spec.name
     if args_cli.plasticity_loss_exp_reset_all and not args_cli.plasticity_loss_exp:
         raise ValueError("--plasticity-loss-exp-reset-all requires --plasticity-loss-exp.")
     if args_cli.plasticity_exp_first_layer_only and not args_cli.plasticity_loss_exp:
@@ -1656,6 +1761,29 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         raise ValueError(
             "--plasticity-exp-first-layer-only currently supports separate actor/critic MLPs, not --shared-networks."
         )
+    if mitigation_spec.name != "none" and args_cli.plasticity_loss_exp_reset_all:
+        raise ValueError(
+            "--plasticity-mitigation-strategy and --plasticity-loss-exp-reset-all select different "
+            "intervention conditions; run them as separate experiments."
+        )
+    if mitigation_spec.name != "none" and args_cli.plasticity_exp_first_layer_only:
+        raise ValueError(
+            "--plasticity-mitigation-strategy and --plasticity-exp-first-layer-only select different "
+            "intervention conditions; run them as separate experiments."
+        )
+    if mitigation_spec.name != "none" and args_cli.use_cbp:
+        raise ValueError(
+            "--plasticity-mitigation-strategy and --use-cbp are separate mitigation conditions and cannot "
+            "be combined in one controlled run."
+        )
+    if mitigation_spec.name != "none" and args_cli.shared_networks:
+        raise ValueError(
+            "Paper-style plasticity mitigation currently targets separate actor/critic MLPs, not --shared_networks."
+        )
+    if mitigation_spec.name != "none" and agent_cfg.class_name != "OnPolicyRunner":
+        raise ValueError("Paper-style plasticity mitigation currently supports the OnPolicyRunner / PPO path only.")
+    if mitigation_spec.boundary_shrink_perturb and not args_cli.plasticity_loss_exp:
+        raise ValueError("The shrink-perturb strategy requires --plasticity-loss-exp distribution boundaries.")
     if args_cli.run_name is not None:
         agent_cfg.run_name = args_cli.run_name
     if args_cli.shared_networks:
@@ -1737,6 +1865,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             "uses exactly the same permutation boundary."
         )
 
+    if mitigation_spec.name != "none" and args_cli.distributed:
+        raise ValueError(
+            "Paper-style plasticity mitigation is currently single-process only so fresh-parameter samples "
+            "and regenerative references remain exactly synchronized."
+        )
+
     if args_cli.distributed and args_cli.device is not None and "cpu" in args_cli.device:
         raise ValueError(
             "Distributed training is not supported when using CPU device. Please use GPU device (e.g., --device cuda)."
@@ -1814,6 +1948,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         full_run_name += "_reset-all"
     if args_cli.plasticity_exp_first_layer_only:
         full_run_name += "_first-layer-only"
+    if mitigation_spec.name != "none":
+        full_run_name += f"_mit-{mitigation_spec.name}"
     if getattr(agent_cfg.policy, "shared_networks", False):
         full_run_name += "_shared-networks"
 
@@ -1909,6 +2045,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     else:
         raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
 
+    layer_norm_result = None
+    if mitigation_spec.layer_norm:
+        layer_norm_result = plasticity_mitigation.insert_actor_critic_layer_norm(runner)
+        print(
+            "[INFO]: Inserted paper-style LayerNorm before every actor/critic hidden activation "
+            f"({layer_norm_result.layer_count} layers, "
+            f"{layer_norm_result.parameter_count} affine parameters).",
+            flush=True,
+        )
+
     runner.add_git_repo_to_log(__file__)
     reset_all_initial_policy_state = (
         observation_permutation.clone_state_dict(runner.alg.policy.state_dict())
@@ -1932,6 +2078,41 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         _sanitize_policy_action_std(runner)
     _apply_agent_weight_decay_to_optimizer(runner, agent_cfg)
     _apply_agent_adam_betas_to_optimizer(runner, agent_cfg)
+    mitigation_controller = None
+    if mitigation_spec.name != "none":
+        if float(getattr(agent_cfg, "weight_decay", 0.0) or 0.0) != 0.0:
+            print(
+                "[WARN]: agent.weight_decay is nonzero alongside a paper-style plasticity strategy. "
+                "This is allowed, but it adds ordinary L2/AdamW decay as a separate intervention.",
+                flush=True,
+            )
+        mitigation_seed = args_cli.plasticity_mitigation_seed
+        if mitigation_seed is None:
+            mitigation_seed = int(agent_cfg.seed) + 1_618_033
+        mitigation_controller = plasticity_mitigation.PlasticityMitigationController(
+            runner,
+            strategy=mitigation_spec,
+            regenerative_l2_coef=float(args_cli.plasticity_regen_l2_coef),
+            soft_shrink_perturb_beta=float(args_cli.plasticity_soft_sp_beta),
+            shrink_perturb_beta=float(args_cli.plasticity_sp_beta),
+            seed=int(mitigation_seed),
+            learning_rate=float(agent_cfg.algorithm.learning_rate),
+            layer_norm_count=0 if layer_norm_result is None else layer_norm_result.layer_count,
+        )
+        if should_resume and not args_cli.reuse_mlp:
+            _restore_plasticity_mitigation_state(mitigation_controller, resume_path)
+        _patch_runner_save_with_plasticity_mitigation(runner, mitigation_controller)
+        print(
+            "[INFO]: Plasticity mitigation enabled: "
+            f"strategy={mitigation_spec.name}, target={mitigation_controller.target_parameter_count}/"
+            f"{mitigation_controller.total_policy_parameter_count} policy parameters "
+            f"({100.0 * mitigation_controller.target_parameter_fraction:.2f}%), "
+            f"regen_coef={float(args_cli.plasticity_regen_l2_coef):g}, "
+            f"soft_beta={float(args_cli.plasticity_soft_sp_beta):g}, "
+            f"boundary_beta={float(args_cli.plasticity_sp_beta):g}, seed={int(mitigation_seed)}. "
+            "Action-noise std/log_std and empirical-normalizer buffers are excluded.",
+            flush=True,
+        )
     cbp_manager = _attach_continual_backprop_to_runner(runner, args_cli)
     reset_all_initial_cbp_state = (
         copy.deepcopy(cbp_manager.state_dict())
@@ -1972,6 +2153,27 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
     dump_yaml(os.path.join(log_dir, "params", "agent.yaml"), agent_cfg)
+    dump_yaml(
+        os.path.join(log_dir, "params", "plasticity_mitigation.yaml"),
+        {
+            "strategy": mitigation_spec.name,
+            "regenerative_l2_coef": float(args_cli.plasticity_regen_l2_coef),
+            "soft_shrink_perturb_beta": float(args_cli.plasticity_soft_sp_beta),
+            "shrink_perturb_beta": float(args_cli.plasticity_sp_beta),
+            "seed": (
+                None
+                if mitigation_controller is None
+                else int(mitigation_controller.seed)
+            ),
+            "target_parameter_count": (
+                0
+                if mitigation_controller is None
+                else int(mitigation_controller.target_parameter_count)
+            ),
+            "layer_norm_count": 0 if layer_norm_result is None else int(layer_norm_result.layer_count),
+            "excludes_action_noise_and_observation_normalizers": True,
+        },
+    )
 
     if agent_cfg.logger == "wandb":
         snapshot_uploaded = False
@@ -1995,6 +2197,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         __file__,
                         _THIS_DIR / "continual_backprop.py",
                         _THIS_DIR / "plasticity_metrics.py",
+                        _THIS_DIR / "plasticity_mitigation.py" if mitigation_spec.name != "none" else None,
                         _THIS_DIR / "observation_permutation.py" if args_cli.plasticity_loss_exp else None,
                     ]
                     if path
@@ -2140,6 +2343,19 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     runner.log = _log_with_best_model
 
+    if mitigation_controller is not None:
+        log_before_mitigation_metrics = runner.log
+
+        def _log_with_mitigation_metrics(*log_args, **log_kwargs):
+            log_before_mitigation_metrics(*log_args, **log_kwargs)
+            if not log_args or getattr(runner, "writer", None) is None:
+                return
+            iteration = int(log_args[0]["it"])
+            for name, value in mitigation_controller.logging_values().items():
+                runner.writer.add_scalar(f"PlasticityMitigation/{name}", value, iteration)
+
+        runner.log = _log_with_mitigation_metrics
+
     if args_cli.plasticity_loss_exp:
         log_before_permutation_update = runner.log
 
@@ -2198,10 +2414,20 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         first_layer_only_controller.trainable_parameter_fraction,
                         iteration,
                     )
+                runner.writer.add_scalar(
+                    "PlasticityMitigation/boundary_event",
+                    int(permutation_boundary and mitigation_spec.boundary_shrink_perturb),
+                    iteration,
+                )
 
             if env.finish_learning_iteration(iteration, locs["obs"]):
                 if reset_all_controller is not None:
                     reset_all_controller.reset()
+                mitigation_applied = (
+                    mitigation_controller.on_distribution_shift()
+                    if mitigation_controller is not None
+                    else False
+                )
                 first_layer_activated = (
                     first_layer_only_controller.activate()
                     if first_layer_only_controller is not None
@@ -2212,6 +2438,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     f"{iteration} (next permutation index={env.round_index}, "
                     f"permutations seen={env.round_index + 1}/{env.num_rounds}, "
                     f"network reset={'yes' if reset_all_controller is not None else 'no'}, "
+                    f"mitigation event={'yes' if mitigation_applied else 'no'}, "
                     f"first-layer-only activated={'yes' if first_layer_activated else 'no'}).",
                     flush=True,
                 )
