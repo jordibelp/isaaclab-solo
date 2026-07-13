@@ -575,6 +575,12 @@ def _pack_policy_obs(
         value = obs_template[key]
         if key == obs_type:
             data[key] = obs_policy_aug
+        elif key == "rnd_state":
+            # RSL-RL trains RND only on the original (first) batch. Repeat the
+            # task-focused curiosity state so symmetry augmentation preserves the
+            # TensorDict batch contract without interpreting it as policy features.
+            repeat_factor = batch_dim // value.shape[0]
+            data[key] = torch.cat([value] * repeat_factor, dim=0)
         elif isinstance(value, torch.Tensor) and value.ndim == 2:
             data[key] = _augment_obs_tensor(
                 value, policy_model, history_sample_dim, use_front_back_symmetry

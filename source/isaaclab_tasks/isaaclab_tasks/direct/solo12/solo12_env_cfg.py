@@ -406,6 +406,12 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     duration_plasticity_exp_iteration = 300
     num_plasticity_exp_iterations = 20
 
+    # Random Network Distillation (RND) exploration bonus for RSL-RL PPO.
+    # See source/scripts/rsl_rl/SOLO12_RND.md for the curiosity state and tuning guidance.
+    # Both fields are opt-in so existing Solo12 runs remain bit-for-bit unchanged.
+    rnd_network = False
+    beta_curiosity = 0.0
+
     # Base IMU history for student TCN: one sample per physics step.
     # With decimation=4 and policy_steps=3, this gives 13 samples covering t-3 ... t.
     base_imu_history_policy_steps = 3

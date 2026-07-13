@@ -479,6 +479,7 @@ from rsl_rl.runners import DistillationRunner, OnPolicyRunner
 import plasticity_metrics
 import plasticity_mitigation
 import observation_permutation
+import solo12_rnd
 from continual_backprop import build_continual_backprop_manager, collect_actor_critic_cbp_specs
 from isaaclab.envs import DirectMARLEnv, DirectMARLEnvCfg, DirectRLEnvCfg, ManagerBasedRLEnvCfg, multi_agent_to_single_agent
 from isaaclab.utils.dict import print_dict
@@ -1884,6 +1885,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         agent_cfg.seed = seed
 
     _sync_base_imu_policy_cfg_from_env_cfg(env_cfg, agent_cfg)
+    rnd_setup = solo12_rnd.configure_solo12_rnd(env_cfg, agent_cfg)
+    if rnd_setup.enabled:
+        print(
+            "[INFO]: Solo12 RND enabled: "
+            f"beta={rnd_setup.beta:g}, curiosity_state=projected_gravity+joint_position+foot_contacts "
+            "(19D, clean simulator state), state_normalization=yes, reward_normalization=no, "
+            "target=[5], predictor=[5, 5], output=1.",
+            flush=True,
+        )
 
     symmetry_enabled = args_cli.symmetry_mode != "none"
     symmetry_fn = None
@@ -1950,6 +1960,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         full_run_name += "_first-layer-only"
     if mitigation_spec.name != "none":
         full_run_name += f"_mit-{mitigation_spec.name}"
+    if rnd_setup.enabled:
+        full_run_name += f"_rnd-{rnd_setup.beta:g}"
     if getattr(agent_cfg.policy, "shared_networks", False):
         full_run_name += "_shared-networks"
 

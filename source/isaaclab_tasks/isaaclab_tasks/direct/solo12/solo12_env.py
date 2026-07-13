@@ -1096,27 +1096,29 @@ class Solo12Env(DirectRLEnv):
         if self.cfg.policy_model == "base_imu_teacher":
             teacher_obs = self._get_teacher_critic_obs(corrupt=True)
             self._previous_actions = self._actions.clone()
-            return {"policy": teacher_obs, "critic": teacher_obs}
+            return self._with_optional_rnd_state({"policy": teacher_obs, "critic": teacher_obs})
         if self.cfg.policy_model == "base_imu_student_rl":
             policy_obs = torch.cat((self._base_imu_history.reshape(self.num_envs, -1), self._commands), dim=-1)
             critic_obs = self._get_teacher_critic_obs(corrupt=False)
             if self.cfg.feed_history_encoding_to_critic:
                 critic_obs = torch.cat((critic_obs, self._base_imu_history.reshape(self.num_envs, -1)), dim=-1)
             self._previous_actions = self._actions.clone()
-            return {"policy": policy_obs, "critic": critic_obs}
+            return self._with_optional_rnd_state({"policy": policy_obs, "critic": critic_obs})
         if self.cfg.policy_model == "base_imu_student_dagger":
             teacher_obs = self._get_teacher_critic_obs(corrupt=False)
             policy_obs = torch.cat(
                 (teacher_obs, self._base_imu_history.reshape(self.num_envs, -1), self._commands), dim=-1
             )
             self._previous_actions = self._actions.clone()
-            return {"policy": policy_obs, "critic": teacher_obs}
+            return self._with_optional_rnd_state({"policy": policy_obs, "critic": teacher_obs})
         if self.cfg.policy_model == "simple_dreamer_v3":
             policy_obs = self._get_simple_proprioceptive_obs(corrupt=True)
             self._previous_actions = self._actions.clone()
             if getattr(self.cfg, "_dreamer_command_outside_observation", False):
-                return {"policy": policy_obs, "command": self._commands}
-            return {"policy": torch.cat((policy_obs, self._commands), dim=-1)}
+                return self._with_optional_rnd_state({"policy": policy_obs, "command": self._commands})
+            return self._with_optional_rnd_state(
+                {"policy": torch.cat((policy_obs, self._commands), dim=-1)}
+            )
 
         joint_pos = self._robot.data.joint_pos[:, self._joint_ids] - self._q_offset_action_and_obs
         joint_vel = self._robot.data.joint_vel[:, self._joint_ids]
@@ -1138,7 +1140,19 @@ class Solo12Env(DirectRLEnv):
         obs = torch.cat(tuple(obs_terms), dim=-1)
 
         self._previous_actions = self._actions.clone()
-        return {"policy": obs}
+        return self._with_optional_rnd_state({"policy": obs})
+
+    def _with_optional_rnd_state(self, observations: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        if self.cfg.rnd_network:
+            observations["rnd_state"] = self._get_rnd_curiosity_state()
+        return observations
+
+    def _get_rnd_curiosity_state(self) -> torch.Tensor:
+        """Return a clean, task-focused posture/contact state for RND (19 dimensions)."""
+
+        joint_pos = self._robot.data.joint_pos[:, self._joint_ids] - self._q_offset_action_and_obs
+        feet_contact = self._get_feet_contact_mask(self.cfg.feet_ground_contact_threshold).to(joint_pos.dtype)
+        return torch.cat((self._robot.data.projected_gravity_b, joint_pos, feet_contact), dim=-1)
 
     def _get_simple_proprioceptive_obs(self, corrupt: bool) -> torch.Tensor:
         joint_pos = self._robot.data.joint_pos[:, self._joint_ids] - self._q_offset_action_and_obs
