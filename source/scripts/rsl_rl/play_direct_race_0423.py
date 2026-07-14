@@ -1506,6 +1506,14 @@ class SlipConeVisualizer:
         self._csv_path = None
         self._sampler_rows_written = 0
         self._warned_sampler = False
+        self._straight_direction_w = None
+        if str(getattr(raw_env.cfg, "race_scene", "")) == "straightSimple":
+            waypoints_w = getattr(raw_env, "_track_waypoints_w", None)
+            if waypoints_w is not None and len(waypoints_w) >= 2:
+                direction_xy = waypoints_w[-1, :2] - waypoints_w[0, :2]
+                norm = torch.linalg.norm(direction_xy)
+                if float(norm.item()) > 1.0e-9:
+                    self._straight_direction_w = direction_xy / norm
         self._draw = None
         self._warned_debug_draw = False
         self._warned_update = False
@@ -2036,6 +2044,10 @@ class SlipConeVisualizer:
         sim_time_s = substep * self._sim_dt
         policy_step = substep // self._decimation
         substep_in_step = substep % self._decimation
+        base_velocity_straight = float("nan")
+        if self._straight_direction_w is not None:
+            base_velocity_w = self.raw_env._robot.data.root_lin_vel_w[self.env_index, :2]
+            base_velocity_straight = float(torch.dot(base_velocity_w, self._straight_direction_w).item())
 
         for label, state in states.items():
             contact = bool(state.get("contact"))
@@ -2066,7 +2078,15 @@ class SlipConeVisualizer:
                         del buffer[: len(buffer) - 8192]
 
             if self._csv_writer is not None:
-                self._write_csv_row(policy_step, substep_in_step, sim_time_s, label, contact_id, state)
+                self._write_csv_row(
+                    policy_step,
+                    substep_in_step,
+                    sim_time_s,
+                    label,
+                    contact_id,
+                    state,
+                    base_velocity_straight,
+                )
 
         if self._csv_file is not None and (self._sampler_rows_written % 800) == 0:
             try:
@@ -2081,6 +2101,7 @@ class SlipConeVisualizer:
             "substep",
             "policy_action_update",
             "sim_time_s",
+            "base_velocity_straight_mps",
             "foot",
             "contact",
             "contact_id",
@@ -2124,6 +2145,7 @@ class SlipConeVisualizer:
         label: str,
         contact_id: int,
         state: dict[str, object],
+        base_velocity_straight: float,
     ) -> None:
         vel = state.get("foot_vel_w")
         if vel is None:
@@ -2146,6 +2168,7 @@ class SlipConeVisualizer:
                 int(substep_in_step),
                 int(substep_in_step == 0),
                 f"{sim_time_s:.6f}",
+                f"{base_velocity_straight:.6f}",
                 label,
                 int(bool(state.get("contact"))),
                 int(contact_id),
@@ -4206,6 +4229,7 @@ def _generate_slip_plots_after_run(args_cli, slip_csv_path: str | None, env_cfg=
             slip_csv_path,
             task=getattr(args_cli, "task", None),
             title_extra=title_extra,
+            race_scene=getattr(env_cfg, "race_scene", None) if env_cfg is not None else None,
         )
         slip_plots.save_slip_figure(slip_csv_path, png_path, min_samples=min_samples, title_extra=title_extra)
         polar_paths = slip_plots.save_polar_slip_figures(
@@ -4213,6 +4237,13 @@ def _generate_slip_plots_after_run(args_cli, slip_csv_path: str | None, env_cfg=
             os.path.splitext(png_path)[0],
             title_extra=title_extra,
         )
+        velocity_path = None
+        if str(getattr(env_cfg, "race_scene", "")) == "straightSimple":
+            velocity_path = slip_plots.save_straight_velocity_figure(
+                slip_csv_path,
+                os.path.splitext(png_path)[0] + "_straight_velocity.png",
+                title_extra=title_extra,
+            )
         print(f"[INFO] --generate-slip-plots: saved slip data to {slip_csv_path}", flush=True)
         print(f"[INFO] --generate-slip-plots: saved plot metadata to {metadata_path}", flush=True)
         print(f"[INFO] --generate-slip-plots: saved slip plot to {png_path}", flush=True)
@@ -4220,6 +4251,8 @@ def _generate_slip_plots_after_run(args_cli, slip_csv_path: str | None, env_cfg=
             "[INFO] --generate-slip-plots: saved polar reaction-force plots:\n    " + "\n    ".join(polar_paths),
             flush=True,
         )
+        if velocity_path is not None:
+            print(f"[INFO] --generate-slip-plots: saved straight-line velocity plot to {velocity_path}", flush=True)
     except Exception as exc:
         print(f"[WARN] --generate-slip-plots: could not save slip plot: {type(exc).__name__}: {exc}", flush=True)
         return

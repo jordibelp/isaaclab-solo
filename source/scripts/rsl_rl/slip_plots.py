@@ -47,11 +47,20 @@ def _metadata_path(csv_path: str | os.PathLike[str]) -> Path:
     return Path(csv_path).with_suffix(".plot.json")
 
 
-def save_plot_metadata(csv_path: str, *, task: str | None, title_extra: str | None) -> str:
+def save_plot_metadata(
+    csv_path: str,
+    *,
+    task: str | None,
+    title_extra: str | None,
+    race_scene: str | None = None,
+) -> str:
     """Persist plot labels beside a slip CSV so it can be reopened without CLI title arguments."""
     path = _metadata_path(csv_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"task": task, "title_extra": title_extra}, indent=2) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps({"task": task, "title_extra": title_extra, "race_scene": race_scene}, indent=2) + "\n",
+        encoding="utf-8",
+    )
     return str(path)
 
 
@@ -668,6 +677,45 @@ def save_polar_slip_figures(
         fig.savefig(output_path, dpi=dpi, bbox_inches="tight", facecolor="white", transparent=False)
         saved.append(output_path)
     return saved
+
+
+def save_straight_velocity_figure(
+    csv_path: str,
+    output_path: str,
+    *,
+    title_extra: str | None = None,
+    dpi: int = 170,
+) -> str:
+    """Plot signed base velocity along the straight start-to-end direction."""
+    import pandas as pd
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
+
+    task, title_extra = _resolve_plot_labels(csv_path, title_extra)
+    df = pd.read_csv(csv_path, usecols=["sim_time_s", "base_velocity_straight_mps"])
+    data = df.drop_duplicates("sim_time_s").sort_values("sim_time_s")
+    time_s = pd.to_numeric(data["sim_time_s"], errors="coerce").to_numpy(dtype=float)
+    velocity = pd.to_numeric(data["base_velocity_straight_mps"], errors="coerce").to_numpy(dtype=float)
+    valid = np.isfinite(time_s) & np.isfinite(velocity)
+
+    fig = Figure(figsize=(12.0, 6.5), facecolor="white")
+    FigureCanvasAgg(fig)
+    ax = fig.subplots()
+    ax.plot(time_s[valid], velocity[valid], color="tab:blue", linewidth=1.4)
+    ax.axhline(0.0, color="0.35", linewidth=0.8)
+    ax.set_xlabel("simulation time [s]")
+    ax.set_ylabel("base velocity along start → end [m/s]")
+    title = "Base velocity projected onto the straight race direction"
+    if task:
+        title += f"\ntask: {task}"
+    if title_extra:
+        title += f"\n{title_extra}"
+    ax.set_title(title)
+    ax.grid(True, alpha=0.35)
+    fig.tight_layout()
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+    fig.savefig(output_path, dpi=dpi, bbox_inches="tight", facecolor="white", transparent=False)
+    return output_path
 
 
 def open_slip_figures(
