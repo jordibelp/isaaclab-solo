@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
+import torch
 from isaaclab_rl.rsl_rl import RslRlRndCfg
 
 
@@ -12,6 +13,41 @@ from isaaclab_rl.rsl_rl import RslRlRndCfg
 class Solo12RndSetup:
     enabled: bool
     beta: float
+
+
+def load_checkpoint_with_optional_fresh_rnd(runner, path: str) -> tuple[dict, bool]:
+    """Load a runner checkpoint, allowing newly enabled RND to start from fresh weights.
+
+    RSL-RL assumes that an active RND module implies an RND-enabled checkpoint. Older
+    checkpoints do not contain those entries, so temporarily hide only the fresh RND
+    objects while the standard loader restores the policy, PPO optimizer, and iteration.
+    """
+    rnd = getattr(runner.alg, "rnd", None)
+    if not rnd:
+        return runner.load(path), False
+
+    checkpoint = torch.load(path, weights_only=False, map_location="cpu")
+    has_rnd_model = "rnd_state_dict" in checkpoint
+    has_rnd_optimizer = "rnd_optimizer_state_dict" in checkpoint
+    del checkpoint
+
+    if has_rnd_model and has_rnd_optimizer:
+        return runner.load(path), False
+    if has_rnd_model != has_rnd_optimizer:
+        raise ValueError(
+            "Checkpoint has incomplete RND state: expected both 'rnd_state_dict' and "
+            "'rnd_optimizer_state_dict'."
+        )
+
+    rnd_optimizer = runner.alg.rnd_optimizer
+    runner.alg.rnd = None
+    runner.alg.rnd_optimizer = None
+    try:
+        infos = runner.load(path)
+    finally:
+        runner.alg.rnd = rnd
+        runner.alg.rnd_optimizer = rnd_optimizer
+    return infos, True
 
 
 def configure_solo12_rnd(env_cfg, agent_cfg) -> Solo12RndSetup:

@@ -18,7 +18,7 @@ for path in (SCRIPT_DIR, SKRL_SCRIPT_DIR):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-from solo12_rnd import configure_solo12_rnd  # noqa: E402
+from solo12_rnd import configure_solo12_rnd, load_checkpoint_with_optional_fresh_rnd  # noqa: E402
 from solo12_symmetry import compute_symmetric_observations_actions  # noqa: E402
 from tensordict import TensorDict  # noqa: E402
 
@@ -83,6 +83,62 @@ def test_rnd_setup_uses_task_focused_robotics_configuration() -> None:
 def test_rnd_setup_rejects_silent_noop_or_invalid_combinations(enabled, beta, message) -> None:
     with pytest.raises(ValueError, match=message):
         configure_solo12_rnd(SimpleNamespace(rnd_network=enabled, beta_curiosity=beta), make_agent_cfg())
+
+
+def test_resume_old_checkpoint_keeps_fresh_rnd_while_standard_runner_loads_policy(tmp_path) -> None:
+    checkpoint = tmp_path / "old_checkpoint.pt"
+    torch.save({"model_state_dict": {}, "optimizer_state_dict": {}, "iter": 123, "infos": {}}, checkpoint)
+    fresh_rnd = object()
+    fresh_rnd_optimizer = object()
+    seen = []
+
+    def load(path):
+        seen.append((path, runner.alg.rnd, runner.alg.rnd_optimizer))
+        return {"loaded": True}
+
+    runner = SimpleNamespace(
+        alg=SimpleNamespace(rnd=fresh_rnd, rnd_optimizer=fresh_rnd_optimizer),
+        load=load,
+    )
+
+    infos, initialized_fresh = load_checkpoint_with_optional_fresh_rnd(runner, str(checkpoint))
+
+    assert infos == {"loaded": True}
+    assert initialized_fresh is True
+    assert seen == [(str(checkpoint), None, None)]
+    assert runner.alg.rnd is fresh_rnd
+    assert runner.alg.rnd_optimizer is fresh_rnd_optimizer
+
+
+def test_resume_rnd_checkpoint_uses_standard_exact_restore(tmp_path) -> None:
+    checkpoint = tmp_path / "rnd_checkpoint.pt"
+    torch.save({"rnd_state_dict": {}, "rnd_optimizer_state_dict": {}}, checkpoint)
+    rnd = object()
+    rnd_optimizer = object()
+    runner = SimpleNamespace(
+        alg=SimpleNamespace(rnd=rnd, rnd_optimizer=rnd_optimizer),
+        load=lambda path: {"path": path},
+    )
+
+    infos, initialized_fresh = load_checkpoint_with_optional_fresh_rnd(runner, str(checkpoint))
+
+    assert infos == {"path": str(checkpoint)}
+    assert initialized_fresh is False
+    assert runner.alg.rnd is rnd
+    assert runner.alg.rnd_optimizer is rnd_optimizer
+
+
+@pytest.mark.parametrize("present_key", ("rnd_state_dict", "rnd_optimizer_state_dict"))
+def test_resume_rejects_partial_rnd_checkpoint(tmp_path, present_key) -> None:
+    checkpoint = tmp_path / "partial_rnd_checkpoint.pt"
+    torch.save({present_key: {}}, checkpoint)
+    runner = SimpleNamespace(
+        alg=SimpleNamespace(rnd=object(), rnd_optimizer=object()),
+        load=lambda path: pytest.fail("partial RND checkpoint must not be passed to runner.load"),
+    )
+
+    with pytest.raises(ValueError, match="incomplete RND state"):
+        load_checkpoint_with_optional_fresh_rnd(runner, str(checkpoint))
 
 
 def test_curiosity_state_contains_clean_posture_and_contact_configuration() -> None:

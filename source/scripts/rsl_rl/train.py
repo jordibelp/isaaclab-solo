@@ -2083,7 +2083,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     elif should_resume:
         print(f"[INFO]: Loading model checkpoint from: {resume_path}")
         _match_optimizer_param_groups_to_checkpoint(runner, resume_path)
-        loaded_checkpoint_infos = runner.load(resume_path)
+        loaded_checkpoint_infos, initialized_fresh_rnd = solo12_rnd.load_checkpoint_with_optional_fresh_rnd(
+            runner, resume_path
+        )
+        if initialized_fresh_rnd:
+            print(
+                "[WARN]: RND is enabled, but the checkpoint predates RND and has no RND state. "
+                "Restored the policy, PPO optimizer, and learning iteration; initialized the RND "
+                "model and RND optimizer from scratch.",
+                flush=True,
+            )
     if args_cli.plasticity_loss_exp:
         env.set_learning_iteration(runner.current_learning_iteration)
     if resume_path is not None:
