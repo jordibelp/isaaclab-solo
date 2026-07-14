@@ -4135,7 +4135,12 @@ def _resolve_slip_csv_path(args_cli, log_dir: str, resume_path: str) -> str | No
         slip_log_arg = "auto"
     if str(slip_log_arg).strip().lower() == "auto":
         checkpoint_stem = Path(resume_path).stem
-        return os.path.join(log_dir, "slip_logs", f"{checkpoint_stem}_{time.strftime('%Y%m%d_%H%M%S')}.csv")
+        return os.path.join(
+            log_dir,
+            "slip_logs",
+            checkpoint_stem,
+            f"{checkpoint_stem}_{time.strftime('%Y%m%d_%H%M%S')}.csv",
+        )
     return str(slip_log_arg)
 
 
@@ -4197,6 +4202,11 @@ def _generate_slip_plots_after_run(args_cli, slip_csv_path: str | None, env_cfg=
     try:
         import slip_plots  # noqa: PLC0415
 
+        metadata_path = slip_plots.save_plot_metadata(
+            slip_csv_path,
+            task=getattr(args_cli, "task", None),
+            title_extra=title_extra,
+        )
         slip_plots.save_slip_figure(slip_csv_path, png_path, min_samples=min_samples, title_extra=title_extra)
         polar_paths = slip_plots.save_polar_slip_figures(
             slip_csv_path,
@@ -4204,6 +4214,7 @@ def _generate_slip_plots_after_run(args_cli, slip_csv_path: str | None, env_cfg=
             title_extra=title_extra,
         )
         print(f"[INFO] --generate-slip-plots: saved slip data to {slip_csv_path}", flush=True)
+        print(f"[INFO] --generate-slip-plots: saved plot metadata to {metadata_path}", flush=True)
         print(f"[INFO] --generate-slip-plots: saved slip plot to {png_path}", flush=True)
         print(
             "[INFO] --generate-slip-plots: saved polar reaction-force plots:\n    " + "\n    ".join(polar_paths),
@@ -4216,8 +4227,6 @@ def _generate_slip_plots_after_run(args_cli, slip_csv_path: str | None, env_cfg=
     slip_plots_script = os.path.join(str(_THIS_DIR), "slip_plots.py")
     repo_root = Path(__file__).resolve().parents[3]
     interactive_args = [slip_csv_path, "--min-samples", str(min_samples)]
-    if title_extra:
-        interactive_args.extend(("--title-extra", title_extra))
     interactive_cmd = " ".join(
         shlex.quote(str(part))
         for part in [repo_root / "isaaclab.sh", "-p", os.path.relpath(slip_plots_script, repo_root), *interactive_args]

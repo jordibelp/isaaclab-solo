@@ -25,6 +25,7 @@ against the dynamic/static friction-cone limits plus the friction-opposed contac
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import subprocess
@@ -40,6 +41,35 @@ DEFAULT_MIN_SAMPLES = 1
 DEFAULT_EPS_DEG = 0.1
 POLAR_DIRECTION_COLS = ("friction_direction_footprint_x", "friction_direction_footprint_y")
 DEFAULT_SLIP_LOG_DIR = Path(__file__).resolve().parents[3] / "logs" / "skrl" / "slip_logs"
+
+
+def _metadata_path(csv_path: str | os.PathLike[str]) -> Path:
+    return Path(csv_path).with_suffix(".plot.json")
+
+
+def save_plot_metadata(csv_path: str, *, task: str | None, title_extra: str | None) -> str:
+    """Persist plot labels beside a slip CSV so it can be reopened without CLI title arguments."""
+    path = _metadata_path(csv_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"task": task, "title_extra": title_extra}, indent=2) + "\n", encoding="utf-8")
+    return str(path)
+
+
+def _load_plot_metadata(csv_path: str) -> dict:
+    path = _metadata_path(csv_path)
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"[WARN] Could not read plot metadata {path}: {type(exc).__name__}: {exc}")
+        return {}
+
+
+def _resolve_plot_labels(csv_path: str, title_extra: str | None) -> tuple[str | None, str | None]:
+    metadata = _load_plot_metadata(csv_path)
+    return metadata.get("task"), title_extra if title_extra is not None else metadata.get("title_extra")
 
 
 def _has_display() -> bool:
@@ -249,6 +279,7 @@ def build_slip_figure(
     """
     import pandas as pd
 
+    task, title_extra = _resolve_plot_labels(csv_path, title_extra)
     df = pd.read_csv(csv_path)
     if {"normal_force", "friction_force"}.issubset(df.columns):
         normal_force = pd.to_numeric(df["normal_force"], errors="coerce").fillna(0.0).to_numpy(dtype=float)
@@ -443,13 +474,16 @@ def build_slip_figure(
 
     stem = os.path.basename(csv_path).rsplit(".", 1)[0]
     title = f"Per-foot: all contact episodes concatenated — contact reaction force angle - {stem}"
+    if task:
+        title = f"{title}\ntask: {task}"
     if title_extra:
         title = f"{title}\n{title_extra}"
     fig.suptitle(title)
     if shared_legend:
         handles, labels = zip(*shared_legend)
         fig.legend(handles, labels, loc="lower center", bbox_to_anchor=(0.5, 0.01), ncol=len(labels), fontsize=9)
-    fig.tight_layout(rect=(0.0, 0.07, 1.0, 0.91 if title_extra else 0.94))
+    has_subtitle = bool(task or title_extra)
+    fig.tight_layout(rect=(0.0, 0.07, 1.0, 0.88 if has_subtitle else 0.94))
     return fig
 
 
@@ -509,6 +543,8 @@ def _polar_contact_data(df, feet) -> tuple[np.ndarray, np.ndarray, np.ndarray, n
     static = np.deg2rad(pd.to_numeric(dff["angle_static_deg"], errors="coerce").to_numpy(dtype=float))
     valid = np.isfinite(x) & np.isfinite(y) & np.isfinite(radius) & np.isfinite(dynamic) & np.isfinite(static)
     valid &= np.hypot(x, y) > 1.0e-9
+    # Angles beyond the static friction cone are force-estimation/contact-transition outliers.
+    valid &= radius <= static
     return np.arctan2(y[valid], x[valid]), radius[valid], dynamic[valid], static[valid]
 
 
@@ -558,7 +594,7 @@ def _draw_polar_density(ax, theta, radius, dynamic, static, *, title: str):
         np.full_like(full_circle, dynamic_median),
         color="#00b8ff",
         linewidth=2.4,
-        linestyle="--",
+        linestyle="-",
         label=rf"angle_dynamic = {np.rad2deg(dynamic_median):.1f}°",
         zorder=5,
     )
@@ -598,6 +634,7 @@ def save_polar_slip_figures(
     from matplotlib.backends.backend_agg import FigureCanvasAgg
     from matplotlib.figure import Figure
 
+    task, title_extra = _resolve_plot_labels(csv_path, title_extra)
     df = pd.read_csv(csv_path)
     saved = []
     plot_groups = [((foot,), foot) for foot in feet] + [(tuple(feet), "all_feet")]
@@ -617,6 +654,8 @@ def save_polar_slip_figures(
             title=f"{label}: contact-force direction vs reaction-force angle",
         )
         subtitle = f"base-footprint frame; every dot is one contact sample — {stem}"
+        if task:
+            subtitle += f"\ntask: {task}"
         if title_extra:
             subtitle += f"\n{title_extra}"
         fig.text(0.5, 0.96, subtitle, ha="center", va="top", fontsize=9)
