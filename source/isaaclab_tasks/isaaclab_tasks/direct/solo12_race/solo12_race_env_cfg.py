@@ -199,6 +199,9 @@ class Solo12RaceEnvCfg(DirectRLEnvCfg):
     scene_prim_path = "/World/envs/env_.*/Scene"
     scene_source_prim_path = "/World/envs/env_0/Scene"
     race_scene: str = SOLO12_RACE_DEFAULT_SCENE
+    # Constant world-frame force [N] applied at the base COM opposite the straightSimple
+    # start-to-end direction. Zero disables it.
+    backward_force: float = 0.0
     waypoint_names = SOLO12_RACE_WAYPOINT_NAMES
     patch_name_pattern = "patch.*"
 

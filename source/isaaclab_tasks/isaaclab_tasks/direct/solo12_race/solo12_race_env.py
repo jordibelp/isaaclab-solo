@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import copy
+import math
 import re
 
 import gymnasium as gym
@@ -27,6 +28,14 @@ class Solo12RaceEnv(DirectRLEnv):
     cfg: Solo12RaceEnvCfg
 
     def __init__(self, cfg: Solo12RaceEnvCfg, render_mode: str | None = None, **kwargs):
+        backward_force = float(cfg.backward_force)
+        if not math.isfinite(backward_force) or backward_force < 0.0:
+            raise ValueError(
+                f"backward_force must be a finite non-negative force in newtons, got {cfg.backward_force}."
+            )
+        if backward_force > 0.0 and str(cfg.race_scene) != "straightSimple":
+            raise ValueError("backward_force is only supported when race_scene='straightSimple'.")
+
         cfg.scene_usd = sim_utils.UsdFileCfg(usd_path=str(resolve_solo12_race_scene_usd_path(cfg.race_scene)))
         if not getattr(cfg, "enable_events_randomization", False):
             cfg.events = None
@@ -160,6 +169,28 @@ class Solo12RaceEnv(DirectRLEnv):
                 "finish_reward",
             ]
         }
+
+    def _apply_backward_force(self):
+        """Refresh the straight-track opposing force at the floating-base COM."""
+        force_magnitude = float(self.cfg.backward_force)
+        if force_magnitude == 0.0:
+            return
+
+        straight_xy = self._track_waypoints_w[-1, :2] - self._track_waypoints_w[0, :2]
+        straight_length = torch.linalg.vector_norm(straight_xy)
+        if float(straight_length.item()) <= 1e-6:
+            raise ValueError("Cannot apply backward_force: waypoint_start and waypoint_end have identical XY positions.")
+
+        forces_w = torch.zeros((self.num_envs, 1, 3), dtype=torch.float, device=self.device)
+        forces_w[:, 0, :2] = -force_magnitude * straight_xy / straight_length
+        # WrenchComposer stores forces in the link frame even when they are supplied globally. Refreshing it each
+        # physics step keeps the force fixed in the world frame as the robot rotates.
+        self._robot.permanent_wrench_composer.reset()
+        self._robot.permanent_wrench_composer.set_forces_and_torques(
+            forces=forces_w,
+            body_ids=[0],
+            is_global=True,
+        )
 
     def _setup_scene(self):
         self.cfg.scene_usd.func(self.cfg.scene_prim_path, self.cfg.scene_usd)
@@ -882,6 +913,7 @@ class Solo12RaceEnv(DirectRLEnv):
         self._processed_actions = self.cfg.action_scale * self._actions + default_joint_pos
 
     def _apply_action(self):
+        self._apply_backward_force()
         if self._enable_actuation_delay:
             self._delayed_processed_actions = self._action_delay_buffer.compute(self._processed_actions)
         else:
