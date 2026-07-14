@@ -1778,6 +1778,9 @@ class SlipConeVisualizer:
         foot_pos_w = self._foot_reference_positions_w()[self.env_index].detach()
         foot_vel_w = self._foot_velocities_w()[self.env_index].detach()
         foot_vel_origin_w = self._foot_origin_velocities_w()[self.env_index].detach()
+        root_quat_w = self.raw_env._robot.data.root_quat_w[self.env_index].detach().cpu()
+        yaw = SideFollowCamera._quat_wxyz_to_yaw(root_quat_w)
+        world_to_footprint = SideFollowCamera._yaw_rot(yaw).T
 
         foot_names = _foot_body_names_for_overlay(self.raw_env)
         states: dict[str, dict[str, object]] = {}
@@ -1787,6 +1790,13 @@ class SlipConeVisualizer:
             force_w = contact_forces_w[index]
             normal_norm_value = float(normal_force_norm[index].item())
             friction_norm_value = float(friction_force_norm[index].item())
+            friction_force = friction_forces_w[index].detach().cpu().numpy().astype(np.float64)
+            friction_force_footprint = world_to_footprint @ friction_force
+            friction_force_xy_norm = float(np.linalg.norm(friction_force_footprint[:2]))
+            if friction_force_xy_norm > 1.0e-9:
+                friction_direction_footprint = friction_force_footprint[:2] / friction_force_xy_norm
+            else:
+                friction_direction_footprint = np.zeros(2, dtype=np.float64)
             angle_rad = torch.atan2(friction_force_norm[index], normal_force_norm[index])
             angle_deg = float(torch.rad2deg(angle_rad).item())
             effective_mu = friction_norm_value / max(normal_norm_value, 1.0e-6)
@@ -1821,7 +1831,8 @@ class SlipConeVisualizer:
                 "color_key": color_key,
                 "force_w": force_w.detach().cpu().numpy().astype(np.float64),
                 "normal_force_w": normal_forces_w[index].detach().cpu().numpy().astype(np.float64),
-                "friction_force_w": friction_forces_w[index].detach().cpu().numpy().astype(np.float64),
+                "friction_force_w": friction_force,
+                "friction_direction_footprint": friction_direction_footprint,
                 "foot_pos_w": foot_pos_w[index].detach().cpu().numpy().astype(np.float64),
                 "foot_vel_w": foot_vel,
                 "angle_deg": angle_deg,
@@ -2088,6 +2099,8 @@ class SlipConeVisualizer:
             "friction_force_x",
             "friction_force_y",
             "friction_force_z",
+            "friction_direction_footprint_x",
+            "friction_direction_footprint_y",
             "angle_deg",
             "angle_dyn_deg",
             "angle_static_deg",
@@ -2121,6 +2134,9 @@ class SlipConeVisualizer:
         friction_force = state.get("friction_force_w")
         if friction_force is None:
             friction_force = np.zeros(3, dtype=np.float64)
+        friction_direction_footprint = state.get("friction_direction_footprint")
+        if friction_direction_footprint is None:
+            friction_direction_footprint = np.zeros(2, dtype=np.float64)
         contact_pos = state.get("foot_pos_w")
         if contact_pos is None:
             contact_pos = np.zeros(3, dtype=np.float64)
@@ -2148,6 +2164,8 @@ class SlipConeVisualizer:
                 f"{float(friction_force[0]):.6f}",
                 f"{float(friction_force[1]):.6f}",
                 f"{float(friction_force[2]):.6f}",
+                f"{float(friction_direction_footprint[0]):.6f}",
+                f"{float(friction_direction_footprint[1]):.6f}",
                 f"{float(state.get('angle_deg', 0.0)):.4f}",
                 f"{float(state.get('angle_dynamic_deg', 0.0)):.4f}",
                 f"{float(state.get('angle_static_deg', 0.0)):.4f}",
@@ -4180,8 +4198,17 @@ def _generate_slip_plots_after_run(args_cli, slip_csv_path: str | None, env_cfg=
         import slip_plots  # noqa: PLC0415
 
         slip_plots.save_slip_figure(slip_csv_path, png_path, min_samples=min_samples, title_extra=title_extra)
+        polar_paths = slip_plots.save_polar_slip_figures(
+            slip_csv_path,
+            os.path.splitext(png_path)[0],
+            title_extra=title_extra,
+        )
         print(f"[INFO] --generate-slip-plots: saved slip data to {slip_csv_path}", flush=True)
         print(f"[INFO] --generate-slip-plots: saved slip plot to {png_path}", flush=True)
+        print(
+            "[INFO] --generate-slip-plots: saved polar reaction-force plots:\n    " + "\n    ".join(polar_paths),
+            flush=True,
+        )
     except Exception as exc:
         print(f"[WARN] --generate-slip-plots: could not save slip plot: {type(exc).__name__}: {exc}", flush=True)
         return

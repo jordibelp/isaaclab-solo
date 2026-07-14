@@ -38,6 +38,7 @@ SPEED_COL = "tangential_speed"
 DEFAULT_GAP_S = None
 DEFAULT_MIN_SAMPLES = 1
 DEFAULT_EPS_DEG = 0.1
+POLAR_DIRECTION_COLS = ("friction_direction_footprint_x", "friction_direction_footprint_y")
 DEFAULT_SLIP_LOG_DIR = Path(__file__).resolve().parents[3] / "logs" / "skrl" / "slip_logs"
 
 
@@ -486,6 +487,148 @@ def save_slip_figure(
         os.makedirs(out_dir, exist_ok=True)
     fig.savefig(png_path, dpi=dpi, bbox_inches="tight")
     return png_path
+
+
+def _polar_contact_data(df, feet) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Return footprint-frame azimuth, cone angle, and friction limits for contact rows."""
+    import pandas as pd
+
+    missing = [column for column in POLAR_DIRECTION_COLS if column not in df.columns]
+    if missing:
+        raise ValueError(
+            "slip CSV has no base-footprint force direction; generate a new log (missing " + ", ".join(missing) + ")"
+        )
+
+    contact = df["contact"].astype(bool)
+    selected = df["foot"].isin(tuple(feet)) & contact
+    dff = df.loc[selected]
+    x = pd.to_numeric(dff[POLAR_DIRECTION_COLS[0]], errors="coerce").to_numpy(dtype=float)
+    y = pd.to_numeric(dff[POLAR_DIRECTION_COLS[1]], errors="coerce").to_numpy(dtype=float)
+    radius = np.deg2rad(pd.to_numeric(dff["angle_deg"], errors="coerce").to_numpy(dtype=float))
+    dynamic = np.deg2rad(pd.to_numeric(dff["angle_dyn_deg"], errors="coerce").to_numpy(dtype=float))
+    static = np.deg2rad(pd.to_numeric(dff["angle_static_deg"], errors="coerce").to_numpy(dtype=float))
+    valid = np.isfinite(x) & np.isfinite(y) & np.isfinite(radius) & np.isfinite(dynamic) & np.isfinite(static)
+    valid &= np.hypot(x, y) > 1.0e-9
+    return np.arctan2(y[valid], x[valid]), radius[valid], dynamic[valid], static[valid]
+
+
+def _draw_polar_density(ax, theta, radius, dynamic, static, *, title: str):
+    """Draw every contact sample, colored by local point density, on one polar axis."""
+    from matplotlib.colors import LogNorm  # noqa: PLC0415
+
+    ax.set_title(title, pad=42)
+    ax.set_theta_zero_location("E")
+    ax.set_theta_direction(1)
+    ax.set_thetagrids(
+        [0, 45, 90, 135, 180, 225, 270, 315],
+        ["+x forward", "45°", "+y left", "135°", "-x rear", "225°", "-y right", "315°"],
+    )
+    ax.grid(alpha=0.35)
+
+    if radius.size == 0:
+        ax.text(0.5, 0.5, "no contact samples", transform=ax.transAxes, ha="center", va="center")
+        return None
+
+    radial_max = max(float(np.max(radius)), float(np.max(static)))
+    radial_max = max(np.deg2rad(5.0), np.ceil(np.rad2deg(radial_max) / 5.0) * np.deg2rad(5.0))
+    theta_edges = np.linspace(-np.pi, np.pi, 73)
+    radius_edges = np.linspace(0.0, radial_max, 46)
+    counts, _, _ = np.histogram2d(theta, radius, bins=(theta_edges, radius_edges))
+    theta_bin = np.clip(np.searchsorted(theta_edges, theta, side="right") - 1, 0, counts.shape[0] - 1)
+    radius_bin = np.clip(np.searchsorted(radius_edges, radius, side="right") - 1, 0, counts.shape[1] - 1)
+    density = counts[theta_bin, radius_bin]
+    order = np.argsort(density, kind="stable")
+    scatter = ax.scatter(
+        theta[order],
+        radius[order],
+        c=density[order],
+        cmap="inferno",
+        norm=LogNorm(vmin=1.0, vmax=max(1.0, float(density.max()))),
+        s=8,
+        linewidths=0,
+        alpha=0.85,
+        zorder=3,
+    )
+
+    full_circle = np.linspace(0.0, 2.0 * np.pi, 361)
+    dynamic_median = float(np.median(dynamic))
+    static_median = float(np.median(static))
+    ax.plot(
+        full_circle,
+        np.full_like(full_circle, dynamic_median),
+        color="#00b8ff",
+        linewidth=2.4,
+        linestyle="--",
+        label=rf"angle_dynamic = {np.rad2deg(dynamic_median):.1f}°",
+        zorder=5,
+    )
+    ax.plot(
+        full_circle,
+        np.full_like(full_circle, static_median),
+        color="#49e670",
+        linewidth=2.4,
+        label=rf"angle_static = {np.rad2deg(static_median):.1f}°",
+        zorder=5,
+    )
+    for values, color in ((dynamic, "#00b8ff"), (static, "#49e670")):
+        low, high = float(np.min(values)), float(np.max(values))
+        if high - low > np.deg2rad(0.05):
+            ax.fill_between(full_circle, low, high, color=color, alpha=0.10, linewidth=0)
+
+    ax.set_ylim(0.0, radial_max)
+    ticks_deg = np.arange(10.0, np.rad2deg(radial_max) + 0.1, 10.0)
+    if ticks_deg.size:
+        ax.set_yticks(np.deg2rad(ticks_deg))
+        ax.set_yticklabels([f"{value:g}°" for value in ticks_deg])
+    ax.set_rlabel_position(22.5)
+    ax.legend(loc="lower center", bbox_to_anchor=(0.5, -0.22), fontsize=9)
+    return scatter
+
+
+def save_polar_slip_figures(
+    csv_path: str,
+    output_stem: str,
+    *,
+    feet=FEET,
+    title_extra: str | None = None,
+    dpi: int = 170,
+) -> list[str]:
+    """Save four per-foot and one all-feet footprint-frame polar density plots."""
+    import pandas as pd
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
+
+    df = pd.read_csv(csv_path)
+    saved = []
+    plot_groups = [((foot,), foot) for foot in feet] + [(tuple(feet), "all_feet")]
+    stem = os.path.basename(csv_path).rsplit(".", 1)[0]
+    for selected_feet, suffix in plot_groups:
+        theta, radius, dynamic, static = _polar_contact_data(df, selected_feet)
+        fig = Figure(figsize=(11.0, 9.5), facecolor="white")
+        FigureCanvasAgg(fig)
+        ax = fig.add_subplot(111, projection="polar")
+        label = selected_feet[0] if len(selected_feet) == 1 else "all feet"
+        scatter = _draw_polar_density(
+            ax,
+            theta,
+            radius,
+            dynamic,
+            static,
+            title=f"{label}: contact-force direction vs reaction-force angle",
+        )
+        subtitle = f"base-footprint frame; every dot is one contact sample — {stem}"
+        if title_extra:
+            subtitle += f"\n{title_extra}"
+        fig.text(0.5, 0.96, subtitle, ha="center", va="top", fontsize=9)
+        if scatter is not None:
+            colorbar = fig.colorbar(scatter, ax=ax, pad=0.12, shrink=0.75)
+            colorbar.set_label("samples in local angle/direction bin (warmer = denser)")
+        fig.subplots_adjust(left=0.08, right=0.84, bottom=0.15, top=0.82)
+        output_path = f"{output_stem}_polar_{suffix}.png"
+        os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+        fig.savefig(output_path, dpi=dpi, bbox_inches="tight", facecolor="white", transparent=False)
+        saved.append(output_path)
+    return saved
 
 
 def open_slip_figures(
