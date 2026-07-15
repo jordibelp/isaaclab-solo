@@ -490,6 +490,17 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     flexed_initial_joint_pos_noise_range = (-0.07, 0.07)
     reset_base_lin_vel_range = (-0.3, 0.3)
     reset_base_ang_vel_range = (-0.1, 0.1)
+    # Reset profile selected automatically when initial_position="two_feet".
+    # Keep these separate from the effective reset values above so the complete pose remains configurable.
+    two_feet_reset_x_pos = 0.0
+    two_feet_reset_y_pos = 0.0
+    two_feet_reset_root_height = 0.53
+    two_feet_reset_root_roll = 0.0
+    two_feet_reset_root_pitch = math.radians(-73.32)
+    two_feet_reset_root_rpy_noise = tuple(math.radians(value) for value in (3.0, 5.0, 5.0))
+    two_feet_joint_pos_noise_range = (-0.05, 0.05)
+    two_feet_reset_base_lin_vel_range = (0.0, 0.0)
+    two_feet_reset_base_ang_vel_range = (0.0, 0.0)
     # Delays the joint-position target by physics steps.
     actuation_delay_range = (0, 3)
     base_push_interval_range_s = (10.0, 15.0)
@@ -645,6 +656,7 @@ class Solo12EnvCfg(DirectRLEnvCfg):
         return bool(self.curriculum_two_feet and any(self.tricky_terrain_curriculum))
 
     def refresh_runtime_dependent_config(self):
+        self._apply_initial_position_reset_profile()
         self.refresh_observation_dimensions()
         self._apply_runtime_overrides_to_nested_cfg()
         # If a later curriculum phase needs tricky terrain, the generator must exist from startup.
@@ -653,6 +665,21 @@ class Solo12EnvCfg(DirectRLEnvCfg):
             self.terrain.terrain_type = "generator"
             self.terrain.terrain_generator = SOLO12_TRICKY_TERRAINS_CFG.copy()
             self.terrain.use_terrain_origins = True
+
+    def _apply_initial_position_reset_profile(self):
+        """Apply pose-specific reset settings after command-line overrides are parsed."""
+        if self.initial_position.lower() != "two_feet":
+            return
+
+        self.reset_x_pos = self.two_feet_reset_x_pos
+        self.reset_y_pos = self.two_feet_reset_y_pos
+        self.reset_root_height = self.two_feet_reset_root_height
+        self.reset_root_roll = self.two_feet_reset_root_roll
+        self.reset_root_pitch = self.two_feet_reset_root_pitch
+        self.reset_root_rpy_noise = self.two_feet_reset_root_rpy_noise
+        self.flexed_initial_joint_pos_noise_range = self.two_feet_joint_pos_noise_range
+        self.reset_base_lin_vel_range = self.two_feet_reset_base_lin_vel_range
+        self.reset_base_ang_vel_range = self.two_feet_reset_base_ang_vel_range
 
     def _apply_runtime_overrides_to_nested_cfg(self):
         self.robot.spawn.articulation_props.enabled_self_collisions = bool(self.enabled_self_collisions)
@@ -769,18 +796,9 @@ class Solo12TwoFeetEnvCfg(Solo12EnvCfg):
     command_lin_vel_x_range = (-0.5, 0.5)
     max_velx_range_curriculum = [0.5]
 
-    # Accepted with solo12_two_feet_pose_editor.py; values are relative to each terrain origin.
-    initial_position = "two_feet"
-    reset_x_pos = 0.0
-    reset_y_pos = 0.0
-    reset_root_height = 0.53
-    reset_root_roll = 0.0
-    reset_root_pitch = math.radians(-73.32)
-    reset_yaw = math.pi
-    reset_root_rpy_noise = tuple(math.radians(value) for value in (3.0, 5.0, 5.0))
-    flexed_initial_joint_pos_noise_range = (-0.05, 0.05)
-    reset_base_lin_vel_range = (0.0, 0.0)
-    reset_base_ang_vel_range = (0.0, 0.0)
+    # Start from the original safe pose. Set initial_position="two_feet" to activate the complete
+    # accepted two-feet reset profile above; no companion reset overrides are required.
+    initial_position = "safe"
     track_base_height_reward_scale = 0.0
     enable_observation_corruption = True
     tricky_terrain = True
