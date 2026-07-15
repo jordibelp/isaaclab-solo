@@ -27,6 +27,15 @@ def test_heading_frame_tracking_is_enabled_only_for_two_feet_config():
     assert Solo12TwoFeetEnvCfg().track_commands_in_world_heading_frame is True
 
 
+def test_base_thigh_collision_filter_removal_is_opt_in():
+    standard = Solo12EnvCfg()
+    two_feet = Solo12TwoFeetEnvCfg()
+
+    assert standard.remove_base_thigh_collision_filters is False
+    assert two_feet.enabled_self_collisions is True
+    assert two_feet.remove_base_thigh_collision_filters is False
+
+
 def test_world_velocity_in_heading_frame_ignores_pitch_and_vertical_velocity():
     roll = torch.zeros(2)
     pitch = torch.full((2,), math.pi / 2)
@@ -137,6 +146,19 @@ def test_contact_penalty_targets_any_front_foot_with_front_back_asymmetry():
     torch.testing.assert_close(actual, torch.tensor((0.0, 1.0, 1.0)))
 
 
+def test_contact_penalty_targets_any_front_thigh_with_front_back_asymmetry():
+    env = object.__new__(Solo12Env)
+    env._is_closed = True
+    env.cfg = type("Cfg", (), {"front_back_asymetry": True})()
+    env._front_feet_contact_indices = [0, 1]
+    feet_contacts = torch.zeros((3, 4), dtype=torch.bool)
+    front_thigh_contacts = torch.tensor(((False, False), (True, False), (False, True)))
+
+    actual = env._compute_three_or_more_feet_contact_penalty(feet_contacts, front_thigh_contacts)
+
+    torch.testing.assert_close(actual, torch.tensor((0.0, 1.0, 1.0)))
+
+
 def test_contact_penalty_keeps_three_feet_rule_without_front_back_asymmetry():
     env = object.__new__(Solo12Env)
     env._is_closed = True
@@ -150,6 +172,8 @@ def test_contact_penalty_keeps_three_feet_rule_without_front_back_asymmetry():
         )
     )
 
-    actual = env._compute_three_or_more_feet_contact_penalty(contacts)
+    # Thigh contacts do not alter the original symmetric >=3-foot rule.
+    front_thigh_contacts = torch.ones((3, 2), dtype=torch.bool)
+    actual = env._compute_three_or_more_feet_contact_penalty(contacts, front_thigh_contacts)
 
     torch.testing.assert_close(actual, torch.tensor((0.0, 0.0, 1.0)))

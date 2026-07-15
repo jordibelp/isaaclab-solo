@@ -556,6 +556,9 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     compliant_contact_stiffness: float | None = 0.0  # 3_005.0
     compliant_contact_damping: float | None = 0.0  # 60.0
     enabled_self_collisions = False
+    # Opt in to collisions between the base and thighs by removing the explicit USD pair filters.
+    # This is separate from enabled_self_collisions because the unfiltered pairs can constrain the robot severely.
+    remove_base_thigh_collision_filters = False
 
     tracking_std = math.sqrt(0.25)
     feet_air_time_threshold = 0.5
@@ -636,7 +639,7 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     joint_accel_reward_scale = 0.0
     feet_air_time_reward_scale = 0.0
     two_feet_above_height_reward_scale = 0.0
-    # Penalizes >=3 contacting feet normally, or any front-foot contact when front_back_asymetry=True.
+    # Penalizes >=3 contacting feet normally, or any front foot/thigh contact when front_back_asymetry=True.
     three_or_more_feet_contact_penalty_reward_scale = 0.0
     undesired_contact_reward_scale = -2.25
     base_collision_terminal_penalty = 0.0

@@ -126,7 +126,8 @@ class Solo12Env(DirectRLEnv):
         self._feet_robot_body_to_foot_offsets_b = self._build_feet_robot_body_to_foot_offsets_b(
             self._feet_robot_body_names
         )
-        self._thigh_body_ids, _ = self._contact_sensor.find_bodies(".*_thigh")
+        self._thigh_body_ids, self._thigh_body_names = self._contact_sensor.find_bodies(".*_thigh")
+        self._front_thigh_contact_indices = self._find_feet_indices(self._thigh_body_names, ("FL", "FR"))
         self._base_wrench_body_ids, _ = self._robot.find_bodies("base")
         self._joint_wrench_body_ids, _ = self._robot.find_bodies([".*_thigh", ".*_calf"])
         self._reset_joint_pos = self._build_reset_joint_pos()
@@ -203,7 +204,7 @@ class Solo12Env(DirectRLEnv):
 
     def _setup_scene(self):
         self._robot = Articulation(self.cfg.robot)
-        self._enable_base_thigh_self_collisions()
+        self._remove_base_thigh_collision_filters()
         self._apply_configured_base_mass()
         self.scene.articulations["robot"] = self._robot
 
@@ -223,7 +224,7 @@ class Solo12Env(DirectRLEnv):
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
 
-    def _enable_base_thigh_self_collisions(self):
+    def _remove_base_thigh_collision_filters(self):
         """Undo USD pair filters that otherwise defeat enabled articulation self-collisions.
 
         The Solo12 USD intentionally filters directly connected links, but it also filters the base
@@ -231,7 +232,7 @@ class Solo12Env(DirectRLEnv):
         when ``physxArticulation:enabledSelfCollisions`` is enabled. Keep the direct-joint filters
         and remove only the base--thigh pairs.
         """
-        if not bool(self.cfg.enabled_self_collisions):
+        if not bool(self.cfg.enabled_self_collisions) or not bool(self.cfg.remove_base_thigh_collision_filters):
             return
 
         stage = sim_utils.get_current_stage()
@@ -1319,7 +1320,14 @@ class Solo12Env(DirectRLEnv):
 
         feet_contact_mask = self._get_feet_contact_mask(self.cfg.feet_ground_contact_threshold)
         two_feet_above_height = self._compute_two_feet_above_height_reward(feet_contact_mask)
-        three_or_more_feet_contact = self._compute_three_or_more_feet_contact_penalty(feet_contact_mask)
+        front_thigh_contact_mask = None
+        if self.cfg.front_back_asymetry:
+            front_thigh_contact_mask = self._get_body_contact_mask(
+                self._thigh_body_ids, self.cfg.feet_ground_contact_threshold
+            )[:, self._front_thigh_contact_indices]
+        three_or_more_feet_contact = self._compute_three_or_more_feet_contact_penalty(
+            feet_contact_mask, front_thigh_contact_mask
+        )
         undesired_contacts = self._compute_contact_count(self._thigh_body_ids, self.cfg.undesired_contact_threshold)
         force_transmited_through_joints = self._compute_force_transmited_through_joints()
         foot_contact = self._compute_foot_contact_penalty()
@@ -1530,12 +1538,15 @@ class Solo12Env(DirectRLEnv):
         return torch.sum(is_contact, dim=1)
 
     def _get_feet_contact_mask(self, threshold: float) -> torch.Tensor:
+        return self._get_body_contact_mask(self._feet_body_ids, threshold)
+
+    def _get_body_contact_mask(self, body_ids, threshold: float) -> torch.Tensor:
         contact_forces_history = self._contact_sensor.data.net_forces_w_history
         if contact_forces_history is not None:
-            contact_force_norm = torch.norm(contact_forces_history[:, :, self._feet_body_ids], dim=-1)
+            contact_force_norm = torch.norm(contact_forces_history[:, :, body_ids], dim=-1)
             return torch.amax(contact_force_norm, dim=1) > threshold
 
-        contact_forces = self._contact_sensor.data.net_forces_w[:, self._feet_body_ids, :]
+        contact_forces = self._contact_sensor.data.net_forces_w[:, body_ids, :]
         return torch.norm(contact_forces, dim=-1) > threshold
 
     def _compute_two_feet_above_height_reward(self, feet_contact_mask: torch.Tensor) -> torch.Tensor:
@@ -1552,10 +1563,15 @@ class Solo12Env(DirectRLEnv):
         rear_reward = self._two_feet_height_kernel(rear_avg_height) * rear_airborne.float()
         return torch.maximum(front_reward, rear_reward)
 
-    def _compute_three_or_more_feet_contact_penalty(self, feet_contact_mask: torch.Tensor) -> torch.Tensor:
+    def _compute_three_or_more_feet_contact_penalty(
+        self, feet_contact_mask: torch.Tensor, front_thigh_contact_mask: torch.Tensor | None = None
+    ) -> torch.Tensor:
         """Return the contact-penalty indicator selected by the task symmetry mode."""
         if self.cfg.front_back_asymetry:
-            return torch.any(feet_contact_mask[:, self._front_feet_contact_indices], dim=1).float()
+            front_foot_contact = torch.any(feet_contact_mask[:, self._front_feet_contact_indices], dim=1)
+            if front_thigh_contact_mask is not None:
+                front_foot_contact |= torch.any(front_thigh_contact_mask, dim=1)
+            return front_foot_contact.float()
         return (torch.sum(feet_contact_mask, dim=1) >= 3).float()
 
     def _two_feet_height_kernel(self, avg_height: torch.Tensor) -> torch.Tensor:
