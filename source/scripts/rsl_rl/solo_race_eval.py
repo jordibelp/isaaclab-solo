@@ -789,7 +789,7 @@ def _contact_timing_summary(
     physics_dt: float,
     foot_labels: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Summarize foot-contact duty factor and contiguous contact durations."""
+    """Summarize percentage of race time in contact and contiguous contact durations."""
     labels = list(foot_labels or [])
     race_samples = int(sum(int(ep.get("slip_angle_total_samples", 0)) for ep in episodes))
     contact_samples = int(sum(int(ep.get("slip_angle_contact_samples", 0)) for ep in episodes))
@@ -1506,7 +1506,7 @@ def _print_progress_if_due(
             )
             for label in contact_foot_labels
         )
-        print("[CONTACT] duty_factor/mean_contact: " + " ".join(contact_parts), flush=True)
+        print("[CONTACT] time_in_contact_pct/mean_contact: " + " ".join(contact_parts), flush=True)
     _print_progress_if_due.next_progress_t = now + progress_interval_s
 
 

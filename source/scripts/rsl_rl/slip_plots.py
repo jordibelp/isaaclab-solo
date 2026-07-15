@@ -558,7 +558,7 @@ def _polar_contact_data(df, feet) -> tuple[np.ndarray, np.ndarray, np.ndarray, n
 
 
 def _contact_timing_stats(df, feet) -> dict[str, dict[str, float | int]]:
-    """Compute contact duty factor and mean contiguous contact duration from a physics-rate log."""
+    """Compute percentage of race time in contact and mean contiguous contact duration."""
     import pandas as pd
 
     dt_values = df["sim_time_s"].drop_duplicates().sort_values().diff().dropna()
@@ -593,7 +593,7 @@ def _contact_timing_stats(df, feet) -> dict[str, dict[str, float | int]]:
 
 def _format_contact_timing_annotation(stats: dict[str, dict[str, float | int]], selected_feet) -> str:
     labels = ["all_feet", *selected_feet] if len(selected_feet) > 1 else list(selected_feet)
-    lines = ["contact duty / mean contact"]
+    lines = ["time in contact / mean contact"]
     for label in labels:
         values = stats[str(label)]
         pct = float(values["contact_time_pct_of_race"])
