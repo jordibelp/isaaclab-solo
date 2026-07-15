@@ -605,18 +605,36 @@ def _get_curriculum_state_from_runner(runner) -> dict | None:
     global_idx = None
     if hasattr(raw_env, "get_curriculum_global_idx"):
         global_idx = raw_env.get_curriculum_global_idx()
-    if global_idx is None:
+    two_feet_phase = None
+    if bool(getattr(raw_env.cfg, "curriculum_two_feet", False)):
+        two_feet_phase = int(getattr(raw_env, "_two_feet_curriculum_phase", 1))
+    if global_idx is None and two_feet_phase is None:
         return None
 
     velx_low, velx_high = getattr(raw_env.cfg, "command_lin_vel_x_range", (0.0, 0.0))
     force_low, force_high = getattr(raw_env.cfg, "base_push_force_xy_range", (0.0, 0.0))
     return {
-        "global_idx": int(global_idx),
+        "global_idx": None if global_idx is None else int(global_idx),
+        "two_feet_phase": two_feet_phase,
         "max_velx_range_idx": int(getattr(raw_env, "_max_velx_range_curriculum_idx", 0)),
         "base_push_force_idx": int(getattr(raw_env, "_base_push_force_curriculum_idx", 0)),
         "command_lin_vel_x_abs": max(abs(float(velx_low)), abs(float(velx_high))),
         "base_push_force_xy_abs": max(abs(float(force_low)), abs(float(force_high))),
     }
+
+
+def _curriculum_checkpoint_stage(curriculum_state: dict) -> tuple[tuple[int | None, int | None], str]:
+    """Return a stable best-checkpoint key and filename for the active curriculum stage."""
+
+    global_idx = curriculum_state["global_idx"]
+    two_feet_phase = curriculum_state["two_feet_phase"]
+    if global_idx is None:
+        filename = f"best_model_two_feet_phase_{two_feet_phase}.pt"
+    elif two_feet_phase is None:
+        filename = f"best_model_curriculum_idx_{global_idx}.pt"
+    else:
+        filename = f"best_model_curriculum_idx_{global_idx}_two_feet_phase_{two_feet_phase}.pt"
+    return (global_idx, two_feet_phase), filename
 
 
 def _patch_runner_save_with_cbp(runner, cbp_manager) -> None:
@@ -2277,12 +2295,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     original_log = runner.log
     best_model_path = os.path.join(log_dir, "best_model.pt")
-    best_mean_reward_by_curriculum_idx: dict[int, float] = {}
-    last_curriculum_idx: int | None = None
+    best_mean_reward_by_curriculum_stage: dict[tuple[int | None, int | None], float] = {}
+    last_curriculum_stage: tuple[int | None, int | None] | None = None
     mean_reward_history: deque[float] = deque(maxlen=50)
 
     def _log_with_best_model(*log_args, **log_kwargs):
-        nonlocal best_mean_reward, last_curriculum_idx
+        nonlocal best_mean_reward, last_curriculum_stage
         original_log(*log_args, **log_kwargs)
 
         if runner.log_dir is None or getattr(runner, "disable_logs", False):
@@ -2308,30 +2326,38 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             _log_cbp_stats(runner, locs["it"])
 
         curriculum_state = _get_curriculum_state_from_runner(runner)
-        curriculum_idx = None if curriculum_state is None else curriculum_state["global_idx"]
-        if curriculum_idx is not None and getattr(runner, "writer", None) is not None:
-            runner.writer.add_scalar("Curriculum/global_idx", curriculum_idx, locs["it"])
+        curriculum_stage = None
+        curriculum_model_filename = None
+        if curriculum_state is not None:
+            curriculum_stage, curriculum_model_filename = _curriculum_checkpoint_stage(curriculum_state)
+            if getattr(runner, "writer", None) is not None:
+                if curriculum_state["global_idx"] is not None:
+                    runner.writer.add_scalar("Curriculum/global_idx", curriculum_state["global_idx"], locs["it"])
+                if curriculum_state["two_feet_phase"] is not None:
+                    runner.writer.add_scalar(
+                        "Curriculum/two_feet_phase", curriculum_state["two_feet_phase"], locs["it"]
+                    )
 
-        if curriculum_idx is None:
+        if curriculum_stage is None:
             previous_best_reward = best_mean_reward
         else:
-            if last_curriculum_idx is not None and curriculum_idx != last_curriculum_idx:
+            if last_curriculum_stage is not None and curriculum_stage != last_curriculum_stage:
                 print(
                     "[INFO]: Curriculum advanced "
-                    f"{last_curriculum_idx} -> {curriculum_idx}; resetting best-model tracking for the new stage."
+                    f"{last_curriculum_stage} -> {curriculum_stage}; resetting best-model tracking for the new stage."
                 )
-            last_curriculum_idx = curriculum_idx
-            previous_best_reward = best_mean_reward_by_curriculum_idx.get(curriculum_idx, float("-inf"))
+            last_curriculum_stage = curriculum_stage
+            previous_best_reward = best_mean_reward_by_curriculum_stage.get(curriculum_stage, float("-inf"))
 
         if mean_reward <= previous_best_reward:
             return
 
-        if curriculum_idx is None:
+        if curriculum_stage is None:
             best_mean_reward = mean_reward
             curriculum_model_path = None
         else:
-            best_mean_reward_by_curriculum_idx[curriculum_idx] = mean_reward
-            curriculum_model_path = os.path.join(log_dir, f"best_model_curriculum_idx_{curriculum_idx}.pt")
+            best_mean_reward_by_curriculum_stage[curriculum_stage] = mean_reward
+            curriculum_model_path = os.path.join(log_dir, curriculum_model_filename)
 
         best_infos = {
             "best_model_metric": "Train/mean_reward",
@@ -2344,7 +2370,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         if curriculum_state is not None:
             best_infos.update(
                 {
-                    "best_model_curriculum_idx": curriculum_idx,
+                    "best_model_curriculum_idx": curriculum_state["global_idx"],
+                    "best_model_two_feet_phase": curriculum_state["two_feet_phase"],
                     "curriculum_global_idx": curriculum_state["global_idx"],
                     "curriculum_max_velx_range_idx": curriculum_state["max_velx_range_idx"],
                     "curriculum_base_push_force_idx": curriculum_state["base_push_force_idx"],
