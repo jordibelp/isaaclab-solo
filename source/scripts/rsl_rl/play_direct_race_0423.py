@@ -395,6 +395,15 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
+    "--slip-plots-cmap",
+    "--slip_plots_cmap",
+    "--cmap",
+    dest="slip_plots_cmap",
+    choices=("viridis", "plasma", "inferno", "magma", "cividis"),
+    default="plasma",
+    help="Colormap for polar contact-density heatmaps. Default: plasma.",
+)
+parser.add_argument(
     "--disable_slider_friction",
     "--disable-slider-friction",
     action="store_true",
@@ -4236,6 +4245,7 @@ def _generate_slip_plots_after_run(args_cli, slip_csv_path: str | None, env_cfg=
             slip_csv_path,
             os.path.splitext(png_path)[0],
             title_extra=title_extra,
+            cmap=args_cli.slip_plots_cmap,
         )
         velocity_path = None
         if str(getattr(env_cfg, "race_scene", "")) == "straightSimple":

@@ -618,7 +618,7 @@ def _format_contact_timing_annotation(stats: dict[str, dict[str, float | int]], 
     return "\n".join(lines)
 
 
-def _draw_polar_density(ax, theta, radius, dynamic, static, *, tracks=(), title: str):
+def _draw_polar_density(ax, theta, radius, dynamic, static, *, tracks=(), title: str, cmap: str = "plasma"):
     """Draw chronological contact tracks and samples, colored by local density."""
     from matplotlib import colormaps  # noqa: PLC0415
     from matplotlib.collections import LineCollection  # noqa: PLC0415
@@ -646,7 +646,7 @@ def _draw_polar_density(ax, theta, radius, dynamic, static, *, tracks=(), title:
     radius_bin = np.clip(np.searchsorted(radius_edges, radius, side="right") - 1, 0, counts.shape[1] - 1)
     density = counts[theta_bin, radius_bin]
     norm = LogNorm(vmin=1.0, vmax=max(1.0, float(density.max())))
-    cmap = colormaps["autumn"]
+    cmap = colormaps[cmap]
 
     full_circle = np.linspace(0.0, 2.0 * np.pi, 361)
     dynamic_median = float(np.median(dynamic))
@@ -729,6 +729,7 @@ def save_polar_slip_figures(
     feet=FEET,
     title_extra: str | None = None,
     dpi: int = 170,
+    cmap: str = "plasma",
 ) -> list[str]:
     """Save four per-foot and one all-feet footprint-frame polar density plots."""
     import pandas as pd
@@ -756,6 +757,7 @@ def save_polar_slip_figures(
             static,
             tracks=tracks,
             title=f"{label}: contact-force direction vs reaction-force angle",
+            cmap=cmap,
         )
         subtitle = f"base-footprint frame; dots are contact samples, lines follow them in time — {stem}"
         if task:

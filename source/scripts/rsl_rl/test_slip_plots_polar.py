@@ -76,6 +76,21 @@ class TestPolarSlipPlots(unittest.TestCase):
         self.assertEqual(ax.get_theta_offset(), np.pi / 2.0)
         self.assertGreater(scatter.get_zorder(), max(line.get_zorder() for line in ax.lines))
 
+    def test_requested_colormap_is_used(self):
+        from matplotlib.backends.backend_agg import FigureCanvasAgg
+        from matplotlib.figure import Figure
+
+        df = self._dataframe()
+        theta, radius, dynamic, static = slip_plots._polar_contact_data(df, slip_plots.FEET)
+        fig = Figure()
+        FigureCanvasAgg(fig)
+        ax = fig.add_subplot(111, projection="polar")
+        scatter = slip_plots._draw_polar_density(
+            ax, theta, radius, dynamic, static, title="test", cmap="cividis"
+        )
+
+        self.assertEqual(scatter.cmap.name, "cividis")
+
     def test_saves_one_plot_per_foot_and_one_aggregate(self):
         with tempfile.TemporaryDirectory() as directory:
             directory = Path(directory)
