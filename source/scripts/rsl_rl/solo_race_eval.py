@@ -784,10 +784,49 @@ def _pct_from_counts(numerator: int, denominator: int) -> float | None:
     return 100.0 * float(numerator) / float(denominator)
 
 
+def _contact_timing_summary(
+    episodes: list[dict[str, Any]],
+    physics_dt: float,
+    foot_labels: list[str] | None = None,
+) -> dict[str, Any]:
+    """Summarize foot-contact duty factor and contiguous contact durations."""
+    labels = list(foot_labels or [])
+    race_samples = int(sum(int(ep.get("slip_angle_total_samples", 0)) for ep in episodes))
+    contact_samples = int(sum(int(ep.get("slip_angle_contact_samples", 0)) for ep in episodes))
+    duration_samples = int(sum(int(ep.get("slip_angle_contact_duration_samples", 0)) for ep in episodes))
+    contact_episodes = int(sum(int(ep.get("slip_angle_contact_episode_count", 0)) for ep in episodes))
+    summary = {
+        "physics_dt_s": float(physics_dt),
+        "race_time_samples": race_samples,
+        "contact_samples": contact_samples,
+        "contact_time_pct_of_race": _pct_from_counts(contact_samples, race_samples * len(labels)),
+        "contact_episode_count": contact_episodes,
+        "mean_contact_duration_s": (
+            float(duration_samples) * float(physics_dt) / contact_episodes if contact_episodes > 0 else None
+        ),
+    }
+    for label in labels:
+        prefix = f"slip_angle_{label}_"
+        foot_contact = int(sum(int(ep.get(f"{prefix}contact_samples", 0)) for ep in episodes))
+        foot_duration = int(sum(int(ep.get(f"{prefix}contact_duration_samples", 0)) for ep in episodes))
+        foot_episodes = int(sum(int(ep.get(f"{prefix}contact_episode_count", 0)) for ep in episodes))
+        summary.update(
+            {
+                f"{label}_contact_time_pct_of_race": _pct_from_counts(foot_contact, race_samples),
+                f"{label}_contact_episode_count": foot_episodes,
+                f"{label}_mean_contact_duration_s": (
+                    float(foot_duration) * float(physics_dt) / foot_episodes if foot_episodes > 0 else None
+                ),
+            }
+        )
+    return summary
+
+
 def _slip_angle_contact_time_summary(
     episodes: list[dict[str, Any]],
     delta_deg: float,
     speed_threshold: float,
+    physics_dt: float,
     foot_labels: list[str] | None = None,
 ) -> dict[str, Any]:
     contact = int(sum(int(ep.get("slip_angle_contact_samples", 0)) for ep in episodes))
@@ -814,6 +853,7 @@ def _slip_angle_contact_time_summary(
         "dynamic_band_sticking_pct": _pct_from_counts(dynamic_band_sticking, contact),
         "dynamic_plus_delta_to_static_pct": _pct_from_counts(dynamic_to_static, contact),
         "above_static_pct": _pct_from_counts(above_static, contact),
+        **_contact_timing_summary(episodes, physics_dt, foot_labels),
     }
     for label in foot_labels or []:
         prefix = f"slip_angle_{label}_"
@@ -1053,6 +1093,10 @@ def _evaluate_rollouts(
         num_slip_feet = len(tuple(getattr(raw_env, "_foot_reaction_contact_sensor_labels", ()) or ()))
     slip_foot_labels = _slip_angle_foot_labels(raw_env, num_slip_feet)
     slip_contact_samples_by_foot = torch.zeros((num_envs, num_slip_feet), dtype=torch.long, device=device)
+    slip_total_samples = torch.zeros(num_envs, dtype=torch.long, device=device)
+    contact_active_samples = torch.zeros((num_envs, num_slip_feet), dtype=torch.long, device=device)
+    contact_duration_samples = torch.zeros((num_envs, num_slip_feet), dtype=torch.long, device=device)
+    contact_episode_counts = torch.zeros((num_envs, num_slip_feet), dtype=torch.long, device=device)
     slip_below_dynamic_samples_by_foot = torch.zeros((num_envs, num_slip_feet), dtype=torch.long, device=device)
     slip_dynamic_band_samples_by_foot = torch.zeros((num_envs, num_slip_feet), dtype=torch.long, device=device)
     slip_slipping_samples_by_foot = torch.zeros((num_envs, num_slip_feet), dtype=torch.long, device=device)
@@ -1069,12 +1113,11 @@ def _evaluate_rollouts(
 
     scene = getattr(raw_env, "scene", None)
     scene_update_original = getattr(scene, "update", None)
+    try:
+        sim_dt = float(getattr(raw_env.cfg.sim, "dt", raw_env.step_dt))
+    except Exception:
+        sim_dt = float(raw_env.step_dt)
     if callable(scene_update_original):
-        try:
-            sim_dt = float(getattr(raw_env.cfg.sim, "dt", raw_env.step_dt))
-        except Exception:
-            sim_dt = float(raw_env.step_dt)
-
         def _wrapped_scene_update(*args, **kwargs):
             nonlocal warned_slip_angle_metrics
             result = scene_update_original(*args, **kwargs)
@@ -1093,6 +1136,16 @@ def _evaluate_rollouts(
                     )
                     warned_slip_angle_metrics = True
             else:
+                contact_by_foot = slip_counts["contact_by_foot"].to(dtype=torch.long)
+                ended_contact = (contact_by_foot == 0) & (contact_active_samples > 0)
+                contact_duration_samples[:] += torch.where(
+                    ended_contact, contact_active_samples, torch.zeros_like(contact_active_samples)
+                )
+                contact_episode_counts[:] += ended_contact.to(dtype=torch.long)
+                contact_active_samples[:] = torch.where(
+                    contact_by_foot > 0, contact_active_samples + 1, torch.zeros_like(contact_active_samples)
+                )
+                slip_total_samples[:] += 1
                 slip_contact_samples[:] += slip_counts["contact"].to(dtype=torch.long)
                 slip_below_dynamic_samples[:] += slip_counts["below_dynamic"].to(dtype=torch.long)
                 slip_dynamic_band_samples[:] += slip_counts["dynamic_band"].to(dtype=torch.long)
@@ -1100,7 +1153,7 @@ def _evaluate_rollouts(
                 slip_dynamic_band_sticking_samples[:] += slip_counts["dynamic_band_sticking"].to(dtype=torch.long)
                 slip_dynamic_to_static_samples[:] += slip_counts["dynamic_to_static"].to(dtype=torch.long)
                 slip_above_static_samples[:] += slip_counts["above_static"].to(dtype=torch.long)
-                slip_contact_samples_by_foot[:] += slip_counts["contact_by_foot"].to(dtype=torch.long)
+                slip_contact_samples_by_foot[:] += contact_by_foot
                 slip_below_dynamic_samples_by_foot[:] += slip_counts["below_dynamic_by_foot"].to(dtype=torch.long)
                 slip_dynamic_band_samples_by_foot[:] += slip_counts["dynamic_band_by_foot"].to(dtype=torch.long)
                 slip_slipping_samples_by_foot[:] += slip_counts["slipping_by_foot"].to(dtype=torch.long)
@@ -1187,6 +1240,8 @@ def _evaluate_rollouts(
                 eval_t0=eval_t0,
                 next_progress_t_ref=[next_progress_t],
                 active_progress=_gate_progress_ratio(raw_env)[:num_envs],
+                contact_physics_dt=sim_dt,
+                contact_foot_labels=slip_foot_labels,
             )
             next_progress_t = _print_progress_if_due.next_progress_t
             continue
@@ -1218,6 +1273,9 @@ def _evaluate_rollouts(
             slip_dynamic_band_sticking = int(slip_dynamic_band_sticking_samples[env_id].item())
             slip_dynamic_to_static = int(slip_dynamic_to_static_samples[env_id].item())
             slip_above_static = int(slip_above_static_samples[env_id].item())
+            total_samples = int(slip_total_samples[env_id].item())
+            episode_contact_duration = contact_duration_samples[env_id] + contact_active_samples[env_id]
+            episode_contact_counts = contact_episode_counts[env_id] + (contact_active_samples[env_id] > 0).long()
             slip_by_foot: dict[str, int | float | None] = {}
             for foot_idx, foot_label in enumerate(slip_foot_labels):
                 foot_contact = int(slip_contact_samples_by_foot[env_id, foot_idx].item())
@@ -1229,6 +1287,8 @@ def _evaluate_rollouts(
                 )
                 foot_dynamic_to_static = int(slip_dynamic_to_static_samples_by_foot[env_id, foot_idx].item())
                 foot_above_static = int(slip_above_static_samples_by_foot[env_id, foot_idx].item())
+                foot_duration_samples = int(episode_contact_duration[foot_idx].item())
+                foot_contact_episodes = int(episode_contact_counts[foot_idx].item())
                 prefix = f"slip_angle_{foot_label}_"
                 slip_by_foot.update(
                     {
@@ -1240,6 +1300,14 @@ def _evaluate_rollouts(
                         f"{prefix}dynamic_plus_delta_to_static_samples": foot_dynamic_to_static,
                         f"{prefix}above_static_samples": foot_above_static,
                         f"{prefix}contact_time_share_pct": _pct_from_counts(foot_contact, slip_contact),
+                        f"{prefix}contact_time_pct_of_race": _pct_from_counts(foot_contact, total_samples),
+                        f"{prefix}contact_duration_samples": foot_duration_samples,
+                        f"{prefix}contact_episode_count": foot_contact_episodes,
+                        f"{prefix}mean_contact_duration_s": (
+                            foot_duration_samples * sim_dt / foot_contact_episodes
+                            if foot_contact_episodes > 0
+                            else None
+                        ),
                         f"{prefix}below_dynamic_minus_delta_pct": _pct_from_counts(
                             foot_below_dynamic,
                             foot_contact,
@@ -1270,7 +1338,20 @@ def _evaluate_rollouts(
                     "gate_progress_ratio": float(progress_before_step[env_id].item()),
                     "floor_collision_events": int(floor_events[env_id].item()),
                     "pillar_collision_events": int(pillar_events[env_id].item()),
+                    "slip_angle_total_samples": total_samples,
                     "slip_angle_contact_samples": slip_contact,
+                    "slip_angle_contact_time_pct_of_race": _pct_from_counts(
+                        slip_contact,
+                        total_samples * num_slip_feet,
+                    ),
+                    "slip_angle_contact_duration_samples": int(episode_contact_duration.sum().item()),
+                    "slip_angle_contact_episode_count": int(episode_contact_counts.sum().item()),
+                    "slip_angle_mean_contact_duration_s": (
+                        float(episode_contact_duration.sum().item()) * sim_dt
+                        / int(episode_contact_counts.sum().item())
+                        if int(episode_contact_counts.sum().item()) > 0
+                        else None
+                    ),
                     "slip_angle_below_dynamic_minus_delta_samples": slip_below_dynamic,
                     "slip_angle_dynamic_band_samples": slip_dynamic_band,
                     "slip_angle_slipping_samples": slip_slipping,
@@ -1301,6 +1382,10 @@ def _evaluate_rollouts(
         floor_events[done_tensor_ids] = 0
         pillar_events[done_tensor_ids] = 0
         slip_contact_samples[done_tensor_ids] = 0
+        slip_total_samples[done_tensor_ids] = 0
+        contact_active_samples[done_tensor_ids] = 0
+        contact_duration_samples[done_tensor_ids] = 0
+        contact_episode_counts[done_tensor_ids] = 0
         slip_below_dynamic_samples[done_tensor_ids] = 0
         slip_dynamic_band_samples[done_tensor_ids] = 0
         slip_slipping_samples[done_tensor_ids] = 0
@@ -1327,6 +1412,8 @@ def _evaluate_rollouts(
             eval_t0=eval_t0,
             next_progress_t_ref=[next_progress_t],
             active_progress=_gate_progress_ratio(raw_env)[:num_envs],
+            contact_physics_dt=sim_dt,
+            contact_foot_labels=slip_foot_labels,
         )
         next_progress_t = _print_progress_if_due.next_progress_t
 
@@ -1371,6 +1458,8 @@ def _print_progress_if_due(
     eval_t0: float,
     next_progress_t_ref: list[float],
     active_progress: torch.Tensor,
+    contact_physics_dt: float,
+    contact_foot_labels: list[str],
 ):
     progress_interval_s = float(args_cli.progress_interval_s)
     now = time.time()
@@ -1394,6 +1483,30 @@ def _print_progress_if_due(
         f"elapsed={elapsed:.1f}s eps_per_s={completed_count / elapsed:.2f}",
         flush=True,
     )
+    if episodes:
+        timing = _contact_timing_summary(episodes, contact_physics_dt, contact_foot_labels)
+
+        def _format_contact(label: str, pct: float | None, duration: float | None) -> str:
+            pct_text = "n/a" if pct is None else f"{pct:.1f}%"
+            duration_text = "n/a" if duration is None else f"{duration * 1000.0:.1f}ms"
+            return f"{label}={pct_text}/{duration_text}"
+
+        contact_parts = [
+            _format_contact(
+                "all",
+                timing["contact_time_pct_of_race"],
+                timing["mean_contact_duration_s"],
+            )
+        ]
+        contact_parts.extend(
+            _format_contact(
+                label,
+                timing[f"{label}_contact_time_pct_of_race"],
+                timing[f"{label}_mean_contact_duration_s"],
+            )
+            for label in contact_foot_labels
+        )
+        print("[CONTACT] duty_factor/mean_contact: " + " ".join(contact_parts), flush=True)
     _print_progress_if_due.next_progress_t = now + progress_interval_s
 
 
@@ -1538,6 +1651,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             all_episodes,
             float(args_cli.slip_angle_delta_deg),
             float(args_cli.slip_speed_threshold),
+            float(getattr(env_cfg.sim, "dt", step_dt)),
             list(slip_angle_foot_labels),
         ),
         "episodes": all_episodes,

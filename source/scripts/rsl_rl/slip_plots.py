@@ -557,6 +557,54 @@ def _polar_contact_data(df, feet) -> tuple[np.ndarray, np.ndarray, np.ndarray, n
     return np.arctan2(y[valid], x[valid]), radius[valid], dynamic[valid], static[valid]
 
 
+def _contact_timing_stats(df, feet) -> dict[str, dict[str, float | int]]:
+    """Compute contact duty factor and mean contiguous contact duration from a physics-rate log."""
+    import pandas as pd
+
+    dt_values = df["sim_time_s"].drop_duplicates().sort_values().diff().dropna()
+    sample_dt = max(0.0, float(dt_values.median())) if not dt_values.empty else 0.0
+    stats: dict[str, dict[str, float | int]] = {}
+    selected_frames = []
+    for foot in feet:
+        foot_df = df[df["foot"] == foot]
+        contact_df = foot_df[foot_df["contact"].astype(bool)]
+        contact_count = int(contact_df[["foot", "contact_id"]].drop_duplicates().shape[0])
+        stats[str(foot)] = {
+            "contact_time_pct_of_race": 100.0 * len(contact_df) / len(foot_df) if len(foot_df) else float("nan"),
+            "mean_contact_duration_s": sample_dt * len(contact_df) / contact_count if contact_count else float("nan"),
+            "contact_episode_count": contact_count,
+        }
+        selected_frames.append(foot_df)
+
+    selected_df = pd.concat(selected_frames, ignore_index=True) if selected_frames else df.iloc[0:0]
+    selected_contact = selected_df[selected_df["contact"].astype(bool)]
+    selected_contact_count = int(selected_contact[["foot", "contact_id"]].drop_duplicates().shape[0])
+    stats["all_feet"] = {
+        "contact_time_pct_of_race": (
+            100.0 * len(selected_contact) / len(selected_df) if len(selected_df) else float("nan")
+        ),
+        "mean_contact_duration_s": (
+            sample_dt * len(selected_contact) / selected_contact_count if selected_contact_count else float("nan")
+        ),
+        "contact_episode_count": selected_contact_count,
+    }
+    return stats
+
+
+def _format_contact_timing_annotation(stats: dict[str, dict[str, float | int]], selected_feet) -> str:
+    labels = ["all_feet", *selected_feet] if len(selected_feet) > 1 else list(selected_feet)
+    lines = ["contact duty / mean contact"]
+    for label in labels:
+        values = stats[str(label)]
+        pct = float(values["contact_time_pct_of_race"])
+        duration = float(values["mean_contact_duration_s"])
+        pct_text = "n/a" if not np.isfinite(pct) else f"{pct:.1f}%"
+        duration_text = "n/a" if not np.isfinite(duration) else f"{duration * 1000.0:.1f} ms"
+        display_label = "all feet" if label == "all_feet" else str(label)
+        lines.append(f"{display_label}: {pct_text} / {duration_text}")
+    return "\n".join(lines)
+
+
 def _draw_polar_density(ax, theta, radius, dynamic, static, *, title: str):
     """Draw every contact sample, colored by local point density, on one polar axis."""
     from matplotlib.colors import LogNorm  # noqa: PLC0415
@@ -645,12 +693,13 @@ def save_polar_slip_figures(
 
     task, title_extra = _resolve_plot_labels(csv_path, title_extra)
     df = pd.read_csv(csv_path)
+    contact_timing = _contact_timing_stats(df, feet)
     saved = []
     plot_groups = [((foot,), foot) for foot in feet] + [(tuple(feet), "all_feet")]
     stem = os.path.basename(csv_path).rsplit(".", 1)[0]
     for selected_feet, suffix in plot_groups:
         theta, radius, dynamic, static = _polar_contact_data(df, selected_feet)
-        fig = Figure(figsize=(11.0, 9.5), facecolor="white")
+        fig = Figure(figsize=(13.0, 9.5), facecolor="white")
         FigureCanvasAgg(fig)
         ax = fig.add_subplot(111, projection="polar")
         label = selected_feet[0] if len(selected_feet) == 1 else "all feet"
@@ -671,7 +720,17 @@ def save_polar_slip_figures(
         if scatter is not None:
             colorbar = fig.colorbar(scatter, ax=ax, pad=0.12, shrink=0.75)
             colorbar.set_label("samples in local angle/direction bin (warmer = denser)")
-        fig.subplots_adjust(left=0.08, right=0.84, bottom=0.15, top=0.82)
+        fig.text(
+            0.82,
+            0.50,
+            _format_contact_timing_annotation(contact_timing, selected_feet),
+            ha="left",
+            va="center",
+            fontsize=10,
+            linespacing=1.5,
+            bbox={"boxstyle": "round,pad=0.45", "facecolor": "white", "edgecolor": "0.75"},
+        )
+        fig.subplots_adjust(left=0.06, right=0.72, bottom=0.15, top=0.82)
         output_path = f"{output_stem}_polar_{suffix}.png"
         os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
         fig.savefig(output_path, dpi=dpi, bbox_inches="tight", facecolor="white", transparent=False)
