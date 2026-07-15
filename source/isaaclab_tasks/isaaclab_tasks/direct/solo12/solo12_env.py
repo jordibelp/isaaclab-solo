@@ -1394,7 +1394,12 @@ class Solo12Env(DirectRLEnv):
         base_contacts = torch.max(torch.norm(net_contact_forces[:, :, self._base_body_ids], dim=-1), dim=1)[0]
         self._base_collision_terminated = torch.any(base_contacts > self.cfg.base_contact_threshold, dim=1)
         if self.cfg.finish_on_front_feet_contact:
-            self._forbidden_feet_contact_terminated = self._get_forbidden_feet_contact_indicator().bool()
+            grace_period_finished = (
+                self.episode_length_buf * self.step_dt >= self.cfg.finish_on_front_feet_contact_after
+            )
+            self._forbidden_feet_contact_terminated = (
+                self._get_forbidden_feet_contact_indicator().bool() & grace_period_finished
+            )
         else:
             self._forbidden_feet_contact_terminated.zero_()
         terminated = self._base_collision_terminated | self._forbidden_feet_contact_terminated

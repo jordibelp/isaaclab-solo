@@ -38,7 +38,9 @@ def test_base_thigh_collision_filter_removal_is_opt_in():
 
 def test_forbidden_feet_contact_termination_is_opt_in():
     assert Solo12EnvCfg().finish_on_front_feet_contact is False
+    assert Solo12EnvCfg().finish_on_front_feet_contact_after == 1.5
     assert Solo12TwoFeetEnvCfg().finish_on_front_feet_contact is False
+    assert Solo12TwoFeetEnvCfg().finish_on_front_feet_contact_after == 1.5
 
 
 def test_world_velocity_in_heading_frame_ignores_pitch_and_vertical_velocity():
@@ -231,13 +233,15 @@ def test_get_dones_enables_forbidden_contact_termination_from_config():
         (),
         {
             "finish_on_front_feet_contact": True,
+            "finish_on_front_feet_contact_after": 1.5,
             "base_contact_threshold": 1.0,
             "episode_length_s": 2.0,
             "sim": type("Sim", (), {"dt": 0.005})(),
             "decimation": 4,
         },
     )()
-    env.episode_length_buf = torch.zeros(3, dtype=torch.long)
+    # With step_dt=0.02, step 75 is exactly 1.5 seconds into the episode.
+    env.episode_length_buf = torch.tensor((74, 75, 76), dtype=torch.long)
     env._base_body_ids = [0]
     env._contact_sensor = type(
         "Sensor",
@@ -245,11 +249,11 @@ def test_get_dones_enables_forbidden_contact_termination_from_config():
         {"data": type("Data", (), {"net_forces_w_history": torch.zeros((3, 2, 1, 3))})()},
     )()
     env._forbidden_feet_contact_terminated = torch.zeros(3, dtype=torch.bool)
-    env._get_forbidden_feet_contact_indicator = lambda: torch.tensor((0.0, 1.0, 0.0))
+    env._get_forbidden_feet_contact_indicator = lambda: torch.ones(3)
 
     terminated, time_out = env._get_dones()
 
-    torch.testing.assert_close(terminated, torch.tensor((False, True, False)))
+    torch.testing.assert_close(terminated, torch.tensor((False, True, True)))
     assert not torch.any(time_out)
 
 
