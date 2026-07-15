@@ -636,6 +636,7 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     joint_accel_reward_scale = 0.0
     feet_air_time_reward_scale = 0.0
     two_feet_above_height_reward_scale = 0.0
+    # Penalizes >=3 contacting feet normally, or any front-foot contact when front_back_asymetry=True.
     three_or_more_feet_contact_penalty_reward_scale = 0.0
     undesired_contact_reward_scale = -2.25
     base_collision_terminal_penalty = 0.0

@@ -14,7 +14,7 @@ simulation_app = AppLauncher(headless=True).app
 import torch
 
 import isaaclab.utils.math as math_utils
-from isaaclab_tasks.direct.solo12.solo12_env import _sample_reset_root_rpy, _world_velocity_in_heading_frame_xy
+from isaaclab_tasks.direct.solo12.solo12_env import Solo12Env, _sample_reset_root_rpy, _world_velocity_in_heading_frame_xy
 from isaaclab_tasks.direct.solo12.solo12_env_cfg import (
     TWO_FEET_INITIAL_JOINT_POS,
     Solo12EnvCfg,
@@ -117,3 +117,39 @@ def test_root_orientation_noise_stays_inside_accepted_ranges():
     assert torch.all(offsets.abs() <= limits + 1.0e-7)
     assert torch.all(offsets.amin(dim=0) < -0.95 * limits)
     assert torch.all(offsets.amax(dim=0) > 0.95 * limits)
+
+
+def test_contact_penalty_targets_any_front_foot_with_front_back_asymmetry():
+    env = object.__new__(Solo12Env)
+    env._is_closed = True
+    env.cfg = type("Cfg", (), {"front_back_asymetry": True})()
+    env._front_feet_contact_indices = [0, 1]
+    contacts = torch.tensor(
+        (
+            (False, False, True, True),
+            (True, False, False, False),
+            (False, True, True, True),
+        )
+    )
+
+    actual = env._compute_three_or_more_feet_contact_penalty(contacts)
+
+    torch.testing.assert_close(actual, torch.tensor((0.0, 1.0, 1.0)))
+
+
+def test_contact_penalty_keeps_three_feet_rule_without_front_back_asymmetry():
+    env = object.__new__(Solo12Env)
+    env._is_closed = True
+    env.cfg = type("Cfg", (), {"front_back_asymetry": False})()
+    env._front_feet_contact_indices = [0, 1]
+    contacts = torch.tensor(
+        (
+            (True, False, False, False),
+            (False, False, True, True),
+            (True, False, True, True),
+        )
+    )
+
+    actual = env._compute_three_or_more_feet_contact_penalty(contacts)
+
+    torch.testing.assert_close(actual, torch.tensor((0.0, 0.0, 1.0)))

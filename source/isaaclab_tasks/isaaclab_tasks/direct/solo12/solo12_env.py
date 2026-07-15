@@ -1319,7 +1319,7 @@ class Solo12Env(DirectRLEnv):
 
         feet_contact_mask = self._get_feet_contact_mask(self.cfg.feet_ground_contact_threshold)
         two_feet_above_height = self._compute_two_feet_above_height_reward(feet_contact_mask)
-        three_or_more_feet_contact = (torch.sum(feet_contact_mask, dim=1) >= 3).float()
+        three_or_more_feet_contact = self._compute_three_or_more_feet_contact_penalty(feet_contact_mask)
         undesired_contacts = self._compute_contact_count(self._thigh_body_ids, self.cfg.undesired_contact_threshold)
         force_transmited_through_joints = self._compute_force_transmited_through_joints()
         foot_contact = self._compute_foot_contact_penalty()
@@ -1551,6 +1551,12 @@ class Solo12Env(DirectRLEnv):
         rear_avg_height = torch.mean(foot_heights[:, self._rear_feet_robot_indices], dim=1)
         rear_reward = self._two_feet_height_kernel(rear_avg_height) * rear_airborne.float()
         return torch.maximum(front_reward, rear_reward)
+
+    def _compute_three_or_more_feet_contact_penalty(self, feet_contact_mask: torch.Tensor) -> torch.Tensor:
+        """Return the contact-penalty indicator selected by the task symmetry mode."""
+        if self.cfg.front_back_asymetry:
+            return torch.any(feet_contact_mask[:, self._front_feet_contact_indices], dim=1).float()
+        return (torch.sum(feet_contact_mask, dim=1) >= 3).float()
 
     def _two_feet_height_kernel(self, avg_height: torch.Tensor) -> torch.Tensor:
         threshold = self.cfg.two_feet_above_height_threshold
