@@ -203,6 +203,7 @@ class Solo12Env(DirectRLEnv):
 
     def _setup_scene(self):
         self._robot = Articulation(self.cfg.robot)
+        self._enable_base_thigh_self_collisions()
         self._apply_configured_base_mass()
         self.scene.articulations["robot"] = self._robot
 
@@ -221,6 +222,51 @@ class Solo12Env(DirectRLEnv):
 
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
+
+    def _enable_base_thigh_self_collisions(self):
+        """Undo USD pair filters that otherwise defeat enabled articulation self-collisions.
+
+        The Solo12 USD intentionally filters directly connected links, but it also filters the base
+        against every thigh. The latter lets the thigh collision boxes pass through the body even
+        when ``physxArticulation:enabledSelfCollisions`` is enabled. Keep the direct-joint filters
+        and remove only the base--thigh pairs.
+        """
+        if not bool(self.cfg.enabled_self_collisions):
+            return
+
+        stage = sim_utils.get_current_stage()
+        robot_paths = sim_utils.find_matching_prim_paths(self.cfg.robot.prim_path, stage=stage)
+        if len(robot_paths) != 1:
+            raise RuntimeError(
+                "Expected exactly one source Solo12 prim before environment cloning, "
+                f"found {robot_paths} for {self.cfg.robot.prim_path}."
+            )
+        robot_path = robot_paths[0]
+
+        base_path = f"{robot_path}/base"
+        thigh_paths = {f"{robot_path}/{leg}_thigh" for leg in ("FL", "FR", "RL", "RR")}
+        removed_pairs = 0
+        for prim in stage.Traverse():
+            prim_path = str(prim.GetPath())
+            if prim_path != base_path and prim_path not in thigh_paths:
+                continue
+            filtered_pairs = prim.GetRelationship("physics:filteredPairs")
+            if not filtered_pairs:
+                continue
+            targets = filtered_pairs.GetTargets()
+            if prim_path == base_path:
+                retained_targets = [target for target in targets if str(target) not in thigh_paths]
+            else:
+                retained_targets = [target for target in targets if str(target) != base_path]
+            removed_pairs += len(targets) - len(retained_targets)
+            if len(retained_targets) != len(targets):
+                filtered_pairs.SetTargets(retained_targets)
+
+        if removed_pairs != 8:
+            raise RuntimeError(
+                "Expected to remove 8 reciprocal Solo12 base--thigh collision-filter targets, "
+                f"but removed {removed_pairs}; the USD collision layout may have changed."
+            )
 
     def _spawn_flat_terrain_grid_overlay(self):
         if not bool(getattr(self.cfg, "flat_terrain_grid_enabled", False)):
