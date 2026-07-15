@@ -557,6 +557,19 @@ def _polar_contact_data(df, feet) -> tuple[np.ndarray, np.ndarray, np.ndarray, n
     return np.arctan2(y[valid], x[valid]), radius[valid], dynamic[valid], static[valid]
 
 
+def _polar_contact_tracks(df, feet) -> list[tuple[np.ndarray, np.ndarray]]:
+    """Return chronological polar tracks, split by foot and contiguous contact episode."""
+    tracks = []
+    for foot in feet:
+        foot_df = df[(df["foot"] == foot) & df["contact"].astype(bool)].copy()
+        for _, episode in foot_df.groupby("contact_id", sort=False):
+            episode = episode.sort_values("sim_time_s")
+            theta, radius, _, _ = _polar_contact_data(episode, (foot,))
+            if theta.size >= 2:
+                tracks.append((theta, radius))
+    return tracks
+
+
 def _contact_timing_stats(df, feet) -> dict[str, dict[str, float | int]]:
     """Compute percentage of race time in contact and mean contiguous contact duration."""
     import pandas as pd
@@ -605,12 +618,14 @@ def _format_contact_timing_annotation(stats: dict[str, dict[str, float | int]], 
     return "\n".join(lines)
 
 
-def _draw_polar_density(ax, theta, radius, dynamic, static, *, title: str):
-    """Draw every contact sample, colored by local point density, on one polar axis."""
+def _draw_polar_density(ax, theta, radius, dynamic, static, *, tracks=(), title: str):
+    """Draw chronological contact tracks and samples, colored by local density."""
+    from matplotlib import colormaps  # noqa: PLC0415
+    from matplotlib.collections import LineCollection  # noqa: PLC0415
     from matplotlib.colors import LogNorm  # noqa: PLC0415
 
     ax.set_title(title, pad=42)
-    ax.set_theta_zero_location("E")
+    ax.set_theta_zero_location("N")
     ax.set_theta_direction(1)
     ax.set_thetagrids(
         [0, 45, 90, 135, 180, 225, 270, 315],
@@ -630,18 +645,8 @@ def _draw_polar_density(ax, theta, radius, dynamic, static, *, title: str):
     theta_bin = np.clip(np.searchsorted(theta_edges, theta, side="right") - 1, 0, counts.shape[0] - 1)
     radius_bin = np.clip(np.searchsorted(radius_edges, radius, side="right") - 1, 0, counts.shape[1] - 1)
     density = counts[theta_bin, radius_bin]
-    order = np.argsort(density, kind="stable")
-    scatter = ax.scatter(
-        theta[order],
-        radius[order],
-        c=density[order],
-        cmap="inferno",
-        norm=LogNorm(vmin=1.0, vmax=max(1.0, float(density.max()))),
-        s=8,
-        linewidths=0,
-        alpha=0.85,
-        zorder=3,
-    )
+    norm = LogNorm(vmin=1.0, vmax=max(1.0, float(density.max())))
+    cmap = colormaps["autumn"]
 
     full_circle = np.linspace(0.0, 2.0 * np.pi, 361)
     dynamic_median = float(np.median(dynamic))
@@ -653,7 +658,7 @@ def _draw_polar_density(ax, theta, radius, dynamic, static, *, title: str):
         linewidth=2.4,
         linestyle="-",
         label=rf"angle_dynamic = {np.rad2deg(dynamic_median):.1f}°",
-        zorder=5,
+        zorder=1,
     )
     ax.plot(
         full_circle,
@@ -661,12 +666,51 @@ def _draw_polar_density(ax, theta, radius, dynamic, static, *, title: str):
         color="#49e670",
         linewidth=2.4,
         label=rf"angle_static = {np.rad2deg(static_median):.1f}°",
-        zorder=5,
+        zorder=1,
     )
     for values, color in ((dynamic, "#00b8ff"), (static, "#49e670")):
         low, high = float(np.min(values)), float(np.max(values))
         if high - low > np.deg2rad(0.05):
-            ax.fill_between(full_circle, low, high, color=color, alpha=0.10, linewidth=0)
+            ax.fill_between(full_circle, low, high, color=color, alpha=0.10, linewidth=0, zorder=0)
+
+    # Draw each foot/contact episode independently. Segment color and opacity follow
+    # the density at the segment midpoint, giving repeated paths a Strava-like glow.
+    all_segments = []
+    segment_density = []
+    for track_theta, track_radius in tracks:
+        points = np.column_stack((np.unwrap(track_theta), track_radius))
+        segments = np.stack((points[:-1], points[1:]), axis=1)
+        wrapped_theta = (points[:, 0] + np.pi) % (2.0 * np.pi) - np.pi
+        track_theta_bin = np.clip(
+            np.searchsorted(theta_edges, wrapped_theta, side="right") - 1, 0, counts.shape[0] - 1
+        )
+        track_radius_bin = np.clip(
+            np.searchsorted(radius_edges, points[:, 1], side="right") - 1, 0, counts.shape[1] - 1
+        )
+        track_density = counts[track_theta_bin, track_radius_bin]
+        all_segments.extend(segments)
+        segment_density.extend(np.maximum(track_density[:-1], track_density[1:]))
+    if all_segments:
+        segment_density = np.asarray(segment_density, dtype=float)
+        colors = cmap(norm(segment_density))
+        colors[:, 3] = 0.14 + 0.76 * norm(segment_density)
+        collection = LineCollection(
+            all_segments, colors=colors, linewidths=1.25, capstyle="round", joinstyle="round", zorder=3
+        )
+        ax.add_collection(collection)
+
+    order = np.argsort(density, kind="stable")
+    scatter = ax.scatter(
+        theta[order],
+        radius[order],
+        c=density[order],
+        cmap=cmap,
+        norm=norm,
+        s=9,
+        linewidths=0,
+        alpha=0.92,
+        zorder=4,
+    )
 
     ax.set_ylim(0.0, radial_max)
     ticks_deg = np.arange(10.0, np.rad2deg(radial_max) + 0.1, 10.0)
@@ -699,6 +743,7 @@ def save_polar_slip_figures(
     stem = os.path.basename(csv_path).rsplit(".", 1)[0]
     for selected_feet, suffix in plot_groups:
         theta, radius, dynamic, static = _polar_contact_data(df, selected_feet)
+        tracks = _polar_contact_tracks(df, selected_feet)
         fig = Figure(figsize=(13.0, 9.5), facecolor="white")
         FigureCanvasAgg(fig)
         ax = fig.add_subplot(111, projection="polar")
@@ -709,9 +754,10 @@ def save_polar_slip_figures(
             radius,
             dynamic,
             static,
+            tracks=tracks,
             title=f"{label}: contact-force direction vs reaction-force angle",
         )
-        subtitle = f"base-footprint frame; every dot is one contact sample — {stem}"
+        subtitle = f"base-footprint frame; dots are contact samples, lines follow them in time — {stem}"
         if task:
             subtitle += f"\ntask: {task}"
         if title_extra:

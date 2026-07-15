@@ -48,6 +48,34 @@ class TestPolarSlipPlots(unittest.TestCase):
         self.assertAlmostEqual(stats["all_feet"]["mean_contact_duration_s"], 0.005)
         self.assertEqual(stats["all_feet"]["contact_episode_count"], 4)
 
+    def test_tracks_are_split_by_foot_and_contact_episode(self):
+        tracks = slip_plots._polar_contact_tracks(self._dataframe(), slip_plots.FEET)
+
+        self.assertEqual(len(tracks), 4)
+        self.assertTrue(all(theta.size == radius.size == 2 for theta, radius in tracks))
+
+    def test_forward_is_at_top_and_samples_are_above_friction_rings(self):
+        from matplotlib.backends.backend_agg import FigureCanvasAgg
+        from matplotlib.figure import Figure
+
+        df = self._dataframe()
+        theta, radius, dynamic, static = slip_plots._polar_contact_data(df, slip_plots.FEET)
+        fig = Figure()
+        FigureCanvasAgg(fig)
+        ax = fig.add_subplot(111, projection="polar")
+        scatter = slip_plots._draw_polar_density(
+            ax,
+            theta,
+            radius,
+            dynamic,
+            static,
+            tracks=slip_plots._polar_contact_tracks(df, slip_plots.FEET),
+            title="test",
+        )
+
+        self.assertEqual(ax.get_theta_offset(), np.pi / 2.0)
+        self.assertGreater(scatter.get_zorder(), max(line.get_zorder() for line in ax.lines))
+
     def test_saves_one_plot_per_foot_and_one_aggregate(self):
         with tempfile.TemporaryDirectory() as directory:
             directory = Path(directory)
