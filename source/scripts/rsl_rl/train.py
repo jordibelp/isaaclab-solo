@@ -341,10 +341,11 @@ parser.add_argument(
     "--symmetry-mode",
     type=str,
     default="none",
-    choices=["none", "augmentation", "loss", "both"],
+    choices=["none", "augmentation", "augmentation-left-right", "loss", "both"],
     help=(
         "Enable the symmetric PPO variants from arXiv:2403.04359. "
         "'augmentation' enables symmetry data augmentation; "
+        "'augmentation-left-right' augments race tasks with only the identity and left-right mirror; "
         "'loss' enables mirror loss; 'both' combines the two."
     ),
 )
@@ -1935,19 +1936,25 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             "Isaac-Solo12-Race-Vision-Direct-v0",
             "Isaac-Solo12-Race-Vision-IMU-Direct-v0",
         }:
-            symmetry_fn = solo12_race_symmetry.compute_symmetric_observations_actions
+            symmetry_fn = (
+                solo12_race_symmetry.compute_left_right_symmetric_observations_actions
+                if args_cli.symmetry_mode == "augmentation-left-right"
+                else solo12_race_symmetry.compute_symmetric_observations_actions
+            )
         else:
             raise ValueError(
                 "Symmetry mode is implemented for Solo12 direct locomotion/base-IMU tasks "
                 "and the Isaac-Solo12-Race-* direct tasks only."
             )
+        if args_cli.symmetry_mode == "augmentation-left-right" and args_cli.task in _SOLO12_DIRECT_SYMMETRY_TASKS:
+            raise ValueError("--symmetry-mode=augmentation-left-right is only supported for Solo12 race tasks.")
         configured_symmetry_fn = (
             observation_permutation.compute_permutation_aware_symmetry
             if args_cli.plasticity_loss_exp
             else symmetry_fn
         )
         agent_cfg.algorithm.symmetry_cfg = RslRlSymmetryCfg(
-            use_data_augmentation=args_cli.symmetry_mode in ("augmentation", "both"),
+            use_data_augmentation=args_cli.symmetry_mode in ("augmentation", "augmentation-left-right", "both"),
             use_mirror_loss=args_cli.symmetry_mode in ("loss", "both"),
             mirror_loss_coeff=args_cli.symmetry_loss_coeff,
             data_augmentation_func=configured_symmetry_fn,

@@ -19,7 +19,10 @@ try:
 except Exception:  # pragma: no cover
     TensorDict = None
 
-__all__ = ["compute_symmetric_observations_actions"]
+__all__ = [
+    "compute_left_right_symmetric_observations_actions",
+    "compute_symmetric_observations_actions",
+]
 
 _VECTOR_REFLECT_X = torch.tensor([1.0, -1.0, 1.0])
 _VECTOR_REFLECT_Y = torch.tensor([-1.0, 1.0, 1.0])
@@ -516,6 +519,25 @@ def _pack_policy_obs(obs_template: Any, obs_policy_aug: torch.Tensor, obs_type: 
     if TensorDict is None:
         raise RuntimeError("TensorDict support expected but tensordict import is unavailable.")
     return TensorDict(source=data, batch_size=[batch_dim], device=obs_policy_aug.device)
+
+
+@torch.no_grad()
+def compute_left_right_symmetric_observations_actions(
+    env: Any = None,
+    obs: torch.Tensor | None = None,
+    actions: torch.Tensor | None = None,
+    obs_type: str = "policy",
+) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+    """Augment race observations/actions with identity and left-right reflection only."""
+    obs_aug = None
+    actions_aug = None
+    if obs is not None:
+        obs_tensor, was_tensordict = _extract_policy_obs_tensor(obs, obs_type)
+        obs_aug = torch.cat([obs_tensor, transform_policy_obs_reflect_x(obs_tensor, env)], dim=0)
+        obs_aug = _pack_policy_obs(obs, obs_aug, obs_type, was_tensordict)
+    if actions is not None:
+        actions_aug = torch.cat([actions, transform_actions_reflect_x(actions)], dim=0)
+    return obs_aug, actions_aug
 
 
 @torch.no_grad()
