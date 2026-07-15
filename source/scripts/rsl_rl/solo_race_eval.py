@@ -1506,7 +1506,7 @@ def _print_progress_if_due(
             )
             for label in contact_foot_labels
         )
-        print("[CONTACT] time_in_contact_pct/mean_contact: " + " ".join(contact_parts), flush=True)
+        print("[CONTACT] contact_time_pct_of_race/mean_contact: " + " ".join(contact_parts), flush=True)
     _print_progress_if_due.next_progress_t = now + progress_interval_s
 
 
