@@ -184,6 +184,9 @@ class Solo12Env(DirectRLEnv):
         }
         self._episode_reward_sums = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         self._base_collision_terminated = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self._forbidden_feet_contact_terminated = torch.zeros(
+            self.num_envs, dtype=torch.bool, device=self.device
+        )
         self._base_imu_history_len = self.cfg.base_imu_history_length if self.cfg.imu_raw_inputs else 0
         self._base_imu_history_sample_dim = self.cfg.base_imu_history_sample_dim
         self._base_imu_history = torch.zeros(
@@ -1390,7 +1393,12 @@ class Solo12Env(DirectRLEnv):
         net_contact_forces = self._contact_sensor.data.net_forces_w_history
         base_contacts = torch.max(torch.norm(net_contact_forces[:, :, self._base_body_ids], dim=-1), dim=1)[0]
         self._base_collision_terminated = torch.any(base_contacts > self.cfg.base_contact_threshold, dim=1)
-        return self._base_collision_terminated, time_out
+        if self.cfg.finish_on_front_feet_contact:
+            self._forbidden_feet_contact_terminated = self._get_forbidden_feet_contact_indicator().bool()
+        else:
+            self._forbidden_feet_contact_terminated.zero_()
+        terminated = self._base_collision_terminated | self._forbidden_feet_contact_terminated
+        return terminated, time_out
 
     def _reset_idx(self, env_ids: torch.Tensor | None):
         if env_ids is None or len(env_ids) == self.num_envs:
@@ -1510,7 +1518,12 @@ class Solo12Env(DirectRLEnv):
         if self._base_push_mean_reward_smooth is not None:
             extras["Curriculum/base_push_mean_reward_smooth"] = self._base_push_mean_reward_smooth
 
-        extras["Episode_Termination/base_contact"] = torch.count_nonzero(self.reset_terminated[env_ids]).item()
+        extras["Episode_Termination/base_contact"] = torch.count_nonzero(
+            self._base_collision_terminated[env_ids]
+        ).item()
+        extras["Episode_Termination/forbidden_feet_contact"] = torch.count_nonzero(
+            self._forbidden_feet_contact_terminated[env_ids]
+        ).item()
         extras["Episode_Termination/time_out"] = torch.count_nonzero(self.reset_time_outs[env_ids]).item()
         # include logs in wandb
         self.extras["log"] = extras
@@ -1573,6 +1586,16 @@ class Solo12Env(DirectRLEnv):
                 front_foot_contact |= torch.any(front_thigh_contact_mask, dim=1)
             return front_foot_contact.float()
         return (torch.sum(feet_contact_mask, dim=1) >= 3).float()
+
+    def _get_forbidden_feet_contact_indicator(self) -> torch.Tensor:
+        """Return the same contact indicator used by the mode-dependent reward penalty."""
+        feet_contact_mask = self._get_feet_contact_mask(self.cfg.feet_ground_contact_threshold)
+        front_thigh_contact_mask = None
+        if self.cfg.front_back_asymetry:
+            front_thigh_contact_mask = self._get_body_contact_mask(
+                self._thigh_body_ids, self.cfg.feet_ground_contact_threshold
+            )[:, self._front_thigh_contact_indices]
+        return self._compute_three_or_more_feet_contact_penalty(feet_contact_mask, front_thigh_contact_mask)
 
     def _two_feet_height_kernel(self, avg_height: torch.Tensor) -> torch.Tensor:
         threshold = self.cfg.two_feet_above_height_threshold

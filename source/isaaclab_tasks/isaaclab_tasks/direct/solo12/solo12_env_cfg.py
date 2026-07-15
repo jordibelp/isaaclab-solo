@@ -641,6 +641,9 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     two_feet_above_height_reward_scale = 0.0
     # Penalizes >=3 contacting feet normally, or any front foot/thigh contact when front_back_asymetry=True.
     three_or_more_feet_contact_penalty_reward_scale = 0.0
+    # Terminate after applying the contact penalty above. The trigger follows the same mode-dependent predicate:
+    # >=3 contacting feet normally, or any front foot/thigh contact when front_back_asymetry=True.
+    finish_on_front_feet_contact = False
     undesired_contact_reward_scale = -2.25
     base_collision_terminal_penalty = 0.0
     base_tilt_penalty_reward_scale = -0.33

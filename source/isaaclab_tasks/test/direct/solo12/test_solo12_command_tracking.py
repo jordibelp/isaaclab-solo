@@ -36,6 +36,11 @@ def test_base_thigh_collision_filter_removal_is_opt_in():
     assert two_feet.remove_base_thigh_collision_filters is False
 
 
+def test_forbidden_feet_contact_termination_is_opt_in():
+    assert Solo12EnvCfg().finish_on_front_feet_contact is False
+    assert Solo12TwoFeetEnvCfg().finish_on_front_feet_contact is False
+
+
 def test_world_velocity_in_heading_frame_ignores_pitch_and_vertical_velocity():
     roll = torch.zeros(2)
     pitch = torch.full((2,), math.pi / 2)
@@ -177,3 +182,102 @@ def test_contact_penalty_keeps_three_feet_rule_without_front_back_asymmetry():
     actual = env._compute_three_or_more_feet_contact_penalty(contacts, front_thigh_contacts)
 
     torch.testing.assert_close(actual, torch.tensor((0.0, 0.0, 1.0)))
+
+
+def test_termination_indicator_reuses_asymmetric_front_foot_and_thigh_predicate():
+    env = object.__new__(Solo12Env)
+    env._is_closed = True
+    env.cfg = type(
+        "Cfg", (), {"front_back_asymetry": True, "feet_ground_contact_threshold": 1.0}
+    )()
+    env._front_feet_contact_indices = [0, 1]
+    env._thigh_body_ids = [10, 11, 12, 13]
+    env._front_thigh_contact_indices = [0, 1]
+    feet_contacts = torch.tensor(
+        ((False, False, True, True), (True, False, True, True), (False, False, True, True))
+    )
+    thigh_contacts = torch.tensor(
+        ((False, False, False, False), (False, False, False, False), (False, True, False, False))
+    )
+    env._get_feet_contact_mask = lambda threshold: feet_contacts
+    env._get_body_contact_mask = lambda body_ids, threshold: thigh_contacts
+
+    actual = env._get_forbidden_feet_contact_indicator()
+
+    torch.testing.assert_close(actual, torch.tensor((0.0, 1.0, 1.0)))
+
+
+def test_termination_indicator_reuses_symmetric_three_feet_predicate():
+    env = object.__new__(Solo12Env)
+    env._is_closed = True
+    env.cfg = type(
+        "Cfg", (), {"front_back_asymetry": False, "feet_ground_contact_threshold": 1.0}
+    )()
+    feet_contacts = torch.tensor(
+        ((True, False, True, False), (True, True, True, False), (True, True, True, True))
+    )
+    env._get_feet_contact_mask = lambda threshold: feet_contacts
+
+    actual = env._get_forbidden_feet_contact_indicator()
+
+    torch.testing.assert_close(actual, torch.tensor((0.0, 1.0, 1.0)))
+
+
+def test_get_dones_enables_forbidden_contact_termination_from_config():
+    env = object.__new__(Solo12Env)
+    env._is_closed = True
+    env.cfg = type(
+        "Cfg",
+        (),
+        {
+            "finish_on_front_feet_contact": True,
+            "base_contact_threshold": 1.0,
+            "episode_length_s": 2.0,
+            "sim": type("Sim", (), {"dt": 0.005})(),
+            "decimation": 4,
+        },
+    )()
+    env.episode_length_buf = torch.zeros(3, dtype=torch.long)
+    env._base_body_ids = [0]
+    env._contact_sensor = type(
+        "Sensor",
+        (),
+        {"data": type("Data", (), {"net_forces_w_history": torch.zeros((3, 2, 1, 3))})()},
+    )()
+    env._forbidden_feet_contact_terminated = torch.zeros(3, dtype=torch.bool)
+    env._get_forbidden_feet_contact_indicator = lambda: torch.tensor((0.0, 1.0, 0.0))
+
+    terminated, time_out = env._get_dones()
+
+    torch.testing.assert_close(terminated, torch.tensor((False, True, False)))
+    assert not torch.any(time_out)
+
+
+def test_get_dones_disables_forbidden_contact_termination_by_default():
+    env = object.__new__(Solo12Env)
+    env._is_closed = True
+    env.cfg = type(
+        "Cfg",
+        (),
+        {
+            "finish_on_front_feet_contact": False,
+            "base_contact_threshold": 1.0,
+            "episode_length_s": 2.0,
+            "sim": type("Sim", (), {"dt": 0.005})(),
+            "decimation": 4,
+        },
+    )()
+    env.episode_length_buf = torch.zeros(2, dtype=torch.long)
+    env._base_body_ids = [0]
+    env._contact_sensor = type(
+        "Sensor",
+        (),
+        {"data": type("Data", (), {"net_forces_w_history": torch.zeros((2, 2, 1, 3))})()},
+    )()
+    env._forbidden_feet_contact_terminated = torch.ones(2, dtype=torch.bool)
+    env._get_forbidden_feet_contact_indicator = lambda: torch.ones(2)
+
+    terminated, _ = env._get_dones()
+
+    assert not torch.any(terminated)
+    assert not torch.any(env._forbidden_feet_contact_terminated)
