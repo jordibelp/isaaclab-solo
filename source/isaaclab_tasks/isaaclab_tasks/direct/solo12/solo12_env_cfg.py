@@ -666,6 +666,8 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     base_tilt_penalty_reward_scale = -0.33
     # Penalize force transmitted through thigh/calf joints.
     force_transmited_through_joints_reward_scale = 0.0
+    # Point mass added at each front foot center. Zero preserves the original Solo12 mass properties.
+    extra_mass_on_front_feet = 0.0
     # Penalize foot contact
     # Baseline 
     action_rate_reward_scale = -0.05; joint_torque_reward_scale = -0.5e-3;foot_contact_reward_scale = -1.0e-3

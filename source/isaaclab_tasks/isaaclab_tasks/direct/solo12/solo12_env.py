@@ -8,8 +8,9 @@ from __future__ import annotations
 import math
 
 import gymnasium as gym
+import numpy as np
 import torch
-from pxr import Sdf
+from pxr import Gf, Sdf, UsdPhysics
 
 import isaaclab.sim as sim_utils
 import isaaclab.utils.math as math_utils
@@ -87,6 +88,39 @@ def _external_contact_forces(
 ) -> torch.Tensor:
     """Remove forces from self-collisions from a body's net contact-force history."""
     return net_forces_w_history - torch.sum(self_forces_w_history, dim=-2)
+
+
+def _combine_mass_properties_with_point_mass(
+    original_mass: float,
+    original_com: np.ndarray,
+    original_diagonal_inertia: np.ndarray,
+    original_principal_axes,
+    point_mass: float,
+    point_position: np.ndarray,
+) -> tuple[float, np.ndarray, np.ndarray, tuple[float, float, float, float]]:
+    """Combine authored rigid-body mass properties with a point mass in the body frame."""
+    total_mass = original_mass + point_mass
+    combined_com = (original_mass * original_com + point_mass * point_position) / total_mass
+
+    principal_axes_wxyz = torch.tensor(
+        (original_principal_axes.GetReal(), *original_principal_axes.GetImaginary()), dtype=torch.float64
+    )
+    principal_rotation = math_utils.matrix_from_quat(principal_axes_wxyz).numpy()
+    original_inertia = principal_rotation @ np.diag(original_diagonal_inertia) @ principal_rotation.T
+
+    def parallel_axis(mass: float, offset: np.ndarray) -> np.ndarray:
+        return mass * (np.dot(offset, offset) * np.eye(3) - np.outer(offset, offset))
+
+    combined_inertia = original_inertia
+    combined_inertia += parallel_axis(original_mass, original_com - combined_com)
+    combined_inertia += parallel_axis(point_mass, point_position - combined_com)
+    diagonal_inertia, principal_rotation = np.linalg.eigh(combined_inertia)
+    if np.linalg.det(principal_rotation) < 0.0:
+        principal_rotation[:, 0] *= -1.0
+    principal_axes = tuple(
+        float(value) for value in math_utils.quat_from_matrix(torch.from_numpy(principal_rotation)).tolist()
+    )
+    return total_mass, combined_com, diagonal_inertia, principal_axes
 
 
 class Solo12Env(DirectRLEnv):
@@ -218,6 +252,7 @@ class Solo12Env(DirectRLEnv):
         self._robot = Articulation(self.cfg.robot)
         self._configure_base_collision_filters()
         self._apply_configured_base_mass()
+        self._apply_extra_mass_on_front_feet()
         self.scene.articulations["robot"] = self._robot
 
         self._contact_sensor = ContactSensor(self.cfg.contact_sensor)
@@ -424,6 +459,46 @@ class Solo12Env(DirectRLEnv):
         source_base_path = f"{source_robot_path}/base"
         mass_cfg = sim_utils.MassPropertiesCfg(mass=self.cfg.base_mass)
         sim_schemas.define_mass_properties(source_base_path, mass_cfg)
+
+    def _apply_extra_mass_on_front_feet(self):
+        """Add a point mass at each front foot and update the calf mass properties consistently."""
+        extra_mass = float(self.cfg.extra_mass_on_front_feet)
+        if not math.isfinite(extra_mass) or extra_mass < 0.0:
+            raise ValueError(f"extra_mass_on_front_feet must be finite and non-negative, got {extra_mass}.")
+        if extra_mass == 0.0:
+            return
+
+        stage = sim_utils.get_current_stage()
+        source_robot_path = self.cfg.robot.prim_path.replace(self.scene.env_regex_ns, self.scene.env_prim_paths[0])
+        foot_positions = {
+            "FL_calf": np.array((0.0, 0.009000003337860107, -0.1599999964237213)),
+            "FR_calf": np.array((0.0, -0.009000003337860107, -0.1599999964237213)),
+        }
+        for body_name, foot_position in foot_positions.items():
+            body_path = f"{source_robot_path}/{body_name}"
+            body_prim = stage.GetPrimAtPath(body_path)
+            if not body_prim.IsValid():
+                raise RuntimeError(f"Could not find Solo12 front calf prim at {body_path}.")
+            mass_api = UsdPhysics.MassAPI(body_prim)
+            original_mass = mass_api.GetMassAttr().Get()
+            original_com = mass_api.GetCenterOfMassAttr().Get()
+            original_diagonal_inertia = mass_api.GetDiagonalInertiaAttr().Get()
+            original_principal_axes = mass_api.GetPrincipalAxesAttr().Get()
+            if any(value is None for value in (original_mass, original_com, original_diagonal_inertia, original_principal_axes)):
+                raise RuntimeError(f"Solo12 front calf at {body_path} has incomplete authored mass properties.")
+
+            total_mass, combined_com, diagonal_inertia, principal_axes = _combine_mass_properties_with_point_mass(
+                float(original_mass),
+                np.asarray(original_com, dtype=np.float64),
+                np.asarray(original_diagonal_inertia, dtype=np.float64),
+                original_principal_axes,
+                extra_mass,
+                foot_position,
+            )
+            mass_api.GetMassAttr().Set(total_mass)
+            mass_api.GetCenterOfMassAttr().Set(Gf.Vec3f(*combined_com))
+            mass_api.GetDiagonalInertiaAttr().Set(Gf.Vec3f(*diagonal_inertia))
+            mass_api.GetPrincipalAxesAttr().Set(Gf.Quatf(principal_axes[0], *principal_axes[1:]))
 
     @staticmethod
     def _find_feet_indices(body_names: list[str], labels: tuple[str, ...]) -> tuple[int, ...]:

@@ -6,6 +6,7 @@
 import math
 from types import SimpleNamespace
 
+import numpy as np
 from isaaclab.app import AppLauncher
 
 
@@ -13,11 +14,12 @@ simulation_app = AppLauncher(headless=True).app
 
 
 import torch
-from pxr import Sdf, Usd
+from pxr import Gf, Sdf, Usd
 
 import isaaclab.utils.math as math_utils
 from isaaclab_tasks.direct.solo12.solo12_env import (
     Solo12Env,
+    _combine_mass_properties_with_point_mass,
     _external_contact_forces,
     _sample_reset_root_rpy,
     _world_velocity_in_heading_frame_xy,
@@ -41,6 +43,27 @@ def test_base_collision_filters_default_to_hips_and_thighs():
     assert standard.base_filtered_pairs == ("hip", "thigh")
     assert two_feet.enabled_self_collisions is True
     assert two_feet.base_filtered_pairs == ("hip", "thigh")
+
+
+def test_extra_front_foot_mass_is_disabled_by_default():
+    assert Solo12EnvCfg().extra_mass_on_front_feet == 0.0
+    assert Solo12TwoFeetEnvCfg().extra_mass_on_front_feet == 0.0
+
+
+def test_point_mass_updates_mass_com_and_inertia():
+    total_mass, combined_com, diagonal_inertia, principal_axes = _combine_mass_properties_with_point_mass(
+        original_mass=1.0,
+        original_com=np.zeros(3),
+        original_diagonal_inertia=np.ones(3),
+        original_principal_axes=Gf.Quatf(1.0),
+        point_mass=1.0,
+        point_position=np.array((0.0, 0.0, -2.0)),
+    )
+
+    assert total_mass == 2.0
+    np.testing.assert_allclose(combined_com, (0.0, 0.0, -1.0))
+    np.testing.assert_allclose(diagonal_inertia, (1.0, 3.0, 3.0))
+    assert math.isclose(sum(value * value for value in principal_axes), 1.0)
 
 
 def test_base_collision_filters_are_updated_reciprocally(monkeypatch):
