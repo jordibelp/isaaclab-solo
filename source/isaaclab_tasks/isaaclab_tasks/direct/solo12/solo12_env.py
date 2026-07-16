@@ -9,6 +9,7 @@ import math
 
 import gymnasium as gym
 import torch
+from pxr import Sdf
 
 import isaaclab.sim as sim_utils
 import isaaclab.utils.math as math_utils
@@ -208,7 +209,7 @@ class Solo12Env(DirectRLEnv):
 
     def _setup_scene(self):
         self._robot = Articulation(self.cfg.robot)
-        self._remove_base_thigh_collision_filters()
+        self._configure_base_collision_filters()
         self._apply_configured_base_mass()
         self.scene.articulations["robot"] = self._robot
 
@@ -228,16 +229,24 @@ class Solo12Env(DirectRLEnv):
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
 
-    def _remove_base_thigh_collision_filters(self):
-        """Undo USD pair filters that otherwise defeat enabled articulation self-collisions.
+    def _configure_base_collision_filters(self):
+        """Apply ``base_filtered_pairs`` symmetrically to the source Solo12 USD prim.
 
-        The Solo12 USD intentionally filters directly connected links, but it also filters the base
-        against every thigh. The latter lets the thigh collision boxes pass through the body even
-        when ``physxArticulation:enabledSelfCollisions`` is enabled. Keep the direct-joint filters
-        and remove only the base--thigh pairs.
+        The asset filters the base against all hips and thighs by default. A PhysX filtered pair is
+        reciprocal in this USD, so both the base-to-link and link-to-base relationship targets are
+        updated. Directly connected hip--thigh and thigh--calf filters are left untouched.
         """
-        if not bool(self.cfg.enabled_self_collisions) or not bool(self.cfg.remove_base_thigh_collision_filters):
+        if not bool(self.cfg.enabled_self_collisions):
             return
+
+        allowed_groups = {"hip", "thigh"}
+        requested_groups = set(self.cfg.base_filtered_pairs)
+        unknown_groups = requested_groups - allowed_groups
+        if unknown_groups:
+            raise ValueError(
+                f"base_filtered_pairs contains unsupported groups {sorted(unknown_groups)}; "
+                f"expected a subset of {sorted(allowed_groups)}."
+            )
 
         stage = sim_utils.get_current_stage()
         robot_paths = sim_utils.find_matching_prim_paths(self.cfg.robot.prim_path, stage=stage)
@@ -249,29 +258,34 @@ class Solo12Env(DirectRLEnv):
         robot_path = robot_paths[0]
 
         base_path = f"{robot_path}/base"
-        thigh_paths = {f"{robot_path}/{leg}_thigh" for leg in ("FL", "FR", "RL", "RR")}
-        removed_pairs = 0
-        for prim in stage.Traverse():
-            prim_path = str(prim.GetPath())
-            if prim_path != base_path and prim_path not in thigh_paths:
-                continue
-            filtered_pairs = prim.GetRelationship("physics:filteredPairs")
-            if not filtered_pairs:
-                continue
-            targets = filtered_pairs.GetTargets()
-            if prim_path == base_path:
-                retained_targets = [target for target in targets if str(target) not in thigh_paths]
-            else:
-                retained_targets = [target for target in targets if str(target) != base_path]
-            removed_pairs += len(targets) - len(retained_targets)
-            if len(retained_targets) != len(targets):
-                filtered_pairs.SetTargets(retained_targets)
+        grouped_link_paths = {
+            group: {f"{robot_path}/{leg}_{group}" for leg in ("FL", "FR", "RL", "RR")}
+            for group in allowed_groups
+        }
+        all_link_paths = set().union(*grouped_link_paths.values())
+        desired_link_paths = set().union(*(grouped_link_paths[group] for group in requested_groups))
 
-        if removed_pairs != 8:
-            raise RuntimeError(
-                "Expected to remove 8 reciprocal Solo12 base--thigh collision-filter targets, "
-                f"but removed {removed_pairs}; the USD collision layout may have changed."
-            )
+        base_prim = stage.GetPrimAtPath(base_path)
+        if not base_prim.IsValid():
+            raise RuntimeError(f"Could not find Solo12 base prim at {base_path}.")
+        base_relationship = base_prim.GetRelationship("physics:filteredPairs")
+        if not base_relationship:
+            raise RuntimeError(f"Solo12 base prim at {base_path} has no physics:filteredPairs relationship.")
+        base_targets = [target for target in base_relationship.GetTargets() if str(target) not in all_link_paths]
+        base_relationship.SetTargets(base_targets + [Sdf.Path(path) for path in sorted(desired_link_paths)])
+
+        for link_path in sorted(all_link_paths):
+            link_prim = stage.GetPrimAtPath(link_path)
+            if not link_prim.IsValid():
+                raise RuntimeError(f"Could not find Solo12 link prim at {link_path}.")
+            relationship = link_prim.GetRelationship("physics:filteredPairs")
+            if not relationship:
+                raise RuntimeError(f"Solo12 link prim at {link_path} has no physics:filteredPairs relationship.")
+            targets = [target for target in relationship.GetTargets() if str(target) != base_path]
+            group = link_path.rsplit("_", maxsplit=1)[-1]
+            if group in requested_groups:
+                targets.append(Sdf.Path(base_path))
+            relationship.SetTargets(targets)
 
     def _spawn_flat_terrain_grid_overlay(self):
         if not bool(getattr(self.cfg, "flat_terrain_grid_enabled", False)):

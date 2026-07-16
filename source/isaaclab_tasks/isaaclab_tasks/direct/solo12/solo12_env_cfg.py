@@ -556,9 +556,9 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     compliant_contact_stiffness: float | None = 0.0  # 3_005.0
     compliant_contact_damping: float | None = 0.0  # 60.0
     enabled_self_collisions = False
-    # Opt in to collisions between the base and thighs by removing the explicit USD pair filters.
-    # This is separate from enabled_self_collisions because the unfiltered pairs can constrain the robot severely.
-    remove_base_thigh_collision_filters = False
+    # Link groups whose collisions with the base are explicitly filtered. Removing a group from
+    # this list enables those base--link collisions when articulation self-collisions are enabled.
+    base_filtered_pairs = ("hip", "thigh")
 
     tracking_std = math.sqrt(0.25)
     feet_air_time_threshold = 0.5

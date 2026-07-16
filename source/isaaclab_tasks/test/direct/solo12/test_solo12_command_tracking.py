@@ -4,6 +4,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import math
+from types import SimpleNamespace
 
 from isaaclab.app import AppLauncher
 
@@ -12,6 +13,7 @@ simulation_app = AppLauncher(headless=True).app
 
 
 import torch
+from pxr import Sdf, Usd
 
 import isaaclab.utils.math as math_utils
 from isaaclab_tasks.direct.solo12.solo12_env import Solo12Env, _sample_reset_root_rpy, _world_velocity_in_heading_frame_xy
@@ -27,13 +29,55 @@ def test_heading_frame_tracking_is_enabled_only_for_two_feet_config():
     assert Solo12TwoFeetEnvCfg().track_commands_in_world_heading_frame is True
 
 
-def test_base_thigh_collision_filter_removal_is_opt_in():
+def test_base_collision_filters_default_to_hips_and_thighs():
     standard = Solo12EnvCfg()
     two_feet = Solo12TwoFeetEnvCfg()
 
-    assert standard.remove_base_thigh_collision_filters is False
+    assert standard.base_filtered_pairs == ("hip", "thigh")
     assert two_feet.enabled_self_collisions is True
-    assert two_feet.remove_base_thigh_collision_filters is False
+    assert two_feet.base_filtered_pairs == ("hip", "thigh")
+
+
+def test_base_collision_filters_are_updated_reciprocally(monkeypatch):
+    stage = Usd.Stage.CreateInMemory()
+    robot_path = "/World/Robot"
+    base_path = f"{robot_path}/base"
+    stage.DefinePrim(robot_path)
+    base_prim = stage.DefinePrim(base_path)
+    base_relationship = base_prim.CreateRelationship("physics:filteredPairs")
+
+    link_paths = [
+        f"{robot_path}/{leg}_{group}"
+        for leg in ("FL", "FR", "RL", "RR")
+        for group in ("hip", "thigh")
+    ]
+    base_relationship.SetTargets([Sdf.Path(path) for path in link_paths])
+    for link_path in link_paths:
+        relationship = stage.DefinePrim(link_path).CreateRelationship("physics:filteredPairs")
+        relationship.SetTargets([Sdf.Path(base_path), Sdf.Path(f"{robot_path}/unrelated")])
+
+    monkeypatch.setattr("isaaclab_tasks.direct.solo12.solo12_env.sim_utils.get_current_stage", lambda: stage)
+    monkeypatch.setattr(
+        "isaaclab_tasks.direct.solo12.solo12_env.sim_utils.find_matching_prim_paths",
+        lambda _path, stage: [robot_path],
+    )
+    env = SimpleNamespace(
+        cfg=SimpleNamespace(
+            enabled_self_collisions=True,
+            base_filtered_pairs=("hip",),
+            robot=SimpleNamespace(prim_path=robot_path),
+        )
+    )
+
+    Solo12Env._configure_base_collision_filters(env)
+
+    assert {str(path) for path in base_relationship.GetTargets()} == {
+        path for path in link_paths if path.endswith("_hip")
+    }
+    for link_path in link_paths:
+        targets = {str(path) for path in stage.GetPrimAtPath(link_path).GetRelationship("physics:filteredPairs").GetTargets()}
+        assert (base_path in targets) is link_path.endswith("_hip")
+        assert f"{robot_path}/unrelated" in targets
 
 
 def test_forbidden_feet_contact_termination_is_opt_in():
