@@ -43,6 +43,20 @@ def test_forbidden_feet_contact_termination_is_opt_in():
     assert Solo12TwoFeetEnvCfg().finish_on_front_feet_contact_after == 1.5
 
 
+def test_event_randomization_can_be_disabled_independently_of_observation_corruption():
+    enabled = Solo12EnvCfg()
+    assert enabled.include_events_randomization is True
+    assert enabled.events is not None
+
+    disabled = Solo12EnvCfg()
+    disabled.include_events_randomization = False
+    disabled.enable_observation_corruption = True
+    disabled.apply_events_randomization_setting()
+
+    assert disabled.events is None
+    assert disabled.enable_observation_corruption is True
+
+
 def test_world_velocity_in_heading_frame_ignores_pitch_and_vertical_velocity():
     roll = torch.zeros(2)
     pitch = torch.full((2,), math.pi / 2)

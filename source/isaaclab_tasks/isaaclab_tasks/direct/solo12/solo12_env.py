@@ -86,6 +86,7 @@ class Solo12Env(DirectRLEnv):
 
     def __init__(self, cfg: Solo12EnvCfg, render_mode: str | None = None, **kwargs):
         cfg.refresh_runtime_dependent_config()
+        cfg.apply_events_randomization_setting()
         super().__init__(cfg, render_mode, **kwargs)
 
         action_dim = gym.spaces.flatdim(self.single_action_space)

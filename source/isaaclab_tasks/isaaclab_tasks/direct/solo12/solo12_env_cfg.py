@@ -612,7 +612,9 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     )
 
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=2.5, replicate_physics=True)
-    events: EventCfg = EventCfg()
+    # Controls the startup physics randomizations in EventCfg independently of observation noise.
+    include_events_randomization = True
+    events: EventCfg | None = EventCfg()
 
     robot: ArticulationCfg = SOLO12_CFG.replace(prim_path="/World/envs/env_.*/Robot")
     contact_sensor: ContactSensorCfg = ContactSensorCfg(
@@ -675,6 +677,11 @@ class Solo12EnvCfg(DirectRLEnvCfg):
             self.terrain.terrain_type = "generator"
             self.terrain.terrain_generator = SOLO12_TRICKY_TERRAINS_CFG.copy()
             self.terrain.use_terrain_origins = True
+
+    def apply_events_randomization_setting(self):
+        """Disable all configured event randomizations when explicitly requested."""
+        if not self.include_events_randomization:
+            self.events = None
 
     def _apply_initial_position_reset_profile(self):
         """Apply pose-specific reset settings after command-line overrides are parsed."""
