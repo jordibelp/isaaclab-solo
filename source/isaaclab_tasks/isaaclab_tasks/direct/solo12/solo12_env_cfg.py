@@ -623,6 +623,18 @@ class Solo12EnvCfg(DirectRLEnvCfg):
         update_period=1 / 200, # physics dt
         track_air_time=True,
     )
+    # Base-only sensor used by termination logic. The filtered force matrix contains contacts
+    # against Solo12's own links, allowing those forces to be removed from the total base force.
+    base_external_contact_sensor: ContactSensorCfg = ContactSensorCfg(
+        prim_path="/World/envs/env_.*/Robot/base",
+        history_length=3,
+        update_period=1 / 200,
+        filter_prim_paths_expr=[
+            f"/World/envs/env_.*/Robot/{leg}_{link}"
+            for leg in ("FL", "FR", "RL", "RR")
+            for link in ("hip", "thigh", "calf")
+        ],
+    )
     base_imu: ImuCfg = ImuCfg(
         prim_path="/World/envs/env_.*/Robot/base",
         # On the real robot the IMU is mounted 1 cm in front of the CoM. The base link frame

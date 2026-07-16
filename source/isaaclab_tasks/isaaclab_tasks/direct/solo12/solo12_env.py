@@ -82,6 +82,13 @@ def _sample_reset_root_rpy(
     return rpy
 
 
+def _external_contact_forces(
+    net_forces_w_history: torch.Tensor, self_forces_w_history: torch.Tensor
+) -> torch.Tensor:
+    """Remove forces from self-collisions from a body's net contact-force history."""
+    return net_forces_w_history - torch.sum(self_forces_w_history, dim=-2)
+
+
 class Solo12Env(DirectRLEnv):
     cfg: Solo12EnvCfg
 
@@ -215,6 +222,8 @@ class Solo12Env(DirectRLEnv):
 
         self._contact_sensor = ContactSensor(self.cfg.contact_sensor)
         self.scene.sensors["contact_sensor"] = self._contact_sensor
+        self._base_external_contact_sensor = ContactSensor(self.cfg.base_external_contact_sensor)
+        self.scene.sensors["base_external_contact_sensor"] = self._base_external_contact_sensor
 
         self.cfg.terrain.num_envs = self.scene.cfg.num_envs
         self.cfg.terrain.env_spacing = self.scene.cfg.env_spacing
@@ -1405,9 +1414,13 @@ class Solo12Env(DirectRLEnv):
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         time_out = self.episode_length_buf >= self.max_episode_length - 1
-        net_contact_forces = self._contact_sensor.data.net_forces_w_history
-        base_contacts = torch.max(torch.norm(net_contact_forces[:, :, self._base_body_ids], dim=-1), dim=1)[0]
-        self._base_collision_terminated = torch.any(base_contacts > self.cfg.base_contact_threshold, dim=1)
+        base_contact_data = self._base_external_contact_sensor.data
+        external_forces = _external_contact_forces(
+            base_contact_data.net_forces_w_history,
+            base_contact_data.force_matrix_w_history,
+        )
+        max_external_force = torch.amax(torch.norm(external_forces, dim=-1), dim=(1, 2))
+        self._base_collision_terminated = max_external_force > self.cfg.base_contact_threshold
         if self.cfg.finish_on_front_feet_contact:
             grace_period_finished = (
                 self.episode_length_buf * self.step_dt >= self.cfg.finish_on_front_feet_contact_after

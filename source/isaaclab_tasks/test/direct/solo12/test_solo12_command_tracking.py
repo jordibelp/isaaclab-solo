@@ -16,7 +16,12 @@ import torch
 from pxr import Sdf, Usd
 
 import isaaclab.utils.math as math_utils
-from isaaclab_tasks.direct.solo12.solo12_env import Solo12Env, _sample_reset_root_rpy, _world_velocity_in_heading_frame_xy
+from isaaclab_tasks.direct.solo12.solo12_env import (
+    Solo12Env,
+    _external_contact_forces,
+    _sample_reset_root_rpy,
+    _world_velocity_in_heading_frame_xy,
+)
 from isaaclab_tasks.direct.solo12.solo12_env_cfg import (
     TWO_FEET_INITIAL_JOINT_POS,
     Solo12EnvCfg,
@@ -85,6 +90,18 @@ def test_forbidden_feet_contact_termination_is_opt_in():
     assert Solo12EnvCfg().finish_on_front_feet_contact_after == 1.5
     assert Solo12TwoFeetEnvCfg().finish_on_front_feet_contact is False
     assert Solo12TwoFeetEnvCfg().finish_on_front_feet_contact_after == 1.5
+
+
+def test_external_contact_forces_exclude_base_self_collisions():
+    self_forces = torch.tensor(
+        [[[[[2.0, 0.0, 0.0], [0.0, 3.0, 0.0]]], [[[1.0, 0.0, 0.0], [0.0, 0.0, 0.0]]]]]
+    )
+    external_forces = torch.tensor([[[[0.0, 0.0, 4.0]], [[0.0, 5.0, 0.0]]]])
+    net_forces = external_forces + torch.sum(self_forces, dim=-2)
+
+    actual = _external_contact_forces(net_forces, self_forces)
+
+    torch.testing.assert_close(actual, external_forces)
 
 
 def test_event_randomization_can_be_disabled_independently_of_observation_corruption():
@@ -300,11 +317,19 @@ def test_get_dones_enables_forbidden_contact_termination_from_config():
     )()
     # With step_dt=0.02, step 75 is exactly 1.5 seconds into the episode.
     env.episode_length_buf = torch.tensor((74, 75, 76), dtype=torch.long)
-    env._base_body_ids = [0]
-    env._contact_sensor = type(
+    env._base_external_contact_sensor = type(
         "Sensor",
         (),
-        {"data": type("Data", (), {"net_forces_w_history": torch.zeros((3, 2, 1, 3))})()},
+        {
+            "data": type(
+                "Data",
+                (),
+                {
+                    "net_forces_w_history": torch.zeros((3, 2, 1, 3)),
+                    "force_matrix_w_history": torch.zeros((3, 2, 1, 1, 3)),
+                },
+            )()
+        },
     )()
     env._forbidden_feet_contact_terminated = torch.zeros(3, dtype=torch.bool)
     env._get_forbidden_feet_contact_indicator = lambda: torch.ones(3)
@@ -330,11 +355,19 @@ def test_get_dones_disables_forbidden_contact_termination_by_default():
         },
     )()
     env.episode_length_buf = torch.zeros(2, dtype=torch.long)
-    env._base_body_ids = [0]
-    env._contact_sensor = type(
+    env._base_external_contact_sensor = type(
         "Sensor",
         (),
-        {"data": type("Data", (), {"net_forces_w_history": torch.zeros((2, 2, 1, 3))})()},
+        {
+            "data": type(
+                "Data",
+                (),
+                {
+                    "net_forces_w_history": torch.zeros((2, 2, 1, 3)),
+                    "force_matrix_w_history": torch.zeros((2, 2, 1, 1, 3)),
+                },
+            )()
+        },
     )()
     env._forbidden_feet_contact_terminated = torch.ones(2, dtype=torch.bool)
     env._get_forbidden_feet_contact_indicator = lambda: torch.ones(2)
