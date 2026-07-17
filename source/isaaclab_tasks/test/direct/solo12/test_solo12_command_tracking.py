@@ -21,6 +21,7 @@ from isaaclab_tasks.direct.solo12.solo12_env import (
     Solo12Env,
     _combine_mass_properties_with_point_mass,
     _external_contact_forces,
+    _per_step_reward_ratios,
     _sample_reset_root_rpy,
     _world_velocity_in_heading_frame_xy,
 )
@@ -34,6 +35,24 @@ from isaaclab_tasks.direct.solo12.solo12_env_cfg import (
 def test_heading_frame_tracking_is_enabled_only_for_two_feet_config():
     assert Solo12EnvCfg().track_commands_in_world_heading_frame is False
     assert Solo12TwoFeetEnvCfg().track_commands_in_world_heading_frame is True
+
+
+def test_per_step_reward_ratios_remove_scale_and_step_duration():
+    rewards = {
+        "tracking": torch.tensor((0.03, 0.015)),
+        "penalty": torch.tensor((-0.04, -0.02)),
+        "disabled": torch.zeros(2),
+    }
+
+    ratios = _per_step_reward_ratios(
+        rewards,
+        {"tracking": 1.5, "penalty": -2.0, "disabled": 0.0},
+        step_dt=0.02,
+    )
+
+    assert set(ratios) == {"tracking", "penalty"}
+    assert math.isclose(ratios["tracking"], 0.75, rel_tol=1.0e-6)
+    assert math.isclose(ratios["penalty"], 0.75, rel_tol=1.0e-6)
 
 
 def test_base_collision_filters_default_to_hips_and_thighs():

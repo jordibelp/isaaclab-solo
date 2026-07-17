@@ -43,6 +43,17 @@ _EPISODE_REWARD_KEYS = (
 )
 
 
+def _per_step_reward_ratios(
+    rewards: dict[str, torch.Tensor], reward_scales: dict[str, float], step_dt: float
+) -> dict[str, float]:
+    """Remove reward scale and step duration from per-step reward metrics."""
+    return {
+        key: torch.mean(rewards[key]).item() / (scale * step_dt)
+        for key, scale in reward_scales.items()
+        if scale != 0.0
+    }
+
+
 def _world_velocity_in_heading_frame_xy(
     root_lin_vel_w: torch.Tensor, root_quat_w: torch.Tensor
 ) -> torch.Tensor:
@@ -1472,6 +1483,29 @@ class Solo12Env(DirectRLEnv):
 
         reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
         step_log = {f"RewardsPerStep/{key}": torch.mean(value).item() for key, value in rewards.items()}
+        reward_scales = {
+            "track_lin_vel_xy_exp": self.cfg.track_lin_vel_xy_reward_scale,
+            "track_ang_vel_z_exp": self.cfg.track_ang_vel_z_reward_scale,
+            "lin_vel_z_l2": self.cfg.lin_vel_z_reward_scale,
+            "ang_vel_xy_l2": self.cfg.ang_vel_xy_reward_scale,
+            "dof_torques_l2": self.cfg.joint_torque_reward_scale,
+            "dof_acc_l2": self.cfg.joint_accel_reward_scale,
+            "action_rate_l2": self.cfg.action_rate_reward_scale,
+            "feet_air_time": self.cfg.feet_air_time_reward_scale,
+            "two_feet_above_height": self.cfg.two_feet_above_height_reward_scale,
+            "three_or_more_feet_contact": self.cfg.three_or_more_feet_contact_penalty_reward_scale,
+            "undesired_contacts": self.cfg.undesired_contact_reward_scale,
+            "flat_orientation_l2": self.cfg.base_tilt_penalty_reward_scale,
+            "track_base_height_exp": self.cfg.track_base_height_reward_scale,
+            "force_transmited_through_joints": self.cfg.force_transmited_through_joints_reward_scale,
+            "foot_contact": self.cfg.foot_contact_reward_scale,
+        }
+        step_log.update(
+            {
+                f"PerStepRewardRatio/{key}": ratio
+                for key, ratio in _per_step_reward_ratios(rewards, reward_scales, self.step_dt).items()
+            }
+        )
         step_log["RewardsPerStep/cmd_tracking"] = (
             step_log["RewardsPerStep/track_lin_vel_xy_exp"] + step_log["RewardsPerStep/track_ang_vel_z_exp"]
         )
