@@ -164,6 +164,33 @@ class TestPolarSlipPlots(unittest.TestCase):
                 any(len(line.get_xdata()) == 2 and np.allclose(line.get_xdata(), (1.0, 1.0)) for line in ax.lines)
             )
 
+    def test_all_feet_polar_plot_labels_race_finish_time(self):
+        from unittest.mock import patch
+
+        from matplotlib.figure import Figure
+
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            csv_path = directory / "slip.csv"
+            self._dataframe().to_csv(csv_path, index=False)
+            slip_plots.save_plot_metadata(
+                str(csv_path),
+                task="race",
+                title_extra=None,
+                finish_time_s=1.234,
+            )
+            figures = []
+
+            def capture_figure(figure, *_args, **_kwargs):
+                figures.append(figure)
+
+            with patch.object(Figure, "savefig", autospec=True, side_effect=capture_figure):
+                slip_plots.save_polar_slip_figures(str(csv_path), str(directory / "slip"))
+
+            self.assertEqual(len(figures), 5)
+            self.assertNotIn("race finish", "\n".join(item.get_text() for item in figures[0].texts))
+            self.assertIn("race finish: 1.234 s", "\n".join(item.get_text() for item in figures[-1].texts))
+
 
 if __name__ == "__main__":
     unittest.main()

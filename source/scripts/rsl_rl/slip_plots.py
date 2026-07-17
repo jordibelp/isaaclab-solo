@@ -88,6 +88,15 @@ def _load_plot_metadata(csv_path: str) -> dict:
         return {}
 
 
+def _metadata_finish_time_s(csv_path: str) -> float | None:
+    value = _load_plot_metadata(csv_path).get("finish_time_s")
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return None
+    return value if np.isfinite(value) else None
+
+
 def _resolve_plot_labels(csv_path: str, title_extra: str | None) -> tuple[str | None, str | None]:
     metadata = _load_plot_metadata(csv_path)
     return metadata.get("task"), title_extra if title_extra is not None else metadata.get("title_extra")
@@ -743,6 +752,7 @@ def save_polar_slip_figures(
     from matplotlib.figure import Figure
 
     task, title_extra = _resolve_plot_labels(csv_path, title_extra)
+    finish_time_s = _metadata_finish_time_s(csv_path)
     df = pd.read_csv(csv_path)
     contact_timing = _contact_timing_stats(df, feet)
     saved = []
@@ -774,10 +784,13 @@ def save_polar_slip_figures(
         if scatter is not None:
             colorbar = fig.colorbar(scatter, ax=ax, pad=0.12, shrink=0.75)
             colorbar.set_label("samples in local angle/direction bin (warmer = denser)")
+        timing_annotation = _format_contact_timing_annotation(contact_timing, selected_feet)
+        if suffix == "all_feet" and finish_time_s is not None:
+            timing_annotation += f"\n\nrace finish: {finish_time_s:.3f} s"
         fig.text(
             0.82,
             0.50,
-            _format_contact_timing_annotation(contact_timing, selected_feet),
+            timing_annotation,
             ha="left",
             va="center",
             fontsize=10,
@@ -805,14 +818,7 @@ def save_straight_velocity_figure(
     from matplotlib.figure import Figure
 
     task, title_extra = _resolve_plot_labels(csv_path, title_extra)
-    metadata = _load_plot_metadata(csv_path)
-    finish_time_s = metadata.get("finish_time_s")
-    try:
-        finish_time_s = float(finish_time_s)
-    except (TypeError, ValueError):
-        finish_time_s = None
-    if finish_time_s is not None and not np.isfinite(finish_time_s):
-        finish_time_s = None
+    finish_time_s = _metadata_finish_time_s(csv_path)
     df = pd.read_csv(csv_path, usecols=["sim_time_s", "base_velocity_straight_mps"])
     data = df.drop_duplicates("sim_time_s").sort_values("sim_time_s")
     time_s = pd.to_numeric(data["sim_time_s"], errors="coerce").to_numpy(dtype=float)
