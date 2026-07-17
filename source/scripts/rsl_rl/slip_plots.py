@@ -40,6 +40,8 @@ DEFAULT_GAP_S = None
 DEFAULT_MIN_SAMPLES = 1
 DEFAULT_EPS_DEG = 0.1
 POLAR_DIRECTION_COLS = ("friction_direction_footprint_x", "friction_direction_footprint_y")
+POLAR_TRACK_COLOR = "#4b5563"
+POLAR_TRACK_ALPHA = 0.16
 DEFAULT_SLIP_LOG_DIR = Path(__file__).resolve().parents[3] / "logs" / "skrl" / "slip_logs"
 
 
@@ -619,7 +621,7 @@ def _format_contact_timing_annotation(stats: dict[str, dict[str, float | int]], 
 
 
 def _draw_polar_density(ax, theta, radius, dynamic, static, *, tracks=(), title: str, cmap: str = "plasma"):
-    """Draw chronological contact tracks and samples, colored by local density."""
+    """Draw neutral chronological contact tracks beneath density-colored samples."""
     from matplotlib import colormaps  # noqa: PLC0415
     from matplotlib.collections import LineCollection  # noqa: PLC0415
     from matplotlib.colors import LogNorm  # noqa: PLC0415
@@ -673,29 +675,23 @@ def _draw_polar_density(ax, theta, radius, dynamic, static, *, tracks=(), title:
         if high - low > np.deg2rad(0.05):
             ax.fill_between(full_circle, low, high, color=color, alpha=0.10, linewidth=0, zorder=0)
 
-    # Draw each foot/contact episode independently. Segment color and opacity follow
-    # the density at the segment midpoint, giving repeated paths a Strava-like glow.
+    # Draw each foot/contact episode independently with one faint neutral style. Lines are
+    # not part of the binned sample-density heatmap; repeated paths darken naturally where
+    # their transparent segments overlap.
     all_segments = []
-    segment_density = []
     for track_theta, track_radius in tracks:
         points = np.column_stack((np.unwrap(track_theta), track_radius))
         segments = np.stack((points[:-1], points[1:]), axis=1)
-        wrapped_theta = (points[:, 0] + np.pi) % (2.0 * np.pi) - np.pi
-        track_theta_bin = np.clip(
-            np.searchsorted(theta_edges, wrapped_theta, side="right") - 1, 0, counts.shape[0] - 1
-        )
-        track_radius_bin = np.clip(
-            np.searchsorted(radius_edges, points[:, 1], side="right") - 1, 0, counts.shape[1] - 1
-        )
-        track_density = counts[track_theta_bin, track_radius_bin]
         all_segments.extend(segments)
-        segment_density.extend(np.maximum(track_density[:-1], track_density[1:]))
     if all_segments:
-        segment_density = np.asarray(segment_density, dtype=float)
-        colors = cmap(norm(segment_density))
-        colors[:, 3] = 0.14 + 0.76 * norm(segment_density)
         collection = LineCollection(
-            all_segments, colors=colors, linewidths=1.25, capstyle="round", joinstyle="round", zorder=3
+            all_segments,
+            colors=POLAR_TRACK_COLOR,
+            alpha=POLAR_TRACK_ALPHA,
+            linewidths=1.25,
+            capstyle="round",
+            joinstyle="round",
+            zorder=3,
         )
         ax.add_collection(collection)
 

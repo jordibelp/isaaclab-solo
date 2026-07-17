@@ -91,6 +91,30 @@ class TestPolarSlipPlots(unittest.TestCase):
 
         self.assertEqual(scatter.cmap.name, "cividis")
 
+    def test_tracks_use_one_faint_color_independent_of_density(self):
+        from matplotlib.backends.backend_agg import FigureCanvasAgg
+        from matplotlib.collections import LineCollection
+        from matplotlib.figure import Figure
+
+        df = self._dataframe()
+        theta, radius, dynamic, static = slip_plots._polar_contact_data(df, slip_plots.FEET)
+        fig = Figure()
+        FigureCanvasAgg(fig)
+        ax = fig.add_subplot(111, projection="polar")
+        slip_plots._draw_polar_density(
+            ax,
+            theta,
+            radius,
+            dynamic,
+            static,
+            tracks=slip_plots._polar_contact_tracks(df, slip_plots.FEET),
+            title="test",
+        )
+
+        track_collection = next(item for item in ax.collections if isinstance(item, LineCollection))
+        self.assertEqual(len(track_collection.get_colors()), 1)
+        self.assertEqual(track_collection.get_alpha(), slip_plots.POLAR_TRACK_ALPHA)
+
     def test_saves_one_plot_per_foot_and_one_aggregate(self):
         with tempfile.TemporaryDirectory() as directory:
             directory = Path(directory)
