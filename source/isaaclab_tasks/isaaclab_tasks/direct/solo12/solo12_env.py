@@ -1315,11 +1315,15 @@ class Solo12Env(DirectRLEnv):
         return observations
 
     def _get_rnd_curiosity_state(self) -> torch.Tensor:
-        """Return a clean, task-focused posture/contact state for RND (19 dimensions)."""
+        """Return the four foot-tip positions in the base frame for RND (12 dimensions)."""
 
-        joint_pos = self._robot.data.joint_pos[:, self._joint_ids] - self._q_offset_action_and_obs
-        feet_contact = self._get_feet_contact_mask(self.cfg.feet_ground_contact_threshold).to(joint_pos.dtype)
-        return torch.cat((self._robot.data.projected_gravity_b, joint_pos, feet_contact), dim=-1)
+        foot_pos_w = self._get_foot_positions_w()
+        foot_pos_relative_w = foot_pos_w - self._robot.data.root_pos_w.unsqueeze(1)
+        base_quat_w = self._robot.data.root_quat_w.unsqueeze(1).expand(-1, foot_pos_w.shape[1], -1)
+        foot_pos_b = math_utils.quat_apply_inverse(
+            base_quat_w.reshape(-1, 4), foot_pos_relative_w.reshape(-1, 3)
+        )
+        return foot_pos_b.reshape(self.num_envs, -1)
 
     def _get_simple_proprioceptive_obs(self, corrupt: bool) -> torch.Tensor:
         joint_pos = self._robot.data.joint_pos[:, self._joint_ids] - self._q_offset_action_and_obs

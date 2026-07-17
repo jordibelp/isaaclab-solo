@@ -1908,8 +1908,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if rnd_setup.enabled:
         print(
             "[INFO]: Solo12 RND enabled: "
-            f"beta={rnd_setup.beta:g}, curiosity_state=projected_gravity+joint_position+foot_contacts "
-            "(19D, clean simulator state), state_normalization=yes, reward_normalization=no, "
+            f"beta={rnd_setup.beta:g}, curiosity_state=base_frame_foot_positions "
+            "(12D, clean simulator state), state_normalization=yes, reward_normalization=no, "
             "target=[5], predictor=[5, 5], output=1.",
             flush=True,
         )

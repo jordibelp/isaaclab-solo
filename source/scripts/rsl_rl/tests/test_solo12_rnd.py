@@ -11,6 +11,8 @@ from isaaclab.app import AppLauncher
 
 simulation_app = AppLauncher(headless=True).app
 
+from isaaclab.utils import math as math_utils  # noqa: E402
+
 
 SCRIPT_DIR = Path(__file__).resolve().parents[1]
 SKRL_SCRIPT_DIR = SCRIPT_DIR.parent / "skrl"
@@ -141,31 +143,40 @@ def test_resume_rejects_partial_rnd_checkpoint(tmp_path, present_key) -> None:
         load_checkpoint_with_optional_fresh_rnd(runner, str(checkpoint))
 
 
-def test_curiosity_state_contains_clean_posture_and_contact_configuration() -> None:
-    projected_gravity = torch.tensor(((0.1, 0.2, -0.9), (0.3, 0.4, -0.8)))
-    joint_pos = torch.arange(24, dtype=torch.float32).reshape(2, 12)
-    joint_offset = torch.full((2, 12), 0.5)
-    contacts = torch.tensor(((True, False, True, False), (False, True, False, True)))
+def test_curiosity_state_contains_foot_positions_in_base_frame() -> None:
+    root_pos_w = torch.tensor(((1.0, 2.0, 3.0), (-2.0, 1.0, 0.5)))
+    yaw = torch.tensor((torch.pi / 2.0, -torch.pi / 2.0))
+    root_quat_w = torch.stack(
+        (torch.cos(yaw / 2.0), torch.zeros(2), torch.zeros(2), torch.sin(yaw / 2.0)), dim=-1
+    )
+    foot_pos_b = torch.tensor(
+        (
+            ((0.2, 0.1, -0.3), (0.2, -0.1, -0.3), (-0.2, 0.1, -0.3), (-0.2, -0.1, -0.3)),
+            ((0.3, 0.2, -0.4), (0.3, -0.2, -0.4), (-0.3, 0.2, -0.4), (-0.3, -0.2, -0.4)),
+        )
+    )
+    expanded_root_quat_w = root_quat_w.unsqueeze(1).expand(-1, 4, -1)
+    foot_pos_relative_w = math_utils.quat_apply(
+        expanded_root_quat_w.reshape(-1, 4), foot_pos_b.reshape(-1, 3)
+    ).reshape(2, 4, 3)
+    foot_pos_w = root_pos_w.unsqueeze(1) + foot_pos_relative_w
     fake_env = SimpleNamespace(
-        _joint_ids=list(range(12)),
-        _q_offset_action_and_obs=joint_offset,
+        num_envs=2,
         _robot=SimpleNamespace(
-            data=SimpleNamespace(projected_gravity_b=projected_gravity, joint_pos=joint_pos)
+            data=SimpleNamespace(root_pos_w=root_pos_w, root_quat_w=root_quat_w)
         ),
-        cfg=SimpleNamespace(feet_ground_contact_threshold=1.0),
-        _get_feet_contact_mask=lambda threshold: contacts,
+        _get_foot_positions_w=lambda: foot_pos_w,
     )
 
     actual = Solo12Env._get_rnd_curiosity_state(fake_env)
-    expected = torch.cat((projected_gravity, joint_pos - joint_offset, contacts.float()), dim=-1)
 
-    assert actual.shape == (2, 19)
-    torch.testing.assert_close(actual, expected)
+    assert actual.shape == (2, 12)
+    torch.testing.assert_close(actual, foot_pos_b.reshape(2, 12))
 
 
 def test_symmetry_repeats_rnd_state_without_treating_it_as_policy_features() -> None:
     policy = torch.arange(96, dtype=torch.float32).reshape(2, 48)
-    rnd_state = torch.arange(38, dtype=torch.float32).reshape(2, 19)
+    rnd_state = torch.arange(24, dtype=torch.float32).reshape(2, 12)
     observations = TensorDict(
         {"policy": policy, "rnd_state": rnd_state},
         batch_size=[2],
