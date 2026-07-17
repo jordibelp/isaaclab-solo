@@ -1710,6 +1710,8 @@ class Solo12Env(DirectRLEnv):
         front_avg_height = torch.mean(foot_heights[:, self._front_feet_robot_indices], dim=1)
         front_reward = self._two_feet_height_kernel(front_avg_height) * front_airborne.float()
         if self.cfg.front_back_asymetry:
+            if not self.cfg.rear_feet_in_contact_for_twofeet:
+                return front_reward
             rear_grounded = torch.all(feet_contact_mask[:, self._rear_feet_contact_indices], dim=1)
             return front_reward * rear_grounded.float()
 

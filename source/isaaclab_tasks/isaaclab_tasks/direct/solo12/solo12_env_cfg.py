@@ -522,6 +522,9 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     # and the two-feet lift reward targets the front feet only.
     # When curriculum_two_feet is enabled, front_back_asymetry_curriculum overrides this per phase.
     front_back_asymetry = False
+    # In asymmetric mode, require both rear feet to contact before granting the front-foot height reward.
+    # Disable this to allow alternating rear-foot support while keeping both front feet airborne.
+    rear_feet_in_contact_for_twofeet = True
     front_back_asymetry_curriculum = [True, True, True, True]
     two_feet_curriculum_advance_thresholds = (1.5, 1.44, 1.2)
     # Per phase transition: True gates on Episode_Reward/track_lin_vel_xy_exp,

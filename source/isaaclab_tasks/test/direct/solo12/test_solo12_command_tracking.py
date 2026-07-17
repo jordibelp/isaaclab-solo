@@ -270,6 +270,46 @@ def test_contact_penalty_targets_any_front_foot_with_front_back_asymmetry():
     torch.testing.assert_close(actual, torch.tensor((0.0, 1.0, 1.0)))
 
 
+def test_asymmetric_height_reward_requires_both_rear_feet_by_default():
+    cfg = Solo12TwoFeetEnvCfg()
+    assert cfg.rear_feet_in_contact_for_twofeet is True
+    cfg.front_back_asymetry = True
+
+    env = object.__new__(Solo12Env)
+    env._is_closed = True
+    env.cfg = cfg
+    env._front_feet_contact_indices = [0, 1]
+    env._rear_feet_contact_indices = [2, 3]
+    env._front_feet_robot_indices = [0, 1]
+    env._get_reward_foot_heights = lambda: torch.full((2, 4), 0.6)
+    contacts = torch.tensor(((False, False, True, True), (False, False, True, False)))
+
+    actual = env._compute_two_feet_above_height_reward(contacts)
+
+    torch.testing.assert_close(actual, torch.tensor((1.0, 0.0)))
+
+
+def test_asymmetric_height_reward_can_ignore_rear_feet_contact_mask():
+    cfg = Solo12TwoFeetEnvCfg()
+    cfg.front_back_asymetry = True
+    cfg.rear_feet_in_contact_for_twofeet = False
+
+    env = object.__new__(Solo12Env)
+    env._is_closed = True
+    env.cfg = cfg
+    env._front_feet_contact_indices = [0, 1]
+    env._rear_feet_contact_indices = [2, 3]
+    env._front_feet_robot_indices = [0, 1]
+    env._get_reward_foot_heights = lambda: torch.full((3, 4), 0.6)
+    contacts = torch.tensor(
+        ((False, False, True, True), (False, False, True, False), (False, False, False, False))
+    )
+
+    actual = env._compute_two_feet_above_height_reward(contacts)
+
+    torch.testing.assert_close(actual, torch.ones(3))
+
+
 def test_contact_penalty_targets_any_front_thigh_with_front_back_asymmetry():
     env = object.__new__(Solo12Env)
     env._is_closed = True
