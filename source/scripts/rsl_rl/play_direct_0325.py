@@ -254,6 +254,18 @@ parser.add_argument(
     help="Override the environment reward scale for force_transmited_through_joints.",
 )
 parser.add_argument(
+    "--draw-helper-plane-at",
+    "--draw_helper_plane_at",
+    dest="draw_helper_plane_at",
+    type=float,
+    default=None,
+    metavar="HEIGHT_M",
+    help=(
+        "Draw a translucent horizontal plane at this height [m] above the local terrain below env 0's "
+        "front feet. The plane follows the robot horizontally. Default: disabled."
+    ),
+)
+parser.add_argument(
     "--chase_camera",
     "--follow_camera",
     dest="follow_camera",
@@ -385,7 +397,9 @@ from rsl_rl.networks import EmpiricalNormalization
 from rsl_rl.runners import DistillationRunner, OnPolicyRunner
 from tensordict import TensorDict
 
+import isaaclab.sim as sim_utils
 from isaaclab.envs import DirectMARLEnv, DirectMARLEnvCfg, DirectRLEnvCfg, ManagerBasedRLEnvCfg, multi_agent_to_single_agent
+from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
 from isaaclab.utils.dict import print_dict
 from isaaclab_rl.rsl_rl import RslRlBaseRunnerCfg, RslRlVecEnvWrapper
 from isaaclab_tasks.utils.hydra import hydra_task_config
@@ -1376,6 +1390,37 @@ class BodyForceArrowVisualizer:
                 self._warned = True
 
 
+class HelperHeightPlaneVisualizer:
+    """Translucent, non-physical height guide that follows one robot horizontally."""
+
+    def __init__(self, raw_env, height_m: float, env_index: int = 0):
+        self.raw_env = raw_env
+        self.height_m = float(height_m)
+        self.env_index = int(env_index)
+        cfg = VisualizationMarkersCfg(
+            prim_path="/Visuals/Solo12HelperHeightPlane",
+            markers={
+                "plane": sim_utils.CuboidCfg(
+                    size=(2.4, 2.4, 0.004),
+                    visual_material=sim_utils.PreviewSurfaceCfg(
+                        diffuse_color=(0.1, 0.65, 1.0),
+                        emissive_color=(0.02, 0.13, 0.2),
+                        opacity=0.16,
+                    ),
+                )
+            },
+        )
+        self._markers = VisualizationMarkers(cfg)
+
+    def update(self):
+        position = self.raw_env._robot.data.root_pos_w[self.env_index : self.env_index + 1].clone()
+        foot_positions_w = self.raw_env._get_foot_positions_w()
+        terrain_z = self.raw_env._get_terrain_height_below_feet(foot_positions_w)
+        front_terrain_z = terrain_z[self.env_index, self.raw_env._front_feet_robot_indices].mean()
+        position[:, 2] = front_terrain_z + self.height_m
+        self._markers.visualize(position)
+
+
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
@@ -1389,6 +1434,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if env_cfg.seed is not None and hasattr(env_cfg, "friction_seed"):
         env_cfg.friction_seed = int(env_cfg.seed)
         print(f"[INFO] Using race patch-friction seed: {env_cfg.friction_seed}", flush=True)
+
+    if args_cli.draw_helper_plane_at is not None and not math.isfinite(args_cli.draw_helper_plane_at):
+        raise ValueError(f"--draw-helper-plane-at must be finite, got {args_cli.draw_helper_plane_at}.")
 
     vx_range = args_cli.vx_range if args_cli.vx_range is not None else env_cfg.command_lin_vel_x_range
     vy_range = args_cli.vy_range if args_cli.vy_range is not None else env_cfg.command_lin_vel_y_range
@@ -1548,6 +1596,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     force_ui_window = None
     force_ui_keepalive = None
     force_arrow = None
+    helper_height_plane = None
     if interactive:
         ui_window, ui_keepalive = _build_command_window(
             cmd_state,
@@ -1592,6 +1641,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         _update_active_camera(cameras, camera_state)
     if force_state is not None:
         force_arrow = BodyForceArrowVisualizer(raw_env, env_index=0)
+    if args_cli.draw_helper_plane_at is not None:
+        helper_height_plane = HelperHeightPlaneVisualizer(raw_env, args_cli.draw_helper_plane_at, env_index=0)
+        helper_height_plane.update()
+        print(
+            f"[INFO] Drawing helper plane at {args_cli.draw_helper_plane_at:g} m above the local terrain "
+            "below env 0's front feet.",
+            flush=True,
+        )
 
     dagger_adapter_checkpoint = _load_dagger_adapter_checkpoint(resume_path)
     if dagger_adapter_checkpoint is not None:
@@ -1642,6 +1699,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     active_body_force = _sync_manual_body_frame_base_force(raw_env, force_state)
     if force_arrow is not None:
         force_arrow.update(active_body_force)
+    if helper_height_plane is not None:
+        helper_height_plane.update()
     target_steps = max(1, int(round(float(args_cli.duration_s) / float(dt))))
     ratio_over_time = []
     track_over_time = []
@@ -1674,6 +1733,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             if force_arrow is not None:
                 force_arrow.update(active_body_force)
             _update_active_camera(cameras, camera_state)
+            if helper_height_plane is not None:
+                helper_height_plane.update()
             continue
 
         _apply_live_direct_command(raw_env, cmd_state, (vx_ui_min, vx_ui_max), (vy_ui_min, vy_ui_max), (wz_ui_min, wz_ui_max))
@@ -1681,6 +1742,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         if force_arrow is not None:
             force_arrow.update(active_body_force)
         _update_active_camera(cameras, camera_state)
+        if helper_height_plane is not None:
+            helper_height_plane.update()
 
         with torch.inference_mode():
             actions = policy(obs)
