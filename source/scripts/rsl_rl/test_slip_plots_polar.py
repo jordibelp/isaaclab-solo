@@ -127,6 +127,43 @@ class TestPolarSlipPlots(unittest.TestCase):
             self.assertTrue(all(Path(path).is_file() and Path(path).stat().st_size > 0 for path in paths))
             self.assertEqual(Path(paths[-1]).name, "slip_polar_all_feet.png")
 
+    def test_straight_velocity_plot_labels_race_finish_time(self):
+        from unittest.mock import patch
+
+        from matplotlib.figure import Figure
+
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            csv_path = directory / "slip.csv"
+            pd.DataFrame(
+                {
+                    "sim_time_s": (0.0, 0.5, 1.0),
+                    "base_velocity_straight_mps": (0.0, 1.0, 0.5),
+                }
+            ).to_csv(csv_path, index=False)
+            slip_plots.save_plot_metadata(
+                str(csv_path),
+                task="race",
+                title_extra=None,
+                finish_time_s=1.0,
+            )
+            captured = {}
+
+            def capture_figure(figure, *_args, **_kwargs):
+                captured["figure"] = figure
+
+            with patch.object(Figure, "savefig", autospec=True, side_effect=capture_figure):
+                slip_plots.save_straight_velocity_figure(
+                    str(csv_path),
+                    str(directory / "velocity.png"),
+                )
+
+            ax = captured["figure"].axes[0]
+            self.assertIn("Race finish: 1.000 s", [item.get_text() for item in ax.texts])
+            self.assertTrue(
+                any(len(line.get_xdata()) == 2 and np.allclose(line.get_xdata(), (1.0, 1.0)) for line in ax.lines)
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

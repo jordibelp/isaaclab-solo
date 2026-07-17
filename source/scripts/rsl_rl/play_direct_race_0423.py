@@ -4212,7 +4212,9 @@ def _slip_plot_friction_title(env_cfg) -> str | None:
     return ", ".join(pieces) if pieces else None
 
 
-def _generate_slip_plots_after_run(args_cli, slip_csv_path: str | None, env_cfg=None) -> None:
+def _generate_slip_plots_after_run(
+    args_cli, slip_csv_path: str | None, env_cfg=None, finish_time_s: float | None = None
+) -> None:
     """Save per-foot slip plots from the recorded CSV and optionally open them interactively.
 
     The PNG is rendered with the Agg backend in-process (safe inside Kit). The interactive
@@ -4239,6 +4241,7 @@ def _generate_slip_plots_after_run(args_cli, slip_csv_path: str | None, env_cfg=
             task=getattr(args_cli, "task", None),
             title_extra=title_extra,
             race_scene=getattr(env_cfg, "race_scene", None) if env_cfg is not None else None,
+            finish_time_s=finish_time_s,
         )
         slip_plots.save_slip_figure(slip_csv_path, png_path, min_samples=min_samples, title_extra=title_extra)
         polar_paths = slip_plots.save_polar_slip_figures(
@@ -5273,6 +5276,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     gate_history = []
     speed_history = []
     ang_vel_history = []
+    race_finish_time_s = None
 
     for timestep in range(target_steps):
         loop_t0 = time.time()
@@ -5336,8 +5340,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             )
 
         if stop_after_success:
+            race_finish_time_s = (timestep + 1) * float(dt)
+            try:
+                logged_finish_time = raw_env.extras.get("log", {}).get("Episode/finishTimeSeconds")
+                if logged_finish_time is not None and math.isfinite(float(logged_finish_time)):
+                    race_finish_time_s = float(logged_finish_time)
+            except (AttributeError, TypeError, ValueError):
+                pass
             print(
-                f"[INFO] Race task completed after {(timestep + 1) * float(dt):.3f}s; "
+                f"[INFO] Race task completed after {race_finish_time_s:.3f}s; "
                 "stopping early for --generate-slip-plots.",
                 flush=True,
             )
@@ -5394,7 +5405,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         slip_cone_visualizer.close()
 
     # close() above flushes and closes the slip CSV, so the file is complete before we plot it.
-    _generate_slip_plots_after_run(args_cli, slip_csv_path, env_cfg=env_cfg)
+    _generate_slip_plots_after_run(
+        args_cli,
+        slip_csv_path,
+        env_cfg=env_cfg,
+        finish_time_s=race_finish_time_s,
+    )
 
     vec_env.close()
 

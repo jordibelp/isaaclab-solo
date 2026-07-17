@@ -55,12 +55,22 @@ def save_plot_metadata(
     task: str | None,
     title_extra: str | None,
     race_scene: str | None = None,
+    finish_time_s: float | None = None,
 ) -> str:
     """Persist plot labels beside a slip CSV so it can be reopened without CLI title arguments."""
     path = _metadata_path(csv_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        json.dumps({"task": task, "title_extra": title_extra, "race_scene": race_scene}, indent=2) + "\n",
+        json.dumps(
+            {
+                "task": task,
+                "title_extra": title_extra,
+                "race_scene": race_scene,
+                "finish_time_s": finish_time_s,
+            },
+            indent=2,
+        )
+        + "\n",
         encoding="utf-8",
     )
     return str(path)
@@ -795,6 +805,14 @@ def save_straight_velocity_figure(
     from matplotlib.figure import Figure
 
     task, title_extra = _resolve_plot_labels(csv_path, title_extra)
+    metadata = _load_plot_metadata(csv_path)
+    finish_time_s = metadata.get("finish_time_s")
+    try:
+        finish_time_s = float(finish_time_s)
+    except (TypeError, ValueError):
+        finish_time_s = None
+    if finish_time_s is not None and not np.isfinite(finish_time_s):
+        finish_time_s = None
     df = pd.read_csv(csv_path, usecols=["sim_time_s", "base_velocity_straight_mps"])
     data = df.drop_duplicates("sim_time_s").sort_values("sim_time_s")
     time_s = pd.to_numeric(data["sim_time_s"], errors="coerce").to_numpy(dtype=float)
@@ -806,6 +824,18 @@ def save_straight_velocity_figure(
     ax = fig.subplots()
     ax.plot(time_s[valid], velocity[valid], color="tab:blue", linewidth=1.4)
     ax.axhline(0.0, color="0.35", linewidth=0.8)
+    if finish_time_s is not None:
+        ax.axvline(finish_time_s, color="tab:green", linestyle="--", linewidth=1.2, alpha=0.8)
+        ax.text(
+            0.98,
+            0.95,
+            f"Race finish: {finish_time_s:.3f} s",
+            transform=ax.transAxes,
+            ha="right",
+            va="top",
+            fontsize=11,
+            bbox={"boxstyle": "round,pad=0.3", "facecolor": "white", "edgecolor": "tab:green", "alpha": 0.9},
+        )
     ax.set_xlabel("simulation time [s]")
     ax.set_ylabel("base velocity along start → end [m/s]")
     title = "Base velocity projected onto the straight race direction"
