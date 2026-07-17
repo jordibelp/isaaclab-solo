@@ -736,6 +736,18 @@ class Solo12Env(DirectRLEnv):
         else:
             tensor.uniform_(low, high)
 
+    def _sample_base_push_z_forces(self, tensor: torch.Tensor):
+        if not self.cfg.z_forces_both_directions:
+            self._fill_uniform_range(tensor, self.cfg.base_push_force_z_range)
+            return
+
+        low, high = self.cfg.base_push_force_z_range
+        magnitude_low = 0.0 if low <= 0.0 <= high else min(abs(low), abs(high))
+        magnitude_high = max(abs(low), abs(high))
+        self._fill_uniform_range(tensor, (magnitude_low, magnitude_high))
+        signs = torch.randint(0, 2, tensor.shape, device=tensor.device, dtype=torch.int8)
+        tensor *= signs.to(dtype=tensor.dtype).mul_(2.0).sub_(1.0)
+
     def _parse_base_push_force_curriculum(self) -> tuple[float, ...]:
         values = tuple(float(value) for value in self.cfg.forces_applied_to_base_curriculum)
         if any(value < 0.0 for value in values):
@@ -1002,7 +1014,7 @@ class Solo12Env(DirectRLEnv):
         forces = torch.zeros((len(env_ids), len(self._base_wrench_body_ids), 3), device=self.device)
         self._fill_uniform_range(forces[..., 0], self.cfg.base_push_force_xy_range)
         self._fill_uniform_range(forces[..., 1], self.cfg.base_push_force_xy_range)
-        self._fill_uniform_range(forces[..., 2], self.cfg.base_push_force_z_range)
+        self._sample_base_push_z_forces(forces[..., 2])
         self._base_push_forces_b[env_ids] = forces
         self._base_push_application_points_b[env_ids] = self._sample_base_push_surface_points(len(env_ids))
 

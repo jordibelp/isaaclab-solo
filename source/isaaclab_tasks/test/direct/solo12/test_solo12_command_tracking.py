@@ -37,6 +37,46 @@ def test_heading_frame_tracking_is_enabled_only_for_two_feet_config():
     assert Solo12TwoFeetEnvCfg().track_commands_in_world_heading_frame is True
 
 
+def test_two_feet_config_explicitly_samples_z_forces_in_both_directions():
+    assert Solo12EnvCfg().z_forces_both_directions is False
+    assert Solo12TwoFeetEnvCfg().z_forces_both_directions is True
+
+
+def test_z_force_both_directions_adds_independent_sign_to_magnitude_range():
+    env = object.__new__(Solo12Env)
+    env._is_closed = True
+    env.cfg = type(
+        "Cfg",
+        (),
+        {"z_forces_both_directions": True, "base_push_force_z_range": (2.0, 8.0)},
+    )()
+    samples = torch.empty(20_000)
+    torch.manual_seed(17)
+
+    env._sample_base_push_z_forces(samples)
+
+    assert torch.all(samples.abs() >= 2.0)
+    assert torch.all(samples.abs() <= 8.0)
+    assert 0.48 < torch.mean((samples > 0.0).float()).item() < 0.52
+
+
+def test_signed_z_range_already_samples_both_directions_without_explicit_mode():
+    env = object.__new__(Solo12Env)
+    env._is_closed = True
+    env.cfg = type(
+        "Cfg",
+        (),
+        {"z_forces_both_directions": False, "base_push_force_z_range": (-8.0, 8.0)},
+    )()
+    samples = torch.empty(20_000)
+    torch.manual_seed(23)
+
+    env._sample_base_push_z_forces(samples)
+
+    assert torch.any(samples < 0.0)
+    assert torch.any(samples > 0.0)
+
+
 def test_per_step_reward_ratios_remove_scale_and_step_duration():
     rewards = {
         "tracking": torch.tensor((0.03, 0.015)),
