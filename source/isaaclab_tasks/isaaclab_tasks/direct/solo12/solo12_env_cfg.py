@@ -507,9 +507,10 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     base_push_duration_range_s = (0.5, 2.0)
     base_push_force_xy_range = (-4.5, 4.5)
     base_push_force_z_range = (-10.0, 10.0)
-    # If enabled, sample the Z magnitude from base_push_force_z_range and choose its sign uniformly.
-    z_forces_both_directions = False
-    # Half-extents of base/collision_main. Push points are sampled by area over its top and four side faces.
+    # If enabled, apply +Z pushes from the bottom face and -Z pushes from the top face.
+    # Otherwise Z-dominant pushes retain the legacy top-face application point.
+    z_forces_applied_both_faces = False
+    # Half-extents of base/collision_main used to sample a point on the incoming-force face.
     base_push_application_half_extents = (0.22475, 0.09866, 0.01853)
 
     forces_applied_to_base_curriculum = [5.0]
@@ -842,7 +843,7 @@ class Solo12TwoFeetEnvCfg(Solo12EnvCfg):
     track_commands_in_world_heading_frame = True
     flat_terrain_grid_enabled = True
     front_back_asymetry = False
-    z_forces_both_directions = True
+    z_forces_applied_both_faces = True
     base_push_force_z_range = (0.0, 0.0)
     forces_applied_to_base_curriculum = [0.0]
     actuation_delay_range = (0, 0)

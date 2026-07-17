@@ -206,16 +206,6 @@ class Solo12Env(DirectRLEnv):
                 "base_push_application_half_extents must contain three positive values, "
                 f"got {self.cfg.base_push_application_half_extents}."
             )
-        half_x, half_y, half_z = self._base_push_application_half_extents
-        self._base_push_face_areas = torch.stack(
-            (
-                4.0 * half_x * half_y,
-                4.0 * half_y * half_z,
-                4.0 * half_y * half_z,
-                4.0 * half_x * half_z,
-                4.0 * half_x * half_z,
-            )
-        )
         self._max_velx_range_curriculum_values = self._parse_max_velx_range_curriculum()
         self._max_velx_range_curriculum_idx = 0
         self._base_push_force_curriculum_values = self._parse_base_push_force_curriculum()
@@ -736,18 +726,6 @@ class Solo12Env(DirectRLEnv):
         else:
             tensor.uniform_(low, high)
 
-    def _sample_base_push_z_forces(self, tensor: torch.Tensor):
-        if not self.cfg.z_forces_both_directions:
-            self._fill_uniform_range(tensor, self.cfg.base_push_force_z_range)
-            return
-
-        low, high = self.cfg.base_push_force_z_range
-        magnitude_low = 0.0 if low <= 0.0 <= high else min(abs(low), abs(high))
-        magnitude_high = max(abs(low), abs(high))
-        self._fill_uniform_range(tensor, (magnitude_low, magnitude_high))
-        signs = torch.randint(0, 2, tensor.shape, device=tensor.device, dtype=torch.int8)
-        tensor *= signs.to(dtype=tensor.dtype).mul_(2.0).sub_(1.0)
-
     def _parse_base_push_force_curriculum(self) -> tuple[float, ...]:
         values = tuple(float(value) for value in self.cfg.forces_applied_to_base_curriculum)
         if any(value < 0.0 for value in values):
@@ -990,17 +968,34 @@ class Solo12Env(DirectRLEnv):
         self._base_push_application_points_b[env_ids] = 0.0
         self._robot.permanent_wrench_composer.reset(env_ids)
 
-    def _sample_base_push_surface_points(self, count: int) -> torch.Tensor:
-        half_extents = self._base_push_application_half_extents
-        unit_samples = torch.rand((count, 3), device=self.device).clamp_min(torch.finfo(torch.float).eps)
-        points = (2.0 * unit_samples - 1.0) * half_extents
-        face_ids = torch.multinomial(self._base_push_face_areas, count, replacement=True)
+    def _sample_base_push_surface_points(self, forces: torch.Tensor) -> torch.Tensor:
+        """Sample points on the face from which each 3-D push enters the base.
 
-        points[face_ids == 0, 2] = half_extents[2]  # top
-        points[face_ids == 1, 0] = half_extents[0]  # front
-        points[face_ids == 2, 0] = -half_extents[0]  # rear
-        points[face_ids == 3, 1] = half_extents[1]  # left
-        points[face_ids == 4, 1] = -half_extents[1]  # right
+        One force vector has one application point. Its dominant component selects the face normal;
+        the remaining components are tangential components of the same oblique push.
+        """
+        count = forces.shape[0]
+        half_extents = self._base_push_application_half_extents
+        unit_samples = torch.rand((count, 3), device=half_extents.device).clamp_min(torch.finfo(torch.float).eps)
+        points = (2.0 * unit_samples - 1.0) * half_extents
+        representative_forces = forces[:, 0, :]
+        dominant_axes = representative_forces.abs().argmax(dim=-1)
+        dominant_signs = representative_forces.gather(1, dominant_axes[:, None]).squeeze(1)
+
+        for axis in (0, 1):
+            axis_mask = dominant_axes == axis
+            # Positive force enters from the negative face; negative force enters from the positive face.
+            points[axis_mask, axis] = torch.where(
+                dominant_signs[axis_mask] >= 0.0, -half_extents[axis], half_extents[axis]
+            )
+
+        z_mask = dominant_axes == 2
+        if self.cfg.z_forces_applied_both_faces:
+            points[z_mask, 2] = torch.where(
+                dominant_signs[z_mask] >= 0.0, -half_extents[2], half_extents[2]
+            )
+        else:
+            points[z_mask, 2] = half_extents[2]
         return points[:, None, :].expand(-1, len(self._base_wrench_body_ids), -1)
 
     def _start_base_pushes(self, env_ids: torch.Tensor):
@@ -1014,9 +1009,9 @@ class Solo12Env(DirectRLEnv):
         forces = torch.zeros((len(env_ids), len(self._base_wrench_body_ids), 3), device=self.device)
         self._fill_uniform_range(forces[..., 0], self.cfg.base_push_force_xy_range)
         self._fill_uniform_range(forces[..., 1], self.cfg.base_push_force_xy_range)
-        self._sample_base_push_z_forces(forces[..., 2])
+        self._fill_uniform_range(forces[..., 2], self.cfg.base_push_force_z_range)
         self._base_push_forces_b[env_ids] = forces
-        self._base_push_application_points_b[env_ids] = self._sample_base_push_surface_points(len(env_ids))
+        self._base_push_application_points_b[env_ids] = self._sample_base_push_surface_points(forces)
 
     def _update_base_push_wrench(self):
         inactive = self._base_push_steps_left <= 0
