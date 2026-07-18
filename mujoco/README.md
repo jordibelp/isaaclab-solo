@@ -65,14 +65,29 @@ Then run the same experiment (Isaac-only Hydra overrides are accepted and report
 Remove `--headless` for the interactive MuJoCo viewer (on Wayland sessions the script switches GLFW
 to XWayland automatically to avoid the GLFW/GLib warning spam). Add `--realtime` to pace it at real
 time. Plots are rendered with the Agg backend, so no GUI toolkit is touched in headless runs.
-Outputs land in `logs/mujoco/cmd_tracking/<checkpoint_stem>/` by default:
+Every execution gets an immutable timestamped folder under
+`logs/mujoco/cmd_tracking/<checkpoint_stem>/<YYYYMMDD_HHMMSS>/` by default:
 
+- `run_config.json` — checkpoint hash, commands, ignored Isaac overrides, timing, gains, model mass,
+  MuJoCo version, and Git revision
+- `summary.json` — aggregate tracking/fall/stance metrics
 - `command_tracking.csv` — Isaac columns plus `reset`, `base_height_m`, `gravity_x_b`
   (`gravity_x_b` ≈ 0 on four feet, ≈ −0.96 in the upright two-feet stance)
 - `vxy_tracking_error.png`
 - `wz_tracking_error.png` when any requested `wz` is nonzero
 
 Purple dashed lines denote automatic resets caused by base-ground contact or episode timeout.
+
+Completed runs are uploaded by default to the W&B project `solo12-two-feet-exp`, including the
+configuration, summary, CSV, plots, and exact MJCF model as one versioned artifact. Useful options:
+
+```bash
+--wandb-project solo12-two-feet-exp  # default
+--wandb-entity <entity>
+--wandb-name <custom-run-name>
+--no-wandb                           # local artifacts only
+--output-dir <custom-output-root>    # model/timestamp folders are still appended
+```
 
 ## Tests
 

@@ -82,6 +82,13 @@ def test_command_parser():
     assert sim2sim.parse_commands("0.5 0 0; 0 .3 0;") == [(0.5, 0.0, 0.0), (0.0, 0.3, 0.0)]
 
 
+def test_timestamped_run_directory(tmp_path):
+    first = sim2sim.create_run_directory(tmp_path, "model_15008", "20260718_131500")
+    second = sim2sim.create_run_directory(tmp_path, "model_15008", "20260718_131500")
+    assert first == tmp_path / "model_15008" / "20260718_131500"
+    assert second == tmp_path / "model_15008" / "20260718_131500_01"
+
+
 @pytest.mark.skipif(not CHECKPOINT.exists(), reason="real checkpoint unavailable")
 def test_policy_normalization_matches_rsl_rl():
     import torch

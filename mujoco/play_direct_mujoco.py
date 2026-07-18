@@ -5,10 +5,14 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
+import json
 import math
 import os
+import subprocess
 import time
 import warnings
+from datetime import datetime
 from pathlib import Path
 
 import mujoco
@@ -60,7 +64,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--duration_s", type=float, default=2000.0)
     parser.add_argument("--episode_length_s", type=float, default=80.0)
     parser.add_argument("--cmd_init", nargs=3, type=float, default=(0.0, 0.0, 0.0))
-    parser.add_argument("--output-dir", type=Path)
+    parser.add_argument("--output-dir", type=Path,
+                        help="Output root (default logs/mujoco/cmd_tracking); model/timestamp are appended.")
     parser.add_argument("--realtime", action="store_true", help="Pace the interactive viewer at wall-clock speed.")
     parser.add_argument("--task", default="solo12-two-feet")
     parser.add_argument("--num_envs", type=int, default=1)
@@ -70,6 +75,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--kd", type=float, default=DEFAULT_KD,
                         help=f"PD damping (default {DEFAULT_KD:g} = Isaac play with --disable_training_gain_sync; "
                              f"training used {TRAINING_KD:g}).")
+    parser.add_argument("--wandb-project", default="solo12-two-feet-exp")
+    parser.add_argument("--wandb-entity")
+    parser.add_argument("--wandb-name")
+    parser.add_argument("--no-wandb", action="store_true", help="Keep artifacts local without uploading to W&B.")
     return parser
 
 
@@ -245,6 +254,73 @@ def save_results(output_dir: Path, rows: list[tuple], commands: list[tuple[float
     return paths
 
 
+def checkpoint_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def git_revision() -> str | None:
+    try:
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"], check=True, capture_output=True, text=True
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+
+def create_run_directory(output_root: Path, checkpoint_stem: str, timestamp: str) -> Path:
+    run_dir = output_root / checkpoint_stem / timestamp
+    suffix = 1
+    while run_dir.exists():
+        run_dir = output_root / checkpoint_stem / f"{timestamp}_{suffix:02d}"
+        suffix += 1
+    run_dir.mkdir(parents=True)
+    return run_dir
+
+
+def summarize_rows(rows: list[tuple]) -> dict[str, float | int]:
+    values = np.asarray(rows, dtype=float)
+    return {
+        "samples": len(rows),
+        "duration_s": float(values[-1, 0]),
+        "vxy_error_mean_mps": float(values[:, 7].mean()),
+        "vxy_error_median_mps": float(np.median(values[:, 7])),
+        "vxy_error_max_mps": float(values[:, 7].max()),
+        "wz_error_mean_radps": float(values[:, 8].mean()),
+        "resets": int(values[:, 9].sum()),
+        "min_base_height_m": float(values[:, 10].min()),
+        "min_gravity_x_b": float(values[:, 11].min()),
+    }
+
+
+def upload_to_wandb(
+    *, project: str, entity: str | None, run_name: str, config: dict, summary: dict,
+    artifact_paths: list[Path], plot_paths: list[Path], artifact_name: str,
+) -> str | None:
+    """Upload a completed evaluation while keeping local results authoritative."""
+    try:
+        import wandb
+
+        run = wandb.init(project=project, entity=entity, name=run_name, config=config, job_type="sim-to-sim-eval")
+        run.summary.update(summary)
+        image_log = {f"plots/{path.stem}": wandb.Image(str(path)) for path in plot_paths}
+        if image_log:
+            run.log(image_log)
+        artifact = wandb.Artifact(artifact_name, type="sim-to-sim-evaluation", metadata=summary)
+        for path in artifact_paths:
+            artifact.add_file(str(path), name=path.name)
+        run.log_artifact(artifact)
+        run_url = run.url
+        run.finish()
+        return run_url
+    except Exception as exc:
+        print(f"[WARN] W&B upload failed; local artifacts are complete: {exc}", flush=True)
+        return None
+
+
 def main() -> None:
     args, unknown = build_parser().parse_known_args()
     if args.task != "solo12-two-feet" or args.num_envs != 1:
@@ -254,9 +330,41 @@ def main() -> None:
     checkpoint = Path(args.checkpoint).expanduser().resolve()
     commands = args.track_cmds
     duration = len(commands) * COMMAND_DURATION_S
-    output_dir = args.output_dir or Path("logs/mujoco/cmd_tracking") / checkpoint.stem
+    started_at = datetime.now().astimezone()
+    timestamp = started_at.strftime("%Y%m%d_%H%M%S")
+    output_root = args.output_dir or Path("logs/mujoco/cmd_tracking")
+    output_dir = create_run_directory(output_root, checkpoint.stem, timestamp)
     policy = Policy(checkpoint)
-    sim = Solo12Mujoco(Path(__file__).with_name("solo12.xml"), kp=args.kp, kd=args.kd)
+    model_path = Path(__file__).with_name("solo12.xml").resolve()
+    sim = Solo12Mujoco(model_path, kp=args.kp, kd=args.kd)
+    config = {
+        "task": args.task,
+        "simulator": "mujoco",
+        "mujoco_version": mujoco.__version__,
+        "started_at": started_at.isoformat(),
+        "timestamp": timestamp,
+        "checkpoint": str(checkpoint),
+        "checkpoint_sha256": checkpoint_sha256(checkpoint),
+        "model_xml": str(model_path),
+        "git_revision": git_revision(),
+        "commands": [list(command) for command in commands],
+        "command_duration_s": COMMAND_DURATION_S,
+        "duration_s": duration,
+        "episode_length_s": args.episode_length_s,
+        "physics_dt": PHYSICS_DT,
+        "decimation": DECIMATION,
+        "policy_dt": POLICY_DT,
+        "action_scale": ACTION_SCALE,
+        "kp": sim.kp,
+        "kd": sim.kd,
+        "effort_limit_nm": EFFORT_LIMIT,
+        "model_mass_kg": float(sim.model.body_mass.sum()),
+        "headless": args.headless,
+        "realtime": args.realtime,
+        "ignored_isaaclab_overrides": unknown,
+    }
+    config_path = output_dir / "run_config.json"
+    config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
     print(f"[INFO] MuJoCo {mujoco.__version__}; model mass={sim.model.body_mass.sum():.6f} kg")
     print(f"[INFO] PD gains kp={sim.kp:g} kd={sim.kd:g} "
           f"(Isaac play w/ --disable_training_gain_sync: {DEFAULT_KP:g}/{DEFAULT_KD:g}; "
@@ -294,7 +402,26 @@ def main() -> None:
         if args.realtime:
             time.sleep(max(0.0, POLICY_DT - (time.perf_counter() - wall_start)))
     if viewer is not None: viewer.close()
-    for path in save_results(output_dir, rows, commands): print(f"[INFO] Saved {path}")
+    result_paths = save_results(output_dir, rows, commands)
+    summary = summarize_rows(rows)
+    summary_path = output_dir / "summary.json"
+    summary_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+    for path in [config_path, summary_path, *result_paths]:
+        print(f"[INFO] Saved {path}")
+    if not args.no_wandb:
+        run_name = args.wandb_name or f"mujoco-{checkpoint.stem}-{timestamp}"
+        run_url = upload_to_wandb(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            run_name=run_name,
+            config=config,
+            summary=summary,
+            artifact_paths=[config_path, summary_path, model_path, *result_paths],
+            plot_paths=[path for path in result_paths if path.suffix == ".png"],
+            artifact_name=f"{checkpoint.stem}-{timestamp}",
+        )
+        if run_url:
+            print(f"[INFO] W&B run: {run_url}")
 
 
 if __name__ == "__main__":
