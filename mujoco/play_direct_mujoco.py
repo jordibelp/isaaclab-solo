@@ -320,13 +320,23 @@ def create_run_directory(output_root: Path, checkpoint_stem: str, timestamp: str
 
 def summarize_rows(rows: list[tuple]) -> dict[str, float | int]:
     values = np.asarray(rows, dtype=float)
+    vxy_error = values[:, 7]
+    wz_error = values[:, 8]
     return {
         "samples": len(rows),
         "duration_s": float(values[-1, 0]),
-        "vxy_error_mean_mps": float(values[:, 7].mean()),
-        "vxy_error_median_mps": float(np.median(values[:, 7])),
-        "vxy_error_max_mps": float(values[:, 7].max()),
-        "wz_error_mean_radps": float(values[:, 8].mean()),
+        "vxy_error_mean_mps": float(vxy_error.mean()),
+        "vxy_error_median_mps": float(np.median(vxy_error)),
+        "vxy_error_p05_mps": float(np.percentile(vxy_error, 5)),
+        "vxy_error_p95_mps": float(np.percentile(vxy_error, 95)),
+        "vxy_error_std_mps": float(vxy_error.std()),
+        "vxy_error_max_mps": float(vxy_error.max()),
+        "wz_error_mean_radps": float(wz_error.mean()),
+        "wz_error_median_radps": float(np.median(wz_error)),
+        "wz_error_p05_radps": float(np.percentile(wz_error, 5)),
+        "wz_error_p95_radps": float(np.percentile(wz_error, 95)),
+        "wz_error_std_radps": float(wz_error.std()),
+        "wz_error_max_radps": float(wz_error.max()),
         "resets": int(values[:, 9].sum()),
         "min_base_height_m": float(values[:, 10].min()),
         "min_gravity_x_b": float(values[:, 11].min()),

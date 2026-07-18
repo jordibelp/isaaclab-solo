@@ -108,6 +108,11 @@ Every execution gets an immutable timestamped folder under
 
 Purple dashed lines denote automatic resets caused by base-ground contact or episode timeout.
 
+Both the MuJoCo and Isaac Sim tracking runners report the same error-distribution fields for
+`vxy_error` and `wz_error`: mean, median, p05, p95, population standard deviation, and maximum.
+Isaac Sim writes these files beside its tracking CSV/plots and uploads them to the same W&B project
+only when `--track-cmds` is active (`--no-tracking-wandb` disables that Isaac upload).
+
 Completed runs are uploaded by default to the W&B project `solo12-two-feet-exp`, including the
 configuration, summary, CSV, plots, and exact MJCF model as one versioned artifact. Useful options:
 

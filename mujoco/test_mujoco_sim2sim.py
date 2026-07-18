@@ -159,6 +159,20 @@ def test_timestamped_run_directory(tmp_path):
     assert second == tmp_path / "model_15008" / "20260718_131500_01"
 
 
+def test_tracking_summary_distribution_fields():
+    rows = [
+        (0.02, 0.5, 0, 0, 0.4, 0, 0.1, 0.1, 0.1, 0, 0.35, -0.9),
+        (0.04, 0.5, 0, 0, 0.3, 0, 0.2, 0.2, 0.2, 0, 0.34, -1.0),
+    ]
+    summary = sim2sim.summarize_rows(rows)
+    assert summary["vxy_error_mean_mps"] == pytest.approx(0.15)
+    assert summary["vxy_error_median_mps"] == pytest.approx(0.15)
+    assert summary["vxy_error_p05_mps"] == pytest.approx(0.105)
+    assert summary["vxy_error_p95_mps"] == pytest.approx(0.195)
+    assert summary["vxy_error_std_mps"] == pytest.approx(0.05)
+    assert summary["wz_error_std_radps"] == pytest.approx(0.05)
+
+
 @pytest.mark.skipif(not CHECKPOINT.exists(), reason="real checkpoint unavailable")
 def test_policy_normalization_matches_rsl_rl():
     import torch

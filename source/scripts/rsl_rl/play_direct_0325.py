@@ -11,6 +11,7 @@ Example usage:
 
 
 import argparse
+import json
 import math
 import os
 import re
@@ -128,6 +129,20 @@ parser.add_argument(
         "Run a command-tracking experiment and save error plots. Commands are semicolon-separated "
         "'vx vy wz' rows; each command runs for 5 s. Example: '0.5 0 0; -0.5 0 0; 0 0.3 0'."
     ),
+)
+parser.add_argument(
+    "--tracking-wandb-project",
+    type=str,
+    default="solo12-two-feet-exp",
+    help="W&B project used automatically for --track-cmds evaluation artifacts.",
+)
+parser.add_argument("--tracking-wandb-entity", type=str, default=None, help="Optional W&B entity for --track-cmds.")
+parser.add_argument("--tracking-wandb-name", type=str, default=None, help="Optional W&B run name for --track-cmds.")
+parser.add_argument(
+    "--no-tracking-wandb",
+    action="store_true",
+    default=False,
+    help="Keep --track-cmds artifacts local without uploading to W&B.",
 )
 parser.add_argument(
     "--record-sequence-commands",
@@ -1513,6 +1528,101 @@ def _save_command_tracking_plots(
     return paths
 
 
+def _summarize_command_tracking(
+    times_s: list[float],
+    commands: list[tuple[float, float, float]],
+    tracked_lin_vel_xy: list[tuple[float, float]],
+    tracked_yaw_rate: list[float],
+) -> dict[str, float | int]:
+    """Return the simulator-independent tracking statistics shared with the MuJoCo runner."""
+    times = np.asarray(times_s)
+    command_samples = np.asarray(
+        [commands[min(int(max(t - 1.0e-9, 0.0) / TRACKING_COMMAND_DURATION_S), len(commands) - 1)] for t in times]
+    )
+    lin_vel = np.asarray(tracked_lin_vel_xy)
+    yaw_rate = np.asarray(tracked_yaw_rate)
+    vxy_error = np.linalg.norm(command_samples[:, :2] - lin_vel, axis=1)
+    wz_error = np.abs(command_samples[:, 2] - yaw_rate)
+
+    def distribution(prefix: str, values: np.ndarray, unit: str) -> dict[str, float]:
+        return {
+            f"{prefix}_mean_{unit}": float(values.mean()),
+            f"{prefix}_median_{unit}": float(np.median(values)),
+            f"{prefix}_p05_{unit}": float(np.percentile(values, 5)),
+            f"{prefix}_p95_{unit}": float(np.percentile(values, 95)),
+            f"{prefix}_std_{unit}": float(values.std()),
+            f"{prefix}_max_{unit}": float(values.max()),
+        }
+
+    return {
+        "samples": len(times),
+        "duration_s": float(times[-1]),
+        **distribution("vxy_error", vxy_error, "mps"),
+        **distribution("wz_error", wz_error, "radps"),
+    }
+
+
+def _save_and_upload_tracking_metadata(
+    *,
+    output_dir: Path,
+    artifact_paths: list[Path],
+    summary: dict[str, float | int],
+    resume_path: str,
+    env_cfg,
+    agent_cfg,
+    dt: float,
+) -> tuple[Path, Path, str | None]:
+    """Persist complete Isaac tracking metadata and optionally upload it to the shared W&B project."""
+    config = {
+        "task": args_cli.task,
+        "simulator": "isaac_sim",
+        "checkpoint": str(Path(resume_path).resolve()),
+        "commands": [list(command) for command in TRACKING_COMMANDS],
+        "command_duration_s": TRACKING_COMMAND_DURATION_S,
+        "duration_s": float(args_cli.duration_s),
+        "episode_length_s": float(env_cfg.episode_length_s),
+        "num_envs": int(args_cli.num_envs),
+        "policy_dt": float(dt),
+        "kp": float(env_cfg.kp),
+        "kd": float(env_cfg.kd),
+        "env_config": env_cfg.to_dict() if hasattr(env_cfg, "to_dict") else str(env_cfg),
+        "agent_config": agent_cfg.to_dict() if hasattr(agent_cfg, "to_dict") else str(agent_cfg),
+    }
+    config_path = output_dir / "run_config.json"
+    summary_path = output_dir / "summary.json"
+    config_path.write_text(json.dumps(config, indent=2, default=str) + "\n", encoding="utf-8")
+    summary_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+
+    run_url = None
+    if not args_cli.no_tracking_wandb:
+        try:
+            run_name = args_cli.tracking_wandb_name or f"isaac-sim-{Path(resume_path).stem}-{output_dir.name[:15]}"
+            tracking_run = wandb.init(
+                project=args_cli.tracking_wandb_project,
+                entity=args_cli.tracking_wandb_entity,
+                name=run_name,
+                config={key: value for key, value in config.items() if key not in {"env_config", "agent_config"}},
+                job_type="sim-to-sim-eval",
+            )
+            tracking_run.summary.update(summary)
+            plot_paths = [path for path in artifact_paths if path.suffix == ".png"]
+            if plot_paths:
+                tracking_run.log({f"plots/{path.stem}": wandb.Image(str(path)) for path in plot_paths})
+            artifact = wandb.Artifact(
+                f"isaac-sim-{Path(resume_path).stem}-{output_dir.name[:15]}",
+                type="sim-to-sim-evaluation",
+                metadata=summary,
+            )
+            for path in [config_path, summary_path, *artifact_paths]:
+                artifact.add_file(str(path), name=path.name)
+            tracking_run.log_artifact(artifact)
+            run_url = tracking_run.url
+            tracking_run.finish()
+        except Exception as exc:
+            print(f"[WARN] Tracking W&B upload failed; local artifacts are complete: {exc}", flush=True)
+    return config_path, summary_path, run_url
+
+
 class ChaseCamera:
     """Viewport camera that follows a smoothed horizontal robot heading.
 
@@ -2208,9 +2318,27 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             tracking_lin_vel_xy,
             tracking_yaw_rate,
         )
+        tracking_summary = _summarize_command_tracking(
+            tracking_times_s,
+            TRACKING_COMMANDS,
+            tracking_lin_vel_xy,
+            tracking_yaw_rate,
+        )
+        config_path, summary_path, tracking_run_url = _save_and_upload_tracking_metadata(
+            output_dir=output_dir,
+            artifact_paths=paths,
+            summary=tracking_summary,
+            resume_path=resume_path,
+            env_cfg=env_cfg,
+            agent_cfg=agent_cfg,
+            dt=float(dt),
+        )
         print("[RESULT] Command-tracking artifacts:", flush=True)
-        for path in paths:
+        for path in [config_path, summary_path, *paths]:
             print(f"  {path}", flush=True)
+        print("[RESULT] Command-tracking summary:", json.dumps(tracking_summary, sort_keys=True), flush=True)
+        if tracking_run_url:
+            print(f"[RESULT] W&B tracking run: {tracking_run_url}", flush=True)
 
     if force_arrow is not None:
         force_arrow.clear()
