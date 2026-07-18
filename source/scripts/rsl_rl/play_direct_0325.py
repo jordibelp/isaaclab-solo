@@ -1533,6 +1533,7 @@ def _summarize_command_tracking(
     commands: list[tuple[float, float, float]],
     tracked_lin_vel_xy: list[tuple[float, float]],
     tracked_yaw_rate: list[float],
+    resets: int,
 ) -> dict[str, float | int]:
     """Return the simulator-independent tracking statistics shared with the MuJoCo runner."""
     times = np.asarray(times_s)
@@ -1557,6 +1558,8 @@ def _summarize_command_tracking(
     return {
         "samples": len(times),
         "duration_s": float(times[-1]),
+        "resets": int(resets),
+        "failures": int(resets),
         **distribution("vxy_error", vxy_error, "mps"),
         **distribution("wz_error", wz_error, "radps"),
     }
@@ -2113,6 +2116,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     tracking_times_s = []
     tracking_lin_vel_xy = []
     tracking_yaw_rate = []
+    tracking_resets = 0
 
     for timestep in range(target_steps):
         loop_t0 = time.time()
@@ -2156,6 +2160,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         with torch.inference_mode():
             actions = policy(obs)
             obs, _, dones, _ = vec_env.step(actions)
+            if TRACKING_COMMANDS:
+                tracking_resets += int(torch.count_nonzero(dones).item())
             try:
                 policy.actor_critic.reset(dones)
             except AttributeError:
@@ -2317,6 +2323,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             TRACKING_COMMANDS,
             tracking_lin_vel_xy,
             tracking_yaw_rate,
+            tracking_resets,
         )
         tracking_summary = _summarize_command_tracking(
             tracking_times_s,

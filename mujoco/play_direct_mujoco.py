@@ -322,6 +322,7 @@ def summarize_rows(rows: list[tuple]) -> dict[str, float | int]:
     values = np.asarray(rows, dtype=float)
     vxy_error = values[:, 7]
     wz_error = values[:, 8]
+    resets = int(values[:, 9].sum())
     return {
         "samples": len(rows),
         "duration_s": float(values[-1, 0]),
@@ -337,7 +338,8 @@ def summarize_rows(rows: list[tuple]) -> dict[str, float | int]:
         "wz_error_p95_radps": float(np.percentile(wz_error, 95)),
         "wz_error_std_radps": float(wz_error.std()),
         "wz_error_max_radps": float(wz_error.max()),
-        "resets": int(values[:, 9].sum()),
+        "resets": resets,
+        "failures": resets,
         "min_base_height_m": float(values[:, 10].min()),
         "min_gravity_x_b": float(values[:, 11].min()),
     }

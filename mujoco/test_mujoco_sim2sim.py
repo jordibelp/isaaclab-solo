@@ -171,6 +171,8 @@ def test_tracking_summary_distribution_fields():
     assert summary["vxy_error_p95_mps"] == pytest.approx(0.195)
     assert summary["vxy_error_std_mps"] == pytest.approx(0.05)
     assert summary["wz_error_std_radps"] == pytest.approx(0.05)
+    assert summary["resets"] == 0
+    assert summary["failures"] == 0
 
 
 @pytest.mark.skipif(not CHECKPOINT.exists(), reason="real checkpoint unavailable")

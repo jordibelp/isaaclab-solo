@@ -110,6 +110,7 @@ Purple dashed lines denote automatic resets caused by base-ground contact or epi
 
 Both the MuJoCo and Isaac Sim tracking runners report the same error-distribution fields for
 `vxy_error` and `wz_error`: mean, median, p05, p95, population standard deviation, and maximum.
+They also report `resets` and the equivalent `failures` count for rollout resets.
 Isaac Sim writes these files beside its tracking CSV/plots and uploads them to the same W&B project
 only when `--track-cmds` is active (`--no-tracking-wandb` disables that Isaac upload).
 
