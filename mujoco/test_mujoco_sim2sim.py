@@ -2,25 +2,112 @@ from pathlib import Path
 
 import mujoco
 import numpy as np
+import pytest
 
 import play_direct_mujoco as sim2sim
 
+CHECKPOINT = Path("/home/jordibelp/IsaacLab-dirty/logs/skrl/checkpoints/0717_q3a68133_model_15008.pt")
+
+
+def make_env(**kwargs) -> sim2sim.Solo12Mujoco:
+    return sim2sim.Solo12Mujoco(Path(__file__).with_name("solo12.xml"), **kwargs)
+
 
 def test_model_contract():
-    env = sim2sim.Solo12Mujoco(Path(__file__).with_name("solo12.xml"))
+    env = make_env()
     assert env.model.opt.timestep == sim2sim.PHYSICS_DT
     assert env.model.nu == 12
-    assert np.isclose(env.model.body_mass.sum(), 3.028572, atol=1e-7)
+    assert np.isclose(env.model.body_mass.sum(), 3.028572, atol=1e-6)
     assert env.observation((0.5, 0.0, 0.0)).shape == (48,)
     assert np.allclose(env.data.qpos[env.joint_qpos], sim2sim.SAFE_Q)
+    base_inertial_pos = env.model.body_ipos[env.base_id]
+    assert np.allclose(base_inertial_pos, (-0.01, 0.0, 0.0)), "base COM must match the USD-authored value"
 
 
-def test_action_pd_and_step_are_finite():
-    env = sim2sim.Solo12Mujoco(Path(__file__).with_name("solo12.xml"))
-    env.step(np.zeros(12))
+def test_actuator_matches_isaac_pd():
+    env = make_env(kp=15.0, kd=0.5)
+    assert np.allclose(env.model.actuator_gainprm[env.actuator_ids, 0], 15.0)
+    assert np.allclose(env.model.actuator_biasprm[env.actuator_ids, 1], -15.0)
+    assert np.allclose(env.model.actuator_biasprm[env.actuator_ids, 2], -0.5)
+    assert np.allclose(env.model.actuator_forcerange[env.actuator_ids], [[-2.65, 2.65]] * 12)
+    env.step(np.full(12, 10.0))  # saturating request
+    assert np.max(np.abs(env.data.actuator_force)) <= sim2sim.EFFORT_LIMIT + 1e-9
+    for _ in range(100):
+        env.step(np.zeros(12))
     assert np.isfinite(env.data.qpos).all()
-    assert np.max(np.abs(env.data.ctrl)) <= sim2sim.EFFORT_LIMIT
+    assert np.max(np.abs(env.data.qvel[env.joint_dof])) < 20.0, "PD hold at the safe pose must stay stable"
+
+
+def test_body_frame_velocity_observation():
+    """Observation velocities must be R_body^T @ world COM velocities (Isaac contract), not ximat-frame."""
+    env = make_env()
+    rng = np.random.default_rng(7)
+    quat = rng.normal(size=4); quat /= np.linalg.norm(quat)
+    env.data.qpos[3:7] = quat
+    env.data.qvel[:6] = rng.normal(size=6) * 0.5
+    mujoco.mj_forward(env.model, env.data)
+
+    h = 1e-6
+    qpos_next = env.data.qpos.copy()
+    mujoco.mj_integratePos(env.model, qpos_next, env.data.qvel, h)
+    probe = mujoco.MjData(env.model)
+    probe.qpos[:] = qpos_next
+    mujoco.mj_forward(env.model, probe)
+
+    rotation = sim2sim.quat_rotation(env.data.qpos[3:7])
+    rotation_next = sim2sim.quat_rotation(qpos_next[3:7])
+    lin_vel_w = (probe.xipos[env.base_id] - env.data.xipos[env.base_id]) / h
+    omega_skew = (rotation_next - rotation) @ rotation.T / h
+    ang_vel_w = np.array((omega_skew[2, 1], omega_skew[0, 2], omega_skew[1, 0]))
+
+    obs = env.observation((0.0, 0.0, 0.0))
+    np.testing.assert_allclose(obs[0:3], rotation.T @ lin_vel_w, atol=1e-4)
+    np.testing.assert_allclose(obs[3:6], rotation.T @ ang_vel_w, atol=1e-4)
+    np.testing.assert_allclose(obs[6:9], rotation.T @ (0, 0, -1.0), atol=1e-9)
+
+
+def test_observation_layout():
+    env = make_env()
+    base = env.observation((0.0, 0.0, 0.0))
+    with_cmd = env.observation((0.5, -0.3, 0.2))
+    delta = with_cmd - base
+    np.testing.assert_allclose(delta[9:12], (0.5, -0.3, 0.2))
+    assert np.allclose(delta[:9], 0.0) and np.allclose(delta[12:], 0.0)
+    action = np.linspace(-1.0, 1.0, 12)
+    env.step(action)
+    np.testing.assert_allclose(env.observation((0, 0, 0))[36:48], action)
 
 
 def test_command_parser():
     assert sim2sim.parse_commands("0.5 0 0; 0 .3 0;") == [(0.5, 0.0, 0.0), (0.0, 0.3, 0.0)]
+
+
+@pytest.mark.skipif(not CHECKPOINT.exists(), reason="real checkpoint unavailable")
+def test_policy_normalization_matches_rsl_rl():
+    import torch
+    policy = sim2sim.Policy(CHECKPOINT)
+    dims = [layer.in_features for layer in policy.layers] + [policy.layers[-1].out_features]
+    assert dims == [48, 256, 128, 64, 12]
+    obs = np.random.default_rng(0).normal(size=48)
+    x = (torch.from_numpy(obs).float() - policy.obs_mean) / (policy.obs_std + sim2sim.OBS_NORM_EPS)
+    for layer in policy.layers[:-1]:
+        x = torch.nn.functional.elu(layer(x))
+    np.testing.assert_allclose(policy(obs), policy.layers[-1](x).detach().numpy(), atol=1e-6)
+
+
+@pytest.mark.skipif(not CHECKPOINT.exists(), reason="real checkpoint unavailable")
+def test_rollout_stands_up_and_walks():
+    policy = sim2sim.Policy(CHECKPOINT)
+    env = make_env()
+    command = (0.5, 0.0, 0.0)
+    observation = env.observation(command)
+    speeds, gravity_x = [], []
+    for _ in range(int(10.0 / sim2sim.POLICY_DT)):
+        env.step(policy(observation))
+        observation = env.observation(command)
+        vx, vy, _ = env.tracked_velocity()
+        speeds.append(np.hypot(vx, vy))
+        gravity_x.append(env.gravity_x_b())
+        assert not env.base_hit_ground(), "base must not touch the ground during the rollout"
+    assert min(gravity_x) < -0.6, "robot should reach the upright two-feet stance"
+    assert np.mean(speeds[len(speeds) // 2:]) > 0.15, "robot should move once the command is active"

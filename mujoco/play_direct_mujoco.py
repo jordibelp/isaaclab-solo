@@ -6,7 +6,9 @@ from __future__ import annotations
 import argparse
 import csv
 import math
+import os
 import time
+import warnings
 from pathlib import Path
 
 import mujoco
@@ -18,9 +20,14 @@ PHYSICS_DT = 1.0 / 200.0
 DECIMATION = 4
 POLICY_DT = PHYSICS_DT * DECIMATION
 ACTION_SCALE = 0.25
-KP = 9.0
-KD = 0.2
+# play_direct_0325.py --disable_training_gain_sync plays the solo12-two-feet cfg gains (kp=15, kd=0.5),
+# while W&B run q3a68133 trained with kp=9, kd=0.2. Default to the played gains; --kp/--kd override.
+DEFAULT_KP = 15.0
+DEFAULT_KD = 0.5
+TRAINING_KP = 9.0
+TRAINING_KD = 0.2
 EFFORT_LIMIT = 2.65
+OBS_NORM_EPS = 1.0e-2  # rsl_rl EmpiricalNormalization: (x - mean) / (std + eps)
 COMMAND_DURATION_S = 5.0
 JOINT_NAMES = (
     "FL_hip_joint", "FL_thigh_joint", "FL_calf_joint",
@@ -57,6 +64,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--realtime", action="store_true", help="Pace the interactive viewer at wall-clock speed.")
     parser.add_argument("--task", default="solo12-two-feet")
     parser.add_argument("--num_envs", type=int, default=1)
+    parser.add_argument("--kp", type=float, default=DEFAULT_KP,
+                        help=f"PD stiffness (default {DEFAULT_KP:g} = Isaac play with --disable_training_gain_sync; "
+                             f"training used {TRAINING_KP:g}).")
+    parser.add_argument("--kd", type=float, default=DEFAULT_KD,
+                        help=f"PD damping (default {DEFAULT_KD:g} = Isaac play with --disable_training_gain_sync; "
+                             f"training used {TRAINING_KD:g}).")
     return parser
 
 
@@ -65,19 +78,24 @@ class Policy(torch.nn.Module):
         super().__init__()
         payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
         state = payload["model_state_dict"]
-        dims = (48, 256, 128, 64, 12)
-        self.layers = torch.nn.ModuleList(torch.nn.Linear(a, b) for a, b in zip(dims[:-1], dims[1:]))
-        for index, layer in enumerate(self.layers):
-            state_index = 2 * index
-            layer.weight.data.copy_(state[f"actor.{state_index}.weight"])
-            layer.bias.data.copy_(state[f"actor.{state_index}.bias"])
+        weight_keys = sorted(
+            (key for key in state if key.startswith("actor.") and key.endswith(".weight")),
+            key=lambda key: int(key.split(".")[1]),
+        )
+        self.layers = torch.nn.ModuleList()
+        for key in weight_keys:
+            out_dim, in_dim = state[key].shape
+            layer = torch.nn.Linear(in_dim, out_dim)
+            layer.weight.data.copy_(state[key])
+            layer.bias.data.copy_(state[key.replace(".weight", ".bias")])
+            self.layers.append(layer)
         self.register_buffer("obs_mean", state["actor_obs_normalizer._mean"].reshape(-1))
         self.register_buffer("obs_std", state["actor_obs_normalizer._std"].reshape(-1))
         self.eval()
 
     @torch.inference_mode()
     def forward(self, observation: np.ndarray) -> np.ndarray:
-        x = (torch.from_numpy(observation).float() - self.obs_mean) / self.obs_std.clamp_min(1.0e-8)
+        x = (torch.from_numpy(observation).float() - self.obs_mean) / (self.obs_std + OBS_NORM_EPS)
         for layer in self.layers[:-1]:
             x = torch.nn.functional.elu(layer(x))
         return self.layers[-1](x).numpy()
@@ -93,7 +111,7 @@ def quat_rotation(q_wxyz: np.ndarray) -> np.ndarray:
 
 
 class Solo12Mujoco:
-    def __init__(self, model_path: Path):
+    def __init__(self, model_path: Path, kp: float = DEFAULT_KP, kd: float = DEFAULT_KD):
         self.model = mujoco.MjModel.from_xml_path(str(model_path))
         self.data = mujoco.MjData(self.model)
         self.joint_qpos = np.array([self.model.jnt_qposadr[mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, n)] for n in JOINT_NAMES])
@@ -101,30 +119,51 @@ class Solo12Mujoco:
         self.actuator_ids = np.array([mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, n) for n in JOINT_NAMES])
         self.base_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "base")
         self.ground_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "ground")
-        self.base_geom_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "base_collision")
+        self.base_geom_ids = {
+            geom_id for geom_id in range(self.model.ngeom)
+            if self.model.geom_bodyid[geom_id] == self.base_id and self.model.geom_contype[geom_id] != 0
+        }
+        self.set_gains(kp, kd)
         self.action = np.zeros(12)
         self.reset()
 
+    def set_gains(self, kp: float, kd: float) -> None:
+        """Mirror PhysX implicit PD drives: position servo with implicit damping, force-limited."""
+        self.kp, self.kd = float(kp), float(kd)
+        self.model.actuator_gainprm[self.actuator_ids, 0] = self.kp
+        self.model.actuator_biasprm[self.actuator_ids, 1] = -self.kp
+        self.model.actuator_biasprm[self.actuator_ids, 2] = -self.kd
+        self.model.actuator_forcerange[self.actuator_ids, 0] = -EFFORT_LIMIT
+        self.model.actuator_forcerange[self.actuator_ids, 1] = EFFORT_LIMIT
+
     def reset(self) -> None:
         mujoco.mj_resetData(self.model, self.data)
-        self.data.qpos[:7] = (0.0, 0.0, 0.35, 0.0, 0.0, 0.0, 1.0)  # yaw = pi
+        self.data.qpos[:7] = (0.0, 0.0, 0.35, 0.0, 0.0, 0.0, 1.0)  # wxyz quat: yaw = pi, as in Isaac reset
         self.data.qpos[self.joint_qpos] = SAFE_Q
+        self.data.ctrl[self.actuator_ids] = SAFE_Q
         self.action.fill(0.0)
         mujoco.mj_forward(self.model, self.data)
 
+    def _base_velocity_world(self) -> tuple[np.ndarray, np.ndarray]:
+        """World-frame (angular, linear-at-COM) base velocity, matching PhysX root com velocities."""
+        velocity = np.empty(6)
+        mujoco.mj_objectVelocity(self.model, self.data, mujoco.mjtObj.mjOBJ_BODY, self.base_id, velocity, 0)
+        return velocity[:3], velocity[3:]
+
     def observation(self, command: tuple[float, float, float]) -> np.ndarray:
+        # IsaacLab contract: root_com_{lin,ang}_vel_b = R_link^T @ world COM velocity;
+        # mjOBJ_BODY with flg_local=1 would use the inertial (ximat) frame instead -- do not use it.
         rotation_wb = quat_rotation(self.data.qpos[3:7])
-        velocity_b = np.empty(6)
-        mujoco.mj_objectVelocity(
-            self.model, self.data, mujoco.mjtObj.mjOBJ_BODY, self.base_id, velocity_b, 1
-        )
-        ang_vel_b, lin_vel_b = velocity_b[:3], velocity_b[3:]
+        ang_vel_w, lin_vel_w = self._base_velocity_world()
+        lin_vel_b = rotation_wb.T @ lin_vel_w
+        ang_vel_b = rotation_wb.T @ ang_vel_w
         gravity_b = rotation_wb.T @ np.array((0.0, 0.0, -1.0))
         q = self.data.qpos[self.joint_qpos]
         qd = self.data.qvel[self.joint_dof]
         return np.concatenate((lin_vel_b, ang_vel_b, gravity_b, command, q - SAFE_Q, qd, self.action))
 
     def tracked_velocity(self) -> tuple[float, float, float]:
+        """Planar velocity in the gravity-aligned heading frame plus world yaw rate (env reward frame)."""
         rotation_wb = quat_rotation(self.data.qpos[3:7])
         lateral = rotation_wb[:2, 1]
         norm = np.linalg.norm(lateral)
@@ -133,36 +172,48 @@ class Solo12Mujoco:
         else:
             lateral /= norm
         forward = np.array((lateral[1], -lateral[0]))
-        velocity_w = np.empty(6)
-        mujoco.mj_objectVelocity(
-            self.model, self.data, mujoco.mjtObj.mjOBJ_BODY, self.base_id, velocity_w, 0
-        )
-        velocity_xy = velocity_w[3:5]
-        return float(velocity_xy @ forward), float(velocity_xy @ lateral), float(velocity_w[2])
+        ang_vel_w, lin_vel_w = self._base_velocity_world()
+        velocity_xy = lin_vel_w[:2]
+        return float(velocity_xy @ forward), float(velocity_xy @ lateral), float(ang_vel_w[2])
 
     def step(self, action: np.ndarray) -> None:
         self.action = np.asarray(action).copy()
-        target = SAFE_Q + ACTION_SCALE * self.action
+        self.data.ctrl[self.actuator_ids] = SAFE_Q + ACTION_SCALE * self.action
         for _ in range(DECIMATION):
-            q = self.data.qpos[self.joint_qpos]
-            qd = self.data.qvel[self.joint_dof]
-            torque = np.clip(KP * (target - q) - KD * qd, -EFFORT_LIMIT, EFFORT_LIMIT)
-            self.data.ctrl[self.actuator_ids] = torque
             mujoco.mj_step(self.model, self.data)
 
     def base_hit_ground(self) -> bool:
         for contact in self.data.contact:
-            if {contact.geom1, contact.geom2} == {self.ground_id, self.base_geom_id}:
+            pair = {contact.geom1, contact.geom2}
+            if self.ground_id in pair and pair & self.base_geom_ids:
                 return True
         return False
 
+    def base_height(self) -> float:
+        return float(self.data.qpos[2])
+
+    def gravity_x_b(self) -> float:
+        """Base-frame gravity x: ~0 on four feet, ~-0.96 in the upright two-feet stance."""
+        return float(quat_rotation(self.data.qpos[3:7]).T[0] @ np.array((0.0, 0.0, -1.0)))
+
+
+def prepare_viewer_environment() -> None:
+    """Prefer XWayland for the GLFW viewer: the Wayland backend spams GLFW/GLib warnings."""
+    if os.environ.get("WAYLAND_DISPLAY") and os.environ.get("DISPLAY"):
+        os.environ.pop("WAYLAND_DISPLAY")
+        print("[INFO] Wayland session detected; using XWayland for the MuJoCo viewer.", flush=True)
+    warnings.filterwarnings("ignore", message=".*Wayland.*")
+
 
 def save_results(output_dir: Path, rows: list[tuple], commands: list[tuple[float, float, float]]) -> list[Path]:
+    import matplotlib
+    matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     output_dir.mkdir(parents=True, exist_ok=True)
     csv_path = output_dir / "command_tracking.csv"
-    header = ("time_s", "cmd_vx", "cmd_vy", "cmd_wz", "velocity_vx", "velocity_vy", "yaw_rate_wz", "vxy_error_norm", "wz_error_abs", "reset")
+    header = ("time_s", "cmd_vx", "cmd_vy", "cmd_wz", "velocity_vx", "velocity_vy", "yaw_rate_wz",
+              "vxy_error_norm", "wz_error_abs", "reset", "base_height_m", "gravity_x_b")
     with csv_path.open("w", newline="", encoding="utf-8") as stream:
         writer = csv.writer(stream); writer.writerow(header); writer.writerows(rows)
     values = np.asarray(rows, dtype=float)
@@ -205,29 +256,38 @@ def main() -> None:
     duration = len(commands) * COMMAND_DURATION_S
     output_dir = args.output_dir or Path("logs/mujoco/cmd_tracking") / checkpoint.stem
     policy = Policy(checkpoint)
-    sim = Solo12Mujoco(Path(__file__).with_name("solo12.xml"))
+    sim = Solo12Mujoco(Path(__file__).with_name("solo12.xml"), kp=args.kp, kd=args.kd)
     print(f"[INFO] MuJoCo {mujoco.__version__}; model mass={sim.model.body_mass.sum():.6f} kg")
+    print(f"[INFO] PD gains kp={sim.kp:g} kd={sim.kd:g} "
+          f"(Isaac play w/ --disable_training_gain_sync: {DEFAULT_KP:g}/{DEFAULT_KD:g}; "
+          f"training run: {TRAINING_KP:g}/{TRAINING_KD:g})", flush=True)
     print(f"[INFO] Running {len(commands)} commands for {duration:g} s; output={output_dir}")
     viewer = None
     if not args.headless:
+        prepare_viewer_environment()
         from mujoco import viewer as mujoco_viewer
         viewer = mujoco_viewer.launch_passive(sim.model, sim.data)
     rows = []
     episode_elapsed = 0.0
     reset_next_sample = False
+    # Match play_direct_0325.py: the observation served to the policy carries the command from
+    # the previous loop iteration (the first observation carries commands[0]).
+    observation = sim.observation(commands[0])
     for step in range(int(round(duration / POLICY_DT))):
         t = step * POLICY_DT
         command = commands[min(int(t / COMMAND_DURATION_S), len(commands) - 1)]
         wall_start = time.perf_counter()
-        action = policy(sim.observation(command))
+        action = policy(observation)
         sim.step(action)
         episode_elapsed += POLICY_DT
         vx, vy, wz = sim.tracked_velocity()
-        rows.append((t + POLICY_DT, *command, vx, vy, wz, math.hypot(command[0]-vx, command[1]-vy), abs(command[2]-wz), int(reset_next_sample)))
+        rows.append((t + POLICY_DT, *command, vx, vy, wz, math.hypot(command[0]-vx, command[1]-vy),
+                     abs(command[2]-wz), int(reset_next_sample), sim.base_height(), sim.gravity_x_b()))
         reset_next_sample = False
         if sim.base_hit_ground() or episode_elapsed >= args.episode_length_s:
             print(f"[INFO] Reset at t={t + POLICY_DT:.3f} s ({'base contact' if sim.base_hit_ground() else 'timeout'})")
             sim.reset(); episode_elapsed = 0.0; reset_next_sample = True
+        observation = sim.observation(command)
         if viewer is not None:
             viewer.sync()
             if not viewer.is_running(): break
