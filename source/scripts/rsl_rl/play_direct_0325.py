@@ -224,7 +224,7 @@ parser.add_argument(
     "--apply-force-ui",
     action="store_true",
     default=False,
-    help="Show an Omni.UI panel to apply a manual body-frame XY force to the Solo12 base.",
+    help="Show an Omni.UI panel for point forces on the Solo12 base (3-D direction, surface point, and pulse duration).",
 )
 parser.add_argument(
     "--force-ui-max-magnitude",
@@ -246,6 +246,18 @@ parser.add_argument(
     type=float,
     default=0.0,
     help="Initial selected body-frame XY force direction angle in degrees. 0 is +body-x, 90 is +body-y.",
+)
+parser.add_argument(
+    "--force-ui-initial-elevation-deg",
+    type=float,
+    default=0.0,
+    help="Initial force elevation in degrees. 0 is in body XY; +90 is +body-z.",
+)
+parser.add_argument(
+    "--force-ui-initial-duration-s",
+    type=float,
+    default=0.25,
+    help="Initial pulse duration selected in the force UI [s].",
 )
 parser.add_argument(
     "--force_transmited_through_joints_reward_scale",
@@ -458,10 +470,15 @@ class LiveCommandState:
 class BodyFrameForceState:
     selected_magnitude: float = 0.0
     selected_angle_deg: float = 0.0
+    selected_elevation_deg: float = 0.0
+    selected_point_b: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    selected_duration_s: float = 0.25
+    dt: float = 0.02
 
     def __post_init__(self):
         self._lock = threading.Lock()
-        self._active_force: tuple[float, float, float, float] | None = None
+        self._active_force: tuple[float, float, float, float, float, float, float, float] | None = None
+        self._pulse_steps_left: int | None = 0
         self._clear_requested = False
 
     def set_magnitude(self, value: float):
@@ -472,20 +489,59 @@ class BodyFrameForceState:
         with self._lock:
             self.selected_angle_deg = float(value)
 
-    def apply_selected(self):
+    def set_elevation_deg(self, value: float):
         with self._lock:
-            magnitude = max(0.0, float(self.selected_magnitude))
-            angle_deg = float(self.selected_angle_deg)
-            angle_rad = math.radians(angle_deg)
-            fx_b = magnitude * math.cos(angle_rad)
-            fy_b = magnitude * math.sin(angle_rad)
-            self._active_force = (fx_b, fy_b, 0.0, angle_deg)
+            self.selected_elevation_deg = float(np.clip(value, -90.0, 90.0))
+
+    def set_point_axis(self, axis: int, value: float):
+        with self._lock:
+            point = list(self.selected_point_b)
+            point[axis] = float(value)
+            self.selected_point_b = tuple(point)
+
+    def set_point(self, point_b):
+        with self._lock:
+            self.selected_point_b = tuple(map(float, point_b))
+
+    def set_duration_s(self, value: float):
+        with self._lock:
+            self.selected_duration_s = max(float(self.dt), float(value))
+
+    def _selected_locked(self):
+        magnitude = max(0.0, float(self.selected_magnitude))
+        azimuth_deg = float(self.selected_angle_deg)
+        elevation_deg = float(self.selected_elevation_deg)
+        azimuth = math.radians(azimuth_deg)
+        elevation = math.radians(elevation_deg)
+        horizontal = magnitude * math.cos(elevation)
+        force = (
+            horizontal * math.cos(azimuth),
+            horizontal * math.sin(azimuth),
+            magnitude * math.sin(elevation),
+        )
+        return (*force, *self.selected_point_b, magnitude, azimuth_deg, elevation_deg)
+
+    def apply_selected(self, continuous: bool = False):
+        with self._lock:
+            fx_b, fy_b, fz_b, px_b, py_b, pz_b, _magnitude, azimuth_deg, elevation_deg = self._selected_locked()
+            self._active_force = (fx_b, fy_b, fz_b, px_b, py_b, pz_b, azimuth_deg, elevation_deg)
+            self._pulse_steps_left = None if continuous else max(1, int(round(self.selected_duration_s / self.dt)))
             self._clear_requested = False
 
     def request_clear(self):
         with self._lock:
             self._active_force = None
+            self._pulse_steps_left = 0
             self._clear_requested = True
+
+    def tick(self):
+        with self._lock:
+            if self._active_force is None or self._pulse_steps_left is None:
+                return
+            self._pulse_steps_left -= 1
+            if self._pulse_steps_left <= 0:
+                self._active_force = None
+                self._clear_requested = True
 
     def consume_clear_request(self) -> bool:
         with self._lock:
@@ -493,14 +549,11 @@ class BodyFrameForceState:
             self._clear_requested = False
             return requested
 
-    def get_selected(self) -> tuple[float, float, float, float]:
+    def get_selected(self):
         with self._lock:
-            magnitude = max(0.0, float(self.selected_magnitude))
-            angle_deg = float(self.selected_angle_deg)
-        angle_rad = math.radians(angle_deg)
-        return magnitude * math.cos(angle_rad), magnitude * math.sin(angle_rad), magnitude, angle_deg
+            return self._selected_locked()
 
-    def get_active_force(self) -> tuple[float, float, float, float] | None:
+    def get_active_force(self):
         with self._lock:
             return self._active_force
 
@@ -970,7 +1023,7 @@ def _build_command_window(
     return win, keepalive
 
 
-def _build_body_force_window(force_state: BodyFrameForceState, max_magnitude: float):
+def _build_body_force_window(force_state: BodyFrameForceState, max_magnitude: float, point_half_extents):
     import omni.ui as ui
 
     max_magnitude = max(1.0e-6, float(max_magnitude))
@@ -980,47 +1033,74 @@ def _build_body_force_window(force_state: BodyFrameForceState, max_magnitude: fl
     active_model = ui.SimpleStringModel("Active force: none")
 
     def _selected_text() -> str:
-        fx_b, fy_b, magnitude, angle_deg = force_state.get_selected()
-        return f"Selected: {magnitude:.2f} N @ {angle_deg:.1f} deg -> body [{fx_b:.2f}, {fy_b:.2f}, 0.00] N"
+        fx, fy, fz, px, py, pz, magnitude, azimuth, elevation = force_state.get_selected()
+        return f"Selected: {magnitude:.1f} N, F_b=[{fx:.1f},{fy:.1f},{fz:.1f}], p_b=[{px:.3f},{py:.3f},{pz:.3f}] m"
 
     def _active_text() -> str:
         active = force_state.get_active_force()
         if active is None:
             return "Active force: none"
-        fx_b, fy_b, _fz_b, angle_deg = active
-        magnitude = math.sqrt(fx_b * fx_b + fy_b * fy_b)
-        return f"Active: {magnitude:.2f} N @ {angle_deg:.1f} deg -> body [{fx_b:.2f}, {fy_b:.2f}, 0.00] N"
+        fx, fy, fz, px, py, pz, _azimuth, _elevation = active
+        magnitude = math.sqrt(fx * fx + fy * fy + fz * fz)
+        return f"Active: {magnitude:.1f} N, F_b=[{fx:.1f},{fy:.1f},{fz:.1f}], p_b=[{px:.3f},{py:.3f},{pz:.3f}] m"
 
     def _refresh_selected():
         selected_model.set_value(_selected_text())
 
-    def _apply():
-        force_state.apply_selected()
+    def _pulse():
+        force_state.apply_selected(continuous=False)
+        active_model.set_value(_active_text())
+
+    def _hold():
+        force_state.apply_selected(continuous=True)
         active_model.set_value(_active_text())
 
     def _clear():
         force_state.request_clear()
         active_model.set_value("Active force: none")
 
-    win = ui.Window("Solo12 body-frame base force", width=520, height=275, visible=True)
+    half_x, half_y, half_z = map(float, point_half_extents)
+    win = ui.Window("Solo12 point-force robustness control", width=590, height=510, visible=True)
     with win.frame:
         with ui.VStack(spacing=8, height=0):
-            ui.Label("Manual base force in body XY frame", height=22)
-            ui.Label("Angle: 0 deg = +body x, 90 deg = +body y.", height=18)
+            ui.Label("Point force in the moving Solo12 body frame", height=22)
+            ui.Label("Direction: azimuth 0 = +x, 90 = +y; elevation +90 = +z.", height=18)
 
             magnitude_model = ui.SimpleFloatModel(
                 max(0.0, float(force_state.selected_magnitude)), min=0.0, max=max_magnitude
             )
             angle_model = ui.SimpleFloatModel(float(force_state.selected_angle_deg), min=-180.0, max=180.0)
+            elevation_model = ui.SimpleFloatModel(float(force_state.selected_elevation_deg), min=-90.0, max=90.0)
+            duration_model = ui.SimpleFloatModel(float(force_state.selected_duration_s), min=force_state.dt, max=3.0)
+            point_models = [
+                ui.SimpleFloatModel(float(force_state.selected_point_b[0]), min=-half_x, max=half_x),
+                ui.SimpleFloatModel(float(force_state.selected_point_b[1]), min=-half_y, max=half_y),
+                ui.SimpleFloatModel(float(force_state.selected_point_b[2]), min=-half_z, max=half_z),
+            ]
 
             with ui.HStack(spacing=8, height=30):
                 ui.Label("magnitude [N]", width=105)
                 ui.FloatField(magnitude_model, width=110)
                 ui.FloatSlider(magnitude_model, min=0.0, max=max_magnitude, width=270)
             with ui.HStack(spacing=8, height=30):
-                ui.Label("angle [deg]", width=105)
+                ui.Label("azimuth [deg]", width=105)
                 ui.FloatField(angle_model, width=110)
                 ui.FloatSlider(angle_model, min=-180.0, max=180.0, width=270)
+            with ui.HStack(spacing=8, height=30):
+                ui.Label("elevation [deg]", width=105)
+                ui.FloatField(elevation_model, width=110)
+                ui.FloatSlider(elevation_model, min=-90.0, max=90.0, width=270)
+            with ui.HStack(spacing=8, height=30):
+                ui.Label("pulse time [s]", width=105)
+                ui.FloatField(duration_model, width=110)
+                ui.FloatSlider(duration_model, min=force_state.dt, max=3.0, width=270)
+
+            ui.Label("Application point p_b [m] (box surface presets below)", height=20)
+            for axis, (label, model, limit) in enumerate(zip(("point x", "point y", "point z"), point_models, (half_x, half_y, half_z))):
+                with ui.HStack(spacing=8, height=28):
+                    ui.Label(label, width=105)
+                    ui.FloatField(model, width=110)
+                    ui.FloatSlider(model, min=-limit, max=limit, width=270)
 
             def _on_magnitude_change(model):
                 force_state.set_magnitude(model.get_value_as_float())
@@ -1030,7 +1110,23 @@ def _build_body_force_window(force_state: BodyFrameForceState, max_magnitude: fl
                 force_state.set_angle_deg(model.get_value_as_float())
                 _refresh_selected()
 
-            for model, callback in ((magnitude_model, _on_magnitude_change), (angle_model, _on_angle_change)):
+            def _on_elevation_change(model):
+                force_state.set_elevation_deg(model.get_value_as_float())
+                _refresh_selected()
+
+            def _on_duration_change(model):
+                force_state.set_duration_s(model.get_value_as_float())
+
+            def _point_callback(axis):
+                def callback(model):
+                    force_state.set_point_axis(axis, model.get_value_as_float())
+                    _refresh_selected()
+                return callback
+
+            callbacks = [(magnitude_model, _on_magnitude_change), (angle_model, _on_angle_change),
+                         (elevation_model, _on_elevation_change), (duration_model, _on_duration_change)]
+            callbacks.extend((model, _point_callback(axis)) for axis, model in enumerate(point_models))
+            for model, callback in callbacks:
                 if hasattr(model, "subscribe_value_changed_fn"):
                     keepalive.append(model.subscribe_value_changed_fn(callback))
                 else:
@@ -1038,16 +1134,30 @@ def _build_body_force_window(force_state: BodyFrameForceState, max_magnitude: fl
                     keepalive.append(callback)
 
             with ui.HStack(spacing=8, height=34):
-                ui.Button("Apply force", clicked_fn=_apply)
-                ui.Button("Clear force", clicked_fn=_clear)
+                ui.Button("Pulse", clicked_fn=_pulse)
+                ui.Button("Hold", clicked_fn=_hold)
+                ui.Button("Release", clicked_fn=_clear)
                 ui.Button("+X", width=48, clicked_fn=lambda: angle_model.set_value(0.0))
                 ui.Button("+Y", width=48, clicked_fn=lambda: angle_model.set_value(90.0))
                 ui.Button("-X", width=48, clicked_fn=lambda: angle_model.set_value(180.0))
                 ui.Button("-Y", width=48, clicked_fn=lambda: angle_model.set_value(-90.0))
 
+            def _set_point(point):
+                for model, value in zip(point_models, point):
+                    model.set_value(float(value))
+
+            with ui.HStack(spacing=5, height=30):
+                ui.Label("surface", width=65)
+                ui.Button("front", clicked_fn=lambda: _set_point((half_x, 0, 0)))
+                ui.Button("rear", clicked_fn=lambda: _set_point((-half_x, 0, 0)))
+                ui.Button("left", clicked_fn=lambda: _set_point((0, half_y, 0)))
+                ui.Button("right", clicked_fn=lambda: _set_point((0, -half_y, 0)))
+                ui.Button("top", clicked_fn=lambda: _set_point((0, 0, half_z)))
+                ui.Button("center", clicked_fn=lambda: _set_point((0, 0, 0)))
+
             ui.StringField(selected_model, read_only=True, height=26)
             ui.StringField(active_model, read_only=True, height=26)
-            ui.Label("Edit the number field for exact magnitude, then press Apply force.", height=18)
+            ui.Label("Pulse applies for the selected simulation time; Hold stays active until Release.", height=18)
 
     _refresh_selected()
     return win, keepalive, selected_model, active_model
@@ -1072,8 +1182,8 @@ def _resolve_base_wrench_body_ids(raw_env) -> list[int]:
     return list(body_ids)
 
 
-def _set_manual_body_frame_base_force(raw_env, force_b: tuple[float, float, float, float]):
-    fx_b, fy_b, fz_b, _angle_deg = force_b
+def _set_manual_body_frame_base_force(raw_env, force_b):
+    fx_b, fy_b, fz_b, px_b, py_b, pz_b, _azimuth_deg, _elevation_deg = force_b
     body_ids = _resolve_base_wrench_body_ids(raw_env)
     forces = torch.zeros((raw_env.num_envs, len(body_ids), 3), device=raw_env.device)
     forces[..., 0] = float(fx_b)
@@ -1082,7 +1192,10 @@ def _set_manual_body_frame_base_force(raw_env, force_b: tuple[float, float, floa
 
     application_points = None
     if hasattr(raw_env, "_base_push_application_points_b"):
-        application_points = raw_env._robot.data.body_com_pos_b[:, body_ids].clone()
+        application_points = torch.empty_like(forces)
+        application_points[..., 0] = float(px_b)
+        application_points[..., 1] = float(py_b)
+        application_points[..., 2] = float(pz_b)
         raw_env._robot.permanent_wrench_composer.set_forces_and_torques(
             forces=forces,
             positions=application_points,
@@ -1351,14 +1464,14 @@ class BodyForceArrowVisualizer:
             except Exception:
                 pass
 
-    def update(self, active_force: tuple[float, float, float, float] | None):
+    def update(self, active_force):
         if self._draw is None:
             return
         self.clear()
         if active_force is None:
             return
 
-        fx_b, fy_b, fz_b, _angle_deg = active_force
+        fx_b, fy_b, fz_b, px_b, py_b, pz_b, _azimuth_deg, _elevation_deg = active_force
         force_b = np.array([fx_b, fy_b, fz_b], dtype=np.float64)
         magnitude = float(np.linalg.norm(force_b))
         if magnitude <= 1.0e-6:
@@ -1369,7 +1482,8 @@ class BodyForceArrowVisualizer:
             root_quat_w = self.asset.data.root_quat_w[self.env_index].detach().cpu().numpy().astype(np.float64)
             direction_w = self._quat_apply_wxyz(root_quat_w, force_b / magnitude)
             direction_w /= max(float(np.linalg.norm(direction_w)), 1.0e-6)
-            start = root_pos_w + np.array([0.0, 0.0, 0.45], dtype=np.float64)
+            point_b = np.array([px_b, py_b, pz_b], dtype=np.float64)
+            start = root_pos_w + self._quat_apply_wxyz(root_quat_w, point_b)
             arrow_length = min(1.75, 0.25 + 0.05 * magnitude)
             end = start + arrow_length * direction_w
             side = np.cross(direction_w, np.array([0.0, 0.0, 1.0], dtype=np.float64))
@@ -1611,10 +1725,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             force_state = BodyFrameForceState(
                 selected_magnitude=initial_force_magnitude,
                 selected_angle_deg=float(args_cli.force_ui_initial_angle_deg),
+                selected_elevation_deg=float(args_cli.force_ui_initial_elevation_deg),
+                selected_duration_s=float(args_cli.force_ui_initial_duration_s),
+                dt=float(dt),
             )
+            point_half_extents = getattr(raw_env, "_base_push_application_half_extents", (0.2, 0.1, 0.05))
+            if torch.is_tensor(point_half_extents):
+                point_half_extents = point_half_extents.detach().cpu().tolist()
             force_ui_window, force_ui_keepalive, _, _ = _build_body_force_window(
                 force_state,
                 max_magnitude=force_ui_max_magnitude,
+                point_half_extents=point_half_extents,
             )
     else:
         print("[WARN] Running headless: live Omni.UI window and scripted cameras are disabled.")
@@ -1785,8 +1906,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             force_ui_angle_deg = 0.0
             force_ui_active = 0.0
         else:
-            force_ui_fx_b, force_ui_fy_b, _force_ui_fz_b, force_ui_angle_deg = active_body_force
-            force_ui_magnitude = math.sqrt(force_ui_fx_b * force_ui_fx_b + force_ui_fy_b * force_ui_fy_b)
+            (force_ui_fx_b, force_ui_fy_b, force_ui_fz_b, force_ui_px_b, force_ui_py_b, force_ui_pz_b,
+             force_ui_angle_deg, force_ui_elevation_deg) = active_body_force
+            force_ui_magnitude = math.sqrt(
+                force_ui_fx_b * force_ui_fx_b + force_ui_fy_b * force_ui_fy_b + force_ui_fz_b * force_ui_fz_b
+            )
             force_ui_active = 1.0
 
         ratio_over_time.append(ratio_mean)
@@ -1817,8 +1941,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             "force_ui/active": force_ui_active,
             "force_ui/fx_b": float(force_ui_fx_b),
             "force_ui/fy_b": float(force_ui_fy_b),
+            "force_ui/fz_b": float(force_ui_fz_b) if active_body_force is not None else 0.0,
+            "force_ui/px_b": float(force_ui_px_b) if active_body_force is not None else 0.0,
+            "force_ui/py_b": float(force_ui_py_b) if active_body_force is not None else 0.0,
+            "force_ui/pz_b": float(force_ui_pz_b) if active_body_force is not None else 0.0,
             "force_ui/magnitude": float(force_ui_magnitude),
             "force_ui/angle_deg": float(force_ui_angle_deg),
+            "force_ui/elevation_deg": float(force_ui_elevation_deg) if active_body_force is not None else 0.0,
         }
 
         if run is not None:
@@ -1834,6 +1963,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             if force_arrow is not None:
                 force_arrow.update(active_body_force)
             _update_active_camera(cameras, camera_state)
+
+        if force_state is not None:
+            force_state.tick()
 
         _update_active_camera(cameras, camera_state)
 
