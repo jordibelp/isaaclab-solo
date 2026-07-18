@@ -2323,13 +2323,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             TRACKING_COMMANDS,
             tracking_lin_vel_xy,
             tracking_yaw_rate,
-            tracking_resets,
         )
         tracking_summary = _summarize_command_tracking(
             tracking_times_s,
             TRACKING_COMMANDS,
             tracking_lin_vel_xy,
             tracking_yaw_rate,
+            tracking_resets,
         )
         config_path, summary_path, tracking_run_url = _save_and_upload_tracking_metadata(
             output_dir=output_dir,
