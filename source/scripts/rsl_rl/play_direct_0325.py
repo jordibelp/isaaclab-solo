@@ -121,6 +121,15 @@ parser.add_argument(
     help="Run the fixed 35 s Solo12 command-sequence comparison and save/upload telemetry plots.",
 )
 parser.add_argument(
+    "--track-cmds",
+    type=str,
+    default="",
+    help=(
+        "Run a command-tracking experiment and save error plots. Commands are semicolon-separated "
+        "'vx vy wz' rows; each command runs for 5 s. Example: '0.5 0 0; -0.5 0 0; 0 0.3 0'."
+    ),
+)
+parser.add_argument(
     "--record-sequence-commands",
     type=str,
     default="",
@@ -379,6 +388,28 @@ args_cli, hydra_args = parser.parse_known_args()
 hydra_args = _consume_record_sequence_hydra_override(args_cli, hydra_args)
 RECORD_SEQUENCE = None
 
+
+def _parse_tracking_commands(value: str) -> list[tuple[float, float, float]]:
+    commands = []
+    for index, row in enumerate(value.split(";"), start=1):
+        row = row.strip()
+        if not row:
+            continue
+        fields = row.split()
+        if len(fields) != 3:
+            raise ValueError(f"--track-cmds row {index} must contain exactly vx vy wz, got: {row!r}")
+        command = tuple(float(field) for field in fields)
+        if not all(math.isfinite(component) for component in command):
+            raise ValueError(f"--track-cmds row {index} contains a non-finite value: {row!r}")
+        commands.append(command)
+    if not commands:
+        raise ValueError("--track-cmds must contain at least one vx vy wz command")
+    return commands
+
+
+TRACKING_COMMAND_DURATION_S = 5.0
+TRACKING_COMMANDS = _parse_tracking_commands(args_cli.track_cmds) if args_cli.track_cmds.strip() else []
+
 if args_cli.checkpoint is None and not args_cli.use_pretrained_checkpoint:
     parser.error("either --checkpoint or --use_pretrained_checkpoint is required")
 
@@ -393,6 +424,12 @@ if args_cli.record_sequence:
     args_cli.camera_mode = "chase"
     args_cli.follow_camera = True
     args_cli.no_follow_camera = False
+
+if TRACKING_COMMANDS:
+    if args_cli.record_sequence:
+        parser.error("--track-cmds and --record-sequence cannot be used together")
+    args_cli.duration_s = len(TRACKING_COMMANDS) * TRACKING_COMMAND_DURATION_S
+    args_cli.cmd_init = TRACKING_COMMANDS[0]
 
 if args_cli.video:
     args_cli.enable_cameras = True
@@ -421,6 +458,7 @@ from isaaclab_tasks.direct.solo12.agents.base_imu_actor_critic import (
     BaseImuTcnEncoder,
     Solo12BaseImuTeacherActorCritic,
 )
+from isaaclab_tasks.direct.solo12.solo12_env import _world_velocity_in_heading_frame_xy
 
 
 @dataclass
@@ -1341,14 +1379,28 @@ def _manual_reset_all_envs(raw_env, vec_env):
         return vec_env.get_observations()
 
 
+def _get_tracked_base_velocity(raw_env):
+    """Return the planar velocity and yaw rate in the frame used by the environment rewards."""
+    if raw_env.cfg.track_commands_in_world_heading_frame:
+        lin_vel_xy = _world_velocity_in_heading_frame_xy(
+            raw_env._robot.data.root_lin_vel_w, raw_env._robot.data.root_quat_w
+        )
+        yaw_rate = raw_env._robot.data.root_ang_vel_w[:, 2]
+    else:
+        lin_vel_xy = raw_env._robot.data.root_lin_vel_b[:, :2]
+        yaw_rate = raw_env._robot.data.root_ang_vel_b[:, 2]
+    return lin_vel_xy, yaw_rate
+
+
 def _compute_reward_terms(raw_env):
     commands = raw_env._commands
     robot = raw_env._robot
     joint_ids = raw_env._joint_ids
 
-    lin_vel_error = torch.sum(torch.square(commands[:, :2] - robot.data.root_lin_vel_b[:, :2]), dim=1)
-    lin_vel_xy_error_norm = torch.linalg.vector_norm(commands[:, :2] - robot.data.root_lin_vel_b[:, :2], dim=1)
-    ang_vel_z_error_abs = torch.abs(commands[:, 2] - robot.data.root_ang_vel_b[:, 2])
+    tracked_lin_vel_xy, tracked_yaw_rate = _get_tracked_base_velocity(raw_env)
+    lin_vel_error = torch.sum(torch.square(commands[:, :2] - tracked_lin_vel_xy), dim=1)
+    lin_vel_xy_error_norm = torch.linalg.vector_norm(commands[:, :2] - tracked_lin_vel_xy, dim=1)
+    ang_vel_z_error_abs = torch.abs(commands[:, 2] - tracked_yaw_rate)
     force_transmited_through_joints = raw_env._compute_force_transmited_through_joints()
 
     track_lin_vel_xy_exp = (
@@ -1374,6 +1426,91 @@ def _compute_reward_terms(raw_env):
         "ratio": ratio,
         "joint_torque_sq": joint_torque,
     }
+
+
+def _save_command_tracking_plots(
+    output_dir: Path,
+    times_s: list[float],
+    commands: list[tuple[float, float, float]],
+    tracked_lin_vel_xy: list[tuple[float, float]],
+    tracked_yaw_rate: list[float],
+) -> list[Path]:
+    """Save raw tracking data and command-cell error plots."""
+    import csv
+
+    import matplotlib.pyplot as plt
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    times = np.asarray(times_s)
+    command_samples = np.asarray(
+        [commands[min(int(max(t - 1.0e-9, 0.0) / TRACKING_COMMAND_DURATION_S), len(commands) - 1)] for t in times]
+    )
+    lin_vel = np.asarray(tracked_lin_vel_xy)
+    yaw_rate = np.asarray(tracked_yaw_rate)
+    lin_error = np.linalg.norm(command_samples[:, :2] - lin_vel, axis=1)
+    yaw_error = np.abs(command_samples[:, 2] - yaw_rate)
+
+    csv_path = output_dir / "command_tracking.csv"
+    with csv_path.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.writer(stream)
+        writer.writerow(
+            ["time_s", "cmd_vx", "cmd_vy", "cmd_wz", "velocity_vx", "velocity_vy", "yaw_rate_wz", "vxy_error_norm", "wz_error_abs"]
+        )
+        writer.writerows(np.column_stack((times, command_samples, lin_vel, yaw_rate, lin_error, yaw_error)))
+
+    def decorate_cells(ax):
+        for boundary in np.arange(1, len(commands)) * TRACKING_COMMAND_DURATION_S:
+            ax.axvline(boundary, color="0.25", linewidth=1.0, alpha=0.65)
+        ax.set_xlim(0.0, len(commands) * TRACKING_COMMAND_DURATION_S)
+        ax.grid(axis="y", alpha=0.22)
+
+    fig, ax = plt.subplots(figsize=(max(9.0, 1.45 * len(commands)), 4.8), constrained_layout=True)
+    ax.plot(times, lin_error, color="#e69f00", linewidth=1.7)
+    decorate_cells(ax)
+    ax.set_xlabel("Time [s]")
+    ax.set_ylabel(r"$\|\Delta v_{xy}\|$ [m/s]")
+    ax.set_title("Planar command-tracking error (base-footprint frame)")
+    y0, y1 = ax.get_ylim()
+    y_span = max(y1 - y0, 1.0e-6)
+    max_cmd = max(max(math.hypot(vx, vy) for vx, vy, _ in commands), 1.0e-6)
+    for index, (vx, vy, _) in enumerate(commands):
+        center_t = (index + 0.5) * TRACKING_COMMAND_DURATION_S
+        scale = 0.18 / max_cmd
+        # Match the requested footprint glyph: +vx points up and +vy points left.
+        dx = -vy * TRACKING_COMMAND_DURATION_S * scale
+        dy = vx * y_span * scale
+        center_y = y0 + 0.82 * y_span
+        ax.annotate(
+            "",
+            xy=(center_t + dx, center_y + dy),
+            xytext=(center_t - dx, center_y - dy),
+            arrowprops={"arrowstyle": "->", "color": "#d62728", "lw": 1.8, "alpha": 0.65},
+        )
+        ax.text(center_t, y0 + 0.97 * y_span, f"({vx:g}, {vy:g})", ha="center", va="top", fontsize=8, color="#a51f1f")
+    lin_path = output_dir / "vxy_tracking_error.png"
+    fig.savefig(lin_path, dpi=180)
+    plt.close(fig)
+
+    paths = [csv_path, lin_path]
+    if any(abs(wz) > 1.0e-9 for _, _, wz in commands):
+        fig, ax = plt.subplots(figsize=(max(9.0, 1.45 * len(commands)), 4.8), constrained_layout=True)
+        ax.plot(times, yaw_error, color="#0072b2", linewidth=1.7)
+        decorate_cells(ax)
+        ax.set_xlabel("Time [s]")
+        ax.set_ylabel(r"$|\Delta \omega_z|$ [rad/s]")
+        ax.set_title("Yaw-rate command-tracking error (world vertical axis)")
+        y0, y1 = ax.get_ylim()
+        y_span = max(y1 - y0, 1.0e-6)
+        for index, (_, _, wz) in enumerate(commands):
+            center_t = (index + 0.5) * TRACKING_COMMAND_DURATION_S
+            glyph = "↶" if wz > 0 else "↷" if wz < 0 else "·"
+            ax.text(center_t, y0 + 0.86 * y_span, glyph, ha="center", va="center", fontsize=22, color="#d62728", alpha=0.65)
+            ax.text(center_t, y0 + 0.97 * y_span, f"{wz:g} rad/s", ha="center", va="top", fontsize=8, color="#a51f1f")
+        yaw_path = output_dir / "wz_tracking_error.png"
+        fig.savefig(yaw_path, dpi=180)
+        plt.close(fig)
+        paths.append(yaw_path)
+    return paths
 
 
 class ChaseCamera:
@@ -1863,11 +2000,19 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     ang_vel_error_over_time = []
     root_lin_vel_x_over_time = []
     root_ang_vel_z_over_time = []
+    tracking_times_s = []
+    tracking_lin_vel_xy = []
+    tracking_yaw_rate = []
 
     for timestep in range(target_steps):
         loop_t0 = time.time()
         if args_cli.record_sequence:
             cmd_state.set_command(*record_sequence_command_at(RECORD_SEQUENCE, timestep * float(dt)))
+        elif TRACKING_COMMANDS:
+            command_index = min(
+                int(timestep * float(dt) / TRACKING_COMMAND_DURATION_S), len(TRACKING_COMMANDS) - 1
+            )
+            cmd_state.set_command(*TRACKING_COMMANDS[command_index])
 
         if cmd_state.consume_reset_request():
             print("[INFO] Manual reset requested from the UI; returning env(s) to the reset pose.", flush=True)
@@ -1929,8 +2074,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         torque_mean = terms["joint_torque_sq"].mean().item()
         lin_vel_error_mean = terms["lin_vel_xy_error_norm"].mean().item()
         ang_vel_error_mean = terms["ang_vel_z_error_abs"].mean().item()
-        base_vel = raw_env._robot.data.root_lin_vel_b[:, :2].mean(dim=0)
-        base_ang_vel_z = raw_env._robot.data.root_ang_vel_b[:, 2].mean().item()
+        tracked_base_vel, tracked_base_yaw_rate = _get_tracked_base_velocity(raw_env)
+        base_vel = tracked_base_vel.mean(dim=0)
+        base_ang_vel_z = tracked_base_yaw_rate.mean().item()
         if active_body_force is None:
             force_ui_fx_b = 0.0
             force_ui_fy_b = 0.0
@@ -1953,6 +2099,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         ang_vel_error_over_time.append(ang_vel_error_mean)
         root_lin_vel_x_over_time.append(base_vel[0].item())
         root_ang_vel_z_over_time.append(base_ang_vel_z)
+        if TRACKING_COMMANDS:
+            tracking_times_s.append((timestep + 1) * float(dt))
+            tracking_lin_vel_xy.append((base_vel[0].item(), base_vel[1].item()))
+            tracking_yaw_rate.append(base_ang_vel_z)
 
         log_data = {
             "play/step": timestep,
@@ -2041,6 +2191,26 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     if sequence_recorder is not None:
         sequence_recorder.finish(env_config=env_cfg, agent_config=agent_cfg.to_dict())
+
+    if TRACKING_COMMANDS:
+        checkpoint_stem = Path(resume_path).stem
+        output_dir = (
+            _ISAACLAB_ROOT
+            / "logs"
+            / "rsl_rl"
+            / "cmd_tracking"
+            / f"{time.strftime('%Y%m%d_%H%M%S')}_{checkpoint_stem}"
+        )
+        paths = _save_command_tracking_plots(
+            output_dir,
+            tracking_times_s,
+            TRACKING_COMMANDS,
+            tracking_lin_vel_xy,
+            tracking_yaw_rate,
+        )
+        print("[RESULT] Command-tracking artifacts:", flush=True)
+        for path in paths:
+            print(f"  {path}", flush=True)
 
     if force_arrow is not None:
         force_arrow.clear()
