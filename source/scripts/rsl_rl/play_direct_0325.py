@@ -1377,7 +1377,12 @@ def _compute_reward_terms(raw_env):
 
 
 class ChaseCamera:
-    """Viewport camera that tracks the robot root from behind in the robot yaw frame."""
+    """Viewport camera that follows a smoothed horizontal robot heading.
+
+    Heading is measured from the projected body-y axis instead of Euler yaw.  The
+    lateral axis remains horizontal while Solo12 stands on two feet, avoiding the
+    +/-180 degree Euler-yaw flips that occur when body pitch approaches 90 degrees.
+    """
 
     def __init__(self, raw_env, env_index: int = 0, eye_b=(-2.6, 0.0, 1.0), lookat_b=(0.45, 0.0, 0.35)):
         self.raw_env = raw_env
@@ -1385,13 +1390,30 @@ class ChaseCamera:
         self.eye_b = np.asarray(eye_b, dtype=np.float64)
         self.lookat_b = np.asarray(lookat_b, dtype=np.float64)
         self.asset = raw_env._robot
+        self._anchor_w = None
+        self._heading = None
+        self._smoothing_time_s = 0.20
 
     @staticmethod
-    def _quat_wxyz_to_yaw(quat_wxyz: torch.Tensor) -> float:
+    def _stable_heading_from_quat(quat_wxyz: torch.Tensor, previous: float | None = None) -> float:
         w, x, y, z = [float(v) for v in quat_wxyz]
-        siny_cosp = 2.0 * (w * z + x * y)
-        cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
-        return math.atan2(siny_cosp, cosy_cosp)
+        # Horizontal projection of body +y. Unlike Euler yaw, this remains
+        # well-conditioned when the robot's body +x points nearly vertically.
+        lateral_x = 2.0 * (x * y - w * z)
+        lateral_y = 1.0 - 2.0 * (x * x + z * z)
+        if math.hypot(lateral_x, lateral_y) > 1.0e-4:
+            heading = math.atan2(lateral_y, lateral_x) - 0.5 * math.pi
+        else:
+            # Rare fallback for a near-vertical lateral axis.
+            forward_x = 1.0 - 2.0 * (y * y + z * z)
+            forward_y = 2.0 * (x * y + w * z)
+            if math.hypot(forward_x, forward_y) <= 1.0e-4:
+                return 0.0 if previous is None else previous
+            heading = math.atan2(forward_y, forward_x)
+
+        if previous is not None:
+            heading = previous + math.atan2(math.sin(heading - previous), math.cos(heading - previous))
+        return heading
 
     @staticmethod
     def _yaw_rot(yaw: float) -> np.ndarray:
@@ -1402,11 +1424,21 @@ class ChaseCamera:
     def update(self):
         root_pos_w = self.asset.data.root_pos_w[self.env_index].detach().cpu().numpy().astype(np.float64)
         root_quat_w = self.asset.data.root_quat_w[self.env_index].detach().cpu()
-        yaw = self._quat_wxyz_to_yaw(root_quat_w)
-        rot = self._yaw_rot(yaw)
+        heading = self._stable_heading_from_quat(root_quat_w, self._heading)
 
-        eye_w = root_pos_w + rot @ self.eye_b
-        lookat_w = root_pos_w + rot @ self.lookat_b
+        dt = float(getattr(self.raw_env, "step_dt", 1.0 / 60.0))
+        alpha = 1.0 - math.exp(-max(dt, 1.0e-6) / self._smoothing_time_s)
+        if self._anchor_w is None:
+            self._anchor_w = root_pos_w
+            self._heading = heading
+        else:
+            self._anchor_w = self._anchor_w + alpha * (root_pos_w - self._anchor_w)
+            self._heading = self._heading + alpha * (heading - self._heading)
+
+        rot = self._yaw_rot(self._heading)
+
+        eye_w = self._anchor_w + rot @ self.eye_b
+        lookat_w = self._anchor_w + rot @ self.lookat_b
         self.raw_env.sim.set_camera_view(eye=eye_w, target=lookat_w)
 
 
