@@ -64,7 +64,37 @@ Then run the same experiment (Isaac-only Hydra overrides are accepted and report
 
 Remove `--headless` for the interactive MuJoCo viewer (on Wayland sessions the script switches GLFW
 to XWayland automatically to avoid the GLFW/GLib warning spam). Add `--realtime` to pace it at real
-time. Plots are rendered with the Agg backend, so no GUI toolkit is touched in headless runs.
+time. MuJoCo's left and right helper panels start hidden; pass `--show-viewer-ui` to restore them.
+Plots are rendered with the Agg backend, so no GUI toolkit is touched in headless runs.
+
+`env.kp=…`, `env.kd=…`, and `env.command_*_range=[lo,hi]` from the Isaac command line are honored
+(explicit `--kp/--kd` win if both forms are present); all other `env.*`/Isaac-only flags are reported
+and ignored. Duplicate equal gains are harmless and reported; conflicting duplicates produce a warning.
+
+## Live mode (sliders, forces, cameras)
+
+Omit `--track-cmds` (and `--headless`) to drive the robot interactively, mirroring the Isaac play UI:
+
+```bash
+./isaaclab.sh -p mujoco/play_direct_mujoco.py \
+  --checkpoint="/home/jordibelp/IsaacLab-dirty/logs/skrl/checkpoints/0717_q3a68133_model_15008.pt" \
+  --cmd_init 0.1 0.0 0.0 env.kp=9.0 env.kd=0.2
+```
+
+- **Command sliders** (tkinter panel): vx/vy/wz clipped to the command ranges
+  (defaults ±0.5/±0.3/±0.5, widened by `env.command_*_range`), plus Zero cmd / Reset robot.
+- **Base force UI**: body-frame force from magnitude/azimuth/elevation sliders, applied at a
+  selectable point (front/rear/left/right/top/center of the base) with Isaac-style
+  **Pulse** (for the chosen duration) / **Hold** / **Release**; a red arrow in the viewer shows the
+  active force (`--force-ui-max` caps the magnitude slider, default 10 N).
+- **Cameras**: `side` and `front` follow cameras use the same EMA-smoothed, heading-stable anchor
+  as the IsaacLab chase cameras (safe at ~90° pitch), plus the `free` mouse camera. Start mode via
+  `--camera {side,front,free}` (default side); cycle with `C`. The follow cameras also work in
+  `--track-cmds` viewer runs.
+- **Keyboard** (works without the panel): arrows = vx/wz, `A/D` = vy, `SPACE` = zero command,
+  `R` = reset robot, `C` = cycle camera, `F` = release force.
+
+Live mode always paces at wall-clock speed and records no artifacts; close the viewer to stop.
 Every execution gets an immutable timestamped folder under
 `logs/mujoco/cmd_tracking/<checkpoint_stem>/<YYYYMMDD_HHMMSS>/` by default:
 

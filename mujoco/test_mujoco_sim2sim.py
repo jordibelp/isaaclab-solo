@@ -4,6 +4,7 @@ import mujoco
 import numpy as np
 import pytest
 
+import interactive
 import play_direct_mujoco as sim2sim
 
 CHECKPOINT = Path("/home/jordibelp/IsaacLab-dirty/logs/skrl/checkpoints/0717_q3a68133_model_15008.pt")
@@ -80,6 +81,75 @@ def test_observation_layout():
 
 def test_command_parser():
     assert sim2sim.parse_commands("0.5 0 0; 0 .3 0;") == [(0.5, 0.0, 0.0), (0.0, 0.3, 0.0)]
+
+
+def test_env_override_consumption():
+    overrides, ignored = sim2sim.consume_env_overrides([
+        "env.kp=9.0", "env.kd=0.2", "env.command_lin_vel_x_range=[-0.6,0.6]",
+        "env.tricky_terrain=False", "--disable_training_gain_sync",
+    ])
+    assert overrides == {"kp": 9.0, "kd": 0.2, "command_lin_vel_x_range": (-0.6, 0.6)}
+    assert ignored == ["env.tricky_terrain=False", "--disable_training_gain_sync"]
+
+
+def test_track_cmds_is_optional():
+    args, unknown = sim2sim.build_parser().parse_known_args(["--checkpoint", "x"])
+    assert args.track_cmds is None and args.kp is None and args.kd is None
+    assert args.show_viewer_ui is False
+    assert unknown == []
+
+
+def test_body_force_state_pulse_hold_release():
+    state = interactive.BodyForceState(dt=0.02)
+    state.set(magnitude=4.0, azimuth_deg=90.0, elevation_deg=0.0, point_b=(0.1, 0.0, 0.0), duration_s=0.06)
+    assert state.get_active_force() is None
+    state.pulse()
+    pulses = [state.get_active_force() for _ in range(5)]
+    active = [force for force in pulses if force is not None]
+    assert len(active) == 3  # 0.06 s / 0.02 s
+    fx, fy, fz, px, _, _ = active[0]
+    assert abs(fx) < 1e-9 and np.isclose(fy, 4.0) and abs(fz) < 1e-9 and np.isclose(px, 0.1)
+    state.hold()
+    assert all(state.get_active_force() is not None for _ in range(10))
+    state.release()
+    assert state.get_active_force() is None
+
+
+def test_follow_camera_modes():
+    camera = interactive.FollowCamera(dt=0.02, mode="side")
+    for _ in range(300):  # converge the EMA on a static pose (identity quat -> heading 0)
+        camera.update((1.0, 2.0, 0.4), (1.0, 0.0, 0.0, 0.0))
+    cam = mujoco.MjvCamera()
+    assert camera.apply(cam)
+    assert np.isclose(cam.azimuth, 90.0, atol=0.5)  # side camera sits at -y, looking +y
+    assert np.isclose(cam.elevation, -16.1, atol=0.5)
+    assert np.allclose(cam.lookat, (1.0, 2.0, 0.75), atol=0.02)
+    camera.mode = "front"
+    camera.apply(cam)
+    assert np.isclose(abs(cam.azimuth), 180.0, atol=0.5)
+    camera.mode = "free"
+    assert not camera.apply(cam)
+    assert camera.cycle_mode() == "side"
+
+
+def test_apply_body_force_world_mapping():
+    env = make_env()
+    env.data.qpos[3:7] = (1.0, 0.0, 0.0, 0.0)
+    mujoco.mj_forward(env.model, env.data)
+    interactive.apply_body_force(env, (0.0, 0.0, -5.0, 0.2247476, 0.0, 0.0))
+    np.testing.assert_allclose(env.data.qfrc_applied[:3], (0.0, 0.0, -5.0), atol=1e-9)
+    assert env.data.qfrc_applied[4] > 1.0  # downward force at the nose pitches the base
+    interactive.apply_body_force(env, None)
+    assert not env.data.qfrc_applied.any()
+
+
+def test_force_arrow_geometry():
+    env = make_env()
+    scene = mujoco.MjvScene(env.model, 8)
+    interactive.update_force_arrow(scene, env, (3.0, 0.0, 0.0, 0.2, 0.0, 0.0))
+    assert scene.ngeom == 1
+    interactive.update_force_arrow(scene, env, None)
+    assert scene.ngeom == 0
 
 
 def test_timestamped_run_directory(tmp_path):

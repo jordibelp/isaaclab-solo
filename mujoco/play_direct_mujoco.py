@@ -59,7 +59,8 @@ def parse_commands(value: str) -> list[tuple[float, float, float]]:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", required=True)
-    parser.add_argument("--track-cmds", required=True, type=parse_commands)
+    parser.add_argument("--track-cmds", type=parse_commands, default=None,
+                        help="Scripted command sequence (5 s each). Omit to drive the robot live with sliders/keys.")
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--duration_s", type=float, default=2000.0)
     parser.add_argument("--episode_length_s", type=float, default=80.0)
@@ -69,17 +70,53 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--realtime", action="store_true", help="Pace the interactive viewer at wall-clock speed.")
     parser.add_argument("--task", default="solo12-two-feet")
     parser.add_argument("--num_envs", type=int, default=1)
-    parser.add_argument("--kp", type=float, default=DEFAULT_KP,
-                        help=f"PD stiffness (default {DEFAULT_KP:g} = Isaac play with --disable_training_gain_sync; "
-                             f"training used {TRAINING_KP:g}).")
-    parser.add_argument("--kd", type=float, default=DEFAULT_KD,
-                        help=f"PD damping (default {DEFAULT_KD:g} = Isaac play with --disable_training_gain_sync; "
-                             f"training used {TRAINING_KD:g}).")
+    parser.add_argument("--kp", type=float, default=None,
+                        help=f"PD stiffness (default: env.kp override, else {DEFAULT_KP:g} = Isaac play with "
+                             f"--disable_training_gain_sync; training used {TRAINING_KP:g}).")
+    parser.add_argument("--kd", type=float, default=None,
+                        help=f"PD damping (default: env.kd override, else {DEFAULT_KD:g} = Isaac play with "
+                             f"--disable_training_gain_sync; training used {TRAINING_KD:g}).")
+    parser.add_argument("--camera", choices=("free", "side", "front"), default="side",
+                        help="Initial viewer camera; press C in the viewer to cycle.")
+    parser.add_argument("--show-viewer-ui", action="store_true",
+                        help="Show MuJoCo's left/right helper panels (hidden by default).")
+    parser.add_argument("--force-ui-max", type=float, default=10.0,
+                        help="Maximum magnitude of the base-force slider in live mode [N].")
     parser.add_argument("--wandb-project", default="solo12-two-feet-exp")
     parser.add_argument("--wandb-entity")
     parser.add_argument("--wandb-name")
     parser.add_argument("--no-wandb", action="store_true", help="Keep artifacts local without uploading to W&B.")
     return parser
+
+
+# solo12-two-feet training command ranges; env.command_*_range CLI overrides widen the slider/clip limits.
+DEFAULT_COMMAND_RANGES = ((-0.5, 0.5), (-0.3, 0.3), (-0.5, 0.5))
+_ENV_RANGE_KEYS = {
+    "env.command_lin_vel_x_range": 0,
+    "env.command_lin_vel_y_range": 1,
+    "env.command_ang_vel_z_range": 2,
+}
+
+
+def consume_env_overrides(unknown: list[str]) -> tuple[dict, list[str]]:
+    """Pull the env.* overrides MuJoCo understands (kp/kd/command ranges) out of the Isaac CLI tail."""
+    import ast
+
+    overrides: dict = {}
+    ignored: list[str] = []
+    for token in unknown:
+        key, _, raw = token.partition("=")
+        try:
+            if key in ("env.kp", "env.kd"):
+                overrides[key.removeprefix("env.")] = float(raw)
+            elif key in _ENV_RANGE_KEYS:
+                low, high = ast.literal_eval(raw)
+                overrides[key.removeprefix("env.")] = (float(low), float(high))
+            else:
+                ignored.append(token)
+        except (ValueError, SyntaxError):
+            ignored.append(token)
+    return overrides, ignored
 
 
 class Policy(torch.nn.Module):
@@ -321,22 +358,71 @@ def upload_to_wandb(
         return None
 
 
-def main() -> None:
-    args, unknown = build_parser().parse_known_args()
-    if args.task != "solo12-two-feet" or args.num_envs != 1:
-        raise ValueError("MuJoCo sim-to-sim currently supports --task=solo12-two-feet --num_envs=1 only")
-    if unknown:
-        print("[INFO] Ignoring IsaacLab-only overrides:", " ".join(unknown), flush=True)
-    checkpoint = Path(args.checkpoint).expanduser().resolve()
+def launch_viewer(sim: Solo12Mujoco, cmd_state, force_state, camera, show_viewer_ui: bool = False):
+    prepare_viewer_environment()
+    from mujoco import viewer as mujoco_viewer
+    import interactive
+
+    return mujoco_viewer.launch_passive(
+        sim.model,
+        sim.data,
+        key_callback=interactive.make_key_callback(cmd_state, force_state, camera),
+        show_left_ui=show_viewer_ui,
+        show_right_ui=show_viewer_ui,
+    )
+
+
+def run_live(args, sim: Solo12Mujoco, policy: Policy, command_ranges) -> None:
+    """Drive the robot with sliders/keyboard, mirroring the Isaac live command + force UI."""
+    import interactive
+
+    cmd_state = interactive.LiveCommandState(*args.cmd_init)
+    force_state = interactive.BodyForceState(dt=POLICY_DT)
+    camera = interactive.FollowCamera(dt=POLICY_DT, mode=args.camera)
+    viewer = launch_viewer(sim, cmd_state, force_state, camera, args.show_viewer_ui)
+    panel = interactive.start_control_panel(cmd_state, force_state, camera, command_ranges, args.force_ui_max)
+    print(f"[INFO] Live mode: {'slider panel + ' if panel else ''}{interactive.KEYBOARD_HELP}", flush=True)
+    print("[INFO] Live mode paces at wall-clock speed; close the viewer window to stop.", flush=True)
+
+    command = cmd_state.get_clipped(command_ranges)
+    observation = sim.observation(command)
+    episode_elapsed = 0.0
+    for _ in range(int(round(args.duration_s / POLICY_DT))):
+        wall_start = time.perf_counter()
+        command = cmd_state.get_clipped(command_ranges)
+        if cmd_state.consume_reset_request():
+            print("[INFO] Manual reset requested; returning the robot to the reset pose.", flush=True)
+            sim.reset(); episode_elapsed = 0.0
+            observation = sim.observation(command)
+        active_force = force_state.get_active_force()
+        interactive.apply_body_force(sim, active_force)
+        action = policy(observation)
+        sim.step(action)
+        episode_elapsed += POLICY_DT
+        if sim.base_hit_ground() or episode_elapsed >= args.episode_length_s:
+            print(f"[INFO] Reset ({'base contact' if sim.base_hit_ground() else 'timeout'})", flush=True)
+            sim.reset(); episode_elapsed = 0.0
+        observation = sim.observation(command)
+        camera.update(sim.data.qpos[:3], sim.data.qpos[3:7])
+        with viewer.lock():
+            camera.apply(viewer.cam)
+            interactive.update_force_arrow(viewer.user_scn, sim, active_force)
+        viewer.sync()
+        if not viewer.is_running():
+            break
+        time.sleep(max(0.0, POLICY_DT - (time.perf_counter() - wall_start)))
+    viewer.close()
+    print("[INFO] Live session finished; no artifacts are recorded in live mode.", flush=True)
+
+
+def run_tracking(args, sim: Solo12Mujoco, policy: Policy, checkpoint: Path, model_path: Path,
+                 env_overrides: dict, ignored_overrides: list[str]) -> None:
     commands = args.track_cmds
     duration = len(commands) * COMMAND_DURATION_S
     started_at = datetime.now().astimezone()
     timestamp = started_at.strftime("%Y%m%d_%H%M%S")
     output_root = args.output_dir or Path("logs/mujoco/cmd_tracking")
     output_dir = create_run_directory(output_root, checkpoint.stem, timestamp)
-    policy = Policy(checkpoint)
-    model_path = Path(__file__).with_name("solo12.xml").resolve()
-    sim = Solo12Mujoco(model_path, kp=args.kp, kd=args.kd)
     config = {
         "task": args.task,
         "simulator": "mujoco",
@@ -361,20 +447,23 @@ def main() -> None:
         "model_mass_kg": float(sim.model.body_mass.sum()),
         "headless": args.headless,
         "realtime": args.realtime,
-        "ignored_isaaclab_overrides": unknown,
+        "env_overrides": {key: list(value) if isinstance(value, tuple) else value
+                          for key, value in env_overrides.items()},
+        "ignored_isaaclab_overrides": ignored_overrides,
     }
     config_path = output_dir / "run_config.json"
     config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
-    print(f"[INFO] MuJoCo {mujoco.__version__}; model mass={sim.model.body_mass.sum():.6f} kg")
-    print(f"[INFO] PD gains kp={sim.kp:g} kd={sim.kd:g} "
-          f"(Isaac play w/ --disable_training_gain_sync: {DEFAULT_KP:g}/{DEFAULT_KD:g}; "
-          f"training run: {TRAINING_KP:g}/{TRAINING_KD:g})", flush=True)
     print(f"[INFO] Running {len(commands)} commands for {duration:g} s; output={output_dir}")
     viewer = None
+    camera = None
+    cmd_state = None
     if not args.headless:
-        prepare_viewer_environment()
-        from mujoco import viewer as mujoco_viewer
-        viewer = mujoco_viewer.launch_passive(sim.model, sim.data)
+        import interactive
+
+        cmd_state = interactive.LiveCommandState()
+        camera = interactive.FollowCamera(dt=POLICY_DT, mode=args.camera)
+        viewer = launch_viewer(sim, cmd_state, None, camera, args.show_viewer_ui)
+        print(f"[INFO] Viewer keys: R=reset robot, C=cycle camera (starting on '{camera.mode}').", flush=True)
     rows = []
     episode_elapsed = 0.0
     reset_next_sample = False
@@ -385,6 +474,10 @@ def main() -> None:
         t = step * POLICY_DT
         command = commands[min(int(t / COMMAND_DURATION_S), len(commands) - 1)]
         wall_start = time.perf_counter()
+        if cmd_state is not None and cmd_state.consume_reset_request():
+            print("[INFO] Manual reset requested; returning the robot to the reset pose.", flush=True)
+            sim.reset(); episode_elapsed = 0.0; reset_next_sample = True
+            observation = sim.observation(command)
         action = policy(observation)
         sim.step(action)
         episode_elapsed += POLICY_DT
@@ -397,6 +490,9 @@ def main() -> None:
             sim.reset(); episode_elapsed = 0.0; reset_next_sample = True
         observation = sim.observation(command)
         if viewer is not None:
+            camera.update(sim.data.qpos[:3], sim.data.qpos[3:7])
+            with viewer.lock():
+                camera.apply(viewer.cam)
             viewer.sync()
             if not viewer.is_running(): break
         if args.realtime:
@@ -422,6 +518,50 @@ def main() -> None:
         )
         if run_url:
             print(f"[INFO] W&B run: {run_url}")
+
+
+def main() -> None:
+    args, unknown = build_parser().parse_known_args()
+    if args.task != "solo12-two-feet" or args.num_envs != 1:
+        raise ValueError("MuJoCo sim-to-sim currently supports --task=solo12-two-feet --num_envs=1 only")
+    env_overrides, ignored = consume_env_overrides(unknown)
+    if env_overrides:
+        print("[INFO] Applying overrides:", " ".join(f"{k}={v}" for k, v in env_overrides.items()), flush=True)
+    if ignored:
+        print("[INFO] Ignoring IsaacLab-only overrides:", " ".join(ignored), flush=True)
+    if args.track_cmds is None and args.headless:
+        raise SystemExit("Live slider mode needs the viewer; pass --track-cmds for headless runs.")
+
+    kp = args.kp if args.kp is not None else env_overrides.get("kp", DEFAULT_KP)
+    kd = args.kd if args.kd is not None else env_overrides.get("kd", DEFAULT_KD)
+    for name, cli_value in (("kp", args.kp), ("kd", args.kd)):
+        env_value = env_overrides.get(name)
+        if cli_value is not None and env_value is not None:
+            if math.isclose(cli_value, env_value):
+                print(f"[INFO] Duplicate {name}: --{name} and env.{name} both request {cli_value:g}.", flush=True)
+            else:
+                print(
+                    f"[WARN] Conflicting {name}: --{name}={cli_value:g} overrides env.{name}={env_value:g}.",
+                    flush=True,
+                )
+    command_ranges = tuple(
+        env_overrides.get(key.removeprefix("env."), DEFAULT_COMMAND_RANGES[index])
+        for key, index in _ENV_RANGE_KEYS.items()
+    )
+
+    checkpoint = Path(args.checkpoint).expanduser().resolve()
+    policy = Policy(checkpoint)
+    model_path = Path(__file__).with_name("solo12.xml").resolve()
+    sim = Solo12Mujoco(model_path, kp=kp, kd=kd)
+    print(f"[INFO] MuJoCo {mujoco.__version__}; model mass={sim.model.body_mass.sum():.6f} kg")
+    print(f"[INFO] PD gains kp={sim.kp:g} kd={sim.kd:g} "
+          f"(Isaac play w/ --disable_training_gain_sync: {DEFAULT_KP:g}/{DEFAULT_KD:g}; "
+          f"training run: {TRAINING_KP:g}/{TRAINING_KD:g})", flush=True)
+
+    if args.track_cmds is None:
+        run_live(args, sim, policy, command_ranges)
+    else:
+        run_tracking(args, sim, policy, checkpoint, model_path, env_overrides, ignored)
 
 
 if __name__ == "__main__":
