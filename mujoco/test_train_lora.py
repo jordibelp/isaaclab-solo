@@ -3,6 +3,7 @@ from pathlib import Path
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 import torch
 
 import train_lora
@@ -18,11 +19,13 @@ def test_layer_selection_contract():
     assert train_lora.selected_layer_indices(4, "output") == (3,)
 
 
-def test_lora_starts_at_exact_frozen_network():
+@pytest.mark.parametrize("rank", [1, 2, 4, 8])
+def test_lora_starts_at_exact_frozen_network(rank):
+    """B=0 at init, so any rank must reproduce the pretrained policy bit-for-bit."""
     _, actor, critic, _, _, norms, log_std = train_lora.load_frozen_networks(CHECKPOINT)
-    params = train_lora.init_trainable(jax.random.PRNGKey(0), actor, critic, 1, (0, 1, 2, 3), log_std)
+    params = train_lora.init_trainable(jax.random.PRNGKey(0), actor, critic, rank, (0, 1, 2, 3), log_std)
     obs = jnp.asarray(np.random.default_rng(0).normal(size=(3, 48)).astype(np.float32))
-    scale = 1.0
+    scale = 1.0 / rank
     adapted = train_lora.actor_mean(params, obs, actor, norms, scale)
     x = (obs - norms["actor_mean"]) / (norms["actor_std"] + train_lora.OBS_NORM_EPS)
     for index, (weight, bias) in enumerate(actor):
@@ -30,6 +33,28 @@ def test_lora_starts_at_exact_frozen_network():
         if index != len(actor) - 1:
             x = jax.nn.elu(x)
     np.testing.assert_allclose(adapted, x, rtol=1e-6, atol=1e-6)
+
+
+@pytest.mark.parametrize("rank", [1, 3, 8])
+def test_adapter_factor_shapes_follow_rank(rank):
+    _, actor, critic, _, _, _, log_std = train_lora.load_frozen_networks(CHECKPOINT)
+    params = train_lora.init_trainable(jax.random.PRNGKey(0), actor, critic, rank, (0, 3), log_std)
+    for index, (weight, _) in enumerate(actor):
+        a, b = params["actor"][index]["a"], params["actor"][index]["b"]
+        expected = rank if index in (0, 3) else 0
+        assert a.shape == (expected, weight.shape[1])
+        assert b.shape == (weight.shape[0], expected)
+        # b @ a must land back in the frozen weight's shape for checkpoint merging.
+        assert (b @ a).shape == weight.shape
+
+
+def test_nonfinite_gradients_leave_parameters_untouched():
+    params = {"w": jnp.ones((3,))}
+    state = (jnp.array(0), train_lora.zeros_like_tree(params), train_lora.zeros_like_tree(params))
+    bad = {"w": jnp.array([jnp.nan, 1.0, 2.0])}
+    updated, _, _, ok = train_lora.adam_update(params, bad, state, 1e-2, 0.5)
+    assert not bool(ok)
+    np.testing.assert_array_equal(updated["w"], params["w"])
 
 
 def test_merged_checkpoint_is_ordinary_policy_checkpoint(tmp_path):
@@ -40,6 +65,22 @@ def test_merged_checkpoint_is_ordinary_policy_checkpoint(tmp_path):
     assert merged["infos"]["mujoco_lora"]["iteration"] == 1
     assert merged["model_state_dict"]["actor.0.weight"].shape == (256, 48)
     assert (tmp_path / "adapter_latest.pt").is_file()
+
+
+def test_reset_merge_preserves_command_countdown_of_running_envs():
+    """``reset`` doubles as the post-step merge, so unmasked envs must keep their countdown.
+
+    Rearming it unconditionally silently disabled all in-episode command resampling.
+    """
+    info = train_lora.build_model(Path(__file__).with_name("solo12.xml"), 9.0, 0.2)
+    cfg = dict(train_lora.DEFAULT_ENV)
+    reset_fn, _ = train_lora.make_training_functions(info, cfg, num_envs=2)
+    state = reset_fn(jax.random.PRNGKey(0))
+    running = state._replace(command_steps=jnp.array([7, 3]))
+    merged = reset_fn(jax.random.PRNGKey(1), running, jnp.array([True, False]))
+    interval = round(cfg["command_resampling_time_s"] / train_lora.STEP_DT)
+    assert int(merged.command_steps[0]) == interval  # reset env is rearmed
+    assert int(merged.command_steps[1]) == 3  # running env keeps counting down
 
 
 def test_left_right_mirror_is_an_involution():

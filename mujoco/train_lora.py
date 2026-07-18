@@ -47,6 +47,9 @@ JOINT_NAMES = tuple(
 LAYER_CHOICES = ("all", "input_and_output", "input", "output")
 LR_PERM = jnp.array((3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8))
 LR_SIGN = jnp.array((-1.0, 1.0, 1.0) * 4)
+# exp() of the PPO ratio overflows to inf well before this; clamping keeps a diverged
+# update finite so the NaN guard can reject it instead of poisoning every parameter.
+LOG_RATIO_LIMIT = 10.0
 
 
 DEFAULT_ENV = {
@@ -132,20 +135,27 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--task", default="solo12-two-feet")
     p.add_argument("--checkpoint", required=True)
     p.add_argument("--trainable_layers", "--trainable-layers", choices=LAYER_CHOICES, default="all")
-    p.add_argument("--rank", type=int, default=1)
-    p.add_argument("--lora-alpha", type=float, default=1.0)
+    p.add_argument("--rank", type=int, default=1, help="Rank of the LoRA A/B factors; any r>=1 works.")
+    p.add_argument("--lora-alpha", type=float, default=1.0, help="Adapter gain; the applied scale is alpha/rank.")
     p.add_argument("--num_envs", "--num-envs", type=int, default=512)
     p.add_argument("--max-iterations", type=int, default=1000)
     p.add_argument("--rollout-steps", type=int, default=24)
-    p.add_argument("--learning-rate", type=float, default=1.0e-2, help="Paper LoRA default: 1e-2.")
+    p.add_argument("--learning-rate", type=float, default=1.0e-3,
+                   help="Initial LR. With --lr-schedule=adaptive this is only a starting point.")
+    p.add_argument("--lr-schedule", choices=("adaptive", "fixed"), default="adaptive",
+                   help="'adaptive' matches the RSL-RL KL-targeting schedule used for the frozen policy.")
+    p.add_argument("--desired-kl", type=float, default=0.01)
+    p.add_argument("--lr-range", type=float, nargs=2, default=(1.0e-5, 1.0e-2))
     p.add_argument("--ppo-epochs", type=int, default=5)
     p.add_argument("--num-minibatches", type=int, default=4)
     p.add_argument("--gamma", type=float, default=0.99)
     p.add_argument("--gae-lambda", type=float, default=0.95)
     p.add_argument("--clip-param", type=float, default=0.2)
     p.add_argument("--value-loss-coef", type=float, default=1.0)
-    p.add_argument("--entropy-coef", type=float, default=0.01)
-    p.add_argument("--max-grad-norm", type=float, default=1.0)
+    p.add_argument("--entropy-coef", type=float, default=0.002, help="Matches the Isaac solo12 PPO config.")
+    p.add_argument("--max-grad-norm", type=float, default=0.5)
+    p.add_argument("--log-std-range", type=float, nargs=2, default=(-4.0, 0.0),
+                   help="Hard bounds on the exploration log_std; the entropy bonus otherwise drifts it up without limit.")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--save-interval", type=int, default=50)
     p.add_argument("--run-name", default="mujoco LoRA")
@@ -298,14 +308,13 @@ class EnvState(NamedTuple):
 
 class Transition(NamedTuple):
     obs: jax.Array; action: jax.Array; log_prob: jax.Array; reward: jax.Array
-    done: jax.Array; value: jax.Array
+    done: jax.Array; value: jax.Array; mean: jax.Array
 
 
 def make_training_functions(info: ModelInfo, cfg: dict, num_envs: int):
     model = info.mjx_model
-    qids, dids, aids = map(jnp.asarray, (info.joint_qpos, info.joint_dof, info.actuator_ids))
-    foot_bodies, foot_geoms = jnp.asarray(info.foot_body_ids), jnp.asarray(info.foot_geom_ids)
-    front_thigh, thigh_geoms, base_geoms = map(jnp.asarray, (info.front_thigh_geom_ids, info.thigh_geom_ids, info.base_geom_ids))
+    qids, dids = jnp.asarray(info.joint_qpos), jnp.asarray(info.joint_dof)
+    foot_bodies, base_geoms = jnp.asarray(info.foot_body_ids), jnp.asarray(info.base_geom_ids)
     ground_geom = jnp.asarray(info.ground_geom_id)
     safe_q = jnp.asarray(SAFE_Q)
     cpu_data = mujoco.MjData(info.model)
@@ -323,26 +332,39 @@ def make_training_functions(info: ModelInfo, cfg: dict, num_envs: int):
         cmd = jnp.where(flip, -previous, cmd)
         return jnp.where((jax.random.uniform(ks, (num_envs,)) < cfg["standing_env_prob"])[:, None], 0.0, cmd)
 
-    def contact_force(data, geom_ids):
-        pairs = data.contact.geom
-        address = jnp.broadcast_to(
-            data.contact.efc_address,
-            data.efc_force.shape[:-1] + (data.contact.efc_address.shape[-1],),
-        )
-        belongs = jnp.any((pairs[..., 0, None] == geom_ids) | (pairs[..., 1, None] == geom_ids), axis=-1)
-        force = jnp.take_along_axis(data.efc_force, jnp.maximum(address, 0), axis=-1)
-        return jnp.sum(jnp.where((address >= 0) & belongs, jnp.abs(force), 0.0), axis=-1)
+    # One membership column per reward group, so every contact query is a gather into this
+    # table rather than a separate full pass over the constraint force vector.
+    group_names = tuple(f"foot_{i}" for i in range(4)) + tuple(f"thigh_{i}" for i in range(4)) + ("front_thigh",)
+    membership = np.zeros((info.model.ngeom, len(group_names)), bool)
+    for i, geom in enumerate(info.foot_geom_ids):
+        membership[geom, i] = True
+    for i, group in enumerate(info.thigh_geom_ids.reshape(4, 2)):
+        membership[group, 4 + i] = True
+    membership[info.front_thigh_geom_ids, 8] = True
+    membership = jnp.asarray(membership)
+    base_membership = jnp.zeros((info.model.ngeom,), bool).at[base_geoms].set(True)
 
-    def contact_force_between(data, first_ids, second_id):
-        pairs = data.contact.geom
+    def contact_terms(data):
+        """Per-contact geom pair and |constraint force|, evaluated once per physics step."""
+        impl = getattr(data, "_impl", data)  # MJX >=3.3 moved these fields behind ``_impl``.
+        contact, efc_force = impl.contact, impl.efc_force
         address = jnp.broadcast_to(
-            data.contact.efc_address,
-            data.efc_force.shape[:-1] + (data.contact.efc_address.shape[-1],),
+            contact.efc_address, efc_force.shape[:-1] + (contact.efc_address.shape[-1],)
         )
-        first = jnp.any((pairs[..., 0, None] == first_ids) | (pairs[..., 1, None] == first_ids), axis=-1)
-        second = (pairs[..., 0] == second_id) | (pairs[..., 1] == second_id)
-        force = jnp.take_along_axis(data.efc_force, jnp.maximum(address, 0), axis=-1)
-        return jnp.sum(jnp.where((address >= 0) & first & second, jnp.abs(force), 0.0), axis=-1)
+        force = jnp.take_along_axis(efc_force, jnp.maximum(address, 0), axis=-1)
+        return contact.geom, jnp.where(address >= 0, jnp.abs(force), 0.0)
+
+    def group_forces(terms):
+        """Contact force per reward group, shape (..., len(group_names))."""
+        pairs, force = terms
+        hit = membership[pairs[..., 0]] | membership[pairs[..., 1]]
+        return jnp.sum(force[..., None] * hit, axis=-2)
+
+    def force_against_ground(terms, geom_membership):
+        pairs, force = terms
+        touches = geom_membership[pairs[..., 0]] | geom_membership[pairs[..., 1]]
+        ground = (pairs[..., 0] == ground_geom) | (pairs[..., 1] == ground_geom)
+        return jnp.sum(jnp.where(touches & ground, force, 0.0), axis=-1)
 
     def kinematics(data):
         rot = quat_matrix(data.qpos[..., 3:7])
@@ -398,10 +420,16 @@ def make_training_functions(info: ModelInfo, cfg: dict, num_envs: int):
             delay = jnp.where(mask, delay, old.delay)
             zeros_a = jnp.where(mask[:,None], zeros_a, old.action)
             history = jnp.where(mask[None,:,None], history, old.target_history)
-        state = EnvState(new_data, jnp.empty((num_envs,48)), commands, jnp.full((num_envs,),command_interval), zeros_a, zeros_a, history, delay,
-                         jnp.zeros((num_envs,),jnp.int32) if old is None else jnp.where(mask,0,old.episode_steps),
-                         jnp.zeros((num_envs,)) if old is None else jnp.where(mask,0.0,old.episode_return))
-        return state._replace(obs=observation(state.data,state.command,state.action,keys[7]))
+        # ``reset`` also runs as the post-step merge, so every field must fall back to the old
+        # value where ``mask`` is false -- including the command countdown, which otherwise
+        # gets rearmed every step and disables in-episode command resampling entirely.
+        countdown = jnp.full((num_envs,), command_interval)
+        if old is not None:
+            countdown = jnp.where(mask, countdown, old.command_steps)
+        return EnvState(new_data, observation(new_data,commands,zeros_a,keys[7]), commands,
+                        countdown, zeros_a, zeros_a, history, delay,
+                        jnp.zeros((num_envs,),jnp.int32) if old is None else jnp.where(mask,0,old.episode_steps),
+                        jnp.zeros((num_envs,)) if old is None else jnp.where(mask,0.0,old.episode_return))
 
     def env_step(state: EnvState, action, key):
         kcmd, kobs, kreset = jax.random.split(key, 3)
@@ -426,9 +454,11 @@ def make_training_functions(info: ModelInfo, cfg: dict, num_envs: int):
                   +cfg["track_ang_vel_z_reward_scale"]*jnp.exp(-yaw_err/cfg["tracking_std"]**2))*STEP_DT
         reward += cfg["action_rate_reward_scale"]*jnp.sum((action-state.action)**2,-1)*STEP_DT
         reward += cfg["joint_torque_reward_scale"]*jnp.sum(data.qfrc_actuator[:,dids]**2,-1)*STEP_DT
-        foot_forces = jnp.stack([contact_force(data, jnp.array((g,))) for g in foot_geoms], axis=-1)
+        terms = contact_terms(data)
+        forces = group_forces(terms)
+        foot_forces, thigh_forces, front_thigh_force = forces[:, :4], forces[:, 4:8], forces[:, 8]
         feet_contact = foot_forces > 1.0
-        front_contact = jnp.any(feet_contact[:,:2],-1) | (contact_force(data,front_thigh) > 1.0)
+        front_contact = jnp.any(feet_contact[:,:2],-1) | (front_thigh_force > 1.0)
         forbidden = front_contact if cfg["front_back_asymetry"] else jnp.sum(feet_contact,-1)>=3
         reward += cfg["three_or_more_feet_contact_penalty_reward_scale"]*forbidden*STEP_DT
         foot_h = data.xpos[:,foot_bodies,2]
@@ -437,21 +467,24 @@ def make_training_functions(info: ModelInfo, cfg: dict, num_envs: int):
         lift = kernel*(~jnp.any(feet_contact[:,:2],-1))
         if cfg["rear_feet_in_contact_for_twofeet"]: lift *= jnp.all(feet_contact[:,2:],-1)
         reward += cfg["two_feet_above_height_reward_scale"]*lift*STEP_DT
-        thigh_groups = thigh_geoms.reshape((4, 2))
-        thigh_contacts = jnp.stack([contact_force(data, group) > 0.6 for group in thigh_groups], axis=-1)
-        reward += cfg["undesired_contact_reward_scale"]*jnp.sum(thigh_contacts,axis=-1)*STEP_DT
+        reward += cfg["undesired_contact_reward_scale"]*jnp.sum(thigh_forces > 0.6,axis=-1)*STEP_DT
         foot_excess = jnp.maximum(foot_forces-10.0,0.0)
         reward += cfg["foot_contact_reward_scale"]*jnp.sum(foot_excess**2,axis=-1)*STEP_DT
-        base_hit = contact_force_between(data,base_geoms,ground_geom) > 1.0
+        base_hit = force_against_ground(terms,base_membership) > 1.0
         steps = state.episode_steps+1
         timeout = steps>=max_episode_steps
+        diverged = ~jnp.isfinite(data.qpos).all(-1)
         terminate_front = cfg["finish_on_front_feet_contact"] & forbidden & (steps*STEP_DT>=cfg["finish_on_front_feet_contact_after"])
-        done = base_hit | timeout | terminate_front | ~jnp.isfinite(data.qpos).all(-1)
+        terminated = base_hit | terminate_front | diverged
+        done = terminated | timeout
+        reward = jnp.where(diverged, 0.0, reward)  # a diverged rollout must not poison the batch
         returns = state.episode_return+reward
-        next_state = EnvState(data,jnp.empty_like(state.obs),command,command_steps,action,state.action,history,state.delay,steps,returns)
-        next_state = next_state._replace(obs=observation(data,command,action,kobs))
-        next_state = reset(kreset,next_state,done)
-        return next_state,reward,done,returns
+        # Observation of the pre-reset state, so a timeout can be bootstrapped from the value
+        # the episode actually ended at rather than from the fresh reset observation.
+        final_obs = observation(data,command,action,kobs)
+        finished = EnvState(data,final_obs,command,command_steps,action,state.action,history,state.delay,steps,returns)
+        next_state = reset(kreset,finished,done)
+        return next_state,reward,done,terminated,final_obs,returns,steps
 
     return jax.jit(reset), jax.jit(env_step)
 
@@ -470,13 +503,28 @@ def zeros_like_tree(tree): return jax.tree_util.tree_map(jnp.zeros_like,tree)
 
 
 def adam_update(params, grads, state, lr, max_norm):
-    step,m,v=state; step+=1
+    """Adam with a hard non-finite guard: a diverged gradient is dropped, not applied.
+
+    Without this a single inf/NaN gradient permanently poisons the parameters and the run
+    keeps burning GPU time while logging NaN forever.
+    """
+    step,m,v=state
     norm=jnp.sqrt(sum(jnp.sum(x*x) for x in jax.tree_util.tree_leaves(grads)))
-    grads=jax.tree_util.tree_map(lambda g:g*jnp.minimum(1.0,max_norm/(norm+1e-8)),grads)
-    m=jax.tree_util.tree_map(lambda a,g:.9*a+.1*g,m,grads);v=jax.tree_util.tree_map(lambda a,g:.999*a+.001*g*g,v,grads)
+    ok=jnp.isfinite(norm)
+    clip=jnp.where(ok,jnp.minimum(1.0,max_norm/(norm+1e-8)),0.0)
+    grads=jax.tree_util.tree_map(lambda g:jnp.nan_to_num(g,nan=0.0,posinf=0.0,neginf=0.0)*clip,grads)
+    step=step+ok.astype(step.dtype)
+    m=jax.tree_util.tree_map(lambda a,g:jnp.where(ok,.9*a+.1*g,a),m,grads)
+    v=jax.tree_util.tree_map(lambda a,g:jnp.where(ok,.999*a+.001*g*g,a),v,grads)
     mh=jax.tree_util.tree_map(lambda x:x/(1-.9**step),m);vh=jax.tree_util.tree_map(lambda x:x/(1-.999**step),v)
-    params=jax.tree_util.tree_map(lambda p,a,b:p-lr*a/(jnp.sqrt(b)+1e-8),params,mh,vh)
-    return params,(step,m,v),norm
+    params=jax.tree_util.tree_map(lambda p,a,b:jnp.where(ok,p-lr*a/(jnp.sqrt(b)+1e-8),p),params,mh,vh)
+    return params,(step,m,v),norm,ok
+
+
+def gaussian_kl(mean_old, log_std_old, mean_new, log_std_new):
+    """Analytic KL(old || new) per sample, as used by the RSL-RL adaptive LR schedule."""
+    var_old, var_new = jnp.exp(2*log_std_old), jnp.exp(2*log_std_new)
+    return jnp.sum(log_std_new-log_std_old+(var_old+(mean_old-mean_new)**2)/(2*var_new)-0.5,axis=-1)
 
 
 def save_checkpoints(output: Path, iteration: int, original_payload, params, actor, critic, actor_keys, critic_keys, scale, config):
@@ -524,7 +572,8 @@ def main():
             import wandb
             wandb_run=wandb.init(project=args.wandb_project,entity=args.wandb_entity,name=args.run_name,config=config)
         except Exception as exc: print(f"[WARN] W&B disabled: {exc}",flush=True)
-    optimizer=(jnp.array(0),zeros_like_tree(params),zeros_like_tree(params))
+    log_std_min,log_std_max=map(float,args.log_std_range);lr_min,lr_max=map(float,args.lr_range)
+    optimizer=(jnp.array(0),zeros_like_tree(params),zeros_like_tree(params),jnp.asarray(args.learning_rate))
 
     @jax.jit
     def collect(params,state,key):
@@ -532,49 +581,116 @@ def main():
             state,key=carry;key,ka,ks=jax.random.split(key,3)
             mean=actor_mean(params,state.obs,actor,norms,scale);action=mean+jnp.exp(params["log_std"])*jax.random.normal(ka,mean.shape)
             logp=gaussian_log_prob(action,mean,params["log_std"]);value=critic_value(params,state.obs,critic,norms,scale)
-            next_state,reward,done,_=step_fn(state,action,ks)
-            return (next_state,key),Transition(state.obs,action,logp,reward,done,value)
+            next_state,reward,done,terminated,final_obs,ep_return,ep_steps=step_fn(state,action,ks)
+            # Bootstrap timeouts (RSL-RL's ``bootstrap_on_time_outs``) so a truncated episode is
+            # not scored as a failure; genuine terminations keep the hard cut.
+            timeout=done&~terminated
+            reward=reward+args.gamma*critic_value(params,final_obs,critic,norms,scale)*timeout
+            stats=(done*ep_return,done*ep_steps,done,terminated)
+            return (next_state,key),(Transition(state.obs,action,logp,reward,done,value,mean),stats)
         return jax.lax.scan(body,(state,key),None,length=args.rollout_steps)
 
-    @jax.jit
     def update_batch(params,opt,batch):
-        obs,action,old_logp,adv,returns=batch
+        obs,action,old_logp,old_mean,old_log_std,adv,returns=batch
         def loss(p):
             mean=actor_mean(p,obs,actor,norms,scale);logp=gaussian_log_prob(action,mean,p["log_std"])
-            ratio=jnp.exp(logp-old_logp);policy=-jnp.mean(jnp.minimum(ratio*adv,jnp.clip(ratio,1-args.clip_param,1+args.clip_param)*adv))
+            # Clamping before exp keeps a diverged step finite so the NaN guard can reject it.
+            ratio=jnp.exp(jnp.clip(logp-old_logp,-LOG_RATIO_LIMIT,LOG_RATIO_LIMIT))
+            policy=-jnp.mean(jnp.minimum(ratio*adv,jnp.clip(ratio,1-args.clip_param,1+args.clip_param)*adv))
             value=critic_value(p,obs,critic,norms,scale);vloss=.5*jnp.mean((returns-value)**2)
             entropy=jnp.sum(p["log_std"]+.5*math.log(2*math.pi*math.e))
             total=policy+args.value_loss_coef*vloss-args.entropy_coef*entropy
-            return total,(policy,vloss,entropy,jnp.mean(jnp.abs(ratio-1)>args.clip_param))
-        (loss,metrics),grads=jax.value_and_grad(loss,has_aux=True)(params)
-        params,opt,gn=adam_update(params,grads,opt,args.learning_rate,args.max_grad_norm)
-        return params,opt,(loss,*metrics,gn)
+            kl=jnp.mean(gaussian_kl(old_mean,old_log_std,mean,p["log_std"]))
+            return total,(policy,vloss,entropy,jnp.mean(jnp.abs(ratio-1)>args.clip_param),kl)
+        (total,metrics),grads=jax.value_and_grad(loss,has_aux=True)(params)
+        step,m,v,lr=opt
+        kl=metrics[-1]
+        if args.lr_schedule=="adaptive":
+            # RSL-RL schedule: shrink the step when the policy moves further than desired_kl.
+            lr=jnp.where(kl>2.0*args.desired_kl,lr/1.5,jnp.where((kl<0.5*args.desired_kl)&(kl>0.0),lr*1.5,lr))
+            lr=jnp.clip(lr,lr_min,lr_max)
+        params,(step,m,v),gn,ok=adam_update(params,grads,(step,m,v),lr,args.max_grad_norm)
+        params={**params,"log_std":jnp.clip(params["log_std"],log_std_min,log_std_max)}
+        return params,(step,m,v,lr),(total,*metrics,gn,lr,ok.astype(jnp.float32))
 
-    print(f"[INFO] MJX devices={jax.devices()} envs={args.num_envs} rank={args.rank} layers={selected} trainable={sum(x.size for x in jax.tree_util.tree_leaves(params)):,}",flush=True)
-    history=[]
-    iterations=1 if args.dry_run else args.max_iterations
-    for iteration in range(1,iterations+1):
-        started=time.perf_counter();key,kroll,kperm=jax.random.split(key,3);(state,key2),traj=collect(params,state,kroll);key=key2
-        bootstrap=critic_value(params,state.obs,critic,norms,scale)
+    @jax.jit
+    def ppo_update(params,opt,batch,key):
+        """All epochs and minibatches in one dispatch; the Python loop cost dominated at low --num_envs."""
+        size=batch[0].shape[0];mb=max(1,size//args.num_minibatches);usable=mb*args.num_minibatches
+        def epoch(carry,ekey):
+            perm=jax.random.permutation(ekey,size)[:usable].reshape(args.num_minibatches,mb)
+            def minibatch(carry,idx):
+                params,opt=carry
+                params,opt,metrics=update_batch(params,opt,tuple(x[idx] for x in batch))
+                return (params,opt),metrics
+            return jax.lax.scan(minibatch,carry,perm)
+        (params,opt),metrics=jax.lax.scan(epoch,(params,opt),jax.random.split(key,args.ppo_epochs))
+        return params,opt,jax.tree_util.tree_map(lambda x:jnp.mean(x),metrics)
+
+    @jax.jit
+    def build_batch(params,traj,last_obs):
+        bootstrap=critic_value(params,last_obs,critic,norms,scale)
         def gae_step(carry,x):
-            adv,next_v=carry;reward,done,value=x;delta=reward+args.gamma*(1-done)*next_v-value;adv=delta+args.gamma*args.gae_lambda*(1-done)*adv;return (adv,value),adv
+            adv,next_v=carry;reward,done,value=x
+            delta=reward+args.gamma*(1-done)*next_v-value
+            adv=delta+args.gamma*args.gae_lambda*(1-done)*adv
+            return (adv,value),adv
         _,adv_rev=jax.lax.scan(gae_step,(jnp.zeros_like(bootstrap),bootstrap),(traj.reward[::-1],traj.done[::-1],traj.value[::-1]))
         adv=adv_rev[::-1];returns=adv+traj.value
-        obs,actions,old_logp=traj.obs.reshape((-1,48)),traj.action.reshape((-1,12)),traj.log_prob.reshape(-1);adv=adv.reshape(-1);returns=returns.reshape(-1)
+        flat=lambda x:x.reshape((-1,)+x.shape[2:])
+        obs,actions,old_logp,means=flat(traj.obs),flat(traj.action),flat(traj.log_prob),flat(traj.mean)
+        adv,returns=flat(adv),flat(returns)
+        log_std=jnp.broadcast_to(params["log_std"],means.shape)
         if args.symmetry_mode=="augmentation":
-            mo,ma=mirror_lr(obs,actions);ml=gaussian_log_prob(ma,actor_mean(params,mo,actor,norms,scale),params["log_std"])
-            obs=jnp.concatenate((obs,mo));actions=jnp.concatenate((actions,ma));old_logp=jnp.concatenate((old_logp,ml));adv=jnp.concatenate((adv,adv));returns=jnp.concatenate((returns,returns))
-        adv=(adv-jnp.mean(adv))/(jnp.std(adv)+1e-8);size=obs.shape[0];mb=max(1,size//args.num_minibatches);metrics=[]
-        for epoch in range(args.ppo_epochs):
-            kperm,sub=jax.random.split(kperm);perm=jax.random.permutation(sub,size)
-            for start in range(0,size-mb+1,mb):
-                idx=perm[start:start+mb];params,optimizer,m=update_batch(params,optimizer,(obs[idx],actions[idx],old_logp[idx],adv[idx],returns[idx]));metrics.append(m)
-        m=np.asarray(jnp.mean(jnp.stack([jnp.stack(values) for values in metrics]),0));elapsed=time.perf_counter()-started
-        log={"iteration":iteration,"reward/mean_step":float(jnp.mean(traj.reward)),"resets":int(jnp.sum(traj.done)),"loss/total":m[0],"loss/policy":m[1],"loss/value":m[2],"policy/entropy":m[3],"policy/clip_fraction":m[4],"grad_norm":m[5],"throughput_steps_s":args.num_envs*args.rollout_steps/elapsed,"wall_time_s":elapsed}
-        history.append({k:float(v) if isinstance(v,(np.floating,float)) else int(v) for k,v in log.items()});print("[INFO] "+" ".join(f"{k}={v:.5g}" if isinstance(v,float) else f"{k}={v}" for k,v in log.items()),flush=True)
+            mo,ma=mirror_lr(obs,actions)
+            # The mirrored sample's "old" distribution is the current policy evaluated at the
+            # mirrored observation, so the KL/ratio start at their identity values.
+            mmean=actor_mean(params,mo,actor,norms,scale)
+            ml=gaussian_log_prob(ma,mmean,params["log_std"])
+            obs=jnp.concatenate((obs,mo));actions=jnp.concatenate((actions,ma))
+            old_logp=jnp.concatenate((old_logp,ml));means=jnp.concatenate((means,mmean))
+            log_std=jnp.concatenate((log_std,log_std))
+            adv=jnp.concatenate((adv,adv));returns=jnp.concatenate((returns,returns))
+        adv=(adv-jnp.mean(adv))/(jnp.std(adv)+1e-8)
+        return obs,actions,old_logp,means,log_std,adv,returns
+
+    print(f"[INFO] MJX devices={jax.devices()} envs={args.num_envs} rank={args.rank} layers={selected} trainable={sum(x.size for x in jax.tree_util.tree_leaves(params)):,}",flush=True)
+    samples=args.num_envs*args.rollout_steps
+    if samples<256:
+        print(f"[WARN] {samples} samples/iteration ({args.num_envs} envs x {args.rollout_steps} steps) is a very small PPO batch; "
+              f"expect noisy advantages. Raise --num_envs or --rollout-steps if training is unstable.",flush=True)
+    history=[];metrics_file=(output/"metrics.jsonl").open("a");rejected=0
+    iterations=1 if args.dry_run else args.max_iterations
+    for iteration in range(1,iterations+1):
+        started=time.perf_counter();key,kroll,kperm=jax.random.split(key,3)
+        (state,_),(traj,stats)=collect(params,state,kroll)
+        batch=build_batch(params,traj,state.obs)
+        params,optimizer,m=ppo_update(params,optimizer,batch,kperm)
+        m=[float(x) for x in m];elapsed=time.perf_counter()-started
+        ep_return,ep_steps,dones,terminations=(np.asarray(jnp.sum(x)) for x in stats)
+        log={"iteration":iteration,"reward/mean_step":float(jnp.mean(traj.reward)),
+             "episodes":int(dones),"terminations":int(terminations),"timeouts":int(dones-terminations),
+             "loss/total":m[0],"loss/policy":m[1],"loss/value":m[2],"policy/entropy":m[3],
+             "policy/clip_fraction":m[4],"policy/kl":m[5],"grad_norm":m[6],"learning_rate":m[7],
+             "updates_applied_frac":m[8],"policy/action_std":float(jnp.mean(jnp.exp(params["log_std"]))),
+             "throughput_steps_s":samples/elapsed,"wall_time_s":elapsed}
+        if dones: log |= {"episode/return":float(ep_return/dones),"episode/length_s":float(ep_steps/dones)*STEP_DT}
+        history.append({k:float(v) if isinstance(v,(np.floating,float)) else int(v) for k,v in log.items()})
+        print("[INFO] "+" ".join(f"{k}={v:.5g}" if isinstance(v,float) else f"{k}={v}" for k,v in log.items()),flush=True)
         if wandb_run: wandb_run.log(log,step=iteration)
+        metrics_file.write(json.dumps(history[-1])+"\n");metrics_file.flush()
+        # The NaN guard leaves the parameters untouched when a gradient blows up, so a transient
+        # spike is recoverable; only a sustained total rejection means the run is unsalvageable.
+        rejected = rejected+1 if m[8]<1.0 else 0
+        if m[8]<1.0:
+            print(f"[WARN] {(1-m[8])*100:.0f}% of updates rejected as non-finite at iteration {iteration}.",flush=True)
+        if rejected>=5:
+            print("[ERROR] Gradients non-finite for 5 consecutive iterations; aborting with the last "
+                  "good parameters. Lower --learning-rate or raise --num_envs/--rollout-steps.",flush=True)
+            save_checkpoints(output,iteration,payload,params,actor,critic,akeys,ckeys,scale,config)
+            break
         if iteration%args.save_interval==0 or iteration==iterations: save_checkpoints(output,iteration,payload,params,actor,critic,akeys,ckeys,scale,config)
-        (output/"metrics.jsonl").write_text("".join(json.dumps(x)+"\n" for x in history))
+    metrics_file.close()
     if wandb_run:
         import wandb
         artifact=wandb.Artifact(f"mujoco-lora-{timestamp}",type="model");artifact.add_dir(str(output));wandb_run.log_artifact(artifact);wandb_run.finish()
