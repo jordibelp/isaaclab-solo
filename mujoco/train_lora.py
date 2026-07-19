@@ -33,6 +33,8 @@ import jax
 import jax.numpy as jnp
 from mujoco import mjx
 
+from lora_ppo_cfg import DEFAULT_AGENT_CFG
+
 
 PHYSICS_DT = 1.0 / 200.0
 DECIMATION = 4
@@ -131,33 +133,36 @@ def parse_env_overrides(tokens: list[str]) -> tuple[dict, list[str]]:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    agent = DEFAULT_AGENT_CFG
+    policy = agent.policy
+    algorithm = agent.algorithm
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--task", default="solo12-two-feet")
     p.add_argument("--checkpoint", required=True)
-    p.add_argument("--trainable_layers", "--trainable-layers", choices=LAYER_CHOICES, default="all")
-    p.add_argument("--rank", type=int, default=1, help="Rank of the LoRA A/B factors; any r>=1 works.")
-    p.add_argument("--lora-alpha", type=float, default=1.0, help="Adapter gain; the applied scale is alpha/rank.")
+    p.add_argument("--trainable_layers", "--trainable-layers", choices=LAYER_CHOICES, default=policy.trainable_layers)
+    p.add_argument("--rank", type=int, default=policy.rank, help="Rank of the LoRA A/B factors; any r>=1 works.")
+    p.add_argument("--lora-alpha", type=float, default=policy.lora_alpha, help="Adapter gain; the applied scale is alpha/rank.")
     p.add_argument("--num_envs", "--num-envs", type=int, default=512)
-    p.add_argument("--max-iterations", type=int, default=1000)
-    p.add_argument("--rollout-steps", type=int, default=24)
-    p.add_argument("--learning-rate", type=float, default=1.0e-3,
+    p.add_argument("--max-iterations", type=int, default=agent.max_iterations)
+    p.add_argument("--rollout-steps", type=int, default=agent.num_steps_per_env)
+    p.add_argument("--learning-rate", type=float, default=algorithm.learning_rate,
                    help="Initial LR. With --lr-schedule=adaptive this is only a starting point.")
-    p.add_argument("--lr-schedule", choices=("adaptive", "fixed"), default="adaptive",
+    p.add_argument("--lr-schedule", choices=("adaptive", "fixed"), default=algorithm.schedule,
                    help="'adaptive' matches the RSL-RL KL-targeting schedule used for the frozen policy.")
-    p.add_argument("--desired-kl", type=float, default=0.01)
-    p.add_argument("--lr-range", type=float, nargs=2, default=(1.0e-5, 1.0e-2))
-    p.add_argument("--ppo-epochs", type=int, default=5)
-    p.add_argument("--num-minibatches", type=int, default=4)
-    p.add_argument("--gamma", type=float, default=0.99)
-    p.add_argument("--gae-lambda", type=float, default=0.95)
-    p.add_argument("--clip-param", type=float, default=0.2)
-    p.add_argument("--value-loss-coef", type=float, default=1.0)
-    p.add_argument("--entropy-coef", type=float, default=0.002, help="Matches the Isaac solo12 PPO config.")
-    p.add_argument("--max-grad-norm", type=float, default=0.5)
-    p.add_argument("--log-std-range", type=float, nargs=2, default=(-4.0, 0.0),
+    p.add_argument("--desired-kl", type=float, default=algorithm.desired_kl)
+    p.add_argument("--lr-range", type=float, nargs=2, default=algorithm.learning_rate_range)
+    p.add_argument("--ppo-epochs", type=int, default=algorithm.num_learning_epochs)
+    p.add_argument("--num-minibatches", type=int, default=algorithm.num_mini_batches)
+    p.add_argument("--gamma", type=float, default=algorithm.gamma)
+    p.add_argument("--gae-lambda", type=float, default=algorithm.lam)
+    p.add_argument("--clip-param", type=float, default=algorithm.clip_param)
+    p.add_argument("--value-loss-coef", type=float, default=algorithm.value_loss_coef)
+    p.add_argument("--entropy-coef", type=float, default=algorithm.entropy_coef, help="Matches the Isaac solo12 PPO config.")
+    p.add_argument("--max-grad-norm", type=float, default=algorithm.max_grad_norm)
+    p.add_argument("--log-std-range", type=float, nargs=2, default=policy.log_std_range,
                    help="Hard bounds on the exploration log_std; the entropy bonus otherwise drifts it up without limit.")
-    p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--save-interval", type=int, default=50)
+    p.add_argument("--seed", type=int, default=agent.seed)
+    p.add_argument("--save-interval", type=int, default=agent.save_interval)
     p.add_argument("--run-name", default="mujoco LoRA")
     p.add_argument("--symmetry-mode", choices=("none", "augmentation"), default="augmentation")
     p.add_argument("--headless", action="store_true")
@@ -168,6 +173,86 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-wandb", action="store_true")
     p.add_argument("--dry-run", action="store_true", help="Build everything and run one rollout/update only.")
     return p
+
+
+AGENT_OVERRIDE_TO_DEST = {
+    "agent.seed": "seed",
+    "agent.num_steps_per_env": "rollout_steps",
+    "agent.max_iterations": "max_iterations",
+    "agent.save_interval": "save_interval",
+    "agent.policy.trainable_layers": "trainable_layers",
+    "agent.policy.rank": "rank",
+    "agent.policy.lora_alpha": "lora_alpha",
+    "agent.policy.log_std_range": "log_std_range",
+    "agent.algorithm.learning_rate": "learning_rate",
+    "agent.algorithm.schedule": "lr_schedule",
+    "agent.algorithm.desired_kl": "desired_kl",
+    "agent.algorithm.learning_rate_range": "lr_range",
+    "agent.algorithm.num_learning_epochs": "ppo_epochs",
+    "agent.algorithm.num_mini_batches": "num_minibatches",
+    "agent.algorithm.gamma": "gamma",
+    "agent.algorithm.lam": "gae_lambda",
+    "agent.algorithm.clip_param": "clip_param",
+    "agent.algorithm.value_loss_coef": "value_loss_coef",
+    "agent.algorithm.entropy_coef": "entropy_coef",
+    "agent.algorithm.max_grad_norm": "max_grad_norm",
+}
+
+
+def apply_agent_overrides(args: argparse.Namespace, tokens: list[str]) -> tuple[argparse.Namespace, list[str]]:
+    """Apply Hydra-style ``agent.*=value`` tokens after ordinary argparse flags."""
+    remaining = []
+    for token in tokens:
+        key, sep, raw = token.partition("=")
+        if not sep or not key.startswith("agent."):
+            remaining.append(token)
+            continue
+        if key not in AGENT_OVERRIDE_TO_DEST:
+            raise ValueError(f"Unsupported agent override: {token}")
+        dest = AGENT_OVERRIDE_TO_DEST[key]
+        value = _literal(raw)
+        current = getattr(args, dest)
+        if isinstance(current, tuple):
+            value = tuple(value)
+        elif isinstance(current, bool):
+            value = bool(value)
+        elif current is not None:
+            value = type(current)(value)
+        setattr(args, dest, value)
+    if args.trainable_layers not in LAYER_CHOICES:
+        raise ValueError(f"agent.policy.trainable_layers must be one of {LAYER_CHOICES}.")
+    if args.lr_schedule not in ("adaptive", "fixed"):
+        raise ValueError("agent.algorithm.schedule must be 'adaptive' or 'fixed'.")
+    return args, remaining
+
+
+def resolved_agent_config(args: argparse.Namespace) -> dict:
+    return {
+        "seed": args.seed,
+        "num_steps_per_env": args.rollout_steps,
+        "max_iterations": args.max_iterations,
+        "save_interval": args.save_interval,
+        "policy": {
+            "trainable_layers": args.trainable_layers,
+            "rank": args.rank,
+            "lora_alpha": args.lora_alpha,
+            "log_std_range": tuple(args.log_std_range),
+        },
+        "algorithm": {
+            "learning_rate": args.learning_rate,
+            "schedule": args.lr_schedule,
+            "desired_kl": args.desired_kl,
+            "learning_rate_range": tuple(args.lr_range),
+            "num_learning_epochs": args.ppo_epochs,
+            "num_mini_batches": args.num_minibatches,
+            "gamma": args.gamma,
+            "lam": args.gae_lambda,
+            "clip_param": args.clip_param,
+            "value_loss_coef": args.value_loss_coef,
+            "entropy_coef": args.entropy_coef,
+            "max_grad_norm": args.max_grad_norm,
+        },
+    }
 
 
 @dataclass(frozen=True)
@@ -546,6 +631,7 @@ def save_checkpoints(output: Path, iteration: int, original_payload, params, act
 
 def main():
     args,unknown=build_parser().parse_known_args()
+    args,unknown=apply_agent_overrides(args,unknown)
     if args.task!="solo12-two-feet": raise ValueError("Only --task=solo12-two-feet is supported.")
     if args.rank<1 or args.num_envs<1: raise ValueError("--rank and --num_envs must be positive.")
     cfg,unsupported=parse_env_overrides(unknown)
@@ -564,7 +650,7 @@ def main():
     state=reset_fn(kenv)
     timestamp=datetime.now().strftime("%Y%m%d_%H%M%S");run_slug=args.run_name.replace("/","_")
     output=args.output_dir/f"{timestamp}_{run_slug}";output.mkdir(parents=True,exist_ok=False)
-    config={**vars(args),"checkpoint":str(checkpoint),"output_dir":str(output),"selected_layer_indices":selected,"lora_scale":scale,"env":cfg,"jax_devices":[str(x) for x in jax.devices()],"paper":"arXiv:2603.17092"}
+    config={**vars(args),"checkpoint":str(checkpoint),"output_dir":str(output),"selected_layer_indices":selected,"lora_scale":scale,"agent":resolved_agent_config(args),"env":cfg,"jax_devices":[str(x) for x in jax.devices()],"paper":"arXiv:2603.17092"}
     config={k:(str(v) if isinstance(v,Path) else v) for k,v in config.items()};(output/"run_config.json").write_text(json.dumps(config,indent=2)+"\n")
     wandb_run=None
     if not args.no_wandb:

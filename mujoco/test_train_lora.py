@@ -12,6 +12,41 @@ import train_lora
 CHECKPOINT = Path("/home/jordibelp/IsaacLab-dirty/logs/skrl/checkpoints/0717_q3a68133_model_15008.pt")
 
 
+def test_agent_defaults_come_from_config_file():
+    args = train_lora.build_parser().parse_args(["--checkpoint", str(CHECKPOINT)])
+    assert args.learning_rate == train_lora.DEFAULT_AGENT_CFG.algorithm.learning_rate
+    assert args.ppo_epochs == train_lora.DEFAULT_AGENT_CFG.algorithm.num_learning_epochs
+    assert args.rollout_steps == train_lora.DEFAULT_AGENT_CFG.num_steps_per_env
+
+
+def test_hydra_style_agent_overrides():
+    args, unknown = train_lora.build_parser().parse_known_args([
+        "--checkpoint", str(CHECKPOINT), "--learning-rate=3e-4",
+        "agent.algorithm.learning_rate=2e-4",
+        "agent.algorithm.num_learning_epochs=7",
+        "agent.policy.log_std_range=[-3.0,-0.25]",
+        "env.kp=8.0",
+    ])
+    args, remaining = train_lora.apply_agent_overrides(args, unknown)
+    assert args.learning_rate == 2e-4  # agent.* tokens are explicit and applied last
+    assert args.ppo_epochs == 7
+    assert args.log_std_range == (-3.0, -0.25)
+    assert remaining == ["env.kp=8.0"]
+    assert train_lora.resolved_agent_config(args)["algorithm"]["learning_rate"] == 2e-4
+
+
+def test_unknown_agent_override_is_rejected():
+    args = train_lora.build_parser().parse_args(["--checkpoint", str(CHECKPOINT)])
+    with pytest.raises(ValueError, match="Unsupported agent override"):
+        train_lora.apply_agent_overrides(args, ["agent.algorithm.typo=1"])
+
+
+def test_invalid_hydra_style_choice_is_rejected():
+    args = train_lora.build_parser().parse_args(["--checkpoint", str(CHECKPOINT)])
+    with pytest.raises(ValueError, match="schedule"):
+        train_lora.apply_agent_overrides(args, ["agent.algorithm.schedule=magic"])
+
+
 def test_layer_selection_contract():
     assert train_lora.selected_layer_indices(4, "all") == (0, 1, 2, 3)
     assert train_lora.selected_layer_indices(4, "input_and_output") == (0, 3)
