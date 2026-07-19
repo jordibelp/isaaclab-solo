@@ -118,6 +118,30 @@ def test_reset_merge_preserves_command_countdown_of_running_envs():
     assert int(merged.command_steps[1]) == 3  # running env keeps counting down
 
 
+def test_reward_metrics_include_scaled_and_cross_run_comparable_values():
+    cfg = dict(train_lora.DEFAULT_ENV)
+    terms = np.zeros((2, 3, len(train_lora.REWARD_TERM_NAMES)), dtype=np.float32)
+    index = train_lora.REWARD_TERM_NAMES.index("two_feet_above_height")
+    scale = cfg["two_feet_above_height_reward_scale"]
+    terms[..., index] = scale * train_lora.STEP_DT * 0.25
+    completed = np.sum(terms, axis=(0, 1))
+
+    metrics = train_lora.reward_metrics(terms, completed, completed_episodes=2, cfg=cfg)
+
+    assert metrics["RewardsPerStep/two_feet_above_height"] == pytest.approx(scale * train_lora.STEP_DT * 0.25)
+    assert metrics["PerStepRewardRatio/two_feet_above_height"] == pytest.approx(0.25)
+    assert "Episode_Reward/two_feet_above_height" in metrics
+
+
+def test_reward_metrics_omit_episode_values_when_no_episode_finished():
+    terms = np.zeros((2, 3, len(train_lora.REWARD_TERM_NAMES)), dtype=np.float32)
+    metrics = train_lora.reward_metrics(
+        terms, np.zeros(len(train_lora.REWARD_TERM_NAMES)), completed_episodes=0, cfg=dict(train_lora.DEFAULT_ENV)
+    )
+    assert "RewardsPerStep/total" in metrics
+    assert not any(key.startswith("Episode_Reward/") for key in metrics)
+
+
 def test_left_right_mirror_is_an_involution():
     obs = jnp.arange(96, dtype=jnp.float32).reshape(2, 48)
     action = jnp.arange(24, dtype=jnp.float32).reshape(2, 12)

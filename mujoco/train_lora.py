@@ -53,6 +53,27 @@ LR_SIGN = jnp.array((-1.0, 1.0, 1.0) * 4)
 # update finite so the NaN guard can reject it instead of poisoning every parameter.
 LOG_RATIO_LIMIT = 10.0
 
+REWARD_TERM_NAMES = (
+    "track_lin_vel_xy_exp",
+    "track_ang_vel_z_exp",
+    "action_rate_l2",
+    "dof_torques_l2",
+    "three_or_more_feet_contact",
+    "two_feet_above_height",
+    "undesired_contacts",
+    "foot_contact",
+)
+REWARD_SCALE_KEYS = (
+    "track_lin_vel_xy_reward_scale",
+    "track_ang_vel_z_reward_scale",
+    "action_rate_reward_scale",
+    "joint_torque_reward_scale",
+    "three_or_more_feet_contact_penalty_reward_scale",
+    "two_feet_above_height_reward_scale",
+    "undesired_contact_reward_scale",
+    "foot_contact_reward_scale",
+)
+
 
 DEFAULT_ENV = {
     "kp": 9.0,
@@ -389,6 +410,7 @@ class EnvState(NamedTuple):
     delay: jax.Array
     episode_steps: jax.Array
     episode_return: jax.Array
+    episode_reward_sums: jax.Array
 
 
 class Transition(NamedTuple):
@@ -514,7 +536,9 @@ def make_training_functions(info: ModelInfo, cfg: dict, num_envs: int):
         return EnvState(new_data, observation(new_data,commands,zeros_a,keys[7]), commands,
                         countdown, zeros_a, zeros_a, history, delay,
                         jnp.zeros((num_envs,),jnp.int32) if old is None else jnp.where(mask,0,old.episode_steps),
-                        jnp.zeros((num_envs,)) if old is None else jnp.where(mask,0.0,old.episode_return))
+                        jnp.zeros((num_envs,)) if old is None else jnp.where(mask,0.0,old.episode_return),
+                        jnp.zeros((num_envs,len(REWARD_TERM_NAMES))) if old is None else
+                        jnp.where(mask[:,None],0.0,old.episode_reward_sums))
 
     def env_step(state: EnvState, action, key):
         kcmd, kobs, kreset = jax.random.split(key, 3)
@@ -535,26 +559,29 @@ def make_training_functions(info: ModelInfo, cfg: dict, num_envs: int):
         lin_b, ang_b, gravity_b, _, omega_w, tracked = kinematics(data)
         lin_err = jnp.sum((command[:,:2]-tracked)**2,-1)
         yaw_err = (command[:,2]-omega_w[:,2])**2
-        reward = (cfg["track_lin_vel_xy_reward_scale"]*jnp.exp(-lin_err/cfg["tracking_std"]**2)
-                  +cfg["track_ang_vel_z_reward_scale"]*jnp.exp(-yaw_err/cfg["tracking_std"]**2))*STEP_DT
-        reward += cfg["action_rate_reward_scale"]*jnp.sum((action-state.action)**2,-1)*STEP_DT
-        reward += cfg["joint_torque_reward_scale"]*jnp.sum(data.qfrc_actuator[:,dids]**2,-1)*STEP_DT
+        track_lin = cfg["track_lin_vel_xy_reward_scale"]*jnp.exp(-lin_err/cfg["tracking_std"]**2)*STEP_DT
+        track_ang = cfg["track_ang_vel_z_reward_scale"]*jnp.exp(-yaw_err/cfg["tracking_std"]**2)*STEP_DT
+        action_rate = cfg["action_rate_reward_scale"]*jnp.sum((action-state.action)**2,-1)*STEP_DT
+        dof_torques = cfg["joint_torque_reward_scale"]*jnp.sum(data.qfrc_actuator[:,dids]**2,-1)*STEP_DT
         terms = contact_terms(data)
         forces = group_forces(terms)
         foot_forces, thigh_forces, front_thigh_force = forces[:, :4], forces[:, 4:8], forces[:, 8]
         feet_contact = foot_forces > 1.0
         front_contact = jnp.any(feet_contact[:,:2],-1) | (front_thigh_force > 1.0)
         forbidden = front_contact if cfg["front_back_asymetry"] else jnp.sum(feet_contact,-1)>=3
-        reward += cfg["three_or_more_feet_contact_penalty_reward_scale"]*forbidden*STEP_DT
+        forbidden_contact = cfg["three_or_more_feet_contact_penalty_reward_scale"]*forbidden*STEP_DT
         foot_h = data.xpos[:,foot_bodies,2]
         front_h = jnp.mean(foot_h[:,:2],-1)
         kernel = jnp.where(front_h>=cfg["two_feet_above_height_threshold"],1.0,jnp.exp(-cfg["two_feet_above_height_alpha"]*(cfg["two_feet_above_height_threshold"]-front_h)**2))
         lift = kernel*(~jnp.any(feet_contact[:,:2],-1))
         if cfg["rear_feet_in_contact_for_twofeet"]: lift *= jnp.all(feet_contact[:,2:],-1)
-        reward += cfg["two_feet_above_height_reward_scale"]*lift*STEP_DT
-        reward += cfg["undesired_contact_reward_scale"]*jnp.sum(thigh_forces > 0.6,axis=-1)*STEP_DT
+        two_feet_height = cfg["two_feet_above_height_reward_scale"]*lift*STEP_DT
+        undesired_contacts = cfg["undesired_contact_reward_scale"]*jnp.sum(thigh_forces > 0.6,axis=-1)*STEP_DT
         foot_excess = jnp.maximum(foot_forces-10.0,0.0)
-        reward += cfg["foot_contact_reward_scale"]*jnp.sum(foot_excess**2,axis=-1)*STEP_DT
+        foot_contact = cfg["foot_contact_reward_scale"]*jnp.sum(foot_excess**2,axis=-1)*STEP_DT
+        reward_terms = jnp.stack((track_lin,track_ang,action_rate,dof_torques,forbidden_contact,
+                                  two_feet_height,undesired_contacts,foot_contact),axis=-1)
+        reward = jnp.sum(reward_terms,axis=-1)
         base_hit = force_against_ground(terms,base_membership) > 1.0
         steps = state.episode_steps+1
         timeout = steps>=max_episode_steps
@@ -562,14 +589,17 @@ def make_training_functions(info: ModelInfo, cfg: dict, num_envs: int):
         terminate_front = cfg["finish_on_front_feet_contact"] & forbidden & (steps*STEP_DT>=cfg["finish_on_front_feet_contact_after"])
         terminated = base_hit | terminate_front | diverged
         done = terminated | timeout
-        reward = jnp.where(diverged, 0.0, reward)  # a diverged rollout must not poison the batch
+        reward_terms = jnp.where(diverged[:,None],0.0,reward_terms)
+        reward = jnp.sum(reward_terms,axis=-1)  # a diverged rollout must not poison the batch
         returns = state.episode_return+reward
+        reward_sums = state.episode_reward_sums+reward_terms
         # Observation of the pre-reset state, so a timeout can be bootstrapped from the value
         # the episode actually ended at rather than from the fresh reset observation.
         final_obs = observation(data,command,action,kobs)
-        finished = EnvState(data,final_obs,command,command_steps,action,state.action,history,state.delay,steps,returns)
+        finished = EnvState(data,final_obs,command,command_steps,action,state.action,history,state.delay,steps,returns,reward_sums)
         next_state = reset(kreset,finished,done)
-        return next_state,reward,done,terminated,final_obs,returns,steps
+        termination_causes = jnp.stack((base_hit,terminate_front,diverged),axis=-1)
+        return next_state,reward,reward_terms,done,terminated,termination_causes,final_obs,returns,steps,reward_sums
 
     return jax.jit(reset), jax.jit(env_step)
 
@@ -610,6 +640,34 @@ def gaussian_kl(mean_old, log_std_old, mean_new, log_std_new):
     """Analytic KL(old || new) per sample, as used by the RSL-RL adaptive LR schedule."""
     var_old, var_new = jnp.exp(2*log_std_old), jnp.exp(2*log_std_new)
     return jnp.sum(log_std_new-log_std_old+(var_old+(mean_old-mean_new)**2)/(2*var_new)-0.5,axis=-1)
+
+
+def reward_metrics(reward_terms, completed_reward_sums, completed_episodes: int, cfg: dict) -> dict[str, float]:
+    """Build RSL-compatible scaled and scale-independent reward diagnostics."""
+    terms = np.asarray(reward_terms)
+    completed = np.asarray(completed_reward_sums)
+    log = {}
+    for index, (name, scale_key) in enumerate(zip(REWARD_TERM_NAMES, REWARD_SCALE_KEYS)):
+        scale = float(cfg[scale_key])
+        mean_contribution = float(np.mean(terms[..., index]))
+        log[f"RewardsPerStep/{name}"] = mean_contribution
+        if scale != 0.0:
+            log[f"PerStepRewardRatio/{name}"] = mean_contribution / (scale * STEP_DT)
+        if completed_episodes:
+            # Match IsaacLab's Episode_Reward convention: magnitude per configured maximum
+            # episode second. Keep this key for side-by-side RSL/MJX charts.
+            log[f"Episode_Reward/{name}"] = abs(float(completed[index]) / completed_episodes) / float(
+                cfg["episode_length_s"]
+            )
+    log["RewardsPerStep/cmd_tracking"] = (
+        log["RewardsPerStep/track_lin_vel_xy_exp"] + log["RewardsPerStep/track_ang_vel_z_exp"]
+    )
+    log["RewardsPerStep/total"] = float(np.mean(np.sum(terms, axis=-1)))
+    if completed_episodes:
+        log["Episode_Reward/cmd_tracking"] = (
+            log["Episode_Reward/track_lin_vel_xy_exp"] + log["Episode_Reward/track_ang_vel_z_exp"]
+        )
+    return log
 
 
 def save_checkpoints(output: Path, iteration: int, original_payload, params, actor, critic, actor_keys, critic_keys, scale, config):
@@ -667,12 +725,14 @@ def main():
             state,key=carry;key,ka,ks=jax.random.split(key,3)
             mean=actor_mean(params,state.obs,actor,norms,scale);action=mean+jnp.exp(params["log_std"])*jax.random.normal(ka,mean.shape)
             logp=gaussian_log_prob(action,mean,params["log_std"]);value=critic_value(params,state.obs,critic,norms,scale)
-            next_state,reward,done,terminated,final_obs,ep_return,ep_steps=step_fn(state,action,ks)
+            (next_state,reward,reward_terms,done,terminated,termination_causes,final_obs,
+             ep_return,ep_steps,ep_reward_sums)=step_fn(state,action,ks)
             # Bootstrap timeouts (RSL-RL's ``bootstrap_on_time_outs``) so a truncated episode is
             # not scored as a failure; genuine terminations keep the hard cut.
             timeout=done&~terminated
             reward=reward+args.gamma*critic_value(params,final_obs,critic,norms,scale)*timeout
-            stats=(done*ep_return,done*ep_steps,done,terminated)
+            stats=(done*ep_return,done*ep_steps,done,terminated,termination_causes,
+                   reward_terms,done[:,None]*ep_reward_sums)
             return (next_state,key),(Transition(state.obs,action,logp,reward,done,value,mean),stats)
         return jax.lax.scan(body,(state,key),None,length=args.rollout_steps)
 
@@ -753,14 +813,31 @@ def main():
         batch=build_batch(params,traj,state.obs)
         params,optimizer,m=ppo_update(params,optimizer,batch,kperm)
         m=[float(x) for x in m];elapsed=time.perf_counter()-started
-        ep_return,ep_steps,dones,terminations=(np.asarray(jnp.sum(x)) for x in stats)
+        ep_return,ep_steps,dones,terminations=(np.asarray(jnp.sum(x)) for x in stats[:4])
+        termination_causes=np.asarray(jnp.sum(stats[4],axis=(0,1)))
+        reward_terms=np.asarray(stats[5]);completed_reward_sums=np.asarray(jnp.sum(stats[6],axis=(0,1)))
+        dones=int(dones);terminations=int(terminations);timeouts=dones-terminations
+        rollout_envs=samples
         log={"iteration":iteration,"reward/mean_step":float(jnp.mean(traj.reward)),
-             "episodes":int(dones),"terminations":int(terminations),"timeouts":int(dones-terminations),
+             "episodes":dones,
+             "Episode/count":dones,"Episode/termination_count":terminations,"Episode/timeout_count":timeouts,
+             "Episode/completion_rate_per_env_step":dones/rollout_envs,
+             "Episode/termination_rate_per_env_step":terminations/rollout_envs,
+             "Episode/timeout_rate_per_env_step":timeouts/rollout_envs,
+             "Episode_Termination/base_contact":int(termination_causes[0]),
+             "Episode_Termination/forbidden_feet_contact":int(termination_causes[1]),
+             "Episode_Termination/diverged":int(termination_causes[2]),
+             "Episode_Termination/time_out":timeouts,
+             "terminations":terminations,"timeouts":timeouts,
              "loss/total":m[0],"loss/policy":m[1],"loss/value":m[2],"policy/entropy":m[3],
              "policy/clip_fraction":m[4],"policy/kl":m[5],"grad_norm":m[6],"learning_rate":m[7],
              "updates_applied_frac":m[8],"policy/action_std":float(jnp.mean(jnp.exp(params["log_std"]))),
              "throughput_steps_s":samples/elapsed,"wall_time_s":elapsed}
-        if dones: log |= {"episode/return":float(ep_return/dones),"episode/length_s":float(ep_steps/dones)*STEP_DT}
+        log |= reward_metrics(reward_terms,completed_reward_sums,dones,cfg)
+        if dones:
+            log |= {"episode/return":float(ep_return/dones),"episode/length_s":float(ep_steps/dones)*STEP_DT,
+                    "Episode_Reward/total":float(ep_return/dones),
+                    "Episode/length_steps":float(ep_steps/dones),"Episode/length_seconds":float(ep_steps/dones)*STEP_DT}
         history.append({k:float(v) if isinstance(v,(np.floating,float)) else int(v) for k,v in log.items()})
         print("[INFO] "+" ".join(f"{k}={v:.5g}" if isinstance(v,float) else f"{k}={v}" for k,v in log.items()),flush=True)
         if wandb_run: wandb_run.log(log,step=iteration)
