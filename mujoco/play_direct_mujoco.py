@@ -299,6 +299,24 @@ def checkpoint_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def visual_meshes_sha256(model_path: Path) -> str | None:
+    """Digest of the visual mesh set referenced by the MJCF.
+
+    The archived `solo12.xml` is no longer standalone -- it references `meshes/*.obj`, which are
+    versioned in-repo rather than uploaded per run. The meshes never affect physics, so recording
+    their digest (alongside `git_revision`) is enough to pin exactly which visuals were used.
+    """
+    mesh_dir = model_path.parent / "meshes"
+    files = sorted(mesh_dir.glob("*.obj"))
+    if not files:
+        return None
+    digest = hashlib.sha256()
+    for path in files:
+        digest.update(path.name.encode())
+        digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
 def git_revision() -> str | None:
     try:
         return subprocess.run(
@@ -444,6 +462,7 @@ def run_tracking(args, sim: Solo12Mujoco, policy: Policy, checkpoint: Path, mode
         "checkpoint": str(checkpoint),
         "checkpoint_sha256": checkpoint_sha256(checkpoint),
         "model_xml": str(model_path),
+        "visual_meshes_sha256": visual_meshes_sha256(model_path),
         "git_revision": git_revision(),
         "commands": [list(command) for command in commands],
         "command_duration_s": COMMAND_DURATION_S,

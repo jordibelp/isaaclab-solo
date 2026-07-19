@@ -1,7 +1,7 @@
 <mujoco model="solo12_isaaclab_match">
-  <compiler angle="radian" autolimits="true"/>
+  <compiler angle="radian" autolimits="true" meshdir="meshes"/>
   <option timestep="0.005" gravity="0 0 -9.81" integrator="implicitfast" cone="elliptic"/>
-  <visual><global azimuth="135" elevation="-18"/><headlight ambient="0.35 0.35 0.35" diffuse="0.7 0.7 0.7"/></visual>
+  <visual><global azimuth="135" elevation="-18" offwidth="1920" offheight="1440"/><headlight ambient="0.35 0.35 0.35" diffuse="0.7 0.7 0.7"/><quality shadowsize="4096"/></visual>
   <default>
     <joint damping="0" frictionloss="0" armature="0.00036207"/>
     <geom friction="1 0.005 0.0001" solref="0.02 1" solimp="0.9 0.95 0.001"/>
@@ -17,10 +17,78 @@
     <texture type="skybox" builtin="gradient" rgb1="0.45 0.62 0.82" rgb2="0.88 0.93 0.98" width="512" height="3072"/>
     <texture name="groundplane" type="2d" builtin="checker" mark="edge" rgb1="0.62 0.66 0.70" rgb2="0.72 0.76 0.78" markrgb="0.9 0.94 1.0" width="300" height="300"/>
     <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5" reflectance="0.15"/>
-    <material name="base_mat" rgba="0.16 0.18 0.22 1"/>
-    <material name="front_mat" rgba="0.9 0.26 0.18 1"/>
-    <material name="rear_mat" rgba="0.16 0.45 0.82 1"/>
-    <material name="foot_mat" rgba="0.08 0.08 0.08 1"/>
+    <material name="material_0" rgba="0.5020 0.5020 0.5020 1" specular="0.1" shininess="0.5"/>
+    <material name="material_metal_dark" rgba="0.5020 0.5020 0.5020 1" specular="0.2" shininess="0.5"/>
+    <material name="material_metal_gold" rgba="1.0000 0.7137 0.2196 1" specular="0.4" shininess="0.5"/>
+    <material name="material_metal_grey" rgba="0.5020 0.5020 0.5020 1" specular="0.3" shininess="0.5"/>
+    <material name="material_metal_silver" rgba="1.0000 1.0000 1.0000 1" specular="0.4" shininess="0.5"/>
+    <material name="material_pla_grey" rgba="0.5490 0.5490 0.5490 1" specular="0.05" shininess="0.5"/>
+    <material name="material_pla_white" rgba="0.8941 0.8941 0.8941 1" specular="0.05" shininess="0.5"/>
+    <mesh name="FL_calf__material_0" file="FL_calf__material_0.obj"/>
+    <mesh name="FL_calf__material_metal_grey" file="FL_calf__material_metal_grey.obj"/>
+    <mesh name="FL_hip__material_0" file="FL_hip__material_0.obj"/>
+    <mesh name="FL_hip__material_metal_dark" file="FL_hip__material_metal_dark.obj"/>
+    <mesh name="FL_hip__material_metal_gold" file="FL_hip__material_metal_gold.obj"/>
+    <mesh name="FL_hip__material_metal_grey" file="FL_hip__material_metal_grey.obj"/>
+    <mesh name="FL_hip__material_metal_silver" file="FL_hip__material_metal_silver.obj"/>
+    <mesh name="FL_hip__material_pla_white" file="FL_hip__material_pla_white.obj"/>
+    <mesh name="FL_thigh__material_0" file="FL_thigh__material_0.obj"/>
+    <mesh name="FL_thigh__material_metal_dark" file="FL_thigh__material_metal_dark.obj"/>
+    <mesh name="FL_thigh__material_metal_gold" file="FL_thigh__material_metal_gold.obj"/>
+    <mesh name="FL_thigh__material_metal_grey" file="FL_thigh__material_metal_grey.obj"/>
+    <mesh name="FL_thigh__material_metal_silver" file="FL_thigh__material_metal_silver.obj"/>
+    <mesh name="FL_thigh__material_pla_white" file="FL_thigh__material_pla_white.obj"/>
+    <mesh name="FR_calf__material_0" file="FR_calf__material_0.obj"/>
+    <mesh name="FR_calf__material_metal_grey" file="FR_calf__material_metal_grey.obj"/>
+    <mesh name="FR_hip__material_0" file="FR_hip__material_0.obj"/>
+    <mesh name="FR_hip__material_metal_dark" file="FR_hip__material_metal_dark.obj"/>
+    <mesh name="FR_hip__material_metal_gold" file="FR_hip__material_metal_gold.obj"/>
+    <mesh name="FR_hip__material_metal_grey" file="FR_hip__material_metal_grey.obj"/>
+    <mesh name="FR_hip__material_metal_silver" file="FR_hip__material_metal_silver.obj"/>
+    <mesh name="FR_hip__material_pla_grey" file="FR_hip__material_pla_grey.obj"/>
+    <mesh name="FR_hip__material_pla_white" file="FR_hip__material_pla_white.obj"/>
+    <mesh name="FR_thigh__material_0" file="FR_thigh__material_0.obj"/>
+    <mesh name="FR_thigh__material_metal_dark" file="FR_thigh__material_metal_dark.obj"/>
+    <mesh name="FR_thigh__material_metal_gold" file="FR_thigh__material_metal_gold.obj"/>
+    <mesh name="FR_thigh__material_metal_grey" file="FR_thigh__material_metal_grey.obj"/>
+    <mesh name="FR_thigh__material_metal_silver" file="FR_thigh__material_metal_silver.obj"/>
+    <mesh name="FR_thigh__material_pla_white" file="FR_thigh__material_pla_white.obj"/>
+    <mesh name="RL_calf__material_0" file="RL_calf__material_0.obj"/>
+    <mesh name="RL_calf__material_metal_grey" file="RL_calf__material_metal_grey.obj"/>
+    <mesh name="RL_hip__material_0" file="RL_hip__material_0.obj"/>
+    <mesh name="RL_hip__material_metal_dark" file="RL_hip__material_metal_dark.obj"/>
+    <mesh name="RL_hip__material_metal_gold" file="RL_hip__material_metal_gold.obj"/>
+    <mesh name="RL_hip__material_metal_grey" file="RL_hip__material_metal_grey.obj"/>
+    <mesh name="RL_hip__material_metal_silver" file="RL_hip__material_metal_silver.obj"/>
+    <mesh name="RL_hip__material_pla_grey" file="RL_hip__material_pla_grey.obj"/>
+    <mesh name="RL_hip__material_pla_white" file="RL_hip__material_pla_white.obj"/>
+    <mesh name="RL_thigh__material_0" file="RL_thigh__material_0.obj"/>
+    <mesh name="RL_thigh__material_metal_dark" file="RL_thigh__material_metal_dark.obj"/>
+    <mesh name="RL_thigh__material_metal_gold" file="RL_thigh__material_metal_gold.obj"/>
+    <mesh name="RL_thigh__material_metal_grey" file="RL_thigh__material_metal_grey.obj"/>
+    <mesh name="RL_thigh__material_metal_silver" file="RL_thigh__material_metal_silver.obj"/>
+    <mesh name="RL_thigh__material_pla_white" file="RL_thigh__material_pla_white.obj"/>
+    <mesh name="RR_calf__material_0" file="RR_calf__material_0.obj"/>
+    <mesh name="RR_calf__material_metal_grey" file="RR_calf__material_metal_grey.obj"/>
+    <mesh name="RR_hip__material_0" file="RR_hip__material_0.obj"/>
+    <mesh name="RR_hip__material_metal_dark" file="RR_hip__material_metal_dark.obj"/>
+    <mesh name="RR_hip__material_metal_gold" file="RR_hip__material_metal_gold.obj"/>
+    <mesh name="RR_hip__material_metal_grey" file="RR_hip__material_metal_grey.obj"/>
+    <mesh name="RR_hip__material_metal_silver" file="RR_hip__material_metal_silver.obj"/>
+    <mesh name="RR_hip__material_pla_white" file="RR_hip__material_pla_white.obj"/>
+    <mesh name="RR_thigh__material_0" file="RR_thigh__material_0.obj"/>
+    <mesh name="RR_thigh__material_metal_dark" file="RR_thigh__material_metal_dark.obj"/>
+    <mesh name="RR_thigh__material_metal_gold" file="RR_thigh__material_metal_gold.obj"/>
+    <mesh name="RR_thigh__material_metal_grey" file="RR_thigh__material_metal_grey.obj"/>
+    <mesh name="RR_thigh__material_metal_silver" file="RR_thigh__material_metal_silver.obj"/>
+    <mesh name="RR_thigh__material_pla_white" file="RR_thigh__material_pla_white.obj"/>
+    <mesh name="base__material_0" file="base__material_0.obj"/>
+    <mesh name="base__material_metal_dark" file="base__material_metal_dark.obj"/>
+    <mesh name="base__material_metal_gold" file="base__material_metal_gold.obj"/>
+    <mesh name="base__material_metal_grey" file="base__material_metal_grey.obj"/>
+    <mesh name="base__material_metal_silver" file="base__material_metal_silver.obj"/>
+    <mesh name="base__material_pla_grey" file="base__material_pla_grey.obj"/>
+    <mesh name="base__material_pla_white" file="base__material_pla_white.obj"/>
   </asset>
   <worldbody>
     <geom name="ground" type="plane" size="20 20 0.1" material="groundplane"/>
@@ -31,81 +99,133 @@
       <geom name="base_collision" class="collision" type="box" size="0.2247476 0.0986631 0.0185328"/>
       <geom name="base_collision_L_borde" class="collision" type="box" size="0.0563776 0.0075 0.0159707" pos="0 -0.1091568 0"/>
       <geom name="base_collision_R_borde" class="collision" type="box" size="0.0563776 0.0075 0.0159707" pos="0 0.109 0"/>
-      <geom class="visual" type="box" size="0.22475 0.09866 0.01853" material="base_mat"/>
+      <geom class="visual" type="mesh" mesh="base__material_0" material="material_0"/>
+      <geom class="visual" type="mesh" mesh="base__material_metal_dark" material="material_metal_dark"/>
+      <geom class="visual" type="mesh" mesh="base__material_metal_gold" material="material_metal_gold"/>
+      <geom class="visual" type="mesh" mesh="base__material_metal_grey" material="material_metal_grey"/>
+      <geom class="visual" type="mesh" mesh="base__material_metal_silver" material="material_metal_silver"/>
+      <geom class="visual" type="mesh" mesh="base__material_pla_grey" material="material_pla_grey"/>
+      <geom class="visual" type="mesh" mesh="base__material_pla_white" material="material_pla_white"/>
 
       <body name="FL_hip" pos="0.2141 0.0875 0">
         <joint name="FL_hip_joint" axis="1 0 0" range="-3.1241393 3.1241393"/>
         <inertial pos="-0.0940725 -0.00438935 0.00001384" quat="0.525393 0.524526 0.474075 0.473379" mass="0.14196" diaginertia="0.000386433 0.0003805 0.0000242272"/>
-        <geom class="visual" type="capsule" fromto="0 0 0 -0.0195 0.014 0" size="0.025" material="front_mat"/>
+        <geom class="visual" type="mesh" mesh="FL_hip__material_0" material="material_0"/>
+        <geom class="visual" type="mesh" mesh="FL_hip__material_metal_dark" material="material_metal_dark"/>
+        <geom class="visual" type="mesh" mesh="FL_hip__material_metal_gold" material="material_metal_gold"/>
+        <geom class="visual" type="mesh" mesh="FL_hip__material_metal_grey" material="material_metal_grey"/>
+        <geom class="visual" type="mesh" mesh="FL_hip__material_metal_silver" material="material_metal_silver"/>
+        <geom class="visual" type="mesh" mesh="FL_hip__material_pla_white" material="material_pla_white"/>
         <body name="FL_thigh" pos="-0.0195 0.014 0">
           <joint name="FL_thigh_joint" axis="0 1 0" range="-4.3633231 1.5707964"/>
           <inertial pos="0.0000153 0.0176764 -0.0783823" quat="0.705254 -0.0412383 0.0411345 0.706558" mass="0.147373" diaginertia="0.000421743 0.0004154 0.0000244467"/>
           <geom name="FL_thigh_top" class="collision" type="box" size="0.0235987 0.0213779 0.0226626" pos="-0.0031373 0.0217965 -0.0769578"/>
           <geom name="FL_knee" class="collision" type="sphere" size="0.0371" pos="0 0.0325958 -0.1546405"/>
-          <geom class="visual" type="capsule" fromto="0 0 0 0 0.03745 -0.16" size="0.018" material="front_mat"/>
+          <geom class="visual" type="mesh" mesh="FL_thigh__material_0" material="material_0"/>
+          <geom class="visual" type="mesh" mesh="FL_thigh__material_metal_dark" material="material_metal_dark"/>
+          <geom class="visual" type="mesh" mesh="FL_thigh__material_metal_gold" material="material_metal_gold"/>
+          <geom class="visual" type="mesh" mesh="FL_thigh__material_metal_grey" material="material_metal_grey"/>
+          <geom class="visual" type="mesh" mesh="FL_thigh__material_metal_silver" material="material_metal_silver"/>
+          <geom class="visual" type="mesh" mesh="FL_thigh__material_pla_white" material="material_pla_white"/>
           <body name="FL_calf" pos="0 0.03745 -0.16">
             <joint name="FL_calf_joint" axis="0 1 0" range="-3.1241393 3.1415927"/>
             <inertial pos="0 0.00776716 -0.0700388" quat="0.707057 -0.00837059 0.00837059 0.707057" mass="0.023" diaginertia="0.0000858474 0.00008508 0.00000134264"/>
             <geom name="FL_foot_geom" class="collision" type="cylinder" size="0.0186086 0.0063132" pos="0.0006549 0.0076652 -0.1606478" euler="1.5707963 0 0"/>
-            <geom class="visual" type="capsule" fromto="0 0 0 0 0.009 -0.16" size="0.012" material="front_mat"/>
-            <body name="FL_foot" pos="0 0.009 -0.16"><inertial pos="0 0 0" mass="0.007" diaginertia="0.0000007 0.0000007 0.0000007"/><geom class="visual" type="sphere" size="0.0186" material="foot_mat"/></body>
+            <geom class="visual" type="mesh" mesh="FL_calf__material_0" material="material_0"/>
+            <geom class="visual" type="mesh" mesh="FL_calf__material_metal_grey" material="material_metal_grey"/>
+            <body name="FL_foot" pos="0 0.009 -0.16"><inertial pos="0 0 0" mass="0.007" diaginertia="0.0000007 0.0000007 0.0000007"/></body>
           </body>
         </body>
       </body>
       <body name="FR_hip" pos="0.2141 -0.0875 0">
         <joint name="FR_hip_joint" axis="1 0 0" range="-3.1241393 3.1241393"/>
         <inertial pos="-0.0940725 0.00438935 -0.00001384" quat="0.474075 0.473379 0.525393 0.524526" mass="0.14196" diaginertia="0.000386433 0.0003805 0.0000242272"/>
-        <geom class="visual" type="capsule" fromto="0 0 0 -0.0195 -0.014 0" size="0.025" material="front_mat"/>
+        <geom class="visual" type="mesh" mesh="FR_hip__material_0" material="material_0"/>
+        <geom class="visual" type="mesh" mesh="FR_hip__material_metal_dark" material="material_metal_dark"/>
+        <geom class="visual" type="mesh" mesh="FR_hip__material_metal_gold" material="material_metal_gold"/>
+        <geom class="visual" type="mesh" mesh="FR_hip__material_metal_grey" material="material_metal_grey"/>
+        <geom class="visual" type="mesh" mesh="FR_hip__material_metal_silver" material="material_metal_silver"/>
+        <geom class="visual" type="mesh" mesh="FR_hip__material_pla_grey" material="material_pla_grey"/>
+        <geom class="visual" type="mesh" mesh="FR_hip__material_pla_white" material="material_pla_white"/>
         <body name="FR_thigh" pos="-0.0195 -0.014 0">
           <joint name="FR_thigh_joint" axis="0 1 0" range="-4.3633231 1.5707964"/>
           <inertial pos="-0.0000153 -0.0176764 -0.0783823" quat="0.705254 0.0412383 -0.0411345 0.706558" mass="0.147373" diaginertia="0.000421743 0.0004154 0.0000244467"/>
           <geom name="FR_thigh_top" class="collision" type="box" size="0.0235987 0.0213779 0.0226626" pos="0 -0.0189446 -0.0769578"/>
           <geom name="FR_knee" class="collision" type="sphere" size="0.0371" pos="-0.0018192 -0.0334549 -0.1528886"/>
-          <geom class="visual" type="capsule" fromto="0 0 0 0 -0.03745 -0.16" size="0.018" material="front_mat"/>
+          <geom class="visual" type="mesh" mesh="FR_thigh__material_0" material="material_0"/>
+          <geom class="visual" type="mesh" mesh="FR_thigh__material_metal_dark" material="material_metal_dark"/>
+          <geom class="visual" type="mesh" mesh="FR_thigh__material_metal_gold" material="material_metal_gold"/>
+          <geom class="visual" type="mesh" mesh="FR_thigh__material_metal_grey" material="material_metal_grey"/>
+          <geom class="visual" type="mesh" mesh="FR_thigh__material_metal_silver" material="material_metal_silver"/>
+          <geom class="visual" type="mesh" mesh="FR_thigh__material_pla_white" material="material_pla_white"/>
           <body name="FR_calf" pos="0 -0.03745 -0.16">
             <joint name="FR_calf_joint" axis="0 1 0" range="-3.1241393 3.1415927"/>
             <inertial pos="0 -0.00776716 -0.0700388" quat="0.707057 0.00837059 -0.00837059 0.707057" mass="0.023" diaginertia="0.0000858474 0.00008508 0.00000134264"/>
             <geom name="FR_foot_geom" class="collision" type="cylinder" size="0.0186086 0.0063132" pos="0.0009403 -0.0080470 -0.1610490" euler="1.5707963 0 0"/>
-            <geom class="visual" type="capsule" fromto="0 0 0 0 -0.009 -0.16" size="0.012" material="front_mat"/>
-            <body name="FR_foot" pos="0 -0.009 -0.16"><inertial pos="0 0 0" mass="0.007" diaginertia="0.0000007 0.0000007 0.0000007"/><geom class="visual" type="sphere" size="0.0186" material="foot_mat"/></body>
+            <geom class="visual" type="mesh" mesh="FR_calf__material_0" material="material_0"/>
+            <geom class="visual" type="mesh" mesh="FR_calf__material_metal_grey" material="material_metal_grey"/>
+            <body name="FR_foot" pos="0 -0.009 -0.16"><inertial pos="0 0 0" mass="0.007" diaginertia="0.0000007 0.0000007 0.0000007"/></body>
           </body>
         </body>
       </body>
       <body name="RL_hip" pos="-0.2141 0.0875 0">
         <joint name="RL_hip_joint" axis="1 0 0" range="-3.1241393 3.1241393"/>
         <inertial pos="0.0940725 -0.00438935 -0.00001384" quat="0.473379 0.474075 0.524526 0.525393" mass="0.14196" diaginertia="0.000386433 0.0003805 0.0000242272"/>
-        <geom class="visual" type="capsule" fromto="0 0 0 0.0195 0.014 0" size="0.025" material="rear_mat"/>
+        <geom class="visual" type="mesh" mesh="RL_hip__material_0" material="material_0"/>
+        <geom class="visual" type="mesh" mesh="RL_hip__material_metal_dark" material="material_metal_dark"/>
+        <geom class="visual" type="mesh" mesh="RL_hip__material_metal_gold" material="material_metal_gold"/>
+        <geom class="visual" type="mesh" mesh="RL_hip__material_metal_grey" material="material_metal_grey"/>
+        <geom class="visual" type="mesh" mesh="RL_hip__material_metal_silver" material="material_metal_silver"/>
+        <geom class="visual" type="mesh" mesh="RL_hip__material_pla_grey" material="material_pla_grey"/>
+        <geom class="visual" type="mesh" mesh="RL_hip__material_pla_white" material="material_pla_white"/>
         <body name="RL_thigh" pos="0.0195 0.014 0">
           <joint name="RL_thigh_joint" axis="0 1 0" range="-1.5707964 4.3633231"/>
           <inertial pos="0.0000153 0.0176764 -0.0783823" quat="0.705254 -0.0412383 0.0411345 0.706558" mass="0.147373" diaginertia="0.000421743 0.0004154 0.0000244467"/>
           <geom name="RL_thigh_top" class="collision" type="box" size="0.0235987 0.0213779 0.0226626" pos="0 0.0201289 -0.0775397"/>
           <geom name="RL_knee" class="collision" type="sphere" size="0.0371" pos="0 0.0357086 -0.1546405"/>
-          <geom class="visual" type="capsule" fromto="0 0 0 0 0.03745 -0.16" size="0.018" material="rear_mat"/>
+          <geom class="visual" type="mesh" mesh="RL_thigh__material_0" material="material_0"/>
+          <geom class="visual" type="mesh" mesh="RL_thigh__material_metal_dark" material="material_metal_dark"/>
+          <geom class="visual" type="mesh" mesh="RL_thigh__material_metal_gold" material="material_metal_gold"/>
+          <geom class="visual" type="mesh" mesh="RL_thigh__material_metal_grey" material="material_metal_grey"/>
+          <geom class="visual" type="mesh" mesh="RL_thigh__material_metal_silver" material="material_metal_silver"/>
+          <geom class="visual" type="mesh" mesh="RL_thigh__material_pla_white" material="material_pla_white"/>
           <body name="RL_calf" pos="0 0.03745 -0.16">
             <joint name="RL_calf_joint" axis="0 1 0" range="-3.1241393 3.1415927"/>
             <inertial pos="0 0.00776716 -0.0700388" quat="0.707057 -0.00837059 0.00837059 0.707057" mass="0.023" diaginertia="0.0000858474 0.00008508 0.00000134264"/>
             <geom name="RL_foot_geom" class="collision" type="cylinder" size="0.0186086 0.0063132" pos="0.0006715 0.0076652 -0.1603854" euler="1.5707963 0 0"/>
-            <geom class="visual" type="capsule" fromto="0 0 0 0 0.009 -0.16" size="0.012" material="rear_mat"/>
-            <body name="RL_foot" pos="0 0.009 -0.16"><inertial pos="0 0 0" mass="0.007" diaginertia="0.0000007 0.0000007 0.0000007"/><geom class="visual" type="sphere" size="0.0186" material="foot_mat"/></body>
+            <geom class="visual" type="mesh" mesh="RL_calf__material_0" material="material_0"/>
+            <geom class="visual" type="mesh" mesh="RL_calf__material_metal_grey" material="material_metal_grey"/>
+            <body name="RL_foot" pos="0 0.009 -0.16"><inertial pos="0 0 0" mass="0.007" diaginertia="0.0000007 0.0000007 0.0000007"/></body>
           </body>
         </body>
       </body>
       <body name="RR_hip" pos="-0.2141 -0.0875 0">
         <joint name="RR_hip_joint" axis="1 0 0" range="-3.1241393 3.1241393"/>
         <inertial pos="0.0940725 0.00438935 0.00001384" quat="0.524526 0.525393 0.473379 0.474075" mass="0.14196" diaginertia="0.000386433 0.0003805 0.0000242272"/>
-        <geom class="visual" type="capsule" fromto="0 0 0 0.0195 -0.014 0" size="0.025" material="rear_mat"/>
+        <geom class="visual" type="mesh" mesh="RR_hip__material_0" material="material_0"/>
+        <geom class="visual" type="mesh" mesh="RR_hip__material_metal_dark" material="material_metal_dark"/>
+        <geom class="visual" type="mesh" mesh="RR_hip__material_metal_gold" material="material_metal_gold"/>
+        <geom class="visual" type="mesh" mesh="RR_hip__material_metal_grey" material="material_metal_grey"/>
+        <geom class="visual" type="mesh" mesh="RR_hip__material_metal_silver" material="material_metal_silver"/>
+        <geom class="visual" type="mesh" mesh="RR_hip__material_pla_white" material="material_pla_white"/>
         <body name="RR_thigh" pos="0.0195 -0.014 0">
           <joint name="RR_thigh_joint" axis="0 1 0" range="-1.5707964 4.3633231"/>
           <inertial pos="-0.0000153 -0.0176764 -0.0783823" quat="0.705254 0.0412383 -0.0411345 0.706558" mass="0.147373" diaginertia="0.000421743 0.0004154 0.0000244467"/>
           <geom name="RR_thigh_top" class="collision" type="box" size="0.0235987 0.0213779 0.0226626" pos="0 -0.02 -0.0800224"/>
           <geom name="RR_knee" class="collision" type="sphere" size="0.0371" pos="0 -0.0329968 -0.1546405"/>
-          <geom class="visual" type="capsule" fromto="0 0 0 0 -0.03745 -0.16" size="0.018" material="rear_mat"/>
+          <geom class="visual" type="mesh" mesh="RR_thigh__material_0" material="material_0"/>
+          <geom class="visual" type="mesh" mesh="RR_thigh__material_metal_dark" material="material_metal_dark"/>
+          <geom class="visual" type="mesh" mesh="RR_thigh__material_metal_gold" material="material_metal_gold"/>
+          <geom class="visual" type="mesh" mesh="RR_thigh__material_metal_grey" material="material_metal_grey"/>
+          <geom class="visual" type="mesh" mesh="RR_thigh__material_metal_silver" material="material_metal_silver"/>
+          <geom class="visual" type="mesh" mesh="RR_thigh__material_pla_white" material="material_pla_white"/>
           <body name="RR_calf" pos="0 -0.03745 -0.16">
             <joint name="RR_calf_joint" axis="0 1 0" range="-3.1241393 3.1415927"/>
             <inertial pos="0 -0.00776716 -0.0700388" quat="0.707057 0.00837059 -0.00837059 0.707057" mass="0.023" diaginertia="0.0000858474 0.00008508 0.00000134264"/>
             <geom name="RR_foot_geom" class="collision" type="cylinder" size="0.0186086 0.0063132" pos="0.0006519 -0.0077324 -0.1594781" euler="1.5707963 0 0"/>
-            <geom class="visual" type="capsule" fromto="0 0 0 0 -0.009 -0.16" size="0.012" material="rear_mat"/>
-            <body name="RR_foot" pos="0 -0.009 -0.16"><inertial pos="0 0 0" mass="0.007" diaginertia="0.0000007 0.0000007 0.0000007"/><geom class="visual" type="sphere" size="0.0186" material="foot_mat"/></body>
+            <geom class="visual" type="mesh" mesh="RR_calf__material_0" material="material_0"/>
+            <geom class="visual" type="mesh" mesh="RR_calf__material_metal_grey" material="material_metal_grey"/>
+            <body name="RR_foot" pos="0 -0.009 -0.16"><inertial pos="0 0 0" mass="0.007" diaginertia="0.0000007 0.0000007 0.0000007"/></body>
           </body>
         </body>
       </body>

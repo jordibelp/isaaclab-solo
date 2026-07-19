@@ -1,2 +1,12 @@
 *.usd filter=lfs diff=lfs merge=lfs -text
 
+# MuJoCo robot assets. Keep source/configuration text small in Git history while
+# storing large generated geometry through Git LFS.
+mujoco/**/*.urdf filter=lfs diff=lfs merge=lfs -text
+mujoco/**/*.obj filter=lfs diff=lfs merge=lfs -text
+mujoco/**/*.stl filter=lfs diff=lfs merge=lfs -text
+mujoco/**/*.dae filter=lfs diff=lfs merge=lfs -text
+mujoco/**/*.ply filter=lfs diff=lfs merge=lfs -text
+mujoco/**/*.fbx filter=lfs diff=lfs merge=lfs -text
+mujoco/**/*.glb filter=lfs diff=lfs merge=lfs -text
+mujoco/**/*.gltf filter=lfs diff=lfs merge=lfs -text

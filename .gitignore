@@ -19,6 +19,18 @@
 **/*.usdc
 **/*.usdz
 
+# MuJoCo robot assets are opt-in: add new files explicitly with `git add -f`.
+# Once tracked, later edits are shown and staged normally. Git LFS storage is
+# configured for these paths in .gitattributes.
+/mujoco/**/*.urdf
+/mujoco/**/*.obj
+/mujoco/**/*.stl
+/mujoco/**/*.dae
+/mujoco/**/*.ply
+/mujoco/**/*.fbx
+/mujoco/**/*.glb
+/mujoco/**/*.gltf
+
 # Checkpoints / model artifacts
 **/checkpoints/
 **/checkpoint_recordings/

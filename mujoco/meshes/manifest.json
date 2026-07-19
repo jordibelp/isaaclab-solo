@@ -1,0 +1,747 @@
+{
+  "base": [
+    {
+      "name": "base__material_0",
+      "file": "base__material_0.obj",
+      "rgb": [
+        0.5019607543945312,
+        0.5019607543945312,
+        0.5019607543945312
+      ],
+      "nv": 14118,
+      "nf": 27630
+    },
+    {
+      "name": "base__material_metal_dark",
+      "file": "base__material_metal_dark.obj",
+      "rgb": [
+        0.5019609928131104,
+        0.5019609928131104,
+        0.5019609928131104
+      ],
+      "nv": 10260,
+      "nf": 17366
+    },
+    {
+      "name": "base__material_metal_gold",
+      "file": "base__material_metal_gold.obj",
+      "rgb": [
+        1.0,
+        0.7137259840965271,
+        0.21960799396038055
+      ],
+      "nv": 12524,
+      "nf": 24720
+    },
+    {
+      "name": "base__material_metal_grey",
+      "file": "base__material_metal_grey.obj",
+      "rgb": [
+        0.5019609928131104,
+        0.5019609928131104,
+        0.5019609928131104
+      ],
+      "nv": 7596,
+      "nf": 15000
+    },
+    {
+      "name": "base__material_metal_silver",
+      "file": "base__material_metal_silver.obj",
+      "rgb": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "nv": 7321,
+      "nf": 12208
+    },
+    {
+      "name": "base__material_pla_grey",
+      "file": "base__material_pla_grey.obj",
+      "rgb": [
+        0.549019992351532,
+        0.549019992351532,
+        0.549019992351532
+      ],
+      "nv": 15147,
+      "nf": 30888
+    },
+    {
+      "name": "base__material_pla_white",
+      "file": "base__material_pla_white.obj",
+      "rgb": [
+        0.8941180109977722,
+        0.8941180109977722,
+        0.8941180109977722
+      ],
+      "nv": 11621,
+      "nf": 23294
+    }
+  ],
+  "FL_hip": [
+    {
+      "name": "FL_hip__material_0",
+      "file": "FL_hip__material_0.obj",
+      "rgb": [
+        0.5019607543945312,
+        0.5019607543945312,
+        0.5019607543945312
+      ],
+      "nv": 3142,
+      "nf": 6211
+    },
+    {
+      "name": "FL_hip__material_metal_dark",
+      "file": "FL_hip__material_metal_dark.obj",
+      "rgb": [
+        0.5019609928131104,
+        0.5019609928131104,
+        0.5019609928131104
+      ],
+      "nv": 2139,
+      "nf": 3729
+    },
+    {
+      "name": "FL_hip__material_metal_gold",
+      "file": "FL_hip__material_metal_gold.obj",
+      "rgb": [
+        1.0,
+        0.7137259840965271,
+        0.21960799396038055
+      ],
+      "nv": 3131,
+      "nf": 6180
+    },
+    {
+      "name": "FL_hip__material_metal_grey",
+      "file": "FL_hip__material_metal_grey.obj",
+      "rgb": [
+        0.5019609928131104,
+        0.5019609928131104,
+        0.5019609928131104
+      ],
+      "nv": 2283,
+      "nf": 4530
+    },
+    {
+      "name": "FL_hip__material_metal_silver",
+      "file": "FL_hip__material_metal_silver.obj",
+      "rgb": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "nv": 1567,
+      "nf": 2552
+    },
+    {
+      "name": "FL_hip__material_pla_white",
+      "file": "FL_hip__material_pla_white.obj",
+      "rgb": [
+        0.8941180109977722,
+        0.8941180109977722,
+        0.8941180109977722
+      ],
+      "nv": 2691,
+      "nf": 5414
+    }
+  ],
+  "FL_thigh": [
+    {
+      "name": "FL_thigh__material_0",
+      "file": "FL_thigh__material_0.obj",
+      "rgb": [
+        0.5019607543945312,
+        0.5019607543945312,
+        0.5019607543945312
+      ],
+      "nv": 2791,
+      "nf": 5564
+    },
+    {
+      "name": "FL_thigh__material_metal_dark",
+      "file": "FL_thigh__material_metal_dark.obj",
+      "rgb": [
+        0.5019609928131104,
+        0.5019609928131104,
+        0.5019609928131104
+      ],
+      "nv": 2139,
+      "nf": 3729
+    },
+    {
+      "name": "FL_thigh__material_metal_gold",
+      "file": "FL_thigh__material_metal_gold.obj",
+      "rgb": [
+        1.0,
+        0.7137259840965271,
+        0.21960799396038055
+      ],
+      "nv": 3131,
+      "nf": 6180
+    },
+    {
+      "name": "FL_thigh__material_metal_grey",
+      "file": "FL_thigh__material_metal_grey.obj",
+      "rgb": [
+        0.5019609928131104,
+        0.5019609928131104,
+        0.5019609928131104
+      ],
+      "nv": 2528,
+      "nf": 5016
+    },
+    {
+      "name": "FL_thigh__material_metal_silver",
+      "file": "FL_thigh__material_metal_silver.obj",
+      "rgb": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "nv": 1436,
+      "nf": 2290
+    },
+    {
+      "name": "FL_thigh__material_pla_white",
+      "file": "FL_thigh__material_pla_white.obj",
+      "rgb": [
+        0.8941180109977722,
+        0.8941180109977722,
+        0.8941180109977722
+      ],
+      "nv": 3539,
+      "nf": 7106
+    }
+  ],
+  "FL_calf": [
+    {
+      "name": "FL_calf__material_0",
+      "file": "FL_calf__material_0.obj",
+      "rgb": [
+        0.5019607543945312,
+        0.5019607543945312,
+        0.5019607543945312
+      ],
+      "nv": 1387,
+      "nf": 2778
+    },
+    {
+      "name": "FL_calf__material_metal_grey",
+      "file": "FL_calf__material_metal_grey.obj",
+      "rgb": [
+        0.5019609928131104,
+        0.5019609928131104,
+        0.5019609928131104
+      ],
+      "nv": 441,
+      "nf": 874
+    }
+  ],
+  "FL_foot": [],
+  "FR_hip": [
+    {
+      "name": "FR_hip__material_0",
+      "file": "FR_hip__material_0.obj",
+      "rgb": [
+        0.5019607543945312,
+        0.5019607543945312,
+        0.5019607543945312
+      ],
+      "nv": 3142,
+      "nf": 6211
+    },
+    {
+      "name": "FR_hip__material_metal_dark",
+      "file": "FR_hip__material_metal_dark.obj",
+      "rgb": [
+        0.5019609928131104,
+        0.5019609928131104,
+        0.5019609928131104
+      ],
+      "nv": 2139,
+      "nf": 3729
+    },
+    {
+      "name": "FR_hip__material_metal_gold",
+      "file": "FR_hip__material_metal_gold.obj",
+      "rgb": [
+        1.0,
+        0.7137259840965271,
+        0.21960799396038055
+      ],
+      "nv": 3131,
+      "nf": 6180
+    },
+    {
+      "name": "FR_hip__material_metal_grey",
+      "file": "FR_hip__material_metal_grey.obj",
+      "rgb": [
+        0.5019609928131104,
+        0.5019609928131104,
+        0.5019609928131104
+      ],
+      "nv": 2283,
+      "nf": 4530
+    },
+    {
+      "name": "FR_hip__material_metal_silver",
+      "file": "FR_hip__material_metal_silver.obj",
+      "rgb": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "nv": 1567,
+      "nf": 2552
+    },
+    {
+      "name": "FR_hip__material_pla_grey",
+      "file": "FR_hip__material_pla_grey.obj",
+      "rgb": [
+        0.549019992351532,
+        0.549019992351532,
+        0.549019992351532
+      ],
+      "nv": 560,
+      "nf": 1128
+    },
+    {
+      "name": "FR_hip__material_pla_white",
+      "file": "FR_hip__material_pla_white.obj",
+      "rgb": [
+        0.8941180109977722,
+        0.8941180109977722,
+        0.8941180109977722
+      ],
+      "nv": 2691,
+      "nf": 5414
+    }
+  ],
+  "FR_thigh": [
+    {
+      "name": "FR_thigh__material_0",
+      "file": "FR_thigh__material_0.obj",
+      "rgb": [
+        0.5019607543945312,
+        0.5019607543945312,
+        0.5019607543945312
+      ],
+      "nv": 2791,
+      "nf": 5564
+    },
+    {
+      "name": "FR_thigh__material_metal_dark",
+      "file": "FR_thigh__material_metal_dark.obj",
+      "rgb": [
+        0.5019609928131104,
+        0.5019609928131104,
+        0.5019609928131104
+      ],
+      "nv": 2139,
+      "nf": 3729
+    },
+    {
+      "name": "FR_thigh__material_metal_gold",
+      "file": "FR_thigh__material_metal_gold.obj",
+      "rgb": [
+        1.0,
+        0.7137259840965271,
+        0.21960799396038055
+      ],
+      "nv": 3131,
+      "nf": 6180
+    },
+    {
+      "name": "FR_thigh__material_metal_grey",
+      "file": "FR_thigh__material_metal_grey.obj",
+      "rgb": [
+        0.5019609928131104,
+        0.5019609928131104,
+        0.5019609928131104
+      ],
+      "nv": 2528,
+      "nf": 5016
+    },
+    {
+      "name": "FR_thigh__material_metal_silver",
+      "file": "FR_thigh__material_metal_silver.obj",
+      "rgb": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "nv": 1436,
+      "nf": 2290
+    },
+    {
+      "name": "FR_thigh__material_pla_white",
+      "file": "FR_thigh__material_pla_white.obj",
+      "rgb": [
+        0.8941180109977722,
+        0.8941180109977722,
+        0.8941180109977722
+      ],
+      "nv": 3539,
+      "nf": 7106
+    }
+  ],
+  "FR_calf": [
+    {
+      "name": "FR_calf__material_0",
+      "file": "FR_calf__material_0.obj",
+      "rgb": [
+        0.5019607543945312,
+        0.5019607543945312,
+        0.5019607543945312
+      ],
+      "nv": 1387,
+      "nf": 2778
+    },
+    {
+      "name": "FR_calf__material_metal_grey",
+      "file": "FR_calf__material_metal_grey.obj",
+      "rgb": [
+        0.5019609928131104,
+        0.5019609928131104,
+        0.5019609928131104
+      ],
+      "nv": 441,
+      "nf": 874
+    }
+  ],
+  "FR_foot": [],
+  "RL_hip": [
+    {
+      "name": "RL_hip__material_0",
+      "file": "RL_hip__material_0.obj",
+      "rgb": [
+        0.5019607543945312,
+        0.5019607543945312,
+        0.5019607543945312
+      ],
+      "nv": 3142,
+      "nf": 6211
+    },
+    {
+      "name": "RL_hip__material_metal_dark",
+      "file": "RL_hip__material_metal_dark.obj",
+      "rgb": [
+        0.5019609928131104,
+        0.5019609928131104,
+        0.5019609928131104
+      ],
+      "nv": 2139,
+      "nf": 3729
+    },
+    {
+      "name": "RL_hip__material_metal_gold",
+      "file": "RL_hip__material_metal_gold.obj",
+      "rgb": [
+        1.0,
+        0.7137259840965271,
+        0.21960799396038055
+      ],
+      "nv": 3131,
+      "nf": 6180
+    },
+    {
+      "name": "RL_hip__material_metal_grey",
+      "file": "RL_hip__material_metal_grey.obj",
+      "rgb": [
+        0.5019609928131104,
+        0.5019609928131104,
+        0.5019609928131104
+      ],
+      "nv": 2283,
+      "nf": 4530
+    },
+    {
+      "name": "RL_hip__material_metal_silver",
+      "file": "RL_hip__material_metal_silver.obj",
+      "rgb": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "nv": 1567,
+      "nf": 2552
+    },
+    {
+      "name": "RL_hip__material_pla_grey",
+      "file": "RL_hip__material_pla_grey.obj",
+      "rgb": [
+        0.549019992351532,
+        0.549019992351532,
+        0.549019992351532
+      ],
+      "nv": 560,
+      "nf": 1128
+    },
+    {
+      "name": "RL_hip__material_pla_white",
+      "file": "RL_hip__material_pla_white.obj",
+      "rgb": [
+        0.8941180109977722,
+        0.8941180109977722,
+        0.8941180109977722
+      ],
+      "nv": 2691,
+      "nf": 5414
+    }
+  ],
+  "RL_thigh": [
+    {
+      "name": "RL_thigh__material_0",
+      "file": "RL_thigh__material_0.obj",
+      "rgb": [
+        0.5019607543945312,
+        0.5019607543945312,
+        0.5019607543945312
+      ],
+      "nv": 2791,
+      "nf": 5564
+    },
+    {
+      "name": "RL_thigh__material_metal_dark",
+      "file": "RL_thigh__material_metal_dark.obj",
+      "rgb": [
+        0.5019609928131104,
+        0.5019609928131104,
+        0.5019609928131104
+      ],
+      "nv": 2139,
+      "nf": 3729
+    },
+    {
+      "name": "RL_thigh__material_metal_gold",
+      "file": "RL_thigh__material_metal_gold.obj",
+      "rgb": [
+        1.0,
+        0.7137259840965271,
+        0.21960799396038055
+      ],
+      "nv": 3131,
+      "nf": 6180
+    },
+    {
+      "name": "RL_thigh__material_metal_grey",
+      "file": "RL_thigh__material_metal_grey.obj",
+      "rgb": [
+        0.5019609928131104,
+        0.5019609928131104,
+        0.5019609928131104
+      ],
+      "nv": 2528,
+      "nf": 5016
+    },
+    {
+      "name": "RL_thigh__material_metal_silver",
+      "file": "RL_thigh__material_metal_silver.obj",
+      "rgb": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "nv": 1436,
+      "nf": 2290
+    },
+    {
+      "name": "RL_thigh__material_pla_white",
+      "file": "RL_thigh__material_pla_white.obj",
+      "rgb": [
+        0.8941180109977722,
+        0.8941180109977722,
+        0.8941180109977722
+      ],
+      "nv": 3539,
+      "nf": 7106
+    }
+  ],
+  "RL_calf": [
+    {
+      "name": "RL_calf__material_0",
+      "file": "RL_calf__material_0.obj",
+      "rgb": [
+        0.5019607543945312,
+        0.5019607543945312,
+        0.5019607543945312
+      ],
+      "nv": 1387,
+      "nf": 2778
+    },
+    {
+      "name": "RL_calf__material_metal_grey",
+      "file": "RL_calf__material_metal_grey.obj",
+      "rgb": [
+        0.5019609928131104,
+        0.5019609928131104,
+        0.5019609928131104
+      ],
+      "nv": 441,
+      "nf": 874
+    }
+  ],
+  "RL_foot": [],
+  "RR_hip": [
+    {
+      "name": "RR_hip__material_0",
+      "file": "RR_hip__material_0.obj",
+      "rgb": [
+        0.5019607543945312,
+        0.5019607543945312,
+        0.5019607543945312
+      ],
+      "nv": 3142,
+      "nf": 6211
+    },
+    {
+      "name": "RR_hip__material_metal_dark",
+      "file": "RR_hip__material_metal_dark.obj",
+      "rgb": [
+        0.5019609928131104,
+        0.5019609928131104,
+        0.5019609928131104
+      ],
+      "nv": 2139,
+      "nf": 3729
+    },
+    {
+      "name": "RR_hip__material_metal_gold",
+      "file": "RR_hip__material_metal_gold.obj",
+      "rgb": [
+        1.0,
+        0.7137259840965271,
+        0.21960799396038055
+      ],
+      "nv": 3131,
+      "nf": 6180
+    },
+    {
+      "name": "RR_hip__material_metal_grey",
+      "file": "RR_hip__material_metal_grey.obj",
+      "rgb": [
+        0.5019609928131104,
+        0.5019609928131104,
+        0.5019609928131104
+      ],
+      "nv": 2283,
+      "nf": 4530
+    },
+    {
+      "name": "RR_hip__material_metal_silver",
+      "file": "RR_hip__material_metal_silver.obj",
+      "rgb": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "nv": 1567,
+      "nf": 2552
+    },
+    {
+      "name": "RR_hip__material_pla_white",
+      "file": "RR_hip__material_pla_white.obj",
+      "rgb": [
+        0.8941180109977722,
+        0.8941180109977722,
+        0.8941180109977722
+      ],
+      "nv": 2691,
+      "nf": 5414
+    }
+  ],
+  "RR_thigh": [
+    {
+      "name": "RR_thigh__material_0",
+      "file": "RR_thigh__material_0.obj",
+      "rgb": [
+        0.5019607543945312,
+        0.5019607543945312,
+        0.5019607543945312
+      ],
+      "nv": 2791,
+      "nf": 5564
+    },
+    {
+      "name": "RR_thigh__material_metal_dark",
+      "file": "RR_thigh__material_metal_dark.obj",
+      "rgb": [
+        0.5019609928131104,
+        0.5019609928131104,
+        0.5019609928131104
+      ],
+      "nv": 2139,
+      "nf": 3729
+    },
+    {
+      "name": "RR_thigh__material_metal_gold",
+      "file": "RR_thigh__material_metal_gold.obj",
+      "rgb": [
+        1.0,
+        0.7137259840965271,
+        0.21960799396038055
+      ],
+      "nv": 3131,
+      "nf": 6180
+    },
+    {
+      "name": "RR_thigh__material_metal_grey",
+      "file": "RR_thigh__material_metal_grey.obj",
+      "rgb": [
+        0.5019609928131104,
+        0.5019609928131104,
+        0.5019609928131104
+      ],
+      "nv": 2528,
+      "nf": 5016
+    },
+    {
+      "name": "RR_thigh__material_metal_silver",
+      "file": "RR_thigh__material_metal_silver.obj",
+      "rgb": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "nv": 1436,
+      "nf": 2290
+    },
+    {
+      "name": "RR_thigh__material_pla_white",
+      "file": "RR_thigh__material_pla_white.obj",
+      "rgb": [
+        0.8941180109977722,
+        0.8941180109977722,
+        0.8941180109977722
+      ],
+      "nv": 3539,
+      "nf": 7106
+    }
+  ],
+  "RR_calf": [
+    {
+      "name": "RR_calf__material_0",
+      "file": "RR_calf__material_0.obj",
+      "rgb": [
+        0.5019607543945312,
+        0.5019607543945312,
+        0.5019607543945312
+      ],
+      "nv": 1387,
+      "nf": 2778
+    },
+    {
+      "name": "RR_calf__material_metal_grey",
+      "file": "RR_calf__material_metal_grey.obj",
+      "rgb": [
+        0.5019609928131104,
+        0.5019609928131104,
+        0.5019609928131104
+      ],
+      "nv": 441,
+      "nf": 874
+    }
+  ],
+  "RR_foot": []
+}

@@ -25,6 +25,28 @@ def test_model_contract():
     assert np.allclose(base_inertial_pos, (-0.01, 0.0, 0.0)), "base COM must match the USD-authored value"
 
 
+def test_visual_meshes_never_collide():
+    """The Solo12 visual meshes are display-only; contact must come from the USD primitives."""
+    env = make_env()
+    model = env.model
+    colliders = {}
+    for i in range(model.ngeom):
+        name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, i)
+        if model.geom_type[i] == mujoco.mjtGeom.mjGEOM_MESH:
+            assert model.geom_contype[i] == 0 and model.geom_conaffinity[i] == 0, (
+                f"visual mesh {name} must not participate in contact"
+            )
+        elif model.geom_contype[i] or model.geom_conaffinity[i]:
+            colliders[name] = int(model.geom_type[i])
+
+    # ground plane + base box/2 rails + per leg (thigh box, knee sphere, foot cylinder)
+    assert len(colliders) == 16, f"unexpected collider set: {sorted(colliders)}"
+    for leg in ("FL", "FR", "RL", "RR"):
+        assert colliders[f"{leg}_foot_geom"] == mujoco.mjtGeom.mjGEOM_CYLINDER, (
+            "Solo12 feet are disks -- the contact geom must stay a cylinder, not a sphere"
+        )
+
+
 def test_actuator_matches_isaac_pd():
     env = make_env(kp=15.0, kd=0.5)
     assert np.allclose(env.model.actuator_gainprm[env.actuator_ids, 0], 15.0)
