@@ -10,6 +10,7 @@ class LoraPolicyCfg:
     trainable_layers: str = "all"
     rank: int = 1
     lora_alpha: float = 1.0
+    constrain_delta_lora_degrees: float = 0.0
     log_std_range: tuple[float, float] = (-4.0, 0.0)
 
 

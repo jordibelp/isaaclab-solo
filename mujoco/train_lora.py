@@ -5,7 +5,7 @@ The target dynamics are the same MuJoCo model used by ``play_direct_mujoco.py``.
 MJX batches the physics over ``--num_envs`` on a GPU (or CPU fallback).  The
 pre-trained dense weights and biases remain frozen; PPO updates low-rank
 adapters in both actor and critic plus the actor exploration log standard
-deviation.  No recovery policy or safety filter is used.
+deviation.  An optional per-joint bound limits the actor's LoRA correction.
 """
 
 from __future__ import annotations
@@ -163,6 +163,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--trainable_layers", "--trainable-layers", choices=LAYER_CHOICES, default=policy.trainable_layers)
     p.add_argument("--rank", type=int, default=policy.rank, help="Rank of the LoRA A/B factors; any r>=1 works.")
     p.add_argument("--lora-alpha", type=float, default=policy.lora_alpha, help="Adapter gain; the applied scale is alpha/rank.")
+    p.add_argument(
+        "--constrain-delta-lora-degrees",
+        type=float,
+        default=policy.constrain_delta_lora_degrees,
+        help="Per-joint bound in degrees on the LoRA-induced position-target correction; 0 disables it.",
+    )
     p.add_argument("--num_envs", "--num-envs", type=int, default=512)
     p.add_argument("--max-iterations", type=int, default=agent.max_iterations)
     p.add_argument("--rollout-steps", type=int, default=agent.num_steps_per_env)
@@ -204,6 +210,7 @@ AGENT_OVERRIDE_TO_DEST = {
     "agent.policy.trainable_layers": "trainable_layers",
     "agent.policy.rank": "rank",
     "agent.policy.lora_alpha": "lora_alpha",
+    "agent.policy.constrain_delta_lora_degrees": "constrain_delta_lora_degrees",
     "agent.policy.log_std_range": "log_std_range",
     "agent.algorithm.learning_rate": "learning_rate",
     "agent.algorithm.schedule": "lr_schedule",
@@ -257,6 +264,7 @@ def resolved_agent_config(args: argparse.Namespace) -> dict:
             "trainable_layers": args.trainable_layers,
             "rank": args.rank,
             "lora_alpha": args.lora_alpha,
+            "constrain_delta_lora_degrees": args.constrain_delta_lora_degrees,
             "log_std_range": tuple(args.log_std_range),
         },
         "algorithm": {
@@ -372,15 +380,24 @@ def dense_lora(x, frozen, adapter, scale):
 
 def network(x, frozen, adapters, scale):
     for i, layer in enumerate(frozen):
-        x = dense_lora(x, layer, adapters[i], scale)
+        if adapters:
+            x = dense_lora(x, layer, adapters[i], scale)
+        else:
+            weight, bias = layer
+            x = x @ weight.T + bias
         if i != len(frozen) - 1:
             x = jax.nn.elu(x)
     return x
 
 
-def actor_mean(params, obs, frozen, norms, scale):
+def actor_mean(params, obs, frozen, norms, scale, max_delta_radians=0.0):
     x = (obs - norms["actor_mean"]) / (norms["actor_std"] + OBS_NORM_EPS)
-    return network(x, frozen, params["actor"], scale)
+    adapted = network(x, frozen, params["actor"], scale)
+    if max_delta_radians <= 0.0:
+        return adapted
+    frozen_mean = network(x, frozen, (), 0.0)
+    max_delta_action = max_delta_radians / ACTION_SCALE
+    return frozen_mean + jnp.clip(adapted - frozen_mean, -max_delta_action, max_delta_action)
 
 
 def critic_value(params, obs, frozen, norms, scale):
@@ -692,6 +709,8 @@ def main():
     args,unknown=apply_agent_overrides(args,unknown)
     if args.task!="solo12-two-feet": raise ValueError("Only --task=solo12-two-feet is supported.")
     if args.rank<1 or args.num_envs<1: raise ValueError("--rank and --num_envs must be positive.")
+    if not math.isfinite(args.constrain_delta_lora_degrees) or args.constrain_delta_lora_degrees < 0.0:
+        raise ValueError("--constrain-delta-lora-degrees must be finite and non-negative (0 disables it).")
     cfg,unsupported=parse_env_overrides(unknown)
     if unsupported: raise ValueError("Unsupported arguments/overrides: "+" ".join(unsupported))
     if any(abs(x)>1e-9 for x in cfg["forces_applied_to_base_curriculum"]) or any(abs(x)>1e-9 for x in cfg["base_push_force_z_range"]):
@@ -702,6 +721,7 @@ def main():
     payload,actor,critic,akeys,ckeys,norms,log_std=load_frozen_networks(checkpoint)
     if len(actor)!=len(critic): raise ValueError("Actor and critic layer counts differ.")
     selected=selected_layer_indices(len(actor),args.trainable_layers);scale=args.lora_alpha/args.rank
+    max_delta_lora_radians=math.radians(args.constrain_delta_lora_degrees)
     key=jax.random.PRNGKey(args.seed);key,kinit,kenv=jax.random.split(key,3)
     params=init_trainable(kinit,actor,critic,args.rank,selected,log_std)
     model_info=build_model(xml,float(cfg["kp"]),float(cfg["kd"]));reset_fn,step_fn=make_training_functions(model_info,cfg,args.num_envs)
@@ -723,7 +743,7 @@ def main():
     def collect(params,state,key):
         def body(carry,_):
             state,key=carry;key,ka,ks=jax.random.split(key,3)
-            mean=actor_mean(params,state.obs,actor,norms,scale);action=mean+jnp.exp(params["log_std"])*jax.random.normal(ka,mean.shape)
+            mean=actor_mean(params,state.obs,actor,norms,scale,max_delta_lora_radians);action=mean+jnp.exp(params["log_std"])*jax.random.normal(ka,mean.shape)
             logp=gaussian_log_prob(action,mean,params["log_std"]);value=critic_value(params,state.obs,critic,norms,scale)
             (next_state,reward,reward_terms,done,terminated,termination_causes,final_obs,
              ep_return,ep_steps,ep_reward_sums)=step_fn(state,action,ks)
@@ -739,7 +759,7 @@ def main():
     def update_batch(params,opt,batch):
         obs,action,old_logp,old_mean,old_log_std,adv,returns=batch
         def loss(p):
-            mean=actor_mean(p,obs,actor,norms,scale);logp=gaussian_log_prob(action,mean,p["log_std"])
+            mean=actor_mean(p,obs,actor,norms,scale,max_delta_lora_radians);logp=gaussian_log_prob(action,mean,p["log_std"])
             # Clamping before exp keeps a diverged step finite so the NaN guard can reject it.
             ratio=jnp.exp(jnp.clip(logp-old_logp,-LOG_RATIO_LIMIT,LOG_RATIO_LIMIT))
             policy=-jnp.mean(jnp.minimum(ratio*adv,jnp.clip(ratio,1-args.clip_param,1+args.clip_param)*adv))
@@ -791,7 +811,7 @@ def main():
             mo,ma=mirror_lr(obs,actions)
             # The mirrored sample's "old" distribution is the current policy evaluated at the
             # mirrored observation, so the KL/ratio start at their identity values.
-            mmean=actor_mean(params,mo,actor,norms,scale)
+            mmean=actor_mean(params,mo,actor,norms,scale,max_delta_lora_radians)
             ml=gaussian_log_prob(ma,mmean,params["log_std"])
             obs=jnp.concatenate((obs,mo));actions=jnp.concatenate((actions,ma))
             old_logp=jnp.concatenate((old_logp,ml));means=jnp.concatenate((means,mmean))

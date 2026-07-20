@@ -17,6 +17,7 @@ def test_agent_defaults_come_from_config_file():
     assert args.learning_rate == train_lora.DEFAULT_AGENT_CFG.algorithm.learning_rate
     assert args.ppo_epochs == train_lora.DEFAULT_AGENT_CFG.algorithm.num_learning_epochs
     assert args.rollout_steps == train_lora.DEFAULT_AGENT_CFG.num_steps_per_env
+    assert args.constrain_delta_lora_degrees == 0.0
 
 
 def test_hydra_style_agent_overrides():
@@ -25,12 +26,14 @@ def test_hydra_style_agent_overrides():
         "agent.algorithm.learning_rate=2e-4",
         "agent.algorithm.num_learning_epochs=7",
         "agent.policy.log_std_range=[-3.0,-0.25]",
+        "agent.policy.constrain_delta_lora_degrees=10.0",
         "env.kp=8.0",
     ])
     args, remaining = train_lora.apply_agent_overrides(args, unknown)
     assert args.learning_rate == 2e-4  # agent.* tokens are explicit and applied last
     assert args.ppo_epochs == 7
     assert args.log_std_range == (-3.0, -0.25)
+    assert args.constrain_delta_lora_degrees == 10.0
     assert remaining == ["env.kp=8.0"]
     assert train_lora.resolved_agent_config(args)["algorithm"]["learning_rate"] == 2e-4
 
@@ -68,6 +71,37 @@ def test_lora_starts_at_exact_frozen_network(rank):
         if index != len(actor) - 1:
             x = jax.nn.elu(x)
     np.testing.assert_allclose(adapted, x, rtol=1e-6, atol=1e-6)
+
+
+def test_lora_joint_target_delta_is_constrained_in_degrees():
+    _, actor, critic, _, _, norms, log_std = train_lora.load_frozen_networks(CHECKPOINT)
+    params = train_lora.init_trainable(jax.random.PRNGKey(0), actor, critic, 1, (0, 1, 2, 3), log_std)
+    params["actor"][3]["b"] = jnp.ones_like(params["actor"][3]["b"]) * 100.0
+    obs = jnp.asarray(np.random.default_rng(1).normal(size=(3, 48)).astype(np.float32))
+
+    unconstrained = train_lora.actor_mean(params, obs, actor, norms, 1.0)
+    frozen = train_lora.actor_mean(
+        train_lora.init_trainable(jax.random.PRNGKey(2), actor, critic, 1, (), log_std),
+        obs, actor, norms, 1.0,
+    )
+    limit = np.deg2rad(10.0)
+    constrained = train_lora.actor_mean(params, obs, actor, norms, 1.0, limit)
+
+    assert np.max(np.abs(train_lora.ACTION_SCALE * np.asarray(unconstrained - frozen))) > limit
+    np.testing.assert_array_less(
+        np.abs(train_lora.ACTION_SCALE * np.asarray(constrained - frozen)), limit + 1e-6
+    )
+
+
+def test_zero_lora_constraint_is_exactly_disabled():
+    _, actor, critic, _, _, norms, log_std = train_lora.load_frozen_networks(CHECKPOINT)
+    params = train_lora.init_trainable(jax.random.PRNGKey(3), actor, critic, 1, (3,), log_std)
+    params["actor"][3]["b"] = jnp.ones_like(params["actor"][3]["b"])
+    obs = jnp.zeros((2, 48))
+    np.testing.assert_array_equal(
+        train_lora.actor_mean(params, obs, actor, norms, 1.0, 0.0),
+        train_lora.actor_mean(params, obs, actor, norms, 1.0),
+    )
 
 
 @pytest.mark.parametrize("rank", [1, 3, 8])
