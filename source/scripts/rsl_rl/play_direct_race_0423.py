@@ -184,6 +184,37 @@ parser.add_argument(
     help="Training iteration recorded as EvalVideo/trigger_iteration metadata; not used as explicit W&B step.",
 )
 parser.add_argument("--wandb_video_key", "--wandb-video-key", type=str, default="EvalVideo/periodic")
+parser.add_argument(
+    "--wandb-upload-analysis",
+    "--wandb_upload_analysis",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+    help=(
+        "Upload --generate-slip-plots data and figures to a new W&B analysis run (default: enabled). "
+        "Use --no-wandb-upload-analysis to keep the analysis local."
+    ),
+)
+parser.add_argument(
+    "--wandb-analysis-project",
+    "--wandb_analysis_project",
+    type=str,
+    default="solo-race-friction-analysis",
+    help="W&B project for slip/friction analysis runs.",
+)
+parser.add_argument(
+    "--wandb-analysis-entity",
+    "--wandb_analysis_entity",
+    type=str,
+    default="jordibelp",
+    help="W&B entity for slip/friction analysis runs.",
+)
+parser.add_argument(
+    "--wandb-analysis-run-name",
+    "--wandb_analysis_run_name",
+    type=str,
+    default=None,
+    help="Optional W&B run name for the slip/friction analysis.",
+)
 parser.add_argument("--disable_fabric", action="store_true", default=False, help="Disable fabric.")
 parser.add_argument("--num_envs", type=int, default=1, help="Number of environments to simulate.")
 parser.add_argument(
@@ -4214,7 +4245,7 @@ def _slip_plot_friction_title(env_cfg) -> str | None:
 
 def _generate_slip_plots_after_run(
     args_cli, slip_csv_path: str | None, env_cfg=None, finish_time_s: float | None = None
-) -> None:
+) -> list[str]:
     """Save per-foot slip plots from the recorded CSV and optionally open them interactively.
 
     The PNG is rendered with the Agg backend in-process (safe inside Kit). The interactive
@@ -4222,10 +4253,10 @@ def _generate_slip_plots_after_run(
     and never blocks teardown.
     """
     if not bool(getattr(args_cli, "generate_slip_plots", False)):
-        return
+        return []
     if not slip_csv_path or not os.path.isfile(slip_csv_path):
         print(f"[WARN] --generate-slip-plots: no slip CSV found at {slip_csv_path!r}; skipping plot generation.", flush=True)
-        return
+        return []
 
     if str(_THIS_DIR) not in sys.path:
         sys.path.insert(0, str(_THIS_DIR))
@@ -4266,9 +4297,12 @@ def _generate_slip_plots_after_run(
         )
         if velocity_path is not None:
             print(f"[INFO] --generate-slip-plots: saved straight-line velocity plot to {velocity_path}", flush=True)
+        generated_paths = [slip_csv_path, metadata_path, png_path, *polar_paths]
+        if velocity_path is not None:
+            generated_paths.append(velocity_path)
     except Exception as exc:
         print(f"[WARN] --generate-slip-plots: could not save slip plot: {type(exc).__name__}: {exc}", flush=True)
-        return
+        return []
 
     slip_plots_script = os.path.join(str(_THIS_DIR), "slip_plots.py")
     repo_root = Path(__file__).resolve().parents[3]
@@ -4279,14 +4313,14 @@ def _generate_slip_plots_after_run(
     )
     if bool(args_cli.slip_plots_no_window):
         print(f"[INFO] --generate-slip-plots: open interactively (zoom/pan) with:\n    {interactive_cmd}", flush=True)
-        return
+        return generated_paths
     if not os.environ.get("DISPLAY"):
         print(
             "[INFO] --generate-slip-plots: no DISPLAY detected; skipping the interactive window. "
             f"Open it later with:\n    {interactive_cmd}",
             flush=True,
         )
-        return
+        return generated_paths
 
     try:
         subprocess.Popen(
@@ -4304,6 +4338,91 @@ def _generate_slip_plots_after_run(
             f"Open it manually with:\n    {interactive_cmd}",
             flush=True,
         )
+    return generated_paths
+
+
+def _wandb_safe_value(value):
+    """Convert argparse/config values to W&B JSON-compatible values."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, (list, tuple)):
+        return [_wandb_safe_value(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _wandb_safe_value(item) for key, item in value.items()}
+    return str(value)
+
+
+def _upload_slip_analysis_to_wandb(
+    args_cli,
+    generated_paths: list[str],
+    *,
+    checkpoint_path: str,
+    summary: dict[str, float],
+    finish_time_s: float | None,
+) -> None:
+    """Upload raw slip data and every generated analysis figure to one W&B run."""
+    if not bool(getattr(args_cli, "wandb_upload_analysis", True)) or not generated_paths:
+        return
+
+    existing_paths = [Path(path).expanduser().resolve() for path in generated_paths if Path(path).is_file()]
+    if not existing_paths:
+        print("[WARN] W&B analysis upload skipped: no generated files were found.", flush=True)
+        return
+
+    try:
+        import wandb  # noqa: PLC0415
+
+        checkpoint_stem = Path(checkpoint_path).stem
+        run_name = args_cli.wandb_analysis_run_name or f"{checkpoint_stem}_{time.strftime('%Y%m%d_%H%M%S')}"
+        config = {key: _wandb_safe_value(value) for key, value in vars(args_cli).items()}
+        config.update(
+            {
+                "checkpoint": str(Path(checkpoint_path).expanduser().resolve()),
+                "command": " ".join(shlex.quote(arg) for arg in sys.argv),
+            }
+        )
+        init_kwargs = {
+            "project": str(args_cli.wandb_analysis_project),
+            "name": run_name,
+            "job_type": "friction-analysis",
+            "config": config,
+            "settings": wandb.Settings(init_timeout=300, sync_tensorboard=False, disable_git=True),
+        }
+        if args_cli.wandb_analysis_entity:
+            init_kwargs["entity"] = str(args_cli.wandb_analysis_entity)
+        run = wandb.init(**init_kwargs)
+
+        payload = {f"summary/{key}": float(value) for key, value in summary.items()}
+        if finish_time_s is not None:
+            payload["summary/finish_time_s"] = float(finish_time_s)
+        for path in existing_paths:
+            if path.suffix.lower() == ".png":
+                payload[f"plots/{path.stem}"] = wandb.Image(str(path))
+        if payload:
+            wandb.log(payload)
+
+        artifact = wandb.Artifact(
+            name=f"slip-analysis-{run.id}",
+            type="friction-analysis",
+            metadata={
+                "task": str(args_cli.task),
+                "checkpoint": checkpoint_stem,
+                "finish_time_s": finish_time_s,
+            },
+        )
+        for path in existing_paths:
+            artifact.add_file(str(path), name=path.name)
+        run.log_artifact(artifact)
+        wandb.finish()
+        print(
+            f"[INFO] Uploaded {len(existing_paths)} analysis files to W&B "
+            f"{args_cli.wandb_analysis_entity}/{args_cli.wandb_analysis_project} run={run.id}.",
+            flush=True,
+        )
+    except Exception as exc:
+        print(f"[WARN] W&B analysis upload failed: {type(exc).__name__}: {exc}", flush=True)
 
 
 def _print_patch_friction_summary(raw_env, env_index: int = 0):
@@ -5382,12 +5501,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             time.sleep(sleep_time)
 
     summary = _compute_summary(raw_env)
+    analysis_summary = dict(summary)
     if gate_history:
-        print(f"[RESULT] median_gate_idx={statistics.median(gate_history):.3f}")
+        analysis_summary["median_gate_idx"] = statistics.median(gate_history)
+        print(f"[RESULT] median_gate_idx={analysis_summary['median_gate_idx']:.3f}")
     if speed_history:
-        print(f"[RESULT] median_root_speed_xy={statistics.median(speed_history):.3f}")
+        analysis_summary["median_root_speed_xy"] = statistics.median(speed_history)
+        print(f"[RESULT] median_root_speed_xy={analysis_summary['median_root_speed_xy']:.3f}")
     if ang_vel_history:
-        print(f"[RESULT] median_root_ang_vel_z={statistics.median(ang_vel_history):.3f}")
+        analysis_summary["median_root_ang_vel_z"] = statistics.median(ang_vel_history)
+        print(f"[RESULT] median_root_ang_vel_z={analysis_summary['median_root_ang_vel_z']:.3f}")
     for key, value in summary.items():
         print(f"[RESULT] current_{key}={value:.3f}")
 
@@ -5405,10 +5528,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         slip_cone_visualizer.close()
 
     # close() above flushes and closes the slip CSV, so the file is complete before we plot it.
-    _generate_slip_plots_after_run(
+    generated_analysis_paths = _generate_slip_plots_after_run(
         args_cli,
         slip_csv_path,
         env_cfg=env_cfg,
+        finish_time_s=race_finish_time_s,
+    )
+    _upload_slip_analysis_to_wandb(
+        args_cli,
+        generated_analysis_paths,
+        checkpoint_path=resume_path,
+        summary=analysis_summary,
         finish_time_s=race_finish_time_s,
     )
 
