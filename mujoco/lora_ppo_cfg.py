@@ -11,6 +11,7 @@ class LoraPolicyCfg:
     rank: int = 1
     lora_alpha: float = 1.0
     constrain_delta_lora_degrees: float = 0.0
+    clipping_includes_exploratory_noisy: bool = False
     log_std_range: tuple[float, float] = (-4.0, 0.0)
 
 

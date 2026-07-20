@@ -18,6 +18,20 @@ def test_agent_defaults_come_from_config_file():
     assert args.ppo_epochs == train_lora.DEFAULT_AGENT_CFG.algorithm.num_learning_epochs
     assert args.rollout_steps == train_lora.DEFAULT_AGENT_CFG.num_steps_per_env
     assert args.constrain_delta_lora_degrees == 0.0
+    assert args.clipping_includes_exploratory_noisy is False
+
+
+@pytest.mark.parametrize("token", ["--clipping-includes-exploratory-noisy", "--clipping-includes-exploratory-noisy=True"])
+def test_exploration_clipping_flag_can_be_enabled(token):
+    args = train_lora.build_parser().parse_args(["--checkpoint", str(CHECKPOINT), token])
+    assert args.clipping_includes_exploratory_noisy is True
+
+
+def test_exploration_clipping_flag_accepts_explicit_false():
+    args = train_lora.build_parser().parse_args([
+        "--checkpoint", str(CHECKPOINT), "--clipping-includes-exploratory-noisy=False"
+    ])
+    assert args.clipping_includes_exploratory_noisy is False
 
 
 def test_hydra_style_agent_overrides():
@@ -101,6 +115,23 @@ def test_zero_lora_constraint_is_exactly_disabled():
     np.testing.assert_array_equal(
         train_lora.actor_mean(params, obs, actor, norms, 1.0, 0.0),
         train_lora.actor_mean(params, obs, actor, norms, 1.0),
+    )
+
+
+def test_exploration_and_lora_are_jointly_constrained_in_degrees():
+    _, actor, critic, _, _, norms, log_std = train_lora.load_frozen_networks(CHECKPOINT)
+    params = train_lora.init_trainable(jax.random.PRNGKey(4), actor, critic, 1, (3,), log_std)
+    params["actor"][3]["b"] = jnp.ones_like(params["actor"][3]["b"]) * 100.0
+    obs = jnp.asarray(np.random.default_rng(2).normal(size=(3, 48)).astype(np.float32))
+    limit = np.deg2rad(10.0)
+    adapted_mean = train_lora.actor_mean(params, obs, actor, norms, 1.0, limit, True)
+    noisy_action = adapted_mean + 20.0
+    executed = train_lora.clip_exploratory_action(noisy_action, obs, actor, norms, limit)
+    frozen_mean = train_lora.network(
+        (obs - norms["actor_mean"]) / (norms["actor_std"] + train_lora.OBS_NORM_EPS), actor, (), 0.0
+    )
+    np.testing.assert_allclose(
+        np.abs(train_lora.ACTION_SCALE * np.asarray(executed - frozen_mean)), limit, atol=1e-6
     )
 
 

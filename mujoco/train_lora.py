@@ -128,6 +128,17 @@ def _literal(raw: str):
         return raw
 
 
+def _boolean(raw: str | bool) -> bool:
+    if isinstance(raw, bool):
+        return raw
+    value = raw.lower()
+    if value in ("true", "1", "yes", "on"):
+        return True
+    if value in ("false", "0", "no", "off"):
+        return False
+    raise argparse.ArgumentTypeError(f"expected a boolean, got {raw!r}")
+
+
 def parse_env_overrides(tokens: list[str]) -> tuple[dict, list[str]]:
     cfg = copy.deepcopy(DEFAULT_ENV)
     unsupported = []
@@ -168,6 +179,14 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=policy.constrain_delta_lora_degrees,
         help="Per-joint bound in degrees on the LoRA-induced position-target correction; 0 disables it.",
+    )
+    p.add_argument(
+        "--clipping-includes-exploratory-noisy",
+        type=_boolean,
+        nargs="?",
+        const=True,
+        default=policy.clipping_includes_exploratory_noisy,
+        help="Include Gaussian exploration in the correction clipped around the frozen policy mean.",
     )
     p.add_argument("--num_envs", "--num-envs", type=int, default=512)
     p.add_argument("--max-iterations", type=int, default=agent.max_iterations)
@@ -211,6 +230,7 @@ AGENT_OVERRIDE_TO_DEST = {
     "agent.policy.rank": "rank",
     "agent.policy.lora_alpha": "lora_alpha",
     "agent.policy.constrain_delta_lora_degrees": "constrain_delta_lora_degrees",
+    "agent.policy.clipping_includes_exploratory_noisy": "clipping_includes_exploratory_noisy",
     "agent.policy.log_std_range": "log_std_range",
     "agent.algorithm.learning_rate": "learning_rate",
     "agent.algorithm.schedule": "lr_schedule",
@@ -265,6 +285,7 @@ def resolved_agent_config(args: argparse.Namespace) -> dict:
             "rank": args.rank,
             "lora_alpha": args.lora_alpha,
             "constrain_delta_lora_degrees": args.constrain_delta_lora_degrees,
+            "clipping_includes_exploratory_noisy": args.clipping_includes_exploratory_noisy,
             "log_std_range": tuple(args.log_std_range),
         },
         "algorithm": {
@@ -390,14 +411,24 @@ def network(x, frozen, adapters, scale):
     return x
 
 
-def actor_mean(params, obs, frozen, norms, scale, max_delta_radians=0.0):
+def actor_mean(params, obs, frozen, norms, scale, max_delta_radians=0.0, clipping_includes_noise=False):
     x = (obs - norms["actor_mean"]) / (norms["actor_std"] + OBS_NORM_EPS)
     adapted = network(x, frozen, params["actor"], scale)
-    if max_delta_radians <= 0.0:
+    if max_delta_radians <= 0.0 or clipping_includes_noise:
         return adapted
     frozen_mean = network(x, frozen, (), 0.0)
     max_delta_action = max_delta_radians / ACTION_SCALE
     return frozen_mean + jnp.clip(adapted - frozen_mean, -max_delta_action, max_delta_action)
+
+
+def clip_exploratory_action(action, obs, frozen, norms, max_delta_radians):
+    """Clip the combined LoRA and exploration correction around the frozen mean."""
+    if max_delta_radians <= 0.0:
+        return action
+    x = (obs - norms["actor_mean"]) / (norms["actor_std"] + OBS_NORM_EPS)
+    frozen_mean = network(x, frozen, (), 0.0)
+    max_delta_action = max_delta_radians / ACTION_SCALE
+    return frozen_mean + jnp.clip(action - frozen_mean, -max_delta_action, max_delta_action)
 
 
 def critic_value(params, obs, frozen, norms, scale):
@@ -743,10 +774,13 @@ def main():
     def collect(params,state,key):
         def body(carry,_):
             state,key=carry;key,ka,ks=jax.random.split(key,3)
-            mean=actor_mean(params,state.obs,actor,norms,scale,max_delta_lora_radians);action=mean+jnp.exp(params["log_std"])*jax.random.normal(ka,mean.shape)
+            mean=actor_mean(params,state.obs,actor,norms,scale,max_delta_lora_radians,args.clipping_includes_exploratory_noisy)
+            action=mean+jnp.exp(params["log_std"])*jax.random.normal(ka,mean.shape)
+            executed_action=(clip_exploratory_action(action,state.obs,actor,norms,max_delta_lora_radians)
+                             if args.clipping_includes_exploratory_noisy else action)
             logp=gaussian_log_prob(action,mean,params["log_std"]);value=critic_value(params,state.obs,critic,norms,scale)
             (next_state,reward,reward_terms,done,terminated,termination_causes,final_obs,
-             ep_return,ep_steps,ep_reward_sums)=step_fn(state,action,ks)
+             ep_return,ep_steps,ep_reward_sums)=step_fn(state,executed_action,ks)
             # Bootstrap timeouts (RSL-RL's ``bootstrap_on_time_outs``) so a truncated episode is
             # not scored as a failure; genuine terminations keep the hard cut.
             timeout=done&~terminated
@@ -759,7 +793,7 @@ def main():
     def update_batch(params,opt,batch):
         obs,action,old_logp,old_mean,old_log_std,adv,returns=batch
         def loss(p):
-            mean=actor_mean(p,obs,actor,norms,scale,max_delta_lora_radians);logp=gaussian_log_prob(action,mean,p["log_std"])
+            mean=actor_mean(p,obs,actor,norms,scale,max_delta_lora_radians,args.clipping_includes_exploratory_noisy);logp=gaussian_log_prob(action,mean,p["log_std"])
             # Clamping before exp keeps a diverged step finite so the NaN guard can reject it.
             ratio=jnp.exp(jnp.clip(logp-old_logp,-LOG_RATIO_LIMIT,LOG_RATIO_LIMIT))
             policy=-jnp.mean(jnp.minimum(ratio*adv,jnp.clip(ratio,1-args.clip_param,1+args.clip_param)*adv))
@@ -811,7 +845,7 @@ def main():
             mo,ma=mirror_lr(obs,actions)
             # The mirrored sample's "old" distribution is the current policy evaluated at the
             # mirrored observation, so the KL/ratio start at their identity values.
-            mmean=actor_mean(params,mo,actor,norms,scale,max_delta_lora_radians)
+            mmean=actor_mean(params,mo,actor,norms,scale,max_delta_lora_radians,args.clipping_includes_exploratory_noisy)
             ml=gaussian_log_prob(ma,mmean,params["log_std"])
             obs=jnp.concatenate((obs,mo));actions=jnp.concatenate((actions,ma))
             old_logp=jnp.concatenate((old_logp,ml));means=jnp.concatenate((means,mmean))
