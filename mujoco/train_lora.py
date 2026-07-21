@@ -17,6 +17,7 @@ import json
 import math
 import os
 import time
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -216,6 +217,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--output-dir", type=Path, default=Path("logs/mujoco/lora_ppo"))
     p.add_argument("--wandb-project", default="solo12-two-feet-lora")
     p.add_argument("--wandb-entity")
+    p.add_argument(
+        "--metrics-smoothing-window",
+        type=int,
+        default=100,
+        help="Number of PPO iterations pooled into Smoothed* metrics; 1 reproduces the unsmoothed values.",
+    )
     p.add_argument("--no-wandb", action="store_true")
     p.add_argument("--dry-run", action="store_true", help="Build everything and run one rollout/update only.")
     return p
@@ -718,6 +725,74 @@ def reward_metrics(reward_terms, completed_reward_sums, completed_episodes: int,
     return log
 
 
+class MetricSmoother:
+    """Compute rolling metrics from raw rollout and completed-episode statistics."""
+
+    def __init__(self, window: int, cfg: dict):
+        if window < 1:
+            raise ValueError("--metrics-smoothing-window must be at least 1")
+        self.entries = deque(maxlen=window)
+        self.cfg = cfg
+
+    def update(
+        self,
+        rollout_metrics: dict[str, float],
+        episode_return_sum: float,
+        episode_steps_sum: float,
+        completed_episodes: int,
+        completed_reward_sums,
+    ) -> dict[str, float]:
+        continuous = {
+            key: float(value)
+            for key, value in rollout_metrics.items()
+            if key == "reward/mean_step"
+            or key.startswith("RewardsPerStep/")
+            or key.startswith("PerStepRewardRatio/")
+        }
+        self.entries.append(
+            (
+                continuous,
+                float(episode_return_sum),
+                float(episode_steps_sum),
+                int(completed_episodes),
+                np.asarray(completed_reward_sums, dtype=np.float64),
+            )
+        )
+
+        result = {
+            "Smoothed/window_iterations": len(self.entries),
+            "SmoothedEpisode/completed_count": sum(entry[3] for entry in self.entries),
+        }
+        for key in continuous:
+            values = [entry[0][key] for entry in self.entries]
+            prefix, name = key.split("/", 1)
+            smoothed_prefix = "SmoothedReward" if prefix == "reward" else f"Smoothed{prefix}"
+            result[f"{smoothed_prefix}/{name}"] = float(np.mean(values))
+
+        episode_count = int(result["SmoothedEpisode/completed_count"])
+        if episode_count:
+            return_sum = sum(entry[1] for entry in self.entries)
+            steps_sum = sum(entry[2] for entry in self.entries)
+            reward_sums = np.sum([entry[4] for entry in self.entries], axis=0)
+            result.update(
+                {
+                    "SmoothedEpisode/return": return_sum / episode_count,
+                    "SmoothedEpisode/length_steps": steps_sum / episode_count,
+                    "SmoothedEpisode/length_seconds": steps_sum / episode_count * STEP_DT,
+                    "SmoothedEpisode_Reward/total": return_sum / episode_count,
+                }
+            )
+            for index, name in enumerate(REWARD_TERM_NAMES):
+                result[f"SmoothedEpisode_Reward/{name}"] = (
+                    abs(float(reward_sums[index]) / episode_count) / float(self.cfg["episode_length_s"])
+                )
+            result["SmoothedEpisode_Reward/cmd_tracking"] = (
+                result["SmoothedEpisode_Reward/track_lin_vel_xy_exp"]
+                + result["SmoothedEpisode_Reward/track_ang_vel_z_exp"]
+            )
+        return result
+
+
 def save_checkpoints(output: Path, iteration: int, original_payload, params, actor, critic, actor_keys, critic_keys, scale, config):
     output.mkdir(parents=True,exist_ok=True)
     adapter={"iteration":iteration,"config":config,"actor":[],"critic":[],"log_std":np.asarray(params["log_std"])}
@@ -740,6 +815,7 @@ def main():
     args,unknown=apply_agent_overrides(args,unknown)
     if args.task!="solo12-two-feet": raise ValueError("Only --task=solo12-two-feet is supported.")
     if args.rank<1 or args.num_envs<1: raise ValueError("--rank and --num_envs must be positive.")
+    if args.metrics_smoothing_window < 1: raise ValueError("--metrics-smoothing-window must be at least 1.")
     if not math.isfinite(args.constrain_delta_lora_degrees) or args.constrain_delta_lora_degrees < 0.0:
         raise ValueError("--constrain-delta-lora-degrees must be finite and non-negative (0 disables it).")
     cfg,unsupported=parse_env_overrides(unknown)
@@ -860,6 +936,7 @@ def main():
         print(f"[WARN] {samples} samples/iteration ({args.num_envs} envs x {args.rollout_steps} steps) is a very small PPO batch; "
               f"expect noisy advantages. Raise --num_envs or --rollout-steps if training is unstable.",flush=True)
     history=[];metrics_file=(output/"metrics.jsonl").open("a");rejected=0
+    metric_smoother = MetricSmoother(args.metrics_smoothing_window, cfg)
     iterations=1 if args.dry_run else args.max_iterations
     for iteration in range(1,iterations+1):
         started=time.perf_counter();key,kroll,kperm=jax.random.split(key,3)
@@ -892,6 +969,7 @@ def main():
             log |= {"episode/return":float(ep_return/dones),"episode/length_s":float(ep_steps/dones)*STEP_DT,
                     "Episode_Reward/total":float(ep_return/dones),
                     "Episode/length_steps":float(ep_steps/dones),"Episode/length_seconds":float(ep_steps/dones)*STEP_DT}
+        log |= metric_smoother.update(log, ep_return, ep_steps, dones, completed_reward_sums)
         history.append({k:float(v) if isinstance(v,(np.floating,float)) else int(v) for k,v in log.items()})
         print("[INFO] "+" ".join(f"{k}={v:.5g}" if isinstance(v,float) else f"{k}={v}" for k,v in log.items()),flush=True)
         if wandb_run: wandb_run.log(log,step=iteration)

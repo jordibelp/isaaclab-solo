@@ -207,6 +207,50 @@ def test_reward_metrics_omit_episode_values_when_no_episode_finished():
     assert not any(key.startswith("Episode_Reward/") for key in metrics)
 
 
+def test_metric_smoother_averages_rollouts_and_pools_completed_episodes():
+    cfg = dict(train_lora.DEFAULT_ENV)
+    smoother = train_lora.MetricSmoother(window=2, cfg=cfg)
+    zeros = np.zeros(len(train_lora.REWARD_TERM_NAMES))
+
+    first = smoother.update(
+        {"RewardsPerStep/total": 1.0, "PerStepRewardRatio/track_lin_vel_xy_exp": 0.2},
+        episode_return_sum=10.0,
+        episode_steps_sum=100.0,
+        completed_episodes=1,
+        completed_reward_sums=zeros,
+    )
+    second_rewards = zeros.copy()
+    second_rewards[0] = 12.0
+    second = smoother.update(
+        {"RewardsPerStep/total": 3.0, "PerStepRewardRatio/track_lin_vel_xy_exp": 0.6},
+        episode_return_sum=60.0,
+        episode_steps_sum=900.0,
+        completed_episodes=3,
+        completed_reward_sums=second_rewards,
+    )
+
+    assert first["SmoothedRewardsPerStep/total"] == pytest.approx(1.0)
+    assert second["SmoothedRewardsPerStep/total"] == pytest.approx(2.0)
+    assert second["SmoothedPerStepRewardRatio/track_lin_vel_xy_exp"] == pytest.approx(0.4)
+    assert second["SmoothedEpisode/completed_count"] == 4
+    assert second["SmoothedEpisode/return"] == pytest.approx(17.5)
+    assert second["SmoothedEpisode/length_steps"] == pytest.approx(250.0)
+    assert second["SmoothedEpisode_Reward/track_lin_vel_xy_exp"] == pytest.approx(
+        12.0 / 4 / cfg["episode_length_s"]
+    )
+
+    third = smoother.update(
+        {"RewardsPerStep/total": 5.0, "PerStepRewardRatio/track_lin_vel_xy_exp": 1.0},
+        episode_return_sum=0.0,
+        episode_steps_sum=0.0,
+        completed_episodes=0,
+        completed_reward_sums=zeros,
+    )
+    assert third["SmoothedRewardsPerStep/total"] == pytest.approx(4.0)
+    assert third["SmoothedEpisode/completed_count"] == 3
+    assert third["SmoothedEpisode/return"] == pytest.approx(20.0)
+
+
 def test_left_right_mirror_is_an_involution():
     obs = jnp.arange(96, dtype=jnp.float32).reshape(2, 48)
     action = jnp.arange(24, dtype=jnp.float32).reshape(2, 12)
