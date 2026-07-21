@@ -776,7 +776,6 @@ class MetricSmoother:
             reward_sums = np.sum([entry[4] for entry in self.entries], axis=0)
             result.update(
                 {
-                    "SmoothedEpisode/return": return_sum / episode_count,
                     "SmoothedEpisode/length_steps": steps_sum / episode_count,
                     "SmoothedEpisode/length_seconds": steps_sum / episode_count * STEP_DT,
                     "SmoothedEpisode_Reward/total": return_sum / episode_count,
@@ -966,7 +965,7 @@ def main():
              "throughput_steps_s":samples/elapsed,"wall_time_s":elapsed}
         log |= reward_metrics(reward_terms,completed_reward_sums,dones,cfg)
         if dones:
-            log |= {"episode/return":float(ep_return/dones),"episode/length_s":float(ep_steps/dones)*STEP_DT,
+            log |= {"episode/length_s":float(ep_steps/dones)*STEP_DT,
                     "Episode_Reward/total":float(ep_return/dones),
                     "Episode/length_steps":float(ep_steps/dones),"Episode/length_seconds":float(ep_steps/dones)*STEP_DT}
         log |= metric_smoother.update(log, ep_return, ep_steps, dones, completed_reward_sums)

@@ -233,7 +233,8 @@ def test_metric_smoother_averages_rollouts_and_pools_completed_episodes():
     assert second["SmoothedRewardsPerStep/total"] == pytest.approx(2.0)
     assert second["SmoothedPerStepRewardRatio/track_lin_vel_xy_exp"] == pytest.approx(0.4)
     assert second["SmoothedEpisode/completed_count"] == 4
-    assert second["SmoothedEpisode/return"] == pytest.approx(17.5)
+    assert second["SmoothedEpisode_Reward/total"] == pytest.approx(17.5)
+    assert "SmoothedEpisode/return" not in second
     assert second["SmoothedEpisode/length_steps"] == pytest.approx(250.0)
     assert second["SmoothedEpisode_Reward/track_lin_vel_xy_exp"] == pytest.approx(
         12.0 / 4 / cfg["episode_length_s"]
@@ -248,7 +249,7 @@ def test_metric_smoother_averages_rollouts_and_pools_completed_episodes():
     )
     assert third["SmoothedRewardsPerStep/total"] == pytest.approx(4.0)
     assert third["SmoothedEpisode/completed_count"] == 3
-    assert third["SmoothedEpisode/return"] == pytest.approx(20.0)
+    assert third["SmoothedEpisode_Reward/total"] == pytest.approx(20.0)
 
 
 def test_left_right_mirror_is_an_involution():
