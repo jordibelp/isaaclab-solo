@@ -863,6 +863,13 @@ def run_directory_name(timestamp, run_name, wandb_run_id=None):
     return f"{name}_{wandb_run_id}" if wandb_run_id else name
 
 
+def update_wandb_run_config(wandb_run, output, wandb_run_id):
+    wandb_run.config.update(
+        {"output_dir": str(output), "wandb_run_id": wandb_run_id},
+        allow_val_change=True,
+    )
+
+
 def main():
     args,unknown=build_parser().parse_known_args()
     args,unknown=apply_agent_overrides(args,unknown)
@@ -902,7 +909,7 @@ def main():
     output=args.output_dir/run_directory_name(timestamp,args.run_name,wandb_run_id);output.mkdir(parents=True,exist_ok=False)
     config.update({"output_dir":str(output),"wandb_run_id":wandb_run_id})
     (output/"run_config.json").write_text(json.dumps(config,indent=2)+"\n")
-    if wandb_run: wandb_run.config.update({"output_dir":str(output),"wandb_run_id":wandb_run_id})
+    if wandb_run: update_wandb_run_config(wandb_run,output,wandb_run_id)
     log_std_min,log_std_max=map(float,args.log_std_range);lr_min,lr_max=map(float,args.lr_range)
     optimizer=(jnp.array(0),zeros_like_tree(params),zeros_like_tree(params),jnp.asarray(args.learning_rate))
 

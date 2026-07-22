@@ -31,6 +31,20 @@ def test_run_directory_name_appends_wandb_run_id():
     ) == "20260722_142955_offline run"
 
 
+def test_wandb_config_allows_output_directory_to_be_finalized():
+    class Config:
+        def update(self, values, **kwargs):
+            self.values = values
+            self.kwargs = kwargs
+
+    run = type("Run", (), {"config": Config()})()
+    output = Path("logs/mujoco/lora_ppo/run_7dbe7he7")
+    train_lora.update_wandb_run_config(run, output, "7dbe7he7")
+
+    assert run.config.values == {"output_dir": str(output), "wandb_run_id": "7dbe7he7"}
+    assert run.config.kwargs == {"allow_val_change": True}
+
+
 @pytest.mark.parametrize("token", ["--frozen-base-weights=False", "--frozen-base-weights=false"])
 def test_base_weights_can_be_unfrozen(token):
     args = train_lora.build_parser().parse_args(["--checkpoint", str(CHECKPOINT), "--rank=0", token])
