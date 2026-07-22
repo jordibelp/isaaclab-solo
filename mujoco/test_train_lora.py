@@ -282,3 +282,33 @@ def test_left_right_mirror_is_an_involution():
     restored_obs, restored_action = train_lora.mirror_lr(mirrored_obs, mirrored_action)
     np.testing.assert_array_equal(restored_obs, obs)
     np.testing.assert_array_equal(restored_action, action)
+
+
+def test_symmetry_augmentation_uses_transformed_behavior_distribution():
+    """A mirrored transition must retain the likelihood of the action that generated it."""
+    rng = np.random.default_rng(4)
+    obs = jnp.asarray(rng.normal(size=(5, 48)).astype(np.float32))
+    means = jnp.asarray(rng.normal(size=(5, 12)).astype(np.float32))
+    log_std = jnp.asarray(rng.normal(size=(5, 12)).astype(np.float32) * 0.1 - 1.0)
+    actions = means + jnp.exp(log_std) * jnp.asarray(rng.normal(size=(5, 12)).astype(np.float32))
+    old_logp = train_lora.gaussian_log_prob(actions, means, log_std)
+    advantages = jnp.arange(5, dtype=jnp.float32)
+    returns = advantages + 10.0
+
+    augmented = train_lora.augment_left_right_batch(
+        obs, actions, old_logp, means, log_std, advantages, returns
+    )
+    aug_obs, aug_actions, aug_logp, aug_means, aug_log_std, aug_advantages, aug_returns = augmented
+
+    np.testing.assert_allclose(
+        train_lora.gaussian_log_prob(aug_actions[5:], aug_means[5:], aug_log_std[5:]),
+        old_logp,
+        rtol=1e-5,
+        atol=1e-5,
+    )
+    np.testing.assert_allclose(aug_logp[5:], old_logp)
+    np.testing.assert_allclose(aug_log_std[5:], log_std[:, train_lora.LR_PERM])
+    np.testing.assert_allclose(aug_advantages[5:], advantages)
+    np.testing.assert_allclose(aug_returns[5:], returns)
+    mirrored_obs, _ = train_lora.mirror_lr(obs, actions)
+    np.testing.assert_allclose(aug_obs[5:], mirrored_obs)

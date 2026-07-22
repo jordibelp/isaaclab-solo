@@ -716,6 +716,28 @@ def gaussian_kl(mean_old, log_std_old, mean_new, log_std_new):
     return jnp.sum(log_std_new-log_std_old+(var_old+(mean_old-mean_new)**2)/(2*var_new)-0.5,axis=-1)
 
 
+def augment_left_right_batch(obs, actions, old_logp, old_means, old_log_std, advantages, returns):
+    """Add exact left-right transformed behavior samples to a PPO batch.
+
+    The mirrored action was sampled by transforming the original action, so its behavior
+    distribution is the transformed original Gaussian. Evaluating it under the policy at the
+    mirrored observation instead would assign a likelihood from a distribution that did not
+    generate the transition and would make the PPO ratio artificially start at one.
+    """
+    mirrored_obs, mirrored_actions = mirror_lr(obs, actions)
+    _, mirrored_old_means = mirror_lr(obs, old_means)
+    mirrored_old_log_std = old_log_std[..., LR_PERM]
+    return (
+        jnp.concatenate((obs, mirrored_obs)),
+        jnp.concatenate((actions, mirrored_actions)),
+        jnp.concatenate((old_logp, old_logp)),
+        jnp.concatenate((old_means, mirrored_old_means)),
+        jnp.concatenate((old_log_std, mirrored_old_log_std)),
+        jnp.concatenate((advantages, advantages)),
+        jnp.concatenate((returns, returns)),
+    )
+
+
 def reward_metrics(reward_terms, completed_reward_sums, completed_episodes: int, cfg: dict) -> dict[str, float]:
     """Build RSL-compatible scaled and scale-independent reward diagnostics."""
     terms = np.asarray(reward_terms)
@@ -949,15 +971,9 @@ def main():
         adv,returns=flat(adv),flat(returns)
         log_std=jnp.broadcast_to(params["log_std"],means.shape)
         if args.symmetry_mode=="augmentation":
-            mo,ma=mirror_lr(obs,actions)
-            # The mirrored sample's "old" distribution is the current policy evaluated at the
-            # mirrored observation, so the KL/ratio start at their identity values.
-            mmean=actor_mean(params,mo,actor,norms,scale,max_delta_lora_radians,args.clipping_includes_exploratory_noisy)
-            ml=gaussian_log_prob(ma,mmean,params["log_std"])
-            obs=jnp.concatenate((obs,mo));actions=jnp.concatenate((actions,ma))
-            old_logp=jnp.concatenate((old_logp,ml));means=jnp.concatenate((means,mmean))
-            log_std=jnp.concatenate((log_std,log_std))
-            adv=jnp.concatenate((adv,adv));returns=jnp.concatenate((returns,returns))
+            obs,actions,old_logp,means,log_std,adv,returns=augment_left_right_batch(
+                obs,actions,old_logp,means,log_std,adv,returns
+            )
         adv=(adv-jnp.mean(adv))/(jnp.std(adv)+1e-8)
         return obs,actions,old_logp,means,log_std,adv,returns
 
