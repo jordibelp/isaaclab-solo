@@ -363,9 +363,46 @@ def summarize_rows(rows: list[tuple]) -> dict[str, float | int]:
     }
 
 
+def tracking_history_metrics(row: dict[str, str]) -> dict[str, float]:
+    values = {key: float(value) for key, value in row.items()}
+    return {
+        "tracking/time_s": values["time_s"],
+        "tracking/command_vx_mps": values["cmd_vx"],
+        "tracking/command_vy_mps": values["cmd_vy"],
+        "tracking/command_wz_radps": values["cmd_wz"],
+        "tracking/velocity_vx_mps": values["velocity_vx"],
+        "tracking/velocity_vy_mps": values["velocity_vy"],
+        "tracking/velocity_wz_radps": values["yaw_rate_wz"],
+        "tracking/error_vx_abs_mps": abs(values["cmd_vx"] - values["velocity_vx"]),
+        "tracking/error_vy_abs_mps": abs(values["cmd_vy"] - values["velocity_vy"]),
+        "tracking/error_vxy_norm_mps": values["vxy_error_norm"],
+        "tracking/error_wz_abs_radps": values["wz_error_abs"],
+        "tracking/reset": values["reset"],
+        "tracking/base_height_m": values["base_height_m"],
+        "tracking/gravity_x_b": values["gravity_x_b"],
+    }
+
+
+def log_tracking_csv(run, csv_path: Path) -> int:
+    """Log every evaluation sample as comparable W&B scalar history."""
+    with csv_path.open(newline="", encoding="utf-8") as stream:
+        rows = list(csv.DictReader(stream))
+    if not rows:
+        return 0
+    metric_names = tracking_history_metrics(rows[0])
+    run.define_metric("tracking/time_s")
+    for name in metric_names:
+        if name != "tracking/time_s":
+            run.define_metric(name, step_metric="tracking/time_s")
+    for row in rows:
+        run.log(tracking_history_metrics(row))
+    return len(rows)
+
+
 def upload_to_wandb(
     *, project: str, entity: str | None, run_name: str, config: dict, summary: dict,
     artifact_paths: list[Path], plot_paths: list[Path], artifact_name: str,
+    history_path: Path | None = None,
 ) -> str | None:
     """Upload a completed evaluation while keeping local results authoritative."""
     try:
@@ -373,6 +410,8 @@ def upload_to_wandb(
 
         run = wandb.init(project=project, entity=entity, name=run_name, config=config, job_type="sim-to-sim-eval")
         run.summary.update(summary)
+        if history_path is not None:
+            log_tracking_csv(run, history_path)
         image_log = {f"plots/{path.stem}": wandb.Image(str(path)) for path in plot_paths}
         if image_log:
             run.log(image_log)
@@ -546,6 +585,7 @@ def run_tracking(args, sim: Solo12Mujoco, policy: Policy, checkpoint: Path, mode
             artifact_paths=[config_path, summary_path, model_path, *result_paths],
             plot_paths=[path for path in result_paths if path.suffix == ".png"],
             artifact_name=f"{checkpoint.stem}-{timestamp}",
+            history_path=result_paths[0],
         )
         if run_url:
             print(f"[INFO] W&B run: {run_url}")

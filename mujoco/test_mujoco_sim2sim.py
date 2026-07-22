@@ -181,6 +181,34 @@ def test_timestamped_run_directory(tmp_path):
     assert second == tmp_path / "model_15008" / "20260718_131500_01"
 
 
+def test_tracking_csv_logs_comparable_wandb_time_series(tmp_path):
+    csv_path = tmp_path / "command_tracking.csv"
+    csv_path.write_text(
+        "time_s,cmd_vx,cmd_vy,cmd_wz,velocity_vx,velocity_vy,yaw_rate_wz,"
+        "vxy_error_norm,wz_error_abs,reset,base_height_m,gravity_x_b\n"
+        "0.02,0.5,-0.3,0.1,0.4,-0.1,-0.2,0.2236068,0.3,1,0.25,-0.9\n"
+    )
+
+    class Run:
+        def __init__(self):
+            self.metrics = []
+            self.rows = []
+
+        def define_metric(self, name, **kwargs):
+            self.metrics.append((name, kwargs))
+
+        def log(self, row):
+            self.rows.append(row)
+
+    run = Run()
+    assert sim2sim.log_tracking_csv(run, csv_path) == 1
+    assert ("tracking/error_vxy_norm_mps", {"step_metric": "tracking/time_s"}) in run.metrics
+    assert run.rows[0]["tracking/time_s"] == pytest.approx(0.02)
+    assert run.rows[0]["tracking/error_vx_abs_mps"] == pytest.approx(0.1)
+    assert run.rows[0]["tracking/error_vy_abs_mps"] == pytest.approx(0.2)
+    assert run.rows[0]["tracking/error_wz_abs_radps"] == pytest.approx(0.3)
+
+
 def test_tracking_summary_distribution_fields():
     rows = [
         (0.02, 0.5, 0, 0, 0.4, 0, 0.1, 0.1, 0.1, 0, 0.35, -0.9),
