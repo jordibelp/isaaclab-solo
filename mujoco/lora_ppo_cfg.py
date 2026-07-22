@@ -9,6 +9,7 @@ from dataclasses import asdict, dataclass, field
 class LoraPolicyCfg:
     trainable_layers: str = "all"
     rank: int = 1
+    frozen_base_weights: bool = True
     lora_alpha: float = 1.0
     constrain_delta_lora_degrees: float = 0.0
     clipping_includes_exploratory_noisy: bool = False

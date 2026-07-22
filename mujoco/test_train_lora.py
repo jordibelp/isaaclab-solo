@@ -19,6 +19,14 @@ def test_agent_defaults_come_from_config_file():
     assert args.rollout_steps == train_lora.DEFAULT_AGENT_CFG.num_steps_per_env
     assert args.constrain_delta_lora_degrees == 0.0
     assert args.clipping_includes_exploratory_noisy is False
+    assert args.frozen_base_weights is True
+
+
+@pytest.mark.parametrize("token", ["--frozen-base-weights=False", "--frozen-base-weights=false"])
+def test_base_weights_can_be_unfrozen(token):
+    args = train_lora.build_parser().parse_args(["--checkpoint", str(CHECKPOINT), "--rank=0", token])
+    assert args.rank == 0
+    assert args.frozen_base_weights is False
 
 
 @pytest.mark.parametrize("token", ["--clipping-includes-exploratory-noisy", "--clipping-includes-exploratory-noisy=True"])
@@ -146,6 +154,21 @@ def test_adapter_factor_shapes_follow_rank(rank):
         assert b.shape == (weight.shape[0], expected)
         # b @ a must land back in the frozen weight's shape for checkpoint merging.
         assert (b @ a).shape == weight.shape
+
+
+def test_rank_zero_unfrozen_initializes_full_dense_actor_and_critic():
+    _, actor, critic, _, _, norms, log_std = train_lora.load_frozen_networks(CHECKPOINT)
+    params = train_lora.init_trainable(jax.random.PRNGKey(0), actor, critic, 0, (), log_std, False)
+    assert all(set(layer) == {"weight", "bias"} for layer in params["actor"] + params["critic"])
+    obs = jnp.asarray(np.random.default_rng(3).normal(size=(3, 48)).astype(np.float32))
+    np.testing.assert_allclose(train_lora.actor_mean(params, obs, actor, norms, 0.0),
+                               train_lora.network((obs - norms["actor_mean"]) / (norms["actor_std"] + train_lora.OBS_NORM_EPS), actor, (), 0.0))
+
+
+def test_rank_zero_frozen_has_no_network_parameters():
+    _, actor, critic, _, _, _, log_std = train_lora.load_frozen_networks(CHECKPOINT)
+    params = train_lora.init_trainable(jax.random.PRNGKey(0), actor, critic, 0, (), log_std, True)
+    assert all(not layer for layer in params["actor"] + params["critic"])
 
 
 def test_nonfinite_gradients_leave_parameters_untouched():

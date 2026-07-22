@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Fine-tune frozen Solo12 RSL-RL actor/critic networks with LoRA PPO in MJX.
+"""Fine-tune Solo12 RSL-RL actor/critic networks with LoRA or full PPO in MJX.
 
 The target dynamics are the same MuJoCo model used by ``play_direct_mujoco.py``.
 MJX batches the physics over ``--num_envs`` on a GPU (or CPU fallback).  The
-pre-trained dense weights and biases remain frozen; PPO updates low-rank
-adapters in both actor and critic plus the actor exploration log standard
-deviation.  An optional per-joint bound limits the actor's LoRA correction.
+By default, pre-trained dense weights and biases remain frozen while PPO updates
+low-rank adapters in both actor and critic plus the actor exploration log
+standard deviation. Rank zero either fully fine-tunes the dense networks or,
+when the base remains frozen, runs a no-learning baseline.
 """
 
 from __future__ import annotations
@@ -173,7 +174,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--task", default="solo12-two-feet")
     p.add_argument("--checkpoint", required=True)
     p.add_argument("--trainable_layers", "--trainable-layers", choices=LAYER_CHOICES, default=policy.trainable_layers)
-    p.add_argument("--rank", type=int, default=policy.rank, help="Rank of the LoRA A/B factors; any r>=1 works.")
+    p.add_argument("--rank", type=int, default=policy.rank, help="LoRA rank; 0 disables adapters for a full/frozen baseline.")
+    p.add_argument(
+        "--frozen-base-weights",
+        type=_boolean,
+        nargs="?",
+        const=True,
+        default=policy.frozen_base_weights,
+        help="Freeze pretrained actor/critic weights and biases (default: true). Use false with --rank=0 for full fine-tuning.",
+    )
     p.add_argument("--lora-alpha", type=float, default=policy.lora_alpha, help="Adapter gain; the applied scale is alpha/rank.")
     p.add_argument(
         "--constrain-delta-lora-degrees",
@@ -235,6 +244,7 @@ AGENT_OVERRIDE_TO_DEST = {
     "agent.save_interval": "save_interval",
     "agent.policy.trainable_layers": "trainable_layers",
     "agent.policy.rank": "rank",
+    "agent.policy.frozen_base_weights": "frozen_base_weights",
     "agent.policy.lora_alpha": "lora_alpha",
     "agent.policy.constrain_delta_lora_degrees": "constrain_delta_lora_degrees",
     "agent.policy.clipping_includes_exploratory_noisy": "clipping_includes_exploratory_noisy",
@@ -290,6 +300,7 @@ def resolved_agent_config(args: argparse.Namespace) -> dict:
         "policy": {
             "trainable_layers": args.trainable_layers,
             "rank": args.rank,
+            "frozen_base_weights": args.frozen_base_weights,
             "lora_alpha": args.lora_alpha,
             "constrain_delta_lora_degrees": args.constrain_delta_lora_degrees,
             "clipping_includes_exploratory_noisy": args.clipping_includes_exploratory_noisy,
@@ -384,25 +395,33 @@ def load_frozen_networks(checkpoint: Path):
     return payload, actor, critic, actor_keys, critic_keys, norms, jnp.asarray(state["log_std"].numpy())
 
 
-def init_trainable(key, actor, critic, rank: int, selected: tuple[int, ...], log_std):
+def init_trainable(key, actor, critic, rank: int, selected: tuple[int, ...], log_std, frozen_base_weights: bool = True):
     keys = jax.random.split(key, 2 * (len(actor) + len(critic)))
-    def adapters(layers, offset):
+    def trainable_layers(layers, offset):
         result = []
-        for i, (weight, _) in enumerate(layers):
-            if i in selected:
+        for i, (weight, bias) in enumerate(layers):
+            if not frozen_base_weights:
+                result.append({"weight": weight, "bias": bias})
+            elif rank > 0 and i in selected:
                 a = 0.01 * jax.random.normal(keys[offset + 2*i], (rank, weight.shape[1]))
                 b = jnp.zeros((weight.shape[0], rank), weight.dtype)
+                result.append({"a": a, "b": b})
+            elif rank > 0:
+                result.append({
+                    "a": jnp.zeros((0, weight.shape[1]), weight.dtype),
+                    "b": jnp.zeros((weight.shape[0], 0), weight.dtype),
+                })
             else:
-                a = jnp.zeros((0, weight.shape[1]), weight.dtype)
-                b = jnp.zeros((weight.shape[0], 0), weight.dtype)
-            result.append({"a": a, "b": b})
+                result.append({})
         return tuple(result)
-    return {"actor": adapters(actor, 0), "critic": adapters(critic, 2*len(actor)), "log_std": log_std}
+    return {"actor": trainable_layers(actor, 0), "critic": trainable_layers(critic, 2*len(actor)), "log_std": log_std}
 
 
 def dense_lora(x, frozen, adapter, scale):
     weight, bias = frozen
-    residual = (x @ adapter["a"].T) @ adapter["b"].T if adapter["a"].shape[0] else 0.0
+    if "weight" in adapter:
+        return x @ adapter["weight"].T + adapter["bias"]
+    residual = (x @ adapter["a"].T) @ adapter["b"].T if "a" in adapter else 0.0
     return x @ weight.T + bias + scale * residual
 
 
@@ -798,8 +817,16 @@ def save_checkpoints(output: Path, iteration: int, original_payload, params, act
     merged=copy.deepcopy(original_payload);state=merged["model_state_dict"]
     for name,layers,keys in (("actor",actor,actor_keys),("critic",critic,critic_keys)):
         for frozen,ad,key in zip(layers,params[name],keys):
-            delta=scale*np.asarray(ad["b"]@ad["a"]);state[key]=torch.as_tensor(np.asarray(frozen[0])+delta,dtype=state[key].dtype)
-            adapter[name].append({"a":np.asarray(ad["a"]),"b":np.asarray(ad["b"]),"weight_key":key})
+            bias_key=key.replace(".weight", ".bias")
+            if "weight" in ad:
+                state[key]=torch.as_tensor(np.asarray(ad["weight"]),dtype=state[key].dtype)
+                state[bias_key]=torch.as_tensor(np.asarray(ad["bias"]),dtype=state[bias_key].dtype)
+                adapter[name].append({"weight":np.asarray(ad["weight"]),"bias":np.asarray(ad["bias"]),"weight_key":key})
+            elif "a" in ad:
+                delta=scale*np.asarray(ad["b"]@ad["a"]);state[key]=torch.as_tensor(np.asarray(frozen[0])+delta,dtype=state[key].dtype)
+                adapter[name].append({"a":np.asarray(ad["a"]),"b":np.asarray(ad["b"]),"weight_key":key})
+            else:
+                adapter[name].append({"weight_key":key})
     state["log_std"]=torch.as_tensor(np.asarray(params["log_std"]).copy(),dtype=state["log_std"].dtype)
     merged["iter"]=iteration
     if merged.get("infos") is None:
@@ -813,7 +840,9 @@ def main():
     args,unknown=build_parser().parse_known_args()
     args,unknown=apply_agent_overrides(args,unknown)
     if args.task!="solo12-two-feet": raise ValueError("Only --task=solo12-two-feet is supported.")
-    if args.rank<1 or args.num_envs<1: raise ValueError("--rank and --num_envs must be positive.")
+    if args.rank<0 or args.num_envs<1: raise ValueError("--rank must be non-negative and --num_envs must be positive.")
+    if args.rank>0 and not args.frozen_base_weights:
+        raise ValueError("Unfreezing base weights is supported only with --rank=0 (full fine-tuning).")
     if args.metrics_smoothing_window < 1: raise ValueError("--metrics-smoothing-window must be at least 1.")
     if not math.isfinite(args.constrain_delta_lora_degrees) or args.constrain_delta_lora_degrees < 0.0:
         raise ValueError("--constrain-delta-lora-degrees must be finite and non-negative (0 disables it).")
@@ -826,10 +855,11 @@ def main():
     checkpoint=Path(args.checkpoint).expanduser().resolve();xml=Path(__file__).with_name("solo12.xml")
     payload,actor,critic,akeys,ckeys,norms,log_std=load_frozen_networks(checkpoint)
     if len(actor)!=len(critic): raise ValueError("Actor and critic layer counts differ.")
-    selected=selected_layer_indices(len(actor),args.trainable_layers);scale=args.lora_alpha/args.rank
+    selected=selected_layer_indices(len(actor),args.trainable_layers) if args.rank > 0 else ()
+    scale=args.lora_alpha/args.rank if args.rank > 0 else 0.0
     max_delta_lora_radians=math.radians(args.constrain_delta_lora_degrees)
     key=jax.random.PRNGKey(args.seed);key,kinit,kenv=jax.random.split(key,3)
-    params=init_trainable(kinit,actor,critic,args.rank,selected,log_std)
+    params=init_trainable(kinit,actor,critic,args.rank,selected,log_std,args.frozen_base_weights)
     model_info=build_model(xml,float(cfg["kp"]),float(cfg["kd"]));reset_fn,step_fn=make_training_functions(model_info,cfg,args.num_envs)
     state=reset_fn(kenv)
     timestamp=datetime.now().strftime("%Y%m%d_%H%M%S");run_slug=args.run_name.replace("/","_")
@@ -878,6 +908,8 @@ def main():
             kl=jnp.mean(gaussian_kl(old_mean,old_log_std,mean,p["log_std"]))
             return total,(policy,vloss,entropy,jnp.mean(jnp.abs(ratio-1)>args.clip_param),kl)
         (total,metrics),grads=jax.value_and_grad(loss,has_aux=True)(params)
+        if args.rank == 0 and args.frozen_base_weights:
+            grads=zeros_like_tree(grads)
         step,m,v,lr=opt
         kl=metrics[-1]
         if args.lr_schedule=="adaptive":
