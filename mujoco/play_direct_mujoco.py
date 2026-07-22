@@ -257,12 +257,23 @@ def save_results(output_dir: Path, rows: list[tuple], commands: list[tuple[float
     import matplotlib.pyplot as plt
 
     output_dir.mkdir(parents=True, exist_ok=True)
+    values = np.asarray(rows, dtype=float)
+    signed_xy_error = values[:, 4:6] - values[:, 1:3]
+    signed_wz_error = values[:, 6] - values[:, 3]
+    command_norm = np.linalg.norm(values[:, 1:3], axis=1)
+    along_command_error = np.divide(
+        np.sum(signed_xy_error * values[:, 1:3], axis=1),
+        command_norm,
+        out=np.zeros_like(command_norm),
+        where=command_norm > 1.0e-9,
+    )
+    csv_rows = np.column_stack((values, signed_xy_error, signed_wz_error, along_command_error))
     csv_path = output_dir / "command_tracking.csv"
     header = ("time_s", "cmd_vx", "cmd_vy", "cmd_wz", "velocity_vx", "velocity_vy", "yaw_rate_wz",
-              "vxy_error_norm", "wz_error_abs", "reset", "base_height_m", "gravity_x_b")
+              "vxy_error_norm", "wz_error_abs", "reset", "base_height_m", "gravity_x_b",
+              "vx_error_signed", "vy_error_signed", "wz_error_signed", "vxy_error_along_command")
     with csv_path.open("w", newline="", encoding="utf-8") as stream:
-        writer = csv.writer(stream); writer.writerow(header); writer.writerows(rows)
-    values = np.asarray(rows, dtype=float)
+        writer = csv.writer(stream); writer.writerow(header); writer.writerows(csv_rows)
     times, errors = values[:, 0], values[:, 7]
 
     def decorate(ax):
@@ -283,6 +294,28 @@ def save_results(output_dir: Path, rows: list[tuple], commands: list[tuple[float
         ax.text(center, y0 + 0.97*span, f"({vx:g}, {vy:g})", ha="center", va="top", fontsize=8, color="#a51f1f")
     vxy_path = output_dir / "vxy_tracking_error.png"; fig.savefig(vxy_path, dpi=180); plt.close(fig)
     paths = [csv_path, vxy_path]
+
+    def save_signed_error_plot(series, ylabel, title, filename, color):
+        fig, ax = plt.subplots(figsize=(max(9.0, 1.45 * len(commands)), 4.4), constrained_layout=True)
+        ax.plot(times, series, color=color, linewidth=1.5); ax.axhline(0.0, color="0.2", linewidth=1.0)
+        decorate(ax); ax.set(xlabel="Time [s]", ylabel=ylabel, title=title)
+        path = output_dir / filename; fig.savefig(path, dpi=180); plt.close(fig); paths.append(path)
+
+    save_signed_error_plot(signed_xy_error[:, 0], r"$v_x-v_x^{cmd}$ [m/s]",
+                           "Signed x-velocity tracking error (base-footprint frame)", "vx_tracking_error_signed.png", "#d55e00")
+    save_signed_error_plot(signed_xy_error[:, 1], r"$v_y-v_y^{cmd}$ [m/s]",
+                           "Signed y-velocity tracking error (base-footprint frame)", "vy_tracking_error_signed.png", "#009e73")
+    save_signed_error_plot(along_command_error, r"$(v_{xy}-v_{xy}^{cmd})\cdot\hat{v}_{xy}^{cmd}$ [m/s]",
+                           "Planar tracking error projected along command direction", "vxy_tracking_error_along_command.png", "#cc79a7")
+    save_signed_error_plot(signed_wz_error, r"$\omega_z-\omega_z^{cmd}$ [rad/s]",
+                           "Signed yaw-rate tracking error (world z)", "wz_tracking_error_signed.png", "#0072b2")
+    fig, ax = plt.subplots(figsize=(max(9.0, 1.45 * len(commands)), 4.4), constrained_layout=True)
+    ax.plot(times, values[:, 6], label=r"$\omega_z$", color="#0072b2", linewidth=1.5)
+    ax.plot(times, values[:, 3], label=r"$\omega_z^{cmd}$", color="#d55e00", linewidth=1.3, linestyle="--")
+    decorate(ax); ax.legend(); ax.set(xlabel="Time [s]", ylabel="Yaw rate [rad/s]",
+                                      title="Measured and commanded yaw rate (world z)")
+    wz_compare_path = output_dir / "wz_tracking_actual_vs_command.png"
+    fig.savefig(wz_compare_path, dpi=180); plt.close(fig); paths.append(wz_compare_path)
     if any(abs(wz) > 1e-9 for _, _, wz in commands):
         fig, ax = plt.subplots(figsize=(max(9.0, 1.45 * len(commands)), 4.4), constrained_layout=True)
         ax.plot(times, values[:, 8], color="#0072b2", linewidth=1.7); decorate(ax)
@@ -340,6 +373,13 @@ def summarize_rows(rows: list[tuple]) -> dict[str, float | int]:
     values = np.asarray(rows, dtype=float)
     vxy_error = values[:, 7]
     wz_error = values[:, 8]
+    signed_xy_error = values[:, 4:6] - values[:, 1:3]
+    signed_wz_error = values[:, 6] - values[:, 3]
+    command_norm = np.linalg.norm(values[:, 1:3], axis=1)
+    along_command_error = np.divide(
+        np.sum(signed_xy_error * values[:, 1:3], axis=1), command_norm,
+        out=np.zeros_like(command_norm), where=command_norm > 1.0e-9,
+    )
     resets = int(values[:, 9].sum())
     return {
         "samples": len(rows),
@@ -356,6 +396,14 @@ def summarize_rows(rows: list[tuple]) -> dict[str, float | int]:
         "wz_error_p95_radps": float(np.percentile(wz_error, 95)),
         "wz_error_std_radps": float(wz_error.std()),
         "wz_error_max_radps": float(wz_error.max()),
+        "vx_error_signed_mean_mps": float(signed_xy_error[:, 0].mean()),
+        "vx_error_signed_std_mps": float(signed_xy_error[:, 0].std()),
+        "vy_error_signed_mean_mps": float(signed_xy_error[:, 1].mean()),
+        "vy_error_signed_std_mps": float(signed_xy_error[:, 1].std()),
+        "wz_error_signed_mean_radps": float(signed_wz_error.mean()),
+        "wz_error_signed_std_radps": float(signed_wz_error.std()),
+        "vxy_error_along_command_mean_mps": float(along_command_error.mean()),
+        "vxy_error_along_command_std_mps": float(along_command_error.std()),
         "resets": resets,
         "failures": resets,
         "min_base_height_m": float(values[:, 10].min()),
@@ -365,6 +413,12 @@ def summarize_rows(rows: list[tuple]) -> dict[str, float | int]:
 
 def tracking_history_metrics(row: dict[str, str]) -> dict[str, float]:
     values = {key: float(value) for key, value in row.items()}
+    vx_error = values["velocity_vx"] - values["cmd_vx"]
+    vy_error = values["velocity_vy"] - values["cmd_vy"]
+    wz_error = values["yaw_rate_wz"] - values["cmd_wz"]
+    command_norm = math.hypot(values["cmd_vx"], values["cmd_vy"])
+    along_command_error = ((vx_error * values["cmd_vx"] + vy_error * values["cmd_vy"]) / command_norm
+                           if command_norm > 1.0e-9 else 0.0)
     return {
         "tracking/time_s": values["time_s"],
         "tracking/command_vx_mps": values["cmd_vx"],
@@ -375,8 +429,12 @@ def tracking_history_metrics(row: dict[str, str]) -> dict[str, float]:
         "tracking/velocity_wz_radps": values["yaw_rate_wz"],
         "tracking/error_vx_abs_mps": abs(values["cmd_vx"] - values["velocity_vx"]),
         "tracking/error_vy_abs_mps": abs(values["cmd_vy"] - values["velocity_vy"]),
+        "tracking/error_vx_signed_mps": vx_error,
+        "tracking/error_vy_signed_mps": vy_error,
         "tracking/error_vxy_norm_mps": values["vxy_error_norm"],
         "tracking/error_wz_abs_radps": values["wz_error_abs"],
+        "tracking/error_wz_signed_radps": wz_error,
+        "tracking/error_vxy_along_command_mps": along_command_error,
         "tracking/reset": values["reset"],
         "tracking/base_height_m": values["base_height_m"],
         "tracking/gravity_x_b": values["gravity_x_b"],

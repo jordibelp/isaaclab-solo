@@ -422,6 +422,11 @@ def _parse_tracking_commands(value: str) -> list[tuple[float, float, float]]:
     return commands
 
 
+def _evaluation_duration_s(requested_duration_s: float, tracking_commands) -> float:
+    return (len(tracking_commands) * TRACKING_COMMAND_DURATION_S
+            if tracking_commands else float(requested_duration_s))
+
+
 TRACKING_COMMAND_DURATION_S = 5.0
 TRACKING_COMMANDS = _parse_tracking_commands(args_cli.track_cmds) if args_cli.track_cmds.strip() else []
 
@@ -1464,14 +1469,24 @@ def _save_command_tracking_plots(
     yaw_rate = np.asarray(tracked_yaw_rate)
     lin_error = np.linalg.norm(command_samples[:, :2] - lin_vel, axis=1)
     yaw_error = np.abs(command_samples[:, 2] - yaw_rate)
+    signed_xy_error = lin_vel - command_samples[:, :2]
+    signed_wz_error = yaw_rate - command_samples[:, 2]
+    command_norm = np.linalg.norm(command_samples[:, :2], axis=1)
+    along_command_error = np.divide(
+        np.sum(signed_xy_error * command_samples[:, :2], axis=1), command_norm,
+        out=np.zeros_like(command_norm), where=command_norm > 1.0e-9,
+    )
 
     csv_path = output_dir / "command_tracking.csv"
     with csv_path.open("w", newline="", encoding="utf-8") as stream:
         writer = csv.writer(stream)
         writer.writerow(
-            ["time_s", "cmd_vx", "cmd_vy", "cmd_wz", "velocity_vx", "velocity_vy", "yaw_rate_wz", "vxy_error_norm", "wz_error_abs"]
+            ["time_s", "cmd_vx", "cmd_vy", "cmd_wz", "velocity_vx", "velocity_vy", "yaw_rate_wz",
+             "vxy_error_norm", "wz_error_abs", "vx_error_signed", "vy_error_signed", "wz_error_signed",
+             "vxy_error_along_command"]
         )
-        writer.writerows(np.column_stack((times, command_samples, lin_vel, yaw_rate, lin_error, yaw_error)))
+        writer.writerows(np.column_stack((times, command_samples, lin_vel, yaw_rate, lin_error, yaw_error,
+                                          signed_xy_error, signed_wz_error, along_command_error)))
 
     def decorate_cells(ax):
         for boundary in np.arange(1, len(commands)) * TRACKING_COMMAND_DURATION_S:
@@ -1507,6 +1522,36 @@ def _save_command_tracking_plots(
     plt.close(fig)
 
     paths = [csv_path, lin_path]
+
+    def save_signed_error_plot(series, ylabel, title, filename, color):
+        fig, ax = plt.subplots(figsize=(max(9.0, 1.45 * len(commands)), 4.4), constrained_layout=True)
+        ax.plot(times, series, color=color, linewidth=1.5)
+        ax.axhline(0.0, color="0.2", linewidth=1.0)
+        decorate_cells(ax)
+        ax.set(xlabel="Time [s]", ylabel=ylabel, title=title)
+        path = output_dir / filename
+        fig.savefig(path, dpi=180)
+        plt.close(fig)
+        paths.append(path)
+
+    save_signed_error_plot(signed_xy_error[:, 0], r"$v_x-v_x^{cmd}$ [m/s]",
+                           "Signed x-velocity tracking error (base-footprint frame)", "vx_tracking_error_signed.png", "#d55e00")
+    save_signed_error_plot(signed_xy_error[:, 1], r"$v_y-v_y^{cmd}$ [m/s]",
+                           "Signed y-velocity tracking error (base-footprint frame)", "vy_tracking_error_signed.png", "#009e73")
+    save_signed_error_plot(along_command_error, r"$(v_{xy}-v_{xy}^{cmd})\cdot\hat{v}_{xy}^{cmd}$ [m/s]",
+                           "Planar tracking error projected along command direction", "vxy_tracking_error_along_command.png", "#cc79a7")
+    save_signed_error_plot(signed_wz_error, r"$\omega_z-\omega_z^{cmd}$ [rad/s]",
+                           "Signed yaw-rate tracking error (world z)", "wz_tracking_error_signed.png", "#0072b2")
+    fig, ax = plt.subplots(figsize=(max(9.0, 1.45 * len(commands)), 4.4), constrained_layout=True)
+    ax.plot(times, yaw_rate, label=r"$\omega_z$", color="#0072b2", linewidth=1.5)
+    ax.plot(times, command_samples[:, 2], label=r"$\omega_z^{cmd}$", color="#d55e00", linewidth=1.3, linestyle="--")
+    decorate_cells(ax)
+    ax.legend()
+    ax.set(xlabel="Time [s]", ylabel="Yaw rate [rad/s]", title="Measured and commanded yaw rate (world z)")
+    wz_compare_path = output_dir / "wz_tracking_actual_vs_command.png"
+    fig.savefig(wz_compare_path, dpi=180)
+    plt.close(fig)
+    paths.append(wz_compare_path)
     if any(abs(wz) > 1.0e-9 for _, _, wz in commands):
         fig, ax = plt.subplots(figsize=(max(9.0, 1.45 * len(commands)), 4.8), constrained_layout=True)
         ax.plot(times, yaw_error, color="#0072b2", linewidth=1.7)
@@ -1544,6 +1589,13 @@ def _summarize_command_tracking(
     yaw_rate = np.asarray(tracked_yaw_rate)
     vxy_error = np.linalg.norm(command_samples[:, :2] - lin_vel, axis=1)
     wz_error = np.abs(command_samples[:, 2] - yaw_rate)
+    signed_xy_error = lin_vel - command_samples[:, :2]
+    signed_wz_error = yaw_rate - command_samples[:, 2]
+    command_norm = np.linalg.norm(command_samples[:, :2], axis=1)
+    along_command_error = np.divide(
+        np.sum(signed_xy_error * command_samples[:, :2], axis=1), command_norm,
+        out=np.zeros_like(command_norm), where=command_norm > 1.0e-9,
+    )
 
     def distribution(prefix: str, values: np.ndarray, unit: str) -> dict[str, float]:
         return {
@@ -1562,7 +1614,50 @@ def _summarize_command_tracking(
         "failures": int(resets),
         **distribution("vxy_error", vxy_error, "mps"),
         **distribution("wz_error", wz_error, "radps"),
+        **distribution("vx_error_signed", signed_xy_error[:, 0], "mps"),
+        **distribution("vy_error_signed", signed_xy_error[:, 1], "mps"),
+        **distribution("wz_error_signed", signed_wz_error, "radps"),
+        **distribution("vxy_error_along_command", along_command_error, "mps"),
     }
+
+
+def _log_command_tracking_csv_to_wandb(run, csv_path: Path) -> int:
+    """Log Isaac command tracking using the same scalar schema as the MuJoCo evaluator."""
+    import csv
+
+    with csv_path.open(newline="", encoding="utf-8") as stream:
+        rows = list(csv.DictReader(stream))
+    if not rows:
+        return 0
+    metric_names = [
+        "tracking/command_vx_mps", "tracking/command_vy_mps", "tracking/command_wz_radps",
+        "tracking/velocity_vx_mps", "tracking/velocity_vy_mps", "tracking/velocity_wz_radps",
+        "tracking/error_vx_abs_mps", "tracking/error_vy_abs_mps", "tracking/error_vxy_norm_mps",
+        "tracking/error_wz_abs_radps", "tracking/error_vx_signed_mps", "tracking/error_vy_signed_mps",
+        "tracking/error_wz_signed_radps", "tracking/error_vxy_along_command_mps",
+    ]
+    run.define_metric("tracking/time_s")
+    for name in metric_names:
+        run.define_metric(name, step_metric="tracking/time_s")
+    for row in rows:
+        cmd_vx, cmd_vy, cmd_wz = (float(row[key]) for key in ("cmd_vx", "cmd_vy", "cmd_wz"))
+        vx, vy, wz = (float(row[key]) for key in ("velocity_vx", "velocity_vy", "yaw_rate_wz"))
+        vx_error, vy_error, wz_error = vx - cmd_vx, vy - cmd_vy, wz - cmd_wz
+        command_norm = math.hypot(cmd_vx, cmd_vy)
+        run.log({
+            "tracking/time_s": float(row["time_s"]),
+            "tracking/command_vx_mps": cmd_vx, "tracking/command_vy_mps": cmd_vy,
+            "tracking/command_wz_radps": cmd_wz, "tracking/velocity_vx_mps": vx,
+            "tracking/velocity_vy_mps": vy, "tracking/velocity_wz_radps": wz,
+            "tracking/error_vx_abs_mps": abs(vx_error), "tracking/error_vy_abs_mps": abs(vy_error),
+            "tracking/error_vxy_norm_mps": float(row["vxy_error_norm"]),
+            "tracking/error_wz_abs_radps": float(row["wz_error_abs"]),
+            "tracking/error_vx_signed_mps": vx_error, "tracking/error_vy_signed_mps": vy_error,
+            "tracking/error_wz_signed_radps": wz_error,
+            "tracking/error_vxy_along_command_mps": ((vx_error * cmd_vx + vy_error * cmd_vy) / command_norm
+                                                       if command_norm > 1.0e-9 else 0.0),
+        })
+    return len(rows)
 
 
 def _save_and_upload_tracking_metadata(
@@ -1582,7 +1677,7 @@ def _save_and_upload_tracking_metadata(
         "checkpoint": str(Path(resume_path).resolve()),
         "commands": [list(command) for command in TRACKING_COMMANDS],
         "command_duration_s": TRACKING_COMMAND_DURATION_S,
-        "duration_s": float(args_cli.duration_s),
+        "duration_s": float(summary["duration_s"]),
         "episode_length_s": float(env_cfg.episode_length_s),
         "num_envs": int(args_cli.num_envs),
         "policy_dt": float(dt),
@@ -1608,6 +1703,8 @@ def _save_and_upload_tracking_metadata(
                 job_type="sim-to-sim-eval",
             )
             tracking_run.summary.update(summary)
+            csv_path = next(path for path in artifact_paths if path.name == "command_tracking.csv")
+            _log_command_tracking_csv_to_wandb(tracking_run, csv_path)
             plot_paths = [path for path in artifact_paths if path.suffix == ".png"]
             if plot_paths:
                 tracking_run.log({f"plots/{path.stem}": wandb.Image(str(path)) for path in plot_paths})
@@ -2104,7 +2201,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         force_arrow.update(active_body_force)
     if helper_height_plane is not None:
         helper_height_plane.update()
-    target_steps = max(1, int(round(float(args_cli.duration_s) / float(dt))))
+    evaluation_duration_s = _evaluation_duration_s(args_cli.duration_s, TRACKING_COMMANDS)
+    target_steps = max(1, int(round(evaluation_duration_s / float(dt))))
     ratio_over_time = []
     track_over_time = []
     force_over_time = []

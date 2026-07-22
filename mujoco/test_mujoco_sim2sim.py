@@ -207,6 +207,42 @@ def test_tracking_csv_logs_comparable_wandb_time_series(tmp_path):
     assert run.rows[0]["tracking/error_vx_abs_mps"] == pytest.approx(0.1)
     assert run.rows[0]["tracking/error_vy_abs_mps"] == pytest.approx(0.2)
     assert run.rows[0]["tracking/error_wz_abs_radps"] == pytest.approx(0.3)
+    assert run.rows[0]["tracking/error_vx_signed_mps"] == pytest.approx(-0.1)
+    assert run.rows[0]["tracking/error_vy_signed_mps"] == pytest.approx(0.2)
+    assert run.rows[0]["tracking/error_wz_signed_radps"] == pytest.approx(-0.3)
+    assert run.rows[0]["tracking/error_vxy_along_command_mps"] == pytest.approx(
+        (-0.1 * 0.5 + 0.2 * -0.3) / np.hypot(0.5, -0.3)
+    )
+
+
+def test_zero_planar_command_has_zero_directional_projection():
+    row = {
+        "time_s": "0.02", "cmd_vx": "0", "cmd_vy": "0", "cmd_wz": "0",
+        "velocity_vx": "0.2", "velocity_vy": "-0.1", "yaw_rate_wz": "0.3",
+        "vxy_error_norm": "0.2236068", "wz_error_abs": "0.3", "reset": "0",
+        "base_height_m": "0.25", "gravity_x_b": "-0.9",
+    }
+    assert sim2sim.tracking_history_metrics(row)["tracking/error_vxy_along_command_mps"] == 0.0
+
+
+def test_tracking_results_include_signed_error_csv_and_plots(tmp_path):
+    rows = [
+        (0.02, 0.5, 0, 0, 0.4, 0.1, 0.2, np.hypot(-0.1, 0.1), 0.2, 0, 0.35, -0.9),
+        (0.04, 0.5, 0, 0, 0.6, -0.1, -0.2, np.hypot(0.1, -0.1), 0.2, 0, 0.35, -0.9),
+    ]
+    paths = sim2sim.save_results(tmp_path, rows, [(0.5, 0.0, 0.0)])
+    csv_data = np.genfromtxt(tmp_path / "command_tracking.csv", delimiter=",", names=True)
+
+    assert csv_data.dtype.names[-4:] == (
+        "vx_error_signed", "vy_error_signed", "wz_error_signed", "vxy_error_along_command"
+    )
+    np.testing.assert_allclose(csv_data["vx_error_signed"], [-0.1, 0.1])
+    np.testing.assert_allclose(csv_data["vxy_error_along_command"], [-0.1, 0.1])
+    assert {path.name for path in paths} >= {
+        "vx_tracking_error_signed.png", "vy_tracking_error_signed.png",
+        "wz_tracking_error_signed.png", "vxy_tracking_error_along_command.png",
+        "wz_tracking_actual_vs_command.png",
+    }
 
 
 def test_tracking_summary_distribution_fields():
