@@ -858,6 +858,11 @@ def save_checkpoints(output: Path, iteration: int, original_payload, params, act
     torch.save(adapter,output/"adapter_latest.pt");torch.save(merged,output/"model_latest.pt")
 
 
+def run_directory_name(timestamp, run_name, wandb_run_id=None):
+    name = f"{timestamp}_{run_name.replace('/', '_')}"
+    return f"{name}_{wandb_run_id}" if wandb_run_id else name
+
+
 def main():
     args,unknown=build_parser().parse_known_args()
     args,unknown=apply_agent_overrides(args,unknown)
@@ -884,16 +889,20 @@ def main():
     params=init_trainable(kinit,actor,critic,args.rank,selected,log_std,args.frozen_base_weights)
     model_info=build_model(xml,float(cfg["kp"]),float(cfg["kd"]));reset_fn,step_fn=make_training_functions(model_info,cfg,args.num_envs)
     state=reset_fn(kenv)
-    timestamp=datetime.now().strftime("%Y%m%d_%H%M%S");run_slug=args.run_name.replace("/","_")
-    output=args.output_dir/f"{timestamp}_{run_slug}";output.mkdir(parents=True,exist_ok=False)
-    config={**vars(args),"checkpoint":str(checkpoint),"output_dir":str(output),"selected_layer_indices":selected,"lora_scale":scale,"agent":resolved_agent_config(args),"env":cfg,"jax_devices":[str(x) for x in jax.devices()],"paper":"arXiv:2603.17092"}
-    config={k:(str(v) if isinstance(v,Path) else v) for k,v in config.items()};(output/"run_config.json").write_text(json.dumps(config,indent=2)+"\n")
+    timestamp=datetime.now().strftime("%Y%m%d_%H%M%S")
+    config={**vars(args),"checkpoint":str(checkpoint),"selected_layer_indices":selected,"lora_scale":scale,"agent":resolved_agent_config(args),"env":cfg,"jax_devices":[str(x) for x in jax.devices()],"paper":"arXiv:2603.17092"}
+    config={k:(str(v) if isinstance(v,Path) else v) for k,v in config.items()}
     wandb_run=None
     if not args.no_wandb:
         try:
             import wandb
             wandb_run=wandb.init(project=args.wandb_project,entity=args.wandb_entity,name=args.run_name,config=config)
         except Exception as exc: print(f"[WARN] W&B disabled: {exc}",flush=True)
+    wandb_run_id=wandb_run.id if wandb_run else None
+    output=args.output_dir/run_directory_name(timestamp,args.run_name,wandb_run_id);output.mkdir(parents=True,exist_ok=False)
+    config.update({"output_dir":str(output),"wandb_run_id":wandb_run_id})
+    (output/"run_config.json").write_text(json.dumps(config,indent=2)+"\n")
+    if wandb_run: wandb_run.config.update({"output_dir":str(output),"wandb_run_id":wandb_run_id})
     log_std_min,log_std_max=map(float,args.log_std_range);lr_min,lr_max=map(float,args.lr_range)
     optimizer=(jnp.array(0),zeros_like_tree(params),zeros_like_tree(params),jnp.asarray(args.learning_rate))
 

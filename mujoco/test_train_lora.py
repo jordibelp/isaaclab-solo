@@ -22,6 +22,15 @@ def test_agent_defaults_come_from_config_file():
     assert args.frozen_base_weights is True
 
 
+def test_run_directory_name_appends_wandb_run_id():
+    assert train_lora.run_directory_name(
+        "20260722_142955", "[cluster] mujoco LoRA/rank=64", "7dbe7he7"
+    ) == "20260722_142955_[cluster] mujoco LoRA_rank=64_7dbe7he7"
+    assert train_lora.run_directory_name(
+        "20260722_142955", "offline run"
+    ) == "20260722_142955_offline run"
+
+
 @pytest.mark.parametrize("token", ["--frozen-base-weights=False", "--frozen-base-weights=false"])
 def test_base_weights_can_be_unfrozen(token):
     args = train_lora.build_parser().parse_args(["--checkpoint", str(CHECKPOINT), "--rank=0", token])
