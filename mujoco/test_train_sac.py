@@ -1,9 +1,12 @@
+from collections import deque
 import shlex
 from types import SimpleNamespace
 
 import pytest
+import torch
 
 import train_sac
+from rsl_rl_sac.utils.logger import Logger
 from rsl_rl_sac.utils import wandb_utils
 
 
@@ -33,6 +36,44 @@ def test_sac_wandb_writer_exposes_command_at_top_level(tmp_path, monkeypatch):
     writer.close()
 
     assert captured["config"]["command"] == "./isaaclab.sh -p mujoco/train_sac.py --headless"
+
+
+def test_sac_logger_counts_individual_environment_steps(tmp_path):
+    scalars = []
+    logger = Logger.__new__(Logger)
+    logger.writer = SimpleNamespace(
+        add_scalar=lambda name, value, step, **kwargs: scalars.append((name, value, step)),
+    )
+    logger.cfg = {"num_steps_per_env": 3, "algorithm": {"rnd_cfg": None}}
+    logger.num_envs = 2
+    logger.gpu_world_size = 1
+    logger.device = "cpu"
+    logger.tot_timesteps = 0
+    logger.tot_time = 0.0
+    logger.ep_extras = []
+    logger.rewbuffer = deque()
+    logger.lenbuffer = deque()
+    logger.logger_type = "tensorboard"
+    logger.log_dir = str(tmp_path)
+
+    common = {
+        "start_it": 0,
+        "total_it": 2,
+        "collect_time": 1.0,
+        "learn_time": 1.0,
+        "loss_dict": {},
+        "learning_rate": 1.0e-4,
+        "action_std": torch.ones(1),
+        "rnd_weight": None,
+        "print_minimal": True,
+    }
+    logger.log(it=0, **common)
+    logger.log(it=1, **common)
+
+    assert [item for item in scalars if item[0] == "env_steps"] == [
+        ("env_steps", 6, 0),
+        ("env_steps", 12, 1),
+    ]
 
 
 def test_runner_config_uses_paper_sac_defaults():

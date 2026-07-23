@@ -158,6 +158,7 @@ class Logger:
             iteration_time = collect_time + learn_time
             self.tot_timesteps += collection_size
             self.tot_time += iteration_time
+            self.writer.add_scalar("env_steps", self.tot_timesteps, it)
 
             # Log episode extras
             extras_string = ""

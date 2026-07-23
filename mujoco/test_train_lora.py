@@ -51,6 +51,7 @@ def test_env_interactions_are_logged_per_parallel_rollout(tmp_path, monkeypatch)
     metrics_path = next(output_dir.glob("*/metrics.jsonl"))
     metrics = json.loads(metrics_path.read_text().splitlines()[0])
     assert metrics["iteration"] == 1
+    assert metrics["env_steps"] == 6
     assert metrics["env_interactions"] == 6
 
 

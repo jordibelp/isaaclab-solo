@@ -1022,7 +1022,7 @@ def main():
         reward_terms=np.asarray(stats[5]);completed_reward_sums=np.asarray(jnp.sum(stats[6],axis=(0,1)))
         dones=int(dones);terminations=int(terminations);timeouts=dones-terminations
         rollout_envs=samples
-        log={"iteration":iteration,"env_interactions":iteration*samples,
+        log={"iteration":iteration,"env_steps":iteration*samples,"env_interactions":iteration*samples,
              "reward/mean_step":float(jnp.mean(traj.reward)),
              "episodes":dones,
              "Episode/count":dones,"Episode/termination_count":terminations,"Episode/timeout_count":timeouts,

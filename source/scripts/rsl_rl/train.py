@@ -2332,6 +2332,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
         locs = log_args[0]
         if getattr(runner, "writer", None) is not None:
+            runner.writer.add_scalar("env_steps", runner.tot_timesteps, locs["it"])
             _log_plasticity_metrics(runner, locs, args_cli.plasticity_metrics_interval)
         rewbuffer = locs.get("rewbuffer")
         if rewbuffer is None or len(rewbuffer) == 0:
