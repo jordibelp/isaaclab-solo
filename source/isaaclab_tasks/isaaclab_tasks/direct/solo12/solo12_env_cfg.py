@@ -904,4 +904,5 @@ class Solo12TwoFeetEnvCfg(Solo12EnvCfg):
     kp = 9.0
     kd = 0.2
     episode_length_s = 10.0
+    command_resampling_time_s=5.0
     enabled_self_collisions=True
