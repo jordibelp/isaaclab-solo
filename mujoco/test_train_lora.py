@@ -1,4 +1,6 @@
+import json
 from pathlib import Path
+import sys
 
 import jax
 import jax.numpy as jnp
@@ -10,6 +12,32 @@ import train_lora
 
 
 CHECKPOINT = Path("/home/jordibelp/IsaacLab-dirty/logs/skrl/checkpoints/0717_q3a68133_model_15008.pt")
+
+
+def test_env_interactions_are_logged_per_parallel_rollout(tmp_path, monkeypatch):
+    output_dir = tmp_path / "runs"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "train_lora.py",
+            "--checkpoint",
+            str(CHECKPOINT),
+            "--output-dir",
+            str(output_dir),
+            "--num-envs=2",
+            "--rollout-steps=3",
+            "--dry-run",
+            "--no-wandb",
+        ],
+    )
+
+    train_lora.main()
+
+    metrics_path = next(output_dir.glob("*/metrics.jsonl"))
+    metrics = json.loads(metrics_path.read_text().splitlines()[0])
+    assert metrics["iteration"] == 1
+    assert metrics["env_interactions"] == 6
 
 
 def test_agent_defaults_come_from_config_file():
