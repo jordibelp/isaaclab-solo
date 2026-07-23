@@ -850,7 +850,7 @@ class Solo12TwoFeetEnvCfg(Solo12EnvCfg):
     two_feet_above_height_reward_scale = 1.5
     three_or_more_feet_contact_penalty_reward_scale = -100.0
     base_tilt_penalty_reward_scale = 0.0
-    two_feet_above_height_threshold = 0.5
+    two_feet_above_height_threshold = 0.45
     two_feet_above_height_alpha = 15.0
 
     command_ang_vel_z_range = (-0.5, 0.5)
@@ -874,11 +874,11 @@ class Solo12TwoFeetEnvCfg(Solo12EnvCfg):
         "two_feet_above_height",
         "track_lin_vel_xy_exp",
     )
-    two_feet_above_height_reward_scale_curriculum = (1.5, 1.2, 1.5, 1.5, 1.5)
-    track_lin_vel_xy_reward_scale_curriculum = (1.2, 1.5, 1.5, 1.5, 1.5)
+    two_feet_above_height_reward_scale_curriculum = (1.7, 1.2, 1.5, 1.5, 1.5)
+    track_lin_vel_xy_reward_scale_curriculum = (1.2, 1.6, 1.5, 1.5, 1.5)
     three_or_more_feet_contact_penalty_reward_scale_curriculum = (-100.0,) * 5
-    two_feet_above_height_alpha_curriculum = (15.0, 20.0, 20.0, 20.0, 20.0)
-    two_feet_above_height_threshold_curriculum = (0.5,) * 5
+    two_feet_above_height_alpha_curriculum = (15.0, 20.0, 25.0, 25.0, 25.0)
+    two_feet_above_height_threshold_curriculum = (0.45,) * 5
     actuation_delay_range_curriculum = ((0, 0), (0, 0), (0, 3), (0, 3), (0, 3))
     tricky_terrain_curriculum = (False, False, True, True, True)
     include_events_randomization_curriculum = (False, False, True, True, True)
@@ -903,5 +903,5 @@ class Solo12TwoFeetEnvCfg(Solo12EnvCfg):
     opposite_direction_cmd_prob = 0.0
     kp = 9.0
     kd = 0.2
-    episode_length_s = 20.0
+    episode_length_s = 10.0
     enabled_self_collisions=True
