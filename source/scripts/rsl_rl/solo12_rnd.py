@@ -66,8 +66,8 @@ def configure_solo12_rnd(env_cfg, agent_cfg) -> Solo12RndSetup:
         return Solo12RndSetup(enabled=False, beta=0.0)
     if beta == 0.0:
         raise ValueError("env.rnd_network=True requires env.beta_curiosity > 0.0.")
-    if getattr(agent_cfg, "class_name", None) != "OnPolicyRunner":
-        raise ValueError("Solo12 RND requires the RSL-RL OnPolicyRunner / PPO path.")
+    if getattr(agent_cfg, "class_name", None) not in ("OnPolicyRunner", "OffPolicyRunner"):
+        raise ValueError("Solo12 RND requires an RSL-RL PPO or SAC runner.")
 
     # Follow the robotics-focused RND setup from Schwarke et al. (CoRL 2023):
     # normalize the curiosity state (not the intrinsic reward), use a one-hidden-layer

@@ -67,6 +67,31 @@ class RslRlPpoActorCriticRecurrentCfg(RslRlPpoActorCriticCfg):
     """The number of RNN layers."""
 
 
+@configclass
+class RslRlSacActorModelCfg:
+    """Configuration for the tanh-squashed SAC actor from RSL-RL-SAC."""
+
+    class_name: str = "SACActorModel"
+    hidden_dims: list[int] = MISSING
+    activation: str = MISSING
+    obs_normalization: bool = MISSING
+    init_noise_std: float = MISSING
+    layer_norm: bool = False
+    log_std_min: float = -20.0
+    log_std_max: float = 2.0
+
+
+@configclass
+class RslRlSacCriticModelCfg:
+    """Configuration for the twin-Q SAC critic."""
+
+    class_name: str = "SACCriticModel"
+    hidden_dims: list[int] = MISSING
+    activation: str = MISSING
+    obs_normalization: bool = MISSING
+    layer_norm: bool = False
+
+
 ############################
 # Algorithm configurations #
 ############################
@@ -127,6 +152,32 @@ class RslRlPpoAlgorithmCfg:
 
     symmetry_cfg: RslRlSymmetryCfg | None = None
     """The symmetry configuration. Default is None, in which case symmetry is not used."""
+
+
+@configclass
+class RslRlSacAlgorithmCfg:
+    """Configuration for SAC as released with arXiv:2605.24975."""
+
+    class_name: str = "SAC"
+    replay_buffer_size: int = MISSING
+    num_learning_epochs: int = MISSING
+    num_mini_batches: int = MISSING
+    mini_batch_size: int = MISSING
+    actor_learning_rate: float = MISSING
+    critic_learning_rate: float = MISSING
+    alpha_learning_rate: float = MISSING
+    gamma: float = MISSING
+    tau: float = MISSING
+    alpha: float = MISSING
+    auto_alpha: bool = MISSING
+    target_entropy_scale: float = 1.0
+    max_grad_norm: float = MISSING
+    policy_frequency: int = MISSING
+    n_steps: int = MISSING
+    actor_optimizer: Literal["adam", "adamw", "sgd", "rmsprop"] = "adam"
+    critic_optimizer: Literal["adam", "adamw", "sgd", "rmsprop"] = "adam"
+    rnd_cfg: RslRlRndCfg | None = None
+    symmetry_cfg: RslRlSymmetryCfg | None = None
 
 
 #########################
@@ -248,3 +299,15 @@ class RslRlOnPolicyRunnerCfg(RslRlBaseRunnerCfg):
 
     algorithm: RslRlPpoAlgorithmCfg = MISSING
     """The algorithm configuration."""
+
+
+@configclass
+class RslRlOffPolicyRunnerCfg(RslRlBaseRunnerCfg):
+    """Configuration for the RSL-RL-SAC off-policy runner."""
+
+    class_name: str = "OffPolicyRunner"
+    actor: RslRlSacActorModelCfg = MISSING
+    critic: RslRlSacCriticModelCfg = MISSING
+    algorithm: RslRlSacAlgorithmCfg = MISSING
+    log_interval: int = 1
+    start_training: int = 1

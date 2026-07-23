@@ -32,6 +32,7 @@ from pathlib import Path
 _THIS_DIR = Path(__file__).resolve().parent
 _UPSTREAM_RSL_SCRIPT_DIR = Path(__file__).resolve().parents[3] / "scripts" / "reinforcement_learning" / "rsl_rl"
 _UPSTREAM_SKRL_HELPERS_DIR = Path(__file__).resolve().parents[1] / "skrl"
+_RSL_RL_SAC_VENDOR_DIR = Path(__file__).resolve().parents[2] / "rsl_rl_sac_vendor"
 for _path in (str(_UPSTREAM_RSL_SCRIPT_DIR), str(_UPSTREAM_SKRL_HELPERS_DIR)):
     if _path not in sys.path:
         sys.path.insert(0, _path)
@@ -457,6 +458,9 @@ simulation_app = app_launcher.app
 
 from packaging import version
 
+if str(_RSL_RL_SAC_VENDOR_DIR) not in sys.path:
+    sys.path.insert(0, str(_RSL_RL_SAC_VENDOR_DIR))
+
 RSL_RL_VERSION = "3.0.1"
 installed_version = metadata.version("rsl-rl-lib")
 if version.parse(installed_version) < version.parse(RSL_RL_VERSION):
@@ -476,6 +480,7 @@ import logging
 import gymnasium as gym
 import torch
 from rsl_rl.runners import DistillationRunner, OnPolicyRunner
+from rsl_rl_sac.runners import OffPolicyRunner
 
 import plasticity_metrics
 import plasticity_mitigation
@@ -1917,8 +1922,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     symmetry_enabled = args_cli.symmetry_mode != "none"
     symmetry_fn = None
     if symmetry_enabled:
-        if agent_cfg.class_name != "OnPolicyRunner":
-            raise ValueError("Symmetry mode currently requires the OnPolicyRunner / PPO path in RSL-RL.")
+        if agent_cfg.class_name not in ("OnPolicyRunner", "OffPolicyRunner"):
+            raise ValueError("Symmetry mode requires the RSL-RL PPO or SAC path.")
         if args_cli.task in _SOLO12_DIRECT_SYMMETRY_TASKS:
             symmetry_fn = solo12_symmetry.compute_symmetric_observations_actions
         elif args_cli.task in {
@@ -1987,7 +1992,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         full_run_name += f"_mit-{mitigation_spec.name}"
     if rnd_setup.enabled:
         full_run_name += f"_rnd-{rnd_setup.beta:g}"
-    if getattr(agent_cfg.policy, "shared_networks", False):
+    policy_cfg = getattr(agent_cfg, "policy", None)
+    if getattr(policy_cfg, "shared_networks", False):
         full_run_name += "_shared-networks"
 
     log_dir_name = full_run_name
@@ -2077,6 +2083,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     if agent_cfg.class_name == "OnPolicyRunner":
         runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
+    elif agent_cfg.class_name == "OffPolicyRunner":
+        runner = OffPolicyRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
     elif agent_cfg.class_name == "DistillationRunner":
         runner = DistillationRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
     else:
@@ -2300,7 +2308,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 f"for this new run (loaded best Train/mean_reward={float(previous_best_reward):.4f} from {resume_path})."
             )
 
-    original_log = runner.log
+    # RSL-RL 3.x exposes runner.log; the SAC OffPolicyRunner delegates logging
+    # to runner.logger and therefore has no equivalent callback.
+    original_log = getattr(runner, "log", lambda *args, **kwargs: None)
     best_model_path = os.path.join(log_dir, "best_model.pt")
     best_mean_reward_by_curriculum_stage: dict[tuple[int | None, int | None], float] = {}
     last_curriculum_stage: tuple[int | None, int | None] | None = None

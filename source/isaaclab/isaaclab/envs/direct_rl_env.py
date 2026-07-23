@@ -395,6 +395,16 @@ class DirectRLEnv(gym.Env):
         # -- reset envs that terminated/timed-out and log the episode information
         reset_env_ids = self.reset_buf.nonzero(as_tuple=False).squeeze(-1)
         if len(reset_env_ids) > 0:
+            # Off-policy algorithms must store the observation reached at a timeout, not
+            # the observation produced by the automatic reset below.  Keep a full-size
+            # batch so the vector wrapper can select timed-out environments without
+            # losing the correspondence between environment indices.
+            time_outs_obs = self._get_observations()
+            if self.cfg.observation_noise_model:
+                time_outs_obs["policy"] = self._observation_noise_model(time_outs_obs["policy"])
+            self.extras["time_outs_obs"] = {
+                key: value.detach().clone() for key, value in time_outs_obs.items()
+            }
             self._reset_idx(reset_env_ids)
             # if sensors are added to the scene, make sure we render to reflect changes in reset
             if self.sim.has_rtx_sensors() and self.cfg.num_rerenders_on_reset > 0:
