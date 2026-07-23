@@ -84,13 +84,13 @@ def test_per_step_reward_ratios_remove_scale_and_step_duration():
     assert math.isclose(ratios["penalty"], 0.75, rel_tol=1.0e-6)
 
 
-def test_base_collision_filters_default_to_hips_and_thighs():
+def test_base_collision_filters_are_task_specific():
     standard = Solo12EnvCfg()
     two_feet = Solo12TwoFeetEnvCfg()
 
     assert standard.base_filtered_pairs == ("hip", "thigh")
     assert two_feet.enabled_self_collisions is True
-    assert two_feet.base_filtered_pairs == ("hip", "thigh")
+    assert two_feet.base_filtered_pairs == ("hip",)
 
 
 def test_extra_front_foot_mass_is_disabled_by_default():

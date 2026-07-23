@@ -517,7 +517,11 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     max_velx_range_curriculum = [1.0, 1.5]
     forces_curriculum_threshold_reward = 28.0
     forces_curriculum_smoothing = 0.05
+    # ``legacy`` preserves the original reward-only two-feet curriculum plus the separate
+    # velocity/force curriculum. Named profiles coordinate all phase-dependent settings.
+    curriculum_profile = "legacy"
     curriculum_two_feet = False
+    two_feet_curriculum_start_phase = 1
     # Track planar commands against the world velocity expressed in a gravity-aligned heading frame.
     # The standard quadruped task keeps the original full-base-frame tracking behavior.
     track_commands_in_world_heading_frame = False
@@ -530,6 +534,9 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     rear_feet_in_contact_for_twofeet = True
     front_back_asymetry_curriculum = [True, True, True, True]
     two_feet_curriculum_advance_thresholds = (1.5, 1.44, 1.2)
+    # Scale-independent raw reward signal used for each transition. Empty preserves the legacy
+    # boolean selector below.
+    two_feet_curriculum_advance_metrics = ()
     # Per phase transition: True gates on Episode_Reward/track_lin_vel_xy_exp,
     # False on Episode_Reward/two_feet_above_height.
     two_feet_curriculum_advance_thresholds_vx_indicator = (False, True, False)
@@ -540,7 +547,10 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     two_feet_above_height_threshold_curriculum = (0.5,0.5, 0.6,0.6)
     actuation_delay_range_curriculum = ((0, 0), (0, 0), (0, 2),(0, 3))
     tricky_terrain_curriculum = (False, False, False,True)
+    include_events_randomization_curriculum = (True, True, True, True)
     opposite_direction_cmd_prob_curriculum = (0.0, 0.0, 0.03, 0.05)
+    forces_applied_to_base_curriculum_by_phase = (None, None, None, None)
+    base_push_force_z_range_curriculum = (None, None, None, None)
 
     # Values larger than the available curriculum range are clipped to the final curriculum index.
     curriculum_tricky_terrain_idx: None | int = 2
@@ -687,6 +697,21 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     def two_feet_curriculum_uses_tricky_terrain(self) -> bool:
         return bool(self.curriculum_two_feet and any(self.tricky_terrain_curriculum))
 
+    def prepare_curriculum_event_randomization(self):
+        """Keep startup randomizers dormant until a staged curriculum enables them."""
+        if (
+            not self.curriculum_two_feet
+            or self.curriculum_profile == "legacy"
+            or self.events is None
+            or not any(self.include_events_randomization_curriculum)
+            or bool(self.include_events_randomization_curriculum[0])
+        ):
+            return
+        for term_name in ("physics_material", "add_base_mass", "joint_friction", "inertia_scale", "base_com"):
+            term = getattr(self.events, term_name, None)
+            if term is not None and term.mode == "startup":
+                term.mode = "curriculum_startup"
+
     def refresh_runtime_dependent_config(self):
         self._apply_initial_position_reset_profile()
         self.refresh_observation_dimensions()
@@ -820,13 +845,13 @@ class Solo12SimpleDreamerV3EnvCfg(Solo12EnvCfg):
 class Solo12TwoFeetEnvCfg(Solo12EnvCfg):
     """Solo12 task variant that rewards walking with two feet airborne."""
 
-    track_lin_vel_xy_reward_scale = 1.3
+    track_lin_vel_xy_reward_scale = 1.2
     track_ang_vel_z_reward_scale = 0.5
-    two_feet_above_height_reward_scale = 1.8
-    three_or_more_feet_contact_penalty_reward_scale = -0.3
+    two_feet_above_height_reward_scale = 1.5
+    three_or_more_feet_contact_penalty_reward_scale = -100.0
     base_tilt_penalty_reward_scale = 0.0
     two_feet_above_height_threshold = 0.5
-    two_feet_above_height_alpha = 7.0
+    two_feet_above_height_alpha = 15.0
 
     command_ang_vel_z_range = (-0.5, 0.5)
     command_lin_vel_y_range = (-0.3, 0.3)
@@ -838,17 +863,45 @@ class Solo12TwoFeetEnvCfg(Solo12EnvCfg):
     initial_position = "safe"
     track_base_height_reward_scale = 0.0
     enable_observation_corruption = True
-    tricky_terrain = True
+    tricky_terrain = False
+    curriculum_profile = "two_feet_sac"
     curriculum_two_feet = True
+    two_feet_curriculum_start_phase = 1
+    two_feet_curriculum_advance_thresholds = (0.7, 0.7, 0.7, 0.7)
+    two_feet_curriculum_advance_metrics = (
+        "two_feet_above_height",
+        "track_lin_vel_xy_exp",
+        "two_feet_above_height",
+        "track_lin_vel_xy_exp",
+    )
+    two_feet_above_height_reward_scale_curriculum = (1.5, 1.2, 1.5, 1.5, 1.5)
+    track_lin_vel_xy_reward_scale_curriculum = (1.2, 1.5, 1.5, 1.5, 1.5)
+    three_or_more_feet_contact_penalty_reward_scale_curriculum = (-100.0,) * 5
+    two_feet_above_height_alpha_curriculum = (15.0, 20.0, 20.0, 20.0, 20.0)
+    two_feet_above_height_threshold_curriculum = (0.5,) * 5
+    actuation_delay_range_curriculum = ((0, 0), (0, 0), (0, 3), (0, 3), (0, 3))
+    tricky_terrain_curriculum = (False, False, True, True, True)
+    include_events_randomization_curriculum = (False, False, True, True, True)
+    opposite_direction_cmd_prob_curriculum = (0.0, 0.0, 0.0, 0.05, 0.05)
+    front_back_asymetry_curriculum = (True,) * 5
+    forces_applied_to_base_curriculum_by_phase = (0.0, 0.0, 0.0, 5.0, 8.0)
+    base_push_force_z_range_curriculum = (
+        (0.0, 0.0),
+        (0.0, 0.0),
+        (0.0, 0.0),
+        (-8.0, 8.0),
+        (-8.0, 8.0),
+    )
     track_commands_in_world_heading_frame = True
     flat_terrain_grid_enabled = True
     front_back_asymetry = False
+    base_filtered_pairs = ("hip",)
     z_forces_applied_both_faces = True
     base_push_force_z_range = (0.0, 0.0)
     forces_applied_to_base_curriculum = [0.0]
     actuation_delay_range = (0, 0)
     opposite_direction_cmd_prob = 0.0
-    kp = 15.0
-    kd = 0.5
+    kp = 9.0
+    kd = 0.2
     episode_length_s = 20.0
     enabled_self_collisions=True

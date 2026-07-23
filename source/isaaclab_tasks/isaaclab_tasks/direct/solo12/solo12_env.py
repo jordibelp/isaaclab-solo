@@ -139,6 +139,7 @@ class Solo12Env(DirectRLEnv):
 
     def __init__(self, cfg: Solo12EnvCfg, render_mode: str | None = None, **kwargs):
         cfg.refresh_runtime_dependent_config()
+        cfg.prepare_curriculum_event_randomization()
         cfg.apply_events_randomization_setting()
         super().__init__(cfg, render_mode, **kwargs)
 
@@ -212,14 +213,16 @@ class Solo12Env(DirectRLEnv):
         self._base_push_force_curriculum_idx = 0
         self._base_push_mean_reward_smooth: float | None = None
         self._base_push_last_curriculum_step = 0
-        self._two_feet_curriculum_phase = 1 if curriculum_two_feet else 0
+        self._two_feet_curriculum_phase = int(self.cfg.two_feet_curriculum_start_phase) if curriculum_two_feet else 0
+        self._curriculum_last_reward_ratio: float | None = None
+        self._curriculum_event_randomization_active = False
         self._tricky_terrain_active = False
-        if curriculum_two_feet:
-            self._set_two_feet_curriculum_phase(1)
         if self._max_velx_range_curriculum_values:
             self._set_max_velx_range_curriculum_level(0)
-        if self._base_push_force_curriculum_values:
+        if self._base_push_force_curriculum_values and not self._integrated_two_feet_curriculum_enabled():
             self._set_base_push_force_curriculum_level(0)
+        if curriculum_two_feet:
+            self._set_two_feet_curriculum_phase(self._two_feet_curriculum_phase)
         self._refresh_tricky_terrain_origins(force=True)
 
         self._episode_sums = {
@@ -646,6 +649,9 @@ class Solo12Env(DirectRLEnv):
     def _curriculum_two_feet_enabled(self) -> bool:
         return bool(getattr(self.cfg, "curriculum_two_feet", False))
 
+    def _integrated_two_feet_curriculum_enabled(self) -> bool:
+        return self._curriculum_two_feet_enabled() and self.cfg.curriculum_profile != "legacy"
+
     @staticmethod
     def _curriculum_values(values) -> tuple:
         return tuple(values)
@@ -665,10 +671,18 @@ class Solo12Env(DirectRLEnv):
         return max(int(delay_range[1]) for delay_range in self.cfg.actuation_delay_range_curriculum)
 
     def _two_feet_curriculum_advance_metric_key(self, transition_idx: int) -> str:
+        metrics = self._curriculum_values(self.cfg.two_feet_curriculum_advance_metrics)
+        if metrics:
+            return str(metrics[transition_idx])
         use_vx = self._curriculum_values(self.cfg.two_feet_curriculum_advance_thresholds_vx_indicator)[transition_idx]
         return "track_lin_vel_xy_exp" if use_vx else "two_feet_above_height"
 
     def _validate_two_feet_curriculum_config(self):
+        if self.cfg.curriculum_profile not in ("legacy", "two_feet_sac"):
+            raise ValueError(
+                f"Unsupported curriculum_profile={self.cfg.curriculum_profile!r}; "
+                "expected 'legacy' or 'two_feet_sac'."
+            )
         phase_fields = {
             "two_feet_above_height_reward_scale_curriculum": self.cfg.two_feet_above_height_reward_scale_curriculum,
             "track_lin_vel_xy_reward_scale_curriculum": self.cfg.track_lin_vel_xy_reward_scale_curriculum,
@@ -679,8 +693,11 @@ class Solo12Env(DirectRLEnv):
             "two_feet_above_height_threshold_curriculum": self.cfg.two_feet_above_height_threshold_curriculum,
             "actuation_delay_range_curriculum": self.cfg.actuation_delay_range_curriculum,
             "tricky_terrain_curriculum": self.cfg.tricky_terrain_curriculum,
+            "include_events_randomization_curriculum": self.cfg.include_events_randomization_curriculum,
             "opposite_direction_cmd_prob_curriculum": self.cfg.opposite_direction_cmd_prob_curriculum,
             "front_back_asymetry_curriculum": self.cfg.front_back_asymetry_curriculum,
+            "forces_applied_to_base_curriculum_by_phase": self.cfg.forces_applied_to_base_curriculum_by_phase,
+            "base_push_force_z_range_curriculum": self.cfg.base_push_force_z_range_curriculum,
         }
         phase_count = self._two_feet_curriculum_phase_count()
         if phase_count < 1:
@@ -691,16 +708,32 @@ class Solo12Env(DirectRLEnv):
 
         advance_thresholds = self._curriculum_values(self.cfg.two_feet_curriculum_advance_thresholds)
         advance_vx_indicators = self._curriculum_values(self.cfg.two_feet_curriculum_advance_thresholds_vx_indicator)
+        advance_metrics = self._curriculum_values(self.cfg.two_feet_curriculum_advance_metrics)
         if len(advance_thresholds) != phase_count - 1:
             raise ValueError(
                 "two_feet_curriculum_advance_thresholds must have one value per phase transition, "
                 f"got {len(advance_thresholds)} for {phase_count} phases."
             )
-        if len(advance_vx_indicators) != phase_count - 1:
+        if not advance_metrics and len(advance_vx_indicators) != phase_count - 1:
             raise ValueError(
                 "two_feet_curriculum_advance_thresholds_vx_indicator must have one value per phase transition, "
                 f"got {len(advance_vx_indicators)} for {phase_count} phases."
             )
+        if advance_metrics and len(advance_metrics) != phase_count - 1:
+            raise ValueError(
+                "two_feet_curriculum_advance_metrics must have one value per phase transition, "
+                f"got {len(advance_metrics)} for {phase_count} phases."
+            )
+        supported_ratio_metrics = ("track_lin_vel_xy_exp", "two_feet_above_height")
+        invalid_metrics = [metric for metric in advance_metrics if metric not in supported_ratio_metrics]
+        if invalid_metrics:
+            raise ValueError(
+                "two_feet_curriculum_advance_metrics only supports bounded reward ratios "
+                f"{supported_ratio_metrics}, got {invalid_metrics}."
+            )
+        start_phase = int(self.cfg.two_feet_curriculum_start_phase)
+        if start_phase < 1 or start_phase > phase_count:
+            raise ValueError(f"two_feet_curriculum_start_phase must be in [1, {phase_count}], got {start_phase}.")
         for i, threshold in enumerate(advance_thresholds):
             if threshold < 0.0:
                 raise ValueError(f"two_feet_curriculum_advance_thresholds[{i}] must be non-negative, got {threshold}.")
@@ -717,6 +750,21 @@ class Solo12Env(DirectRLEnv):
             if not 0.0 <= opposite_prob <= 1.0:
                 raise ValueError(
                     f"opposite_direction_cmd_prob_curriculum[{i}] must be between 0 and 1, got {opposite_prob}."
+                )
+        event_schedule = tuple(bool(value) for value in self.cfg.include_events_randomization_curriculum)
+        if any(active and not later for active, later in zip(event_schedule, event_schedule[1:])):
+            raise ValueError(
+                "include_events_randomization_curriculum cannot disable randomization after it has been applied."
+            )
+        for i, force in enumerate(self.cfg.forces_applied_to_base_curriculum_by_phase):
+            if force is not None and float(force) < 0.0:
+                raise ValueError(
+                    f"forces_applied_to_base_curriculum_by_phase[{i}] must be non-negative or None, got {force}."
+                )
+        for i, z_range in enumerate(self.cfg.base_push_force_z_range_curriculum):
+            if z_range is not None and (len(z_range) != 2 or float(z_range[1]) < float(z_range[0])):
+                raise ValueError(
+                    f"base_push_force_z_range_curriculum[{i}] must be an ordered pair or None, got {z_range}."
                 )
 
     def _fill_uniform_range(self, tensor: torch.Tensor, value_range: tuple[float, float]):
@@ -754,6 +802,8 @@ class Solo12Env(DirectRLEnv):
         self.cfg.base_push_force_xy_range = (-force, force)
 
     def get_curriculum_global_idx(self) -> int | None:
+        if self._integrated_two_feet_curriculum_enabled():
+            return self._two_feet_curriculum_phase_index()
         has_velx_curriculum = bool(self._max_velx_range_curriculum_values)
         has_force_curriculum = bool(self._base_push_force_curriculum_values)
         if not has_velx_curriculum and not has_force_curriculum:
@@ -767,6 +817,8 @@ class Solo12Env(DirectRLEnv):
         return velx_idx + self._base_push_force_curriculum_idx
 
     def get_curriculum_max_global_idx(self) -> int | None:
+        if self._integrated_two_feet_curriculum_enabled():
+            return self._two_feet_curriculum_phase_count() - 1
         has_velx_curriculum = bool(self._max_velx_range_curriculum_values)
         has_force_curriculum = bool(self._base_push_force_curriculum_values)
         if not has_velx_curriculum and not has_force_curriculum:
@@ -876,6 +928,8 @@ class Solo12Env(DirectRLEnv):
         self._tricky_terrain_active = should_be_active
 
     def _update_base_push_force_curriculum(self, completed_episode_returns: torch.Tensor):
+        if self._integrated_two_feet_curriculum_enabled():
+            return
         can_increase_velx = (
             bool(self._max_velx_range_curriculum_values)
             and self._max_velx_range_curriculum_idx < len(self._max_velx_range_curriculum_values) - 1
@@ -916,6 +970,34 @@ class Solo12Env(DirectRLEnv):
     def _episode_reward_metric(self, key: str, env_ids: torch.Tensor) -> float:
         return torch.mean(self._episode_sums[key][env_ids]).abs().item() / self.max_episode_length_s
 
+    def _episode_reward_ratio(self, key: str, env_ids: torch.Tensor) -> float:
+        """Average the raw, scale-independent reward signal over completed episode transitions."""
+        if key == "track_lin_vel_xy_exp":
+            scale = float(self.cfg.track_lin_vel_xy_reward_scale)
+        elif key == "two_feet_above_height":
+            scale = float(self.cfg.two_feet_above_height_reward_scale)
+        else:
+            raise ValueError(f"Unsupported curriculum reward ratio: {key!r}.")
+        if scale == 0.0:
+            raise ValueError(
+                f"Curriculum transition reward {key!r} has zero scale in phase "
+                f"{self._two_feet_curriculum_phase}."
+            )
+        lengths = self.episode_length_buf[env_ids].float().clamp_min(1.0)
+        ratios = self._episode_sums[key][env_ids] / (scale * self.step_dt * lengths)
+        return torch.mean(ratios).item()
+
+    def _activate_curriculum_event_randomization(self):
+        if (
+            self._curriculum_event_randomization_active
+            or not self.cfg.include_events_randomization
+            or not hasattr(self, "event_manager")
+        ):
+            return
+        if "curriculum_startup" in self.event_manager.available_modes:
+            self.event_manager.apply(mode="curriculum_startup")
+        self._curriculum_event_randomization_active = True
+
     def _set_two_feet_curriculum_phase(self, phase: int):
         if phase < 1 or phase > self._two_feet_curriculum_phase_count():
             raise ValueError(
@@ -942,6 +1024,25 @@ class Solo12Env(DirectRLEnv):
             "opposite_direction_cmd_prob", phase
         )
         self.cfg.front_back_asymetry = bool(self._two_feet_curriculum_value("front_back_asymetry", phase))
+        if self._integrated_two_feet_curriculum_enabled():
+            phase_idx = self._two_feet_curriculum_phase_index(phase)
+            force = self.cfg.forces_applied_to_base_curriculum_by_phase[phase_idx]
+            if force is not None:
+                force = float(force)
+                self.cfg.base_push_force_xy_range = (-force, force)
+                force_levels = tuple(
+                    dict.fromkeys(
+                        float(value)
+                        for value in self.cfg.forces_applied_to_base_curriculum_by_phase
+                        if value is not None
+                    )
+                )
+                self._base_push_force_curriculum_idx = force_levels.index(force)
+            z_range = self.cfg.base_push_force_z_range_curriculum[phase_idx]
+            if z_range is not None:
+                self.cfg.base_push_force_z_range = tuple(float(value) for value in z_range)
+            if bool(self._two_feet_curriculum_value("include_events_randomization", phase)):
+                self._activate_curriculum_event_randomization()
         self._refresh_tricky_terrain_origins(force=True)
 
     def _update_two_feet_curriculum(self, completed_env_ids: torch.Tensor):
@@ -955,8 +1056,18 @@ class Solo12Env(DirectRLEnv):
         transition_idx = self._two_feet_curriculum_phase_index()
         metric_key = self._two_feet_curriculum_advance_metric_key(transition_idx)
         threshold = self.cfg.two_feet_curriculum_advance_thresholds[transition_idx]
-        reward_metric = self._episode_reward_metric(metric_key, completed_env_ids)
-        if reward_metric > threshold:
+        reward_metric = (
+            self._episode_reward_ratio(metric_key, completed_env_ids)
+            if self._integrated_two_feet_curriculum_enabled()
+            else self._episode_reward_metric(metric_key, completed_env_ids)
+        )
+        self._curriculum_last_reward_ratio = reward_metric
+        threshold_reached = (
+            reward_metric + 1.0e-6 >= threshold
+            if self._integrated_two_feet_curriculum_enabled()
+            else reward_metric > threshold
+        )
+        if threshold_reached:
             self._set_two_feet_curriculum_phase(self._two_feet_curriculum_phase + 1)
 
     def _reset_base_pushes(self, env_ids: torch.Tensor):
@@ -1665,6 +1776,9 @@ class Solo12Env(DirectRLEnv):
         extras["Curriculum/actuation_delay_max"] = self.cfg.actuation_delay_range[1]
         extras["Curriculum/opposite_direction_cmd_prob"] = self.cfg.opposite_direction_cmd_prob
         extras["Curriculum/front_back_asymetry"] = float(self.cfg.front_back_asymetry)
+        extras["Curriculum/events_randomization_active"] = float(self._curriculum_event_randomization_active)
+        if self._curriculum_last_reward_ratio is not None:
+            extras["Curriculum/advance_reward_ratio"] = self._curriculum_last_reward_ratio
         curriculum_idx = self.get_curriculum_global_idx()
         if curriculum_idx is not None:
             extras["Curriculum/global_idx"] = curriculum_idx
