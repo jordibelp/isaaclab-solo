@@ -42,6 +42,9 @@ from isaaclab.app import AppLauncher
 import cli_args  # isort: skip
 from helpers import _wandb_snapshot  # isort: skip
 
+_REPRODUCIBLE_COMMAND = shlex.join(
+    ["./isaaclab.sh", "-p", "source/scripts/rsl_rl/train.py", *sys.argv[1:]]
+)
 
 parser = argparse.ArgumentParser(description="Train an RL agent with RSL-RL.")
 parser.add_argument("--video", action="store_true", default=False, help="Record videos during training.")
@@ -560,7 +563,7 @@ def _patch_rsl_rl_wandb_writer_for_single_stream() -> None:
                 settings=wandb.Settings(sync_tensorboard=False),
             )
 
-            wandb.config.update({"log_dir": log_dir})
+            wandb.config.update({"log_dir": log_dir, "command": _REPRODUCIBLE_COMMAND})
 
     rsl_wandb_utils.WandbSummaryWriter = SingleStreamWandbSummaryWriter
 
@@ -2081,12 +2084,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             flush=True,
         )
 
+    runner_cfg = agent_cfg.to_dict()
+    runner_cfg["command"] = _REPRODUCIBLE_COMMAND
     if agent_cfg.class_name == "OnPolicyRunner":
-        runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
+        runner = OnPolicyRunner(env, runner_cfg, log_dir=log_dir, device=agent_cfg.device)
     elif agent_cfg.class_name == "OffPolicyRunner":
-        runner = OffPolicyRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
+        runner = OffPolicyRunner(env, runner_cfg, log_dir=log_dir, device=agent_cfg.device)
     elif agent_cfg.class_name == "DistillationRunner":
-        runner = DistillationRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
+        runner = DistillationRunner(env, runner_cfg, log_dir=log_dir, device=agent_cfg.device)
     else:
         raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
 

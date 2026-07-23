@@ -13,11 +13,16 @@ a more user-friendly way.
 """Launch Isaac Sim Simulator first."""
 
 import argparse
+import shlex
 import sys
 import wandb
 from helpers import _jsonify, _wandb_snapshot
 import inspect
 from isaaclab.app import AppLauncher
+
+_REPRODUCIBLE_COMMAND = shlex.join(
+    ["./isaaclab.sh", "-p", "source/scripts/skrl/train.py", *sys.argv[1:]]
+)
 
 
 # add argparse arguments
@@ -317,6 +322,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 "full_run_name": full_run_name,
                 "symmetry_mode": args_cli.symmetry_mode,
                 "symmetry_loss_coeff": args_cli.symmetry_loss_coeff,
+                "command": _REPRODUCIBLE_COMMAND,
             }
         )
 

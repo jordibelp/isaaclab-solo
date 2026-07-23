@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -39,6 +40,12 @@ for _path in (
 import solo12_symmetry
 from rsl_rl_sac.algorithms import SAC
 from rsl_rl_sac.runners import OffPolicyRunner
+
+
+def reproducible_command(argv=None):
+    """Return a shell-safe command that recreates this training invocation."""
+    arguments = sys.argv[1:] if argv is None else argv
+    return shlex.join(["./isaaclab.sh", "-p", "mujoco/train_sac.py", *arguments])
 
 
 def _bool(value):
@@ -286,6 +293,8 @@ def main() -> None:
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     cfg = _runner_config(args)
+    command = reproducible_command()
+    cfg["command"] = command
 
     # The released constructor calls SAC._compute_action_scaling explicitly.
     SAC._compute_action_scaling = staticmethod(_mjx_action_scaling)
@@ -306,7 +315,8 @@ def main() -> None:
     log_dir = args.output_dir / f"{timestamp}_{args.run_name.replace('/', '_')}{suffix}"
     log_dir.mkdir(parents=True, exist_ok=False)
     (log_dir / "run_config.json").write_text(
-        json.dumps({"args": vars(args), "env": env_cfg, "agent": cfg}, indent=2, default=str) + "\n"
+        json.dumps({"command": command, "args": vars(args), "env": env_cfg, "agent": cfg}, indent=2, default=str)
+        + "\n"
     )
 
     runner = OffPolicyRunner(env, cfg, log_dir=str(log_dir), device=args.device)

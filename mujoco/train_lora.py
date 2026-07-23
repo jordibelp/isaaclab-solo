@@ -17,6 +17,8 @@ import copy
 import json
 import math
 import os
+import shlex
+import sys
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -43,6 +45,14 @@ DECIMATION = 4
 STEP_DT = PHYSICS_DT * DECIMATION
 ACTION_SCALE = 0.25
 EFFORT_LIMIT = 2.65
+
+
+def reproducible_command(argv=None):
+    """Return a shell-safe command that recreates this training invocation."""
+    arguments = sys.argv[1:] if argv is None else argv
+    return shlex.join(["./isaaclab.sh", "-p", "mujoco/train_lora.py", *arguments])
+
+
 OBS_NORM_EPS = 1.0e-2
 SAFE_Q = np.array((0.0, 0.4, -0.8, 0.0, 0.4, -0.8, 0.0, -0.4, 0.8, 0.0, -0.4, 0.8), np.float32)
 JOINT_NAMES = tuple(
@@ -897,7 +907,7 @@ def main():
     model_info=build_model(xml,float(cfg["kp"]),float(cfg["kd"]));reset_fn,step_fn=make_training_functions(model_info,cfg,args.num_envs)
     state=reset_fn(kenv)
     timestamp=datetime.now().strftime("%Y%m%d_%H%M%S")
-    config={**vars(args),"checkpoint":str(checkpoint),"selected_layer_indices":selected,"lora_scale":scale,"agent":resolved_agent_config(args),"env":cfg,"jax_devices":[str(x) for x in jax.devices()],"paper":"arXiv:2603.17092"}
+    config={**vars(args),"command":reproducible_command(),"checkpoint":str(checkpoint),"selected_layer_indices":selected,"lora_scale":scale,"agent":resolved_agent_config(args),"env":cfg,"jax_devices":[str(x) for x in jax.devices()],"paper":"arXiv:2603.17092"}
     config={k:(str(v) if isinstance(v,Path) else v) for k,v in config.items()}
     wandb_run=None
     if not args.no_wandb:

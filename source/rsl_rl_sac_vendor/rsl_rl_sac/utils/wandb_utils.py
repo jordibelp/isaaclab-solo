@@ -36,11 +36,14 @@ class WandbSummaryWriter(SummaryWriter):
             entity = None
 
         # Initialize wandb
+        wandb_config = {"log_dir": log_dir}
+        if cfg.get("command"):
+            wandb_config["command"] = cfg["command"]
         wandb.init(
             project=project,
             entity=entity,
             name=run_name,
-            config={"log_dir": log_dir},
+            config=wandb_config,
             settings=wandb.Settings(start_method="thread"),  # TODO check performance impact
         )
 

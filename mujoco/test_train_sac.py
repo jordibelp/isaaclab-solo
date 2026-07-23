@@ -1,8 +1,38 @@
+import shlex
 from types import SimpleNamespace
 
 import pytest
 
 import train_sac
+from rsl_rl_sac.utils import wandb_utils
+
+
+def test_reproducible_command_preserves_shell_sensitive_arguments():
+    arguments = [
+        "--headless",
+        "--num_envs=256",
+        "--run-name=[cluster] MuJoCo SAC | fine-tune",
+        "env.max_velx_range_curriculum=[0.5, 1.0]",
+    ]
+    command = train_sac.reproducible_command(arguments)
+
+    assert shlex.split(command) == ["./isaaclab.sh", "-p", "mujoco/train_sac.py", *arguments]
+
+
+def test_sac_wandb_writer_exposes_command_at_top_level(tmp_path, monkeypatch):
+    captured = {}
+    monkeypatch.setattr(wandb_utils.wandb, "init", lambda **kwargs: captured.update(kwargs))
+    monkeypatch.setattr(wandb_utils.wandb, "Settings", lambda **kwargs: kwargs)
+    monkeypatch.setattr(wandb_utils.wandb, "define_metric", lambda *args, **kwargs: None)
+
+    writer = wandb_utils.WandbSummaryWriter(
+        str(tmp_path),
+        flush_secs=1,
+        cfg={"wandb_project": "test", "command": "./isaaclab.sh -p mujoco/train_sac.py --headless"},
+    )
+    writer.close()
+
+    assert captured["config"]["command"] == "./isaaclab.sh -p mujoco/train_sac.py --headless"
 
 
 def test_runner_config_uses_paper_sac_defaults():

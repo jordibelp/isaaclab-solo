@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import shlex
 import sys
 
 import jax
@@ -12,6 +13,19 @@ import train_lora
 
 
 CHECKPOINT = Path("/home/jordibelp/IsaacLab-dirty/logs/skrl/checkpoints/0717_q3a68133_model_15008.pt")
+
+
+def test_reproducible_command_preserves_shell_sensitive_arguments():
+    arguments = [
+        "--headless",
+        "--num_envs=10000",
+        "--run-name=spaces | pipes",
+        'env.base_filtered_pairs=["hip"]',
+        "env.max_velx_range_curriculum=[0.5, 1.0]",
+    ]
+    command = train_lora.reproducible_command(arguments)
+
+    assert shlex.split(command) == ["./isaaclab.sh", "-p", "mujoco/train_lora.py", *arguments]
 
 
 def test_env_interactions_are_logged_per_parallel_rollout(tmp_path, monkeypatch):
