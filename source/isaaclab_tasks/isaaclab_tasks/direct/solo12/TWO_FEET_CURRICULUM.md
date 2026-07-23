@@ -1,23 +1,25 @@
 # Solo12 two-feet SAC curriculum
 
 The `solo12-two-feet` task defaults to the coordinated `two_feet_sac` profile. It advances on
-scale-independent raw reward ratios, the same quantity logged as `PerStepRewardRatio/*`.
+scale-independent fixed-horizon reward ratios. These are logged as
+`Episode_Reward_ratio/*` and equal `Episode_Reward/* / abs(reward_scale)`.
 
 | Phase | Gate to next phase | Height scale / alpha | XY scale | Terrain | Delay | Startup randomization | Push magnitude |
 |---:|---|---|---:|---|---|---|---|
-| 1 | `two_feet_above_height >= 0.70` | `1.5 / 15` | `1.2` | flat | `[0, 0]` | off | `0 N` |
-| 2 | `track_lin_vel_xy_exp >= 0.70` | `1.2 / 20` | `1.5` | flat | `[0, 0]` | off | `0 N` |
-| 3 | `two_feet_above_height >= 0.70` | `1.5 / 20` | `1.5` | tricky | `[0, 3]` | on | `0 N` |
-| 4 | `track_lin_vel_xy_exp >= 0.70` | `1.5 / 20` | `1.5` | tricky | `[0, 3]` | on | `5 N`, Z `[-8, 8] N` |
-| 5 | final | `1.5 / 20` | `1.5` | tricky | `[0, 3]` | on | `8 N`, Z `[-8, 8] N` |
+| 1 | `two_feet_above_height >= 0.70` | `1.7 / 15` | `1.2` | flat | `[0, 0]` | off | `0 N` |
+| 2 | `track_lin_vel_xy_exp >= 0.70` | `1.2 / 20` | `1.6` | flat | `[0, 0]` | off | `0 N` |
+| 3 | `two_feet_above_height >= 0.70` | `1.5 / 25` | `1.5` | tricky | `[0, 3]` | on | `0 N` |
+| 4 | `track_lin_vel_xy_exp >= 0.70` | `1.5 / 25` | `1.5` | tricky | `[0, 3]` | on | `5 N`, Z `[-8, 8] N` |
+| 5 | final | `1.5 / 25` | `1.5` | tricky | `[0, 3]` | on | `8 N`, Z `[-8, 8] N` |
 
-All phases use a height threshold of `0.5 m`, `kp=9`, `kd=0.2`, observation corruption,
+All phases use a height threshold of `0.45 m`, `kp=9`, `kd=0.2`, observation corruption,
 `vx in [-0.5, 0.5]`, `vy in [-0.3, 0.3]`, hip/base collision filtering, and a
 three-or-more-feet contact penalty scale of `-100`.
 
-The ratio gate averages each completed episode's raw reward signal over its actual number of
-environment steps. It therefore does not change when the configured reward scale or episode length
-changes.
+The ratio gate divides the mean completed-episode reward by
+`abs(reward_scale) * max_episode_length_s`. A ratio of `0.70` therefore requires 70% of the
+maximum fixed-horizon contribution; an episode that terminates early cannot pass merely because it
+performed well during its short lifetime.
 
 ## Selection and debugging
 
@@ -48,5 +50,5 @@ episode-reward gating mechanics and the separate velocity-then-force progression
 phase arrays.
 
 W&B exposes `Curriculum/two_feet_phase`, `Curriculum/global_idx`,
-`Curriculum/advance_reward_ratio`, the active reward scales, terrain/delay settings,
+`Curriculum/advance_reward_ratio`, `Episode_Reward_ratio/*`, the active reward scales, terrain/delay settings,
 push magnitude, and `Curriculum/events_randomization_active`.

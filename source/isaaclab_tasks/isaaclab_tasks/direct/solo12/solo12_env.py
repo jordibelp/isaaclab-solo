@@ -54,6 +54,23 @@ def _per_step_reward_ratios(
     }
 
 
+def _episode_reward_ratios(
+    episode_sums: dict[str, torch.Tensor],
+    reward_scales: dict[str, float],
+    env_ids: torch.Tensor,
+    max_episode_length_s: float,
+) -> dict[str, float]:
+    """Normalize episodic reward metrics to their fixed-horizon maximum magnitude."""
+    if len(env_ids) == 0:
+        return {}
+    return {
+        key: torch.mean(episode_sums[key][env_ids]).abs().item()
+        / (abs(scale) * max_episode_length_s)
+        for key, scale in reward_scales.items()
+        if scale != 0.0
+    }
+
+
 def _world_velocity_in_heading_frame_xy(
     root_lin_vel_w: torch.Tensor, root_quat_w: torch.Tensor
 ) -> torch.Tensor:
@@ -971,21 +988,40 @@ class Solo12Env(DirectRLEnv):
         return torch.mean(self._episode_sums[key][env_ids]).abs().item() / self.max_episode_length_s
 
     def _episode_reward_ratio(self, key: str, env_ids: torch.Tensor) -> float:
-        """Average the raw, scale-independent reward signal over completed episode transitions."""
-        if key == "track_lin_vel_xy_exp":
-            scale = float(self.cfg.track_lin_vel_xy_reward_scale)
-        elif key == "two_feet_above_height":
-            scale = float(self.cfg.two_feet_above_height_reward_scale)
-        else:
+        """Return the scale-independent reward ratio over the fixed maximum episode horizon."""
+        reward_scales = self._reward_scales()
+        if key not in ("track_lin_vel_xy_exp", "two_feet_above_height"):
             raise ValueError(f"Unsupported curriculum reward ratio: {key!r}.")
+        scale = reward_scales[key]
         if scale == 0.0:
             raise ValueError(
                 f"Curriculum transition reward {key!r} has zero scale in phase "
                 f"{self._two_feet_curriculum_phase}."
             )
-        lengths = self.episode_length_buf[env_ids].float().clamp_min(1.0)
-        ratios = self._episode_sums[key][env_ids] / (scale * self.step_dt * lengths)
-        return torch.mean(ratios).item()
+        return (
+            torch.mean(self._episode_sums[key][env_ids]).item()
+            / (scale * self.max_episode_length_s)
+        )
+
+    def _reward_scales(self) -> dict[str, float]:
+        return {
+            "track_lin_vel_xy_exp": self.cfg.track_lin_vel_xy_reward_scale,
+            "track_ang_vel_z_exp": self.cfg.track_ang_vel_z_reward_scale,
+            "lin_vel_z_l2": self.cfg.lin_vel_z_reward_scale,
+            "ang_vel_xy_l2": self.cfg.ang_vel_xy_reward_scale,
+            "dof_torques_l2": self.cfg.joint_torque_reward_scale,
+            "dof_acc_l2": self.cfg.joint_accel_reward_scale,
+            "action_rate_l2": self.cfg.action_rate_reward_scale,
+            "feet_air_time": self.cfg.feet_air_time_reward_scale,
+            "two_feet_above_height": self.cfg.two_feet_above_height_reward_scale,
+            "three_or_more_feet_contact": self.cfg.three_or_more_feet_contact_penalty_reward_scale,
+            "undesired_contacts": self.cfg.undesired_contact_reward_scale,
+            "base_collision_terminal": self.cfg.base_collision_terminal_penalty,
+            "flat_orientation_l2": self.cfg.base_tilt_penalty_reward_scale,
+            "track_base_height_exp": self.cfg.track_base_height_reward_scale,
+            "force_transmited_through_joints": self.cfg.force_transmited_through_joints_reward_scale,
+            "foot_contact": self.cfg.foot_contact_reward_scale,
+        }
 
     def _activate_curriculum_event_randomization(self):
         if (
@@ -1605,27 +1641,10 @@ class Solo12Env(DirectRLEnv):
 
         reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
         step_log = {f"RewardsPerStep/{key}": torch.mean(value).item() for key, value in rewards.items()}
-        reward_scales = {
-            "track_lin_vel_xy_exp": self.cfg.track_lin_vel_xy_reward_scale,
-            "track_ang_vel_z_exp": self.cfg.track_ang_vel_z_reward_scale,
-            "lin_vel_z_l2": self.cfg.lin_vel_z_reward_scale,
-            "ang_vel_xy_l2": self.cfg.ang_vel_xy_reward_scale,
-            "dof_torques_l2": self.cfg.joint_torque_reward_scale,
-            "dof_acc_l2": self.cfg.joint_accel_reward_scale,
-            "action_rate_l2": self.cfg.action_rate_reward_scale,
-            "feet_air_time": self.cfg.feet_air_time_reward_scale,
-            "two_feet_above_height": self.cfg.two_feet_above_height_reward_scale,
-            "three_or_more_feet_contact": self.cfg.three_or_more_feet_contact_penalty_reward_scale,
-            "undesired_contacts": self.cfg.undesired_contact_reward_scale,
-            "flat_orientation_l2": self.cfg.base_tilt_penalty_reward_scale,
-            "track_base_height_exp": self.cfg.track_base_height_reward_scale,
-            "force_transmited_through_joints": self.cfg.force_transmited_through_joints_reward_scale,
-            "foot_contact": self.cfg.foot_contact_reward_scale,
-        }
         step_log.update(
             {
                 f"PerStepRewardRatio/{key}": ratio
-                for key, ratio in _per_step_reward_ratios(rewards, reward_scales, self.step_dt).items()
+                for key, ratio in _per_step_reward_ratios(rewards, self._reward_scales(), self.step_dt).items()
             }
         )
         step_log["RewardsPerStep/cmd_tracking"] = (
@@ -1677,6 +1696,12 @@ class Solo12Env(DirectRLEnv):
             torch.mean(self.episode_length_buf[completed_env_ids].float()).item()
             if len(completed_env_ids) > 0
             else 0.0
+        )
+        episode_reward_ratios = _episode_reward_ratios(
+            self._episode_sums,
+            self._reward_scales(),
+            completed_env_ids,
+            self.max_episode_length_s,
         )
         self._update_two_feet_curriculum(completed_env_ids)
         self._update_base_push_force_curriculum(completed_episode_returns)
@@ -1751,6 +1776,12 @@ class Solo12Env(DirectRLEnv):
             # Included abs to see all positive (reward / penalty) in wandb
             extras[f"Episode_Reward/{key}"] = torch.mean(self._episode_sums[key][env_ids]).abs() / self.max_episode_length_s
             self._episode_sums[key][env_ids] = 0.0
+        extras.update(
+            {
+                f"Episode_Reward_ratio/{key}": ratio
+                for key, ratio in episode_reward_ratios.items()
+            }
+        )
 
         extras['Episode_Reward/cmd_tracking'] = extras[f"Episode_Reward/track_lin_vel_xy_exp"] + extras[f"Episode_Reward/track_ang_vel_z_exp"]
         extras["Episode_Reward/total"] = mean_episode_return
