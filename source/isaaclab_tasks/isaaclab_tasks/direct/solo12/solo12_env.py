@@ -1771,7 +1771,10 @@ class Solo12Env(DirectRLEnv):
         self._robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
         self._robot.set_joint_position_target(joint_pos[:, self._joint_ids], joint_ids=self._joint_ids, env_ids=env_ids)
 
-        extras = {}
+        # A reset happens after rewards were computed for this transition. Keep
+        # those per-step metrics and add the completed-episode metrics instead
+        # of replacing the log payload with a disjoint reset-only dictionary.
+        extras = dict(self.extras.get("log", {}))
         for key in self._episode_sums:
             # Included abs to see all positive (reward / penalty) in wandb
             extras[f"Episode_Reward/{key}"] = torch.mean(self._episode_sums[key][env_ids]).abs() / self.max_episode_length_s
