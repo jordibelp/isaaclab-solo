@@ -109,6 +109,9 @@ class OffPolicyRunner:
             stop = time.time()
             learn_time = stop - start
             self.current_learning_iteration = it
+            iteration_callback = getattr(self, "_iteration_callback", None)
+            if iteration_callback is not None:
+                iteration_callback({"it": it, "obs": obs})
 
             # Accumulate timing across iterations when logging sparsely
             log_window_collect_time += collection_time

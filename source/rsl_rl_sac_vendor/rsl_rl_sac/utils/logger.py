@@ -164,8 +164,10 @@ class Logger:
             extras_string = ""
             terrain_level_mean = None
             if self.ep_extras:
-                # Iterate over all keys in the episode info dictionary
-                for key in self.ep_extras[0]:
+                # Some metrics only exist on reset steps. Use the union so sparse
+                # episodic metrics are not hidden by an earlier non-reset step.
+                keys = dict.fromkeys(key for ep_info in self.ep_extras for key in ep_info)
+                for key in keys:
                     infotensor = torch.tensor([], device=self.device)
                     # Iterate over all steps
                     for ep_info in self.ep_extras:

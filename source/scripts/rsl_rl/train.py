@@ -975,13 +975,42 @@ def _attach_plasticity_metrics_to_runner(runner, parsed_args) -> None:
         return
 
     policy = getattr(runner.alg, "policy", None)
-    groups = {
-        name: module
-        for name in ("actor", "critic")
-        if isinstance(module := getattr(policy, name, None), torch.nn.Module)
-    }
-    if not groups or not hasattr(runner.alg, "optimizer"):
-        print("[WARN]: Plasticity metrics disabled: policy has no actor/critic modules or no optimizer.", flush=True)
+    if policy is not None:
+        groups = {
+            name: module
+            for name in ("actor", "critic")
+            if isinstance(module := getattr(policy, name, None), torch.nn.Module)
+        }
+        optimizers = {"actor": runner.alg.optimizer, "critic": runner.alg.optimizer}
+        forward_fns = {
+            "actor": lambda obs: policy.act_inference(obs),
+            "critic": lambda obs: policy.evaluate(obs),
+        }
+    else:
+        actor = getattr(runner.alg, "actor", None)
+        critic = getattr(runner.alg, "critic", None)
+        actor_mlp = getattr(actor, "mlp", None)
+        critic_mlps = [
+            module
+            for name in ("critic1", "critic2")
+            if isinstance(module := getattr(critic, name, None), torch.nn.Module)
+        ]
+        groups = {}
+        if isinstance(actor_mlp, torch.nn.Module):
+            groups["actor"] = actor_mlp
+        if critic_mlps:
+            groups["critic"] = torch.nn.ModuleList(critic_mlps)
+        optimizers = {
+            "actor": getattr(runner.alg, "actor_optimizer", None),
+            "critic": getattr(runner.alg, "critic_optimizer", None),
+        }
+        forward_fns = {
+            "actor": lambda obs: actor(obs),
+            "critic": lambda obs: critic.evaluate_all_q(obs, actor(obs)),
+        }
+
+    if not groups or any(optimizers.get(name) is None for name in groups):
+        print("[WARN]: Plasticity metrics disabled: actor/critic modules or optimizers were not found.", flush=True)
         return
 
     sample_cap = getattr(parsed_args, "plasticity_metrics_sample_cap", None)
@@ -993,12 +1022,14 @@ def _attach_plasticity_metrics_to_runner(runner, parsed_args) -> None:
     if sample_cap < 1:
         raise ValueError("--plasticity-metrics-sample-cap must be a positive integer.")
 
-    grad_capture = plasticity_metrics.GradKurtosisCapture(
-        {name: list(module.parameters()) for name, module in groups.items()}
-    )
-    grad_capture.wrap_optimizer(runner.alg.optimizer)
+    grad_captures = {}
+    for name, module in groups.items():
+        grad_capture = plasticity_metrics.GradKurtosisCapture({name: list(module.parameters())})
+        grad_capture.wrap_optimizer(optimizers[name])
+        grad_captures[name] = grad_capture
     runner._borinot_plasticity_groups = groups
-    runner._borinot_plasticity_grad_capture = grad_capture
+    runner._borinot_plasticity_grad_captures = grad_captures
+    runner._borinot_plasticity_forward_fns = forward_fns
     runner._borinot_plasticity_activation_ok = dict.fromkeys(groups, True)
     runner._borinot_plasticity_sample_cap = sample_cap
     print(
@@ -1011,35 +1042,39 @@ def _attach_plasticity_metrics_to_runner(runner, parsed_args) -> None:
 
 def _log_plasticity_metrics(runner, locs: dict, interval: int) -> None:
     groups = getattr(runner, "_borinot_plasticity_groups", None)
-    grad_capture = getattr(runner, "_borinot_plasticity_grad_capture", None)
-    if not groups or getattr(runner, "writer", None) is None:
+    grad_captures = getattr(runner, "_borinot_plasticity_grad_captures", None)
+    writer = getattr(runner, "writer", None)
+    if writer is None:
+        writer = getattr(getattr(runner, "logger", None), "writer", None)
+    if not groups or not grad_captures or writer is None:
         return
 
     it = int(locs.get("it", 0))
     interval = max(1, int(interval))
     if (it + 1) % interval == 0:
-        # Captured during the next iteration's PPO update, logged at that iteration below.
-        grad_capture.arm()
+        # Captured during the next iteration's optimizer updates, logged at that iteration below.
+        for grad_capture in grad_captures.values():
+            grad_capture.arm()
     if it % interval != 0:
         return
 
-    policy = runner.alg.policy
     obs = locs.get("obs")
+    if obs is None:
+        obs = runner.env.get_observations().to(runner.device)
     activation_ok = runner._borinot_plasticity_activation_ok
     sample_cap = int(getattr(runner, "_borinot_plasticity_sample_cap", plasticity_metrics.DEFAULT_SAMPLE_CAP))
-    forward_fns = {
-        "actor": (lambda: policy.act_inference(obs)),
-        "critic": (lambda: policy.evaluate(obs)),
-    }
+    forward_fns = runner._borinot_plasticity_forward_fns
     for name, module in groups.items():
         scalars = {"weight_norm": plasticity_metrics.weight_norm(module.parameters())}
-        kurtosis = grad_capture.last.get(name)
+        kurtosis = grad_captures[name].last.get(name)
         if kurtosis is not None:
             scalars["grad_kurtosis"] = kurtosis
         forward_fn = forward_fns.get(name)
         if obs is not None and forward_fn is not None and activation_ok.get(name, False):
             try:
-                activations = plasticity_metrics.collect_hidden_activations(module, forward_fn, sample_cap=sample_cap)
+                activations = plasticity_metrics.collect_hidden_activations(
+                    module, lambda: forward_fn(obs), sample_cap=sample_cap
+                )
                 scalars.update(plasticity_metrics.activation_plasticity_metrics(activations))
             except Exception as exc:
                 activation_ok[name] = False
@@ -1050,7 +1085,7 @@ def _log_plasticity_metrics(runner, locs: dict, interval: int) -> None:
                 )
         for key, value in scalars.items():
             if value == value:  # skip NaN
-                runner.writer.add_scalar(f"Plasticity/{name}/{key}", value, it)
+                writer.add_scalar(f"Plasticity/{name}/{key}", value, it)
 
 
 def _infer_checkpoint_history_dim(checkpoint_state: dict) -> int | None:
@@ -2181,6 +2216,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if cbp_manager is not None and should_resume and not args_cli.reuse_mlp:
         _restore_cbp_state_from_checkpoint(cbp_manager, resume_path)
     _attach_plasticity_metrics_to_runner(runner, args_cli)
+    if isinstance(runner, OffPolicyRunner) and hasattr(runner, "_borinot_plasticity_groups"):
+        def _log_sac_iteration_plasticity(locs):
+            _log_plasticity_metrics(
+                runner,
+                locs,
+                args_cli.plasticity_metrics_interval,
+            )
+
+        runner._iteration_callback = _log_sac_iteration_plasticity
     reset_all_controller = None
     if args_cli.plasticity_loss_exp_reset_all:
         reset_all_controller = observation_permutation.ResetAllController(
@@ -2323,6 +2367,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     def _log_with_best_model(*log_args, **log_kwargs):
         nonlocal best_mean_reward, last_curriculum_stage
+        if log_args:
+            ep_infos = log_args[0].get("ep_infos")
+            if ep_infos:
+                # Upstream PPO only enumerates keys from the first step. Put a
+                # reset-step payload first so sparse episodic metrics are included.
+                richest_index = max(range(len(ep_infos)), key=lambda index: len(ep_infos[index]))
+                ep_infos[0], ep_infos[richest_index] = ep_infos[richest_index], ep_infos[0]
         original_log(*log_args, **log_kwargs)
 
         if runner.log_dir is None or getattr(runner, "disable_logs", False):
