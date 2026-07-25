@@ -26,8 +26,10 @@ from typing import Any
 _THIS_DIR = Path(__file__).resolve().parent
 _ISAACLAB_ROOT = Path(__file__).resolve().parents[3]
 _UPSTREAM_RSL_SCRIPT_DIR = _ISAACLAB_ROOT / "scripts" / "reinforcement_learning" / "rsl_rl"
-if str(_UPSTREAM_RSL_SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, str(_UPSTREAM_RSL_SCRIPT_DIR))
+_RSL_RL_SAC_VENDOR_DIR = _ISAACLAB_ROOT / "source" / "rsl_rl_sac_vendor"
+for _path in (str(_UPSTREAM_RSL_SCRIPT_DIR), str(_RSL_RL_SAC_VENDOR_DIR)):
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
 
 from isaaclab.app import AppLauncher
 
@@ -464,6 +466,7 @@ import torch
 import wandb
 from rsl_rl.networks import EmpiricalNormalization
 from rsl_rl.runners import DistillationRunner, OnPolicyRunner
+from rsl_rl_sac.runners import OffPolicyRunner
 from tensordict import TensorDict
 
 import isaaclab.sim as sim_utils
@@ -2167,6 +2170,21 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         runner = DistillationRunner(vec_env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
         print(f"[INFO] Loading model checkpoint from: {resume_path}")
         runner.load(resume_path, load_optimizer=False)
+        policy = runner.get_inference_policy(device=vec_env.unwrapped.device)
+    elif agent_cfg.class_name == "OffPolicyRunner":
+        runner = OffPolicyRunner(vec_env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
+        print(f"[INFO] Loading SAC model checkpoint from: {resume_path}")
+        checkpoint = torch.load(resume_path, map_location="cpu", weights_only=False)
+        if not isinstance(checkpoint, dict) or "actor_state_dict" not in checkpoint:
+            raise ValueError(
+                "The selected --agent is SAC/OffPolicyRunner, but the checkpoint is not an RSL-RL SAC checkpoint "
+                f"(missing 'actor_state_dict'): {resume_path}"
+            )
+        runner.load(
+            resume_path,
+            load_cfg={"actor": True, "critic": False, "optimizer": False, "iteration": True, "rnd": False},
+            map_location=agent_cfg.device,
+        )
         policy = runner.get_inference_policy(device=vec_env.unwrapped.device)
     else:
         raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
