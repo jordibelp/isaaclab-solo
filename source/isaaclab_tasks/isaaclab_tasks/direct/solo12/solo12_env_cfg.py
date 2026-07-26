@@ -673,6 +673,10 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     # Paper-style hinge penalty for positions outside the soft joint limits.
     # This reward is intentionally not multiplied by the environment step duration.
     soft_qlim_penalty_reward_scale = -1.0
+    # SAC exploration parameterization experiment. False learns one log standard
+    # deviation parameter per joint; True predicts log_std from the current state
+    # as the second output head of the actor network (arXiv:2605.24975).
+    learnable_logstd_as_network_output = False
     feet_air_time_reward_scale = 0.0
     two_feet_above_height_reward_scale = 0.0
     # Penalizes >=3 contacting feet normally, or any front foot/thigh contact when front_back_asymetry=True.

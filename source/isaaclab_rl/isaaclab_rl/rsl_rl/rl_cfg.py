@@ -76,6 +76,8 @@ class RslRlSacActorModelCfg:
     activation: str = MISSING
     obs_normalization: bool = MISSING
     init_noise_std: float = MISSING
+    state_dependent_std: bool = True
+    """Whether the actor network outputs log standard deviation as a function of state."""
     layer_norm: bool = False
     log_std_min: float = -20.0
     log_std_max: float = 2.0

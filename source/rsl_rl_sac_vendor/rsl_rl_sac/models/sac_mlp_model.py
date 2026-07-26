@@ -41,6 +41,7 @@ class SACActorModel(MLPModel):
         activation: str = "elu",
         obs_normalization: bool = False,
         init_noise_std: float = 1.0,
+        state_dependent_std: bool = True,
         layer_norm: bool = False,
         log_std_min: float = -20.0,
         log_std_max: float = 2.0,
@@ -57,6 +58,9 @@ class SACActorModel(MLPModel):
             activation: Activation function of the MLP.
             obs_normalization: Whether to normalize observations.
             init_noise_std: Initial standard deviation for the log-std output head.
+            state_dependent_std: If True, predict log standard deviation from the
+                actor network. If False, learn one state-independent log-standard-
+                deviation parameter per action.
             layer_norm: Whether to apply layer normalization in MLP hidden layers.
             log_std_min: Minimum value for log standard deviation clamping.
             log_std_max: Maximum value for log standard deviation clamping.
@@ -70,8 +74,9 @@ class SACActorModel(MLPModel):
             activation=activation,
             obs_normalization=obs_normalization,
             stochastic=True,
+            init_noise_std=init_noise_std,
             noise_std_type="log",
-            state_dependent_std=True,
+            state_dependent_std=state_dependent_std,
             layer_norm=layer_norm,
         )
 
@@ -87,13 +92,18 @@ class SACActorModel(MLPModel):
             if isinstance(module, nn.Linear):
                 last_linear = module
                 break
-        if last_linear is not None:
+        if last_linear is not None and self.state_dependent_std:
             # Mean output head → near-zero initial actions
             torch.nn.init.normal_(last_linear.weight[:output_dim], mean=0.0, std=1e-3)
             torch.nn.init.zeros_(last_linear.bias[:output_dim])
             # Log-std output head → log(init_noise_std)
             torch.nn.init.zeros_(last_linear.weight[output_dim:])
             torch.nn.init.constant_(last_linear.bias[output_dim:], torch.log(torch.tensor(init_noise_std + 1e-7)))
+        elif last_linear is not None:
+            # State-independent log_std is initialized by MLPModel. Initialize the
+            # complete (mean-only) output layer with the paper's mean-head scheme.
+            torch.nn.init.normal_(last_linear.weight, mean=0.0, std=1e-3)
+            torch.nn.init.zeros_(last_linear.bias)
 
         # Precomputed action scaling buffers — populated by SAC.construct_algorithm()
         # after construction via .copy_(). Using register_buffer ensures .to(device) moves them.
@@ -156,8 +166,12 @@ class SACActorModel(MLPModel):
 
     def _update_distribution(self, latent: torch.Tensor) -> None:
         """Update the Gaussian distribution with log-std clamping."""
-        mean_and_log_std = self.mlp(latent)
-        mean, log_std = torch.unbind(mean_and_log_std, dim=-2)
+        output = self.mlp(latent)
+        if self.state_dependent_std:
+            mean, log_std = torch.unbind(output, dim=-2)
+        else:
+            mean = output
+            log_std = self.log_std.expand_as(mean)
         std = log_std.clamp(self.log_std_min, self.log_std_max).exp()
         self.distribution = Normal(mean, std)
 
@@ -331,13 +345,14 @@ class _TorchSACActorModel(nn.Module):
         super().__init__()
         self.obs_normalizer = copy.deepcopy(model.obs_normalizer)
         self.mlp = copy.deepcopy(model.mlp)
+        self.state_dependent_std = model.state_dependent_std
         self.action_bias = model.action_bias.clone()
         self.action_range = model.action_range.clone()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.obs_normalizer(x)
-        mean_and_log_std = self.mlp(x)
-        mean = mean_and_log_std[..., 0, :]
+        output = self.mlp(x)
+        mean = output[..., 0, :] if self.state_dependent_std else output
         return self.action_range * torch.tanh(mean) + self.action_bias
 
     @torch.jit.export
@@ -355,14 +370,15 @@ class _OnnxSACActorModel(nn.Module):
         self.verbose = verbose
         self.obs_normalizer = copy.deepcopy(model.obs_normalizer)
         self.mlp = copy.deepcopy(model.mlp)
+        self.state_dependent_std = model.state_dependent_std
         self.register_buffer("action_bias", model.action_bias.clone())
         self.register_buffer("action_range", model.action_range.clone())
         self.input_size = model.obs_dim
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.obs_normalizer(x)
-        mean_and_log_std = self.mlp(x)
-        mean = mean_and_log_std[..., 0, :]
+        output = self.mlp(x)
+        mean = output[..., 0, :] if self.state_dependent_std else output
         return self.action_range * torch.tanh(mean) + self.action_bias
 
     def get_dummy_inputs(self) -> tuple[torch.Tensor]:
