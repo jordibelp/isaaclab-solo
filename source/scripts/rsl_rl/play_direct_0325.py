@@ -1457,8 +1457,12 @@ def _save_command_tracking_plots(
     commands: list[tuple[float, float, float]],
     tracked_lin_vel_xy: list[tuple[float, float]],
     tracked_yaw_rate: list[float],
+    joint_names: list[str],
+    joint_positions: list[list[float]],
+    joint_position_targets: list[list[float]],
+    joint_position_limits: np.ndarray,
 ) -> list[Path]:
-    """Save raw tracking data and command-cell error plots."""
+    """Save command-tracking and joint-position-limit diagnostic plots."""
     import csv
 
     import matplotlib.pyplot as plt
@@ -1573,6 +1577,50 @@ def _save_command_tracking_plots(
         fig.savefig(yaw_path, dpi=180)
         plt.close(fig)
         paths.append(yaw_path)
+
+    q = np.asarray(joint_positions)
+    q_des = np.asarray(joint_position_targets)
+    limits = np.asarray(joint_position_limits)
+    if q.shape != q_des.shape or q.shape != (len(times), len(joint_names)):
+        raise ValueError(
+            f"Joint telemetry shapes must be ({len(times)}, {len(joint_names)}), "
+            f"got q={q.shape} and q_des={q_des.shape}."
+        )
+    if limits.shape != (len(joint_names), 2):
+        raise ValueError(f"Joint limits must have shape ({len(joint_names)}, 2), got {limits.shape}.")
+
+    side_groups = {
+        "left": [index for index, name in enumerate(joint_names) if name.startswith(("FL_", "RL_"))],
+        "right": [index for index, name in enumerate(joint_names) if name.startswith(("FR_", "RR_"))],
+    }
+    if any(not indices for indices in side_groups.values()):
+        midpoint = (len(joint_names) + 1) // 2
+        side_groups = {"first_half": list(range(midpoint)), "second_half": list(range(midpoint, len(joint_names)))}
+
+    for side, joint_indices in side_groups.items():
+        fig, axes = plt.subplots(
+            len(joint_indices),
+            1,
+            figsize=(max(10.0, 1.45 * len(commands)), 2.15 * len(joint_indices)),
+            sharex=True,
+            constrained_layout=True,
+        )
+        axes = np.atleast_1d(axes)
+        for ax, joint_index in zip(axes, joint_indices):
+            ax.plot(times, q[:, joint_index], label=r"$q$", color="#0072b2", linewidth=1.25)
+            ax.plot(times, q_des[:, joint_index], label=r"$q_{des}$", color="#d55e00", linewidth=1.1, alpha=0.9)
+            ax.axhline(limits[joint_index, 0], label=r"$q_{min}$", color="#cc79a7", linestyle="--", linewidth=1.0)
+            ax.axhline(limits[joint_index, 1], label=r"$q_{max}$", color="#009e73", linestyle="--", linewidth=1.0)
+            decorate_cells(ax)
+            ax.set_ylabel("rad")
+            ax.set_title(joint_names[joint_index], loc="left", fontsize=10)
+        axes[0].legend(ncol=4, loc="upper right", fontsize=8)
+        axes[-1].set_xlabel("Time [s]")
+        fig.suptitle(f"Joint position and executed target vs physical limits — {side.replace('_', ' ')}", fontsize=13)
+        joint_path = output_dir / f"joint_position_vs_limits_{side}.png"
+        fig.savefig(joint_path, dpi=180)
+        plt.close(fig)
+        paths.append(joint_path)
     return paths
 
 
@@ -2232,6 +2280,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     tracking_times_s = []
     tracking_lin_vel_xy = []
     tracking_yaw_rate = []
+    tracking_joint_positions = []
+    tracking_joint_position_targets = []
     tracking_resets = 0
 
     for timestep in range(target_steps):
@@ -2335,6 +2385,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             tracking_times_s.append((timestep + 1) * float(dt))
             tracking_lin_vel_xy.append((base_vel[0].item(), base_vel[1].item()))
             tracking_yaw_rate.append(base_ang_vel_z)
+            q_desired = getattr(raw_env, "_delayed_processed_actions", None)
+            if q_desired is None:
+                q_desired = getattr(raw_env, "_processed_actions", None)
+            if q_desired is None:
+                q_desired = torch.full_like(
+                    raw_env._robot.data.joint_pos[:, raw_env._joint_ids], float("nan")
+                )
+            tracking_joint_positions.append(
+                raw_env._robot.data.joint_pos[0, raw_env._joint_ids].detach().cpu().tolist()
+            )
+            tracking_joint_position_targets.append(q_desired[0].detach().cpu().tolist())
 
         log_data = {
             "play/step": timestep,
@@ -2439,6 +2500,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             TRACKING_COMMANDS,
             tracking_lin_vel_xy,
             tracking_yaw_rate,
+            [str(name) for name in env_cfg.joint_names],
+            tracking_joint_positions,
+            tracking_joint_position_targets,
+            raw_env._robot.data.joint_pos_limits[0, raw_env._joint_ids].detach().cpu().numpy(),
         )
         tracking_summary = _summarize_command_tracking(
             tracking_times_s,
