@@ -20,7 +20,9 @@ import isaaclab.utils.math as math_utils
 from isaaclab_tasks.direct.solo12.solo12_env import (
     Solo12Env,
     _combine_mass_properties_with_point_mass,
+    _compute_joint_soft_pos_limits,
     _external_contact_forces,
+    _joint_pos_limit_violation,
     _per_step_reward_ratios,
     _sample_reset_root_rpy,
     _world_velocity_in_heading_frame_xy,
@@ -82,6 +84,37 @@ def test_per_step_reward_ratios_remove_scale_and_step_duration():
     assert set(ratios) == {"tracking", "penalty"}
     assert math.isclose(ratios["tracking"], 0.75, rel_tol=1.0e-6)
     assert math.isclose(ratios["penalty"], 0.75, rel_tol=1.0e-6)
+
+
+def test_soft_joint_limits_use_configured_degree_margin():
+    hard_limits = torch.tensor([[[-1.0, 1.0], [-2.0, 2.0]]])
+
+    soft_limits = _compute_joint_soft_pos_limits(hard_limits, 25.0)
+
+    delta = math.radians(25.0)
+    torch.testing.assert_close(
+        soft_limits,
+        torch.tensor([[[-1.0 + delta, 1.0 - delta], [-2.0 + delta, 2.0 - delta]]]),
+    )
+
+
+def test_joint_limit_penalty_is_zero_inside_and_linear_outside_soft_limits():
+    soft_limits = torch.tensor([[[-1.0, 1.0], [-2.0, 2.0]]])
+    joint_pos = torch.tensor([[0.0, 0.0], [-1.25, 2.5]])
+
+    penalty = _joint_pos_limit_violation(joint_pos, soft_limits)
+
+    torch.testing.assert_close(penalty, torch.tensor([0.0, 0.75]))
+
+
+def test_soft_joint_limit_penalty_ratio_does_not_remove_step_duration():
+    ratios = _per_step_reward_ratios(
+        {"soft_qlim_penalty": torch.tensor((-0.5, -1.5))},
+        {"soft_qlim_penalty": -1.0},
+        step_dt=0.02,
+    )
+
+    assert ratios["soft_qlim_penalty"] == 1.0
 
 
 def test_base_collision_filters_are_task_specific():

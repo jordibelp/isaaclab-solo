@@ -81,9 +81,22 @@ def test_logged_episode_reward_ratios_divide_by_scale_and_fixed_horizon():
         {"positive": 2.0, "penalty": -4.0, "disabled": 0.0},
         env_ids,
         max_episode_length_s=10.0,
+        step_dt=0.02,
     )
 
     assert ratios == pytest.approx({"positive": 0.1, "penalty": 0.15})
+
+
+def test_soft_joint_limit_episode_ratio_accounts_for_missing_dt_factor():
+    ratios = _episode_reward_ratios(
+        {"soft_qlim_penalty": torch.tensor([-500.0])},
+        {"soft_qlim_penalty": -1.0},
+        torch.tensor([0]),
+        max_episode_length_s=10.0,
+        step_dt=0.02,
+    )
+
+    assert ratios == pytest.approx({"soft_qlim_penalty": 1.0})
 
 
 def test_startup_events_are_deferred_for_early_phases():

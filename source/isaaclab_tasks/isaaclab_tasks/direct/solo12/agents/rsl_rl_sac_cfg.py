@@ -20,9 +20,7 @@ class Solo12SAC(SAC):
     @staticmethod
     def _compute_action_scaling(env, device: str) -> tuple[torch.Tensor, torch.Tensor]:
         unwrapped = getattr(env, "unwrapped", env)
-        robot = unwrapped.scene["robot"]
-        joint_ids = getattr(unwrapped, "_joint_ids", slice(None))
-        limits = robot.data.soft_joint_pos_limits[0, joint_ids, :].to(device)
+        limits = unwrapped._joint_soft_pos_limits[0].to(device)
         center = unwrapped._q_offset_action_and_obs.to(device)
         if center.ndim > 1:
             center = center[0]
@@ -32,10 +30,13 @@ class Solo12SAC(SAC):
         upper = (limits[:, 1] - center) / scale
         lower = (center - limits[:, 0]) / scale
         if not torch.isfinite(upper).all() or not torch.isfinite(lower).all():
-            raise ValueError("Solo12 SAC computed non-finite action bounds from the soft joint limits.")
+            raise ValueError("Solo12 SAC computed non-finite action bounds from the task soft joint limits.")
         if torch.any(upper <= 0) or torch.any(lower <= 0):
             raise ValueError("Solo12 SAC action center must lie strictly inside every soft joint limit.")
-        print("Solo12 SAC: action bounds use q_offset_action_and_obs and env.action_scale.")
+        print(
+            "Solo12 SAC: action bounds use q_offset_action_and_obs, env.action_scale, "
+            f"and a {unwrapped.cfg.joint_soft_limit_delta:g}-degree joint-limit margin."
+        )
         print(f"  lower magnitudes: {lower}")
         print(f"  upper magnitudes: {upper}")
         return upper, lower

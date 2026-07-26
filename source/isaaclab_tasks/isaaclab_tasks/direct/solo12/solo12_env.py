@@ -30,6 +30,7 @@ _EPISODE_REWARD_KEYS = (
     "ang_vel_xy_l2",
     "dof_torques_l2",
     "dof_acc_l2",
+    "soft_qlim_penalty",
     "action_rate_l2",
     "feet_air_time",
     "two_feet_above_height",
@@ -42,13 +43,20 @@ _EPISODE_REWARD_KEYS = (
     "foot_contact",
 )
 
+_REWARD_KEYS_WITHOUT_STEP_DT = frozenset(("soft_qlim_penalty",))
+
+
+def _reward_step_factor(key: str, step_dt: float) -> float:
+    """Return the time factor used when constructing a reward term."""
+    return 1.0 if key in _REWARD_KEYS_WITHOUT_STEP_DT else step_dt
+
 
 def _per_step_reward_ratios(
     rewards: dict[str, torch.Tensor], reward_scales: dict[str, float], step_dt: float
 ) -> dict[str, float]:
     """Remove reward scale and step duration from per-step reward metrics."""
     return {
-        key: torch.mean(rewards[key]).item() / (scale * step_dt)
+        key: torch.mean(rewards[key]).item() / (scale * _reward_step_factor(key, step_dt))
         for key, scale in reward_scales.items()
         if scale != 0.0
     }
@@ -59,16 +67,49 @@ def _episode_reward_ratios(
     reward_scales: dict[str, float],
     env_ids: torch.Tensor,
     max_episode_length_s: float,
+    step_dt: float,
 ) -> dict[str, float]:
     """Normalize episodic reward metrics to their fixed-horizon maximum magnitude."""
     if len(env_ids) == 0:
         return {}
     return {
         key: torch.mean(episode_sums[key][env_ids]).abs().item()
-        / (abs(scale) * max_episode_length_s)
+        / (
+            abs(scale)
+            * max_episode_length_s
+            * _reward_step_factor(key, step_dt)
+            / step_dt
+        )
         for key, scale in reward_scales.items()
         if scale != 0.0
     }
+
+
+def _compute_joint_soft_pos_limits(
+    joint_pos_limits: torch.Tensor, delta_degrees: float
+) -> torch.Tensor:
+    """Move physical joint limits inward by a fixed angular margin on each side."""
+    if delta_degrees < 0.0:
+        raise ValueError(f"joint_soft_limit_delta must be non-negative, got {delta_degrees}.")
+    delta = math.radians(delta_degrees)
+    soft_limits = joint_pos_limits.clone()
+    soft_limits[..., 0] += delta
+    soft_limits[..., 1] -= delta
+    if torch.any(soft_limits[..., 0] >= soft_limits[..., 1]):
+        raise ValueError(
+            "joint_soft_limit_delta leaves an empty soft range for at least one joint; "
+            f"got {delta_degrees} degrees."
+        )
+    return soft_limits
+
+
+def _joint_pos_limit_violation(
+    joint_pos: torch.Tensor, soft_joint_pos_limits: torch.Tensor
+) -> torch.Tensor:
+    """Sum lower/upper soft-limit violations across joints."""
+    below_lower = torch.clamp_min(soft_joint_pos_limits[..., 0] - joint_pos, 0.0)
+    above_upper = torch.clamp_min(joint_pos - soft_joint_pos_limits[..., 1], 0.0)
+    return torch.sum(below_lower + above_upper, dim=-1)
 
 
 def _world_velocity_in_heading_frame_xy(
@@ -188,6 +229,10 @@ class Solo12Env(DirectRLEnv):
             )
 
         self._joint_ids, _ = self._robot.find_joints(self.cfg.joint_names, preserve_order=True)
+        self._joint_soft_pos_limits = _compute_joint_soft_pos_limits(
+            self._robot.data.joint_pos_limits[:, self._joint_ids, :],
+            self.cfg.joint_soft_limit_delta,
+        )
         self._base_body_ids, _ = self._contact_sensor.find_bodies("base")
         self._feet_body_ids, self._feet_body_names = self._contact_sensor.find_bodies(".*_calf")
         self._feet_robot_body_ids, self._feet_robot_body_names = self._robot.find_bodies(".*_calf")
@@ -1011,6 +1056,7 @@ class Solo12Env(DirectRLEnv):
             "ang_vel_xy_l2": self.cfg.ang_vel_xy_reward_scale,
             "dof_torques_l2": self.cfg.joint_torque_reward_scale,
             "dof_acc_l2": self.cfg.joint_accel_reward_scale,
+            "soft_qlim_penalty": self.cfg.soft_qlim_penalty_reward_scale,
             "action_rate_l2": self.cfg.action_rate_reward_scale,
             "feet_air_time": self.cfg.feet_air_time_reward_scale,
             "two_feet_above_height": self.cfg.two_feet_above_height_reward_scale,
@@ -1579,6 +1625,10 @@ class Solo12Env(DirectRLEnv):
         ang_vel_error = torch.sum(torch.square(self._robot.data.root_ang_vel_b[:, :2]), dim=1)
         joint_torques = torch.sum(torch.square(self._robot.data.applied_torque[:, self._joint_ids]), dim=1)
         joint_accel = torch.sum(torch.square(self._robot.data.joint_acc[:, self._joint_ids]), dim=1)
+        soft_qlim_penalty = _joint_pos_limit_violation(
+            self._robot.data.joint_pos[:, self._joint_ids],
+            self._joint_soft_pos_limits,
+        )
         action_rate = torch.sum(torch.square(self._actions - self._previous_actions), dim=1)
         flat_orientation = torch.sum(torch.square(self._robot.data.projected_gravity_b[:, :2]), dim=1)
         base_height = self._robot.data.root_pos_w[:, 2] - self._terrain.env_origins[:, 2]
@@ -1618,6 +1668,7 @@ class Solo12Env(DirectRLEnv):
             "ang_vel_xy_l2": ang_vel_error * self.cfg.ang_vel_xy_reward_scale * self.step_dt,
             "dof_torques_l2": joint_torques * self.cfg.joint_torque_reward_scale * self.step_dt,
             "dof_acc_l2": joint_accel * self.cfg.joint_accel_reward_scale * self.step_dt,
+            "soft_qlim_penalty": soft_qlim_penalty * self.cfg.soft_qlim_penalty_reward_scale,
             "action_rate_l2": action_rate * self.cfg.action_rate_reward_scale * self.step_dt,
             "feet_air_time": feet_air_time * self.cfg.feet_air_time_reward_scale * self.step_dt,
             "two_feet_above_height": self._scale_bounded_positive_reward(
@@ -1702,6 +1753,7 @@ class Solo12Env(DirectRLEnv):
             self._reward_scales(),
             completed_env_ids,
             self.max_episode_length_s,
+            self.step_dt,
         )
         self._update_two_feet_curriculum(completed_env_ids)
         self._update_base_push_force_curriculum(completed_episode_returns)
