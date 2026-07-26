@@ -18,16 +18,6 @@ class Solo12SAC(SAC):
     """SAC with action bounds matching Solo12's direct position-action mapping."""
 
     @staticmethod
-    def construct_algorithm(obs, env, cfg: dict, device: str):
-        """Construct SAC using the task's state-dependent log-std experiment toggle."""
-        unwrapped = getattr(env, "unwrapped", env)
-        state_dependent_std = bool(unwrapped.cfg.learnable_logstd_as_network_output)
-        cfg["actor"]["state_dependent_std"] = state_dependent_std
-        mode = "network output (state-dependent)" if state_dependent_std else "parameter (state-independent)"
-        print(f"Solo12 SAC: log_std is learned as a {mode}.")
-        return SAC.construct_algorithm(obs, env, cfg, device)
-
-    @staticmethod
     def _compute_action_scaling(env, device: str) -> tuple[torch.Tensor, torch.Tensor]:
         unwrapped = getattr(env, "unwrapped", env)
         limits = unwrapped._joint_soft_pos_limits[0].to(device)
