@@ -65,6 +65,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--duration_s", type=float, default=2000.0)
     parser.add_argument("--episode_length_s", type=float, default=80.0)
     parser.add_argument("--cmd_init", nargs=3, type=float, default=(0.0, 0.0, 0.0))
+    parser.add_argument("--spawn-z", type=float, default=0.35,
+                        help="Base height used for the initial spawn and every reset [m] (default: 0.35).")
     parser.add_argument("--output-dir", type=Path,
                         help="Output root (default logs/mujoco/cmd_tracking); model/timestamp are appended.")
     parser.add_argument("--realtime", action="store_true", help="Pace the interactive viewer at wall-clock speed.")
@@ -180,7 +182,8 @@ def quat_rotation(q_wxyz: np.ndarray) -> np.ndarray:
 
 
 class Solo12Mujoco:
-    def __init__(self, model_path: Path, kp: float = DEFAULT_KP, kd: float = DEFAULT_KD):
+    def __init__(self, model_path: Path, kp: float = DEFAULT_KP, kd: float = DEFAULT_KD,
+                 spawn_z: float = 0.35):
         self.model = mujoco.MjModel.from_xml_path(str(model_path))
         self.data = mujoco.MjData(self.model)
         self.joint_qpos = np.array([self.model.jnt_qposadr[mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, n)] for n in JOINT_NAMES])
@@ -193,7 +196,9 @@ class Solo12Mujoco:
             if self.model.geom_bodyid[geom_id] == self.base_id and self.model.geom_contype[geom_id] != 0
         }
         self.set_gains(kp, kd)
+        self.spawn_z = float(spawn_z)
         self.action = np.zeros(12)
+        self._base_contact_latched = False
         self.reset()
 
     def set_gains(self, kp: float, kd: float) -> None:
@@ -207,10 +212,11 @@ class Solo12Mujoco:
 
     def reset(self) -> None:
         mujoco.mj_resetData(self.model, self.data)
-        self.data.qpos[:7] = (0.0, 0.0, 0.35, 0.0, 0.0, 0.0, 1.0)  # wxyz quat: yaw = pi, as in Isaac reset
+        self.data.qpos[:7] = (0.0, 0.0, self.spawn_z, 0.0, 0.0, 0.0, 1.0)
         self.data.qpos[self.joint_qpos] = SAFE_Q
         self.data.ctrl[self.actuator_ids] = SAFE_Q
         self.action.fill(0.0)
+        self._base_contact_latched = False
         mujoco.mj_forward(self.model, self.data)
 
     def _base_velocity_world(self) -> tuple[np.ndarray, np.ndarray]:
@@ -248,15 +254,21 @@ class Solo12Mujoco:
     def step(self, action: np.ndarray) -> None:
         self.action = np.asarray(action).copy()
         self.data.ctrl[self.actuator_ids] = SAFE_Q + ACTION_SCALE * self.action
+        self._base_contact_latched = False
         for _ in range(DECIMATION):
             mujoco.mj_step(self.model, self.data)
+            self._base_contact_latched |= self._base_hit_ground_now()
 
-    def base_hit_ground(self) -> bool:
+    def _base_hit_ground_now(self) -> bool:
         for contact in self.data.contact:
             pair = {contact.geom1, contact.geom2}
             if self.ground_id in pair and pair & self.base_geom_ids:
                 return True
         return False
+
+    def base_hit_ground(self) -> bool:
+        """Return whether the base touched ground during the latest policy step."""
+        return self._base_contact_latched or self._base_hit_ground_now()
 
     def base_height(self) -> float:
         return float(self.data.qpos[2])
@@ -588,6 +600,7 @@ def run_tracking(args, sim: Solo12Mujoco, policy: Policy, checkpoint: Path, mode
         "command_duration_s": COMMAND_DURATION_S,
         "duration_s": duration,
         "episode_length_s": args.episode_length_s,
+        "spawn_z": sim.spawn_z,
         "physics_dt": PHYSICS_DT,
         "decimation": DECIMATION,
         "policy_dt": POLICY_DT,
@@ -704,7 +717,7 @@ def main() -> None:
     checkpoint = Path(args.checkpoint).expanduser().resolve()
     policy = Policy(checkpoint)
     model_path = Path(__file__).with_name("solo12.xml").resolve()
-    sim = Solo12Mujoco(model_path, kp=kp, kd=kd)
+    sim = Solo12Mujoco(model_path, kp=kp, kd=kd, spawn_z=args.spawn_z)
     print(f"[INFO] MuJoCo {mujoco.__version__}; model mass={sim.model.body_mass.sum():.6f} kg")
     print(f"[INFO] PD gains kp={sim.kp:g} kd={sim.kd:g} "
           f"(Isaac play w/ --disable_training_gain_sync: {DEFAULT_KP:g}/{DEFAULT_KD:g}; "

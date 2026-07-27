@@ -26,6 +26,14 @@ def test_model_contract():
     assert np.allclose(base_inertial_pos, (-0.01, 0.0, 0.0)), "base COM must match the USD-authored value"
 
 
+def test_spawn_height_applies_to_initial_state_and_resets():
+    env = make_env(spawn_z=0.7)
+    assert env.data.qpos[2] == pytest.approx(0.7)
+    env.data.qpos[2] = 0.2
+    env.reset()
+    assert env.data.qpos[2] == pytest.approx(0.7)
+
+
 def test_visual_meshes_never_collide():
     """The Solo12 visual meshes are display-only; contact must come from the USD primitives."""
     env = make_env()
