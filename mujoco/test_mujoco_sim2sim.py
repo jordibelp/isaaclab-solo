@@ -286,10 +286,22 @@ def test_sac_policy_uses_deterministic_squashed_mean():
     obs = np.linspace(-0.2, 0.2, 48, dtype=np.float32)
     x = (torch.from_numpy(obs) - policy.obs_mean) / (policy.obs_std + sim2sim.OBS_NORM_EPS)
     for layer in policy.layers[:-1]:
-        x = torch.nn.functional.elu(layer(x))
+        x = torch.nn.functional.silu(layer(x))
     mean = policy.layers[-1](x)[:12]
     expected = policy.action_range * torch.tanh(mean) + policy.action_bias
     np.testing.assert_allclose(policy(obs), expected.detach().numpy(), atol=1e-6)
+
+
+@pytest.mark.skipif(not SAC_CHECKPOINT.exists(), reason="real SAC checkpoint unavailable")
+def test_sac_rollout_survives_with_mujoco_stable_gains():
+    policy = sim2sim.Policy(SAC_CHECKPOINT)
+    env = make_env(kp=7.0, kd=0.2)
+    command = (0.1, 0.0, 0.0)
+    observation = env.observation(command)
+    for _ in range(int(20.0 / sim2sim.POLICY_DT)):
+        env.step(policy(observation))
+        observation = env.observation(command)
+        assert not env.base_hit_ground()
 
 
 @pytest.mark.skipif(not CHECKPOINT.exists(), reason="real checkpoint unavailable")

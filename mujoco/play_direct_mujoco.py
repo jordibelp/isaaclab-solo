@@ -128,11 +128,13 @@ class Policy(torch.nn.Module):
             layer_prefix = "actor."
             normalizer_prefix = "actor_obs_normalizer"
             self.checkpoint_format = "ppo"
+            self.activation = torch.nn.functional.elu
         elif "actor_state_dict" in payload and "action_range" in payload["actor_state_dict"]:
             state = payload["actor_state_dict"]
             layer_prefix = "mlp."
             normalizer_prefix = "obs_normalizer"
             self.checkpoint_format = "sac"
+            self.activation = torch.nn.functional.silu
         else:
             raise ValueError(
                 f"Unsupported checkpoint layout in {checkpoint}: expected PPO model_state_dict "
@@ -160,7 +162,7 @@ class Policy(torch.nn.Module):
     def forward(self, observation: np.ndarray) -> np.ndarray:
         x = (torch.from_numpy(observation).float() - self.obs_mean) / (self.obs_std + OBS_NORM_EPS)
         for layer in self.layers[:-1]:
-            x = torch.nn.functional.elu(layer(x))
+            x = self.activation(layer(x))
         output = self.layers[-1](x)
         if self.checkpoint_format == "sac":
             mean = output[..., : self.action_range.numel()]
