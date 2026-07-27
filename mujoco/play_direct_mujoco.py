@@ -123,9 +123,23 @@ class Policy(torch.nn.Module):
     def __init__(self, checkpoint: Path):
         super().__init__()
         payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
-        state = payload["model_state_dict"]
+        if "model_state_dict" in payload:
+            state = payload["model_state_dict"]
+            layer_prefix = "actor."
+            normalizer_prefix = "actor_obs_normalizer"
+            self.checkpoint_format = "ppo"
+        elif "actor_state_dict" in payload and "action_range" in payload["actor_state_dict"]:
+            state = payload["actor_state_dict"]
+            layer_prefix = "mlp."
+            normalizer_prefix = "obs_normalizer"
+            self.checkpoint_format = "sac"
+        else:
+            raise ValueError(
+                f"Unsupported checkpoint layout in {checkpoint}: expected PPO model_state_dict "
+                "or SAC actor_state_dict."
+            )
         weight_keys = sorted(
-            (key for key in state if key.startswith("actor.") and key.endswith(".weight")),
+            (key for key in state if key.startswith(layer_prefix) and key.endswith(".weight")),
             key=lambda key: int(key.split(".")[1]),
         )
         self.layers = torch.nn.ModuleList()
@@ -135,8 +149,11 @@ class Policy(torch.nn.Module):
             layer.weight.data.copy_(state[key])
             layer.bias.data.copy_(state[key.replace(".weight", ".bias")])
             self.layers.append(layer)
-        self.register_buffer("obs_mean", state["actor_obs_normalizer._mean"].reshape(-1))
-        self.register_buffer("obs_std", state["actor_obs_normalizer._std"].reshape(-1))
+        self.register_buffer("obs_mean", state[f"{normalizer_prefix}._mean"].reshape(-1))
+        self.register_buffer("obs_std", state[f"{normalizer_prefix}._std"].reshape(-1))
+        if self.checkpoint_format == "sac":
+            self.register_buffer("action_bias", state["action_bias"].reshape(-1))
+            self.register_buffer("action_range", state["action_range"].reshape(-1))
         self.eval()
 
     @torch.inference_mode()
@@ -144,7 +161,11 @@ class Policy(torch.nn.Module):
         x = (torch.from_numpy(observation).float() - self.obs_mean) / (self.obs_std + OBS_NORM_EPS)
         for layer in self.layers[:-1]:
             x = torch.nn.functional.elu(layer(x))
-        return self.layers[-1](x).numpy()
+        output = self.layers[-1](x)
+        if self.checkpoint_format == "sac":
+            mean = output[..., : self.action_range.numel()]
+            output = self.action_range * torch.tanh(mean) + self.action_bias
+        return output.numpy()
 
 
 def quat_rotation(q_wxyz: np.ndarray) -> np.ndarray:

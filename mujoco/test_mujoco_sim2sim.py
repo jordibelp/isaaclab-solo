@@ -8,6 +8,7 @@ import interactive
 import play_direct_mujoco as sim2sim
 
 CHECKPOINT = Path("/home/jordibelp/IsaacLab-dirty/logs/skrl/checkpoints/0717_q3a68133_model_15008.pt")
+SAC_CHECKPOINT = Path("/home/jordibelp/IsaacLab-dirty/logs/skrl/checkpoints/0727_f9hcf1p1_model_2400.pt")
 
 
 def make_env(**kwargs) -> sim2sim.Solo12Mujoco:
@@ -272,6 +273,23 @@ def test_policy_normalization_matches_rsl_rl():
     for layer in policy.layers[:-1]:
         x = torch.nn.functional.elu(layer(x))
     np.testing.assert_allclose(policy(obs), policy.layers[-1](x).detach().numpy(), atol=1e-6)
+
+
+@pytest.mark.skipif(not SAC_CHECKPOINT.exists(), reason="real SAC checkpoint unavailable")
+def test_sac_policy_uses_deterministic_squashed_mean():
+    import torch
+    policy = sim2sim.Policy(SAC_CHECKPOINT)
+    assert policy.checkpoint_format == "sac"
+    assert [(layer.in_features, layer.out_features) for layer in policy.layers] == [
+        (48, 1024), (1024, 512), (512, 256), (256, 24),
+    ]
+    obs = np.linspace(-0.2, 0.2, 48, dtype=np.float32)
+    x = (torch.from_numpy(obs) - policy.obs_mean) / (policy.obs_std + sim2sim.OBS_NORM_EPS)
+    for layer in policy.layers[:-1]:
+        x = torch.nn.functional.elu(layer(x))
+    mean = policy.layers[-1](x)[:12]
+    expected = policy.action_range * torch.tanh(mean) + policy.action_bias
+    np.testing.assert_allclose(policy(obs), expected.detach().numpy(), atol=1e-6)
 
 
 @pytest.mark.skipif(not CHECKPOINT.exists(), reason="real checkpoint unavailable")
