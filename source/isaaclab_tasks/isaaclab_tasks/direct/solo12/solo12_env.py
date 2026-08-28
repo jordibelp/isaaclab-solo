@@ -86,18 +86,24 @@ def _episode_reward_ratios(
 
 
 def _compute_joint_soft_pos_limits(
-    joint_pos_limits: torch.Tensor, delta_degrees: float
+    joint_pos_limits: torch.Tensor, delta_degrees: float | torch.Tensor
 ) -> torch.Tensor:
-    """Move physical joint limits inward by a fixed angular margin on each side."""
-    if delta_degrees < 0.0:
-        raise ValueError(f"joint_soft_limit_delta must be non-negative, got {delta_degrees}.")
-    delta = math.radians(delta_degrees)
+    """Move physical joint limits inward by scalar or per-joint angular margins."""
+    delta_degrees = torch.as_tensor(delta_degrees, device=joint_pos_limits.device, dtype=joint_pos_limits.dtype)
+    if delta_degrees.ndim > 1 or (delta_degrees.ndim == 1 and delta_degrees.numel() != joint_pos_limits.shape[-2]):
+        raise ValueError(
+            "Joint soft-limit deltas must be a scalar or contain one value per joint; "
+            f"got shape {tuple(delta_degrees.shape)} for {joint_pos_limits.shape[-2]} joints."
+        )
+    if not torch.isfinite(delta_degrees).all() or torch.any(delta_degrees < 0.0):
+        raise ValueError(f"Joint soft-limit deltas must be finite and non-negative, got {delta_degrees}.")
+    delta = torch.deg2rad(delta_degrees)
     soft_limits = joint_pos_limits.clone()
     soft_limits[..., 0] += delta
     soft_limits[..., 1] -= delta
     if torch.any(soft_limits[..., 0] >= soft_limits[..., 1]):
         raise ValueError(
-            "joint_soft_limit_delta leaves an empty soft range for at least one joint; "
+            "Joint soft-limit deltas leave an empty soft range for at least one joint; "
             f"got {delta_degrees} degrees."
         )
     return soft_limits
@@ -229,10 +235,7 @@ class Solo12Env(DirectRLEnv):
             )
 
         self._joint_ids, _ = self._robot.find_joints(self.cfg.joint_names, preserve_order=True)
-        self._joint_soft_pos_limits = _compute_joint_soft_pos_limits(
-            self._robot.data.joint_pos_limits[:, self._joint_ids, :],
-            self.cfg.joint_soft_limit_delta,
-        )
+        self._configure_joint_position_limits()
         self._base_body_ids, _ = self._contact_sensor.find_bodies("base")
         self._feet_body_ids, self._feet_body_names = self._contact_sensor.find_bodies(".*_calf")
         self._feet_robot_body_ids, self._feet_robot_body_names = self._robot.find_bodies(".*_calf")
@@ -662,6 +665,60 @@ class Solo12Env(DirectRLEnv):
         )
         joint_pos[:] = initial_joint_pos
         return joint_pos
+
+    def _configure_joint_position_limits(self) -> None:
+        """Apply configured physical limits and derive per-joint-type task soft limits."""
+        joint_types = []
+        for joint_name in self.cfg.joint_names:
+            joint_type = next(
+                (name for name in ("hip", "thigh", "calf") if joint_name.endswith(f"_{name}_joint")), None
+            )
+            if joint_type is None:
+                raise ValueError(f"Cannot select configured joint limits for unknown Solo12 joint '{joint_name}'.")
+            joint_types.append(joint_type)
+
+        physical_limits_degrees = torch.tensor(
+            [getattr(self.cfg, f"joint_physical_limit_{joint_type}") for joint_type in joint_types],
+            device=self._robot.data.joint_pos_limits.device,
+            dtype=self._robot.data.joint_pos_limits.dtype,
+        )
+        if not torch.isfinite(physical_limits_degrees).all() or torch.any(
+            physical_limits_degrees[:, 0] >= physical_limits_degrees[:, 1]
+        ):
+            raise ValueError(
+                "Solo12 physical joint limits must be finite (lower, upper) pairs with lower < upper; "
+                f"got {physical_limits_degrees}."
+            )
+
+        physical_limits = (
+            torch.deg2rad(physical_limits_degrees)
+            .unsqueeze(0)
+            .expand(self._robot.data.joint_pos_limits.shape[0], -1, -1)
+        )
+        self._robot.write_joint_position_limit_to_sim(physical_limits, joint_ids=self._joint_ids)
+
+        soft_limit_deltas_degrees = torch.tensor(
+            [getattr(self.cfg, f"joint_soft_limit_{joint_type}_delta") for joint_type in joint_types],
+            device=self._robot.data.joint_pos_limits.device,
+            dtype=self._robot.data.joint_pos_limits.dtype,
+        )
+        self._joint_soft_pos_limits = _compute_joint_soft_pos_limits(
+            self._robot.data.joint_pos_limits[:, self._joint_ids, :], soft_limit_deltas_degrees
+        )
+
+        hard_limits_summary = ", ".join(
+            f"{joint_type}={getattr(self.cfg, f'joint_physical_limit_{joint_type}')} deg"
+            for joint_type in ("hip", "thigh", "calf")
+        )
+        soft_deltas_summary = ", ".join(
+            f"{joint_type}={getattr(self.cfg, f'joint_soft_limit_{joint_type}_delta'):g} deg"
+            for joint_type in ("hip", "thigh", "calf")
+        )
+        print(
+            f"[INFO] Applied Solo12 joint limits: hard [{hard_limits_summary}]; "
+            f"soft inward deltas [{soft_deltas_summary}].",
+            flush=True,
+        )
 
     def _build_q_offset_action_and_obs(self) -> torch.Tensor:
         offset_cfg = self.cfg.q_offset_action_and_obs

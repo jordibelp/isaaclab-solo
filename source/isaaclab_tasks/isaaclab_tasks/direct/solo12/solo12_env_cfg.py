@@ -667,9 +667,18 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     lin_vel_z_reward_scale = 0.0
     ang_vel_xy_reward_scale = 0.00
     joint_accel_reward_scale = 0.0
-    # Joint-limit safety margin in degrees. The task's soft lower/upper limits are the
-    # physical limits moved inward by this amount on each side.
-    joint_soft_limit_delta = 25.0
+
+    # Physical hard limits in degrees. These override the limits authored in the USD.
+    joint_physical_limit_hip = (-50.0, 50.0)
+    joint_physical_limit_thigh = (-90.0, 90.0)
+    joint_physical_limit_calf = (-170.0, 170.0)
+
+    # Per-joint-type safety margins in degrees. The task's soft lower/upper limits are
+    # the configured physical limits moved inward by these amounts on each side.
+    joint_soft_limit_hip_delta = 5.0
+    joint_soft_limit_thigh_delta = 10.0
+    joint_soft_limit_calf_delta = 5.0
+
     # Paper-style hinge penalty for positions outside the soft joint limits.
     # This reward is intentionally not multiplied by the environment step duration.
     soft_qlim_penalty_reward_scale = -1.0
