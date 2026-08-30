@@ -71,3 +71,37 @@ def test_rsl_wandb_history_matches_mujoco_metric_names(tmp_path):
     assert run.rows[0]["tracking/error_vx_signed_mps"] == pytest.approx(-0.1)
     assert run.rows[0]["tracking/error_vxy_along_command_mps"] == pytest.approx(-0.1)
     assert ("tracking/error_vxy_along_command_mps", {"step_metric": "tracking/time_s"}) in run.metrics
+
+
+def test_rsl_joint_plots_include_effective_soft_and_physical_limits(tmp_path, monkeypatch):
+    save_plots, = load_helpers("_save_command_tracking_plots")
+
+    import matplotlib.axes
+
+    horizontal_lines = []
+    original_axhline = matplotlib.axes.Axes.axhline
+
+    def record_axhline(self, y=0, *args, **kwargs):
+        horizontal_lines.append((float(y), kwargs.get("label")))
+        return original_axhline(self, y, *args, **kwargs)
+
+    monkeypatch.setattr(matplotlib.axes.Axes, "axhline", record_axhline)
+    paths = save_plots(
+        tmp_path,
+        [0.02, 0.04],
+        [(0.5, 0.0, 0.0)],
+        [(0.1, 0.0), (0.2, 0.0)],
+        [0.0, 0.0],
+        ["FL_hip_joint", "FR_hip_joint"],
+        [[0.0, 0.0], [0.1, -0.1]],
+        [[0.05, -0.05], [0.1, -0.1]],
+        np.asarray([[-1.2, 1.2], [-1.3, 1.3]]),
+        np.asarray([[-0.8, 0.8], [-0.9, 0.9]]),
+    )
+
+    assert (-0.8, "soft lower") in horizontal_lines
+    assert (0.9, "soft upper") in horizontal_lines
+    assert (-1.2, "hard lower") in horizontal_lines
+    assert (1.3, "hard upper") in horizontal_lines
+    assert tmp_path / "joint_position_vs_limits_left.png" in paths
+    assert tmp_path / "joint_position_vs_limits_right.png" in paths

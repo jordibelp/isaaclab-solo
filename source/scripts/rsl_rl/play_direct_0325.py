@@ -1460,9 +1460,10 @@ def _save_command_tracking_plots(
     joint_names: list[str],
     joint_positions: list[list[float]],
     joint_position_targets: list[list[float]],
-    joint_position_limits: np.ndarray,
+    joint_physical_position_limits: np.ndarray,
+    joint_soft_position_limits: np.ndarray,
 ) -> list[Path]:
-    """Save command-tracking and joint-position-limit diagnostic plots."""
+    """Save command-tracking plots with physical and task soft joint limits."""
     import csv
 
     import matplotlib.pyplot as plt
@@ -1580,14 +1581,20 @@ def _save_command_tracking_plots(
 
     q = np.asarray(joint_positions)
     q_des = np.asarray(joint_position_targets)
-    limits = np.asarray(joint_position_limits)
+    physical_limits = np.asarray(joint_physical_position_limits)
+    soft_limits = np.asarray(joint_soft_position_limits)
     if q.shape != q_des.shape or q.shape != (len(times), len(joint_names)):
         raise ValueError(
             f"Joint telemetry shapes must be ({len(times)}, {len(joint_names)}), "
             f"got q={q.shape} and q_des={q_des.shape}."
         )
-    if limits.shape != (len(joint_names), 2):
-        raise ValueError(f"Joint limits must have shape ({len(joint_names)}, 2), got {limits.shape}.")
+    expected_limit_shape = (len(joint_names), 2)
+    if physical_limits.shape != expected_limit_shape:
+        raise ValueError(
+            f"Physical joint limits must have shape {expected_limit_shape}, got {physical_limits.shape}."
+        )
+    if soft_limits.shape != expected_limit_shape:
+        raise ValueError(f"Soft joint limits must have shape {expected_limit_shape}, got {soft_limits.shape}.")
 
     side_groups = {
         "left": [index for index, name in enumerate(joint_names) if name.startswith(("FL_", "RL_"))],
@@ -1609,14 +1616,43 @@ def _save_command_tracking_plots(
         for ax, joint_index in zip(axes, joint_indices):
             ax.plot(times, q[:, joint_index], label=r"$q$", color="#0072b2", linewidth=1.25)
             ax.plot(times, q_des[:, joint_index], label=r"$q_{des}$", color="#d55e00", linewidth=1.1, alpha=0.9)
-            ax.axhline(limits[joint_index, 0], label=r"$q_{min}$", color="#cc79a7", linestyle="--", linewidth=1.0)
-            ax.axhline(limits[joint_index, 1], label=r"$q_{max}$", color="#009e73", linestyle="--", linewidth=1.0)
+            ax.axhline(
+                soft_limits[joint_index, 0],
+                label="soft lower",
+                color="#cc79a7",
+                linestyle="--",
+                linewidth=1.15,
+            )
+            ax.axhline(
+                soft_limits[joint_index, 1],
+                label="soft upper",
+                color="#009e73",
+                linestyle="--",
+                linewidth=1.15,
+            )
+            ax.axhline(
+                physical_limits[joint_index, 0],
+                label="hard lower",
+                color="0.45",
+                linestyle=":",
+                linewidth=0.9,
+            )
+            ax.axhline(
+                physical_limits[joint_index, 1],
+                label="hard upper",
+                color="0.45",
+                linestyle=":",
+                linewidth=0.9,
+            )
             decorate_cells(ax)
             ax.set_ylabel("rad")
             ax.set_title(joint_names[joint_index], loc="left", fontsize=10)
-        axes[0].legend(ncol=4, loc="upper right", fontsize=8)
+        axes[0].legend(ncol=3, loc="upper right", fontsize=8)
         axes[-1].set_xlabel("Time [s]")
-        fig.suptitle(f"Joint position and executed target vs physical limits — {side.replace('_', ' ')}", fontsize=13)
+        fig.suptitle(
+            f"Joint position and executed target vs soft/hard limits — {side.replace('_', ' ')}",
+            fontsize=13,
+        )
         joint_path = output_dir / f"joint_position_vs_limits_{side}.png"
         fig.savefig(joint_path, dpi=180)
         plt.close(fig)
@@ -2504,6 +2540,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             tracking_joint_positions,
             tracking_joint_position_targets,
             raw_env._robot.data.joint_pos_limits[0, raw_env._joint_ids].detach().cpu().numpy(),
+            raw_env._joint_soft_pos_limits[0].detach().cpu().numpy(),
         )
         tracking_summary = _summarize_command_tracking(
             tracking_times_s,
