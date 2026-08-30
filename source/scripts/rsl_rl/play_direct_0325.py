@@ -11,6 +11,7 @@ Example usage:
 
 
 import argparse
+import copy
 import json
 import math
 import os
@@ -839,6 +840,15 @@ def _cfg_to_dict(cfg: Any) -> dict[str, Any]:
     if isinstance(cfg, dict):
         return dict(cfg)
     return dict(vars(cfg))
+
+
+def _off_policy_inference_runner_cfg(agent_cfg: Any, num_envs: int) -> dict[str, Any]:
+    """Return a runner config whose replay storage is minimal for actor-only inference."""
+    runner_cfg = copy.deepcopy(_cfg_to_dict(agent_cfg))
+    if "algorithm" not in runner_cfg:
+        raise ValueError("Off-policy agent config is missing its algorithm section.")
+    runner_cfg["algorithm"]["replay_buffer_size"] = max(int(num_envs), 1)
+    return runner_cfg
 
 
 def _checkpoint_model_state_dict(path: str, map_location: str | torch.device = "cpu") -> dict[str, torch.Tensor]:
@@ -2256,7 +2266,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         runner.load(resume_path, load_optimizer=False)
         policy = runner.get_inference_policy(device=vec_env.unwrapped.device)
     elif agent_cfg.class_name == "OffPolicyRunner":
-        runner = OffPolicyRunner(vec_env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
+        inference_runner_cfg = _off_policy_inference_runner_cfg(agent_cfg, raw_env.num_envs)
+        training_replay_buffer_size = int(agent_cfg.algorithm.replay_buffer_size)
+        print(
+            "[INFO] SAC inference uses minimal replay storage: "
+            f"{training_replay_buffer_size:,} -> {inference_runner_cfg['algorithm']['replay_buffer_size']:,} "
+            "transitions; critic/training state is released after actor loading.",
+            flush=True,
+        )
+        runner = OffPolicyRunner(vec_env, inference_runner_cfg, log_dir=None, device=agent_cfg.device)
         print(f"[INFO] Loading SAC model checkpoint from: {resume_path}")
         checkpoint = torch.load(resume_path, map_location="cpu", weights_only=False)
         if not isinstance(checkpoint, dict) or "actor_state_dict" not in checkpoint:
@@ -2270,6 +2288,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             map_location=agent_cfg.device,
         )
         policy = runner.get_inference_policy(device=vec_env.unwrapped.device)
+        del runner
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
     else:
         raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
 

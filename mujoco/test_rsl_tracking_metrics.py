@@ -1,4 +1,5 @@
 import ast
+import copy
 import math
 from pathlib import Path
 
@@ -15,6 +16,8 @@ def load_helpers(*names):
     namespace = {
         "Path": Path,
         "TRACKING_COMMAND_DURATION_S": 5.0,
+        "Any": object,
+        "copy": copy,
         "math": math,
         "np": np,
     }
@@ -105,3 +108,13 @@ def test_rsl_joint_plots_include_effective_soft_and_physical_limits(tmp_path, mo
     assert (1.3, "hard upper") in horizontal_lines
     assert tmp_path / "joint_position_vs_limits_left.png" in paths
     assert tmp_path / "joint_position_vs_limits_right.png" in paths
+
+
+def test_rsl_sac_inference_cfg_does_not_allocate_training_replay_buffer():
+    cfg_to_dict, inference_cfg = load_helpers("_cfg_to_dict", "_off_policy_inference_runner_cfg")
+    training_cfg = {"algorithm": {"replay_buffer_size": 5_000_000}, "num_steps_per_env": 24}
+
+    play_cfg = inference_cfg(training_cfg, num_envs=3)
+
+    assert play_cfg["algorithm"]["replay_buffer_size"] == 3
+    assert training_cfg["algorithm"]["replay_buffer_size"] == 5_000_000
