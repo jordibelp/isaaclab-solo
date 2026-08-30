@@ -567,6 +567,11 @@ class SAC:
         actor.action_range.copy_(0.5 * (upper - lower_neg))
         actor.log_action_range.copy_(torch.log(actor.action_range).sum())
 
+        unwrapped_env = getattr(env, "unwrapped", env)
+        if bool(getattr(getattr(unwrapped_env, "cfg", None), "sac_q_offset_init_actions", False)):
+            actor.initialize_mean_head_for_action(torch.zeros_like(actor.action_bias))
+            print("SAC actor initialization: latent Gaussian centered on the environment q offset.")
+
         # Initialize the critic
         critic: SACCriticModel = critic_class(
             obs, cfg["obs_groups"], "critic", 1, num_actions=env.num_actions, **cfg["critic"]

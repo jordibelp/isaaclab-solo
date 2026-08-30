@@ -111,6 +111,34 @@ class SACActorModel(MLPModel):
         self.register_buffer("action_range", torch.ones(output_dim))
         self.register_buffer("log_action_range", torch.zeros(1))
 
+    @torch.no_grad()
+    def initialize_mean_head_for_action(self, target_action: torch.Tensor) -> None:
+        """Center the initial latent Gaussian on a requested scaled action.
+
+        For ``action = action_range * tanh(latent) + action_bias``, the
+        required latent mean is ``atanh((target_action - action_bias) /
+        action_range)``. Only the mean-head bias is changed; its small random
+        weights and the log-standard-deviation initialization are preserved.
+        """
+        target_action = torch.as_tensor(target_action, device=self.action_bias.device, dtype=self.action_bias.dtype)
+        if target_action.shape != self.action_bias.shape:
+            raise ValueError(
+                f"Expected target_action shape {tuple(self.action_bias.shape)}, got {tuple(target_action.shape)}."
+            )
+        if torch.any(self.action_range <= 0.0):
+            raise ValueError("SAC action ranges must be strictly positive before centering the mean head.")
+
+        normalized_target = (target_action - self.action_bias) / self.action_range
+        if torch.any(normalized_target <= -1.0) or torch.any(normalized_target >= 1.0):
+            raise ValueError("The requested initial SAC action must lie strictly inside every action bound.")
+        latent_mean = torch.atanh(normalized_target)
+
+        last_linear = next(module for module in reversed(self.mlp) if isinstance(module, nn.Linear))
+        if self.state_dependent_std:
+            last_linear.bias[: self.output_dim].copy_(latent_mean)
+        else:
+            last_linear.bias.copy_(latent_mean)
+
     def forward(
         self,
         obs: TensorDict,

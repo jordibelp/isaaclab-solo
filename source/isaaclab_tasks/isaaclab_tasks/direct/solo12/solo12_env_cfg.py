@@ -465,6 +465,10 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     joint_names = JOINT_NAMES
     # None uses initial_position as the action/observation offset.
     q_offset_action_and_obs = None
+    # When enabled, initialize SAC's latent Gaussian mean so that its initial
+    # deterministic action is zero and q_des is centered on the q offset.
+    # False preserves the released SAC implementation's midpoint-centered behavior.
+    sac_q_offset_init_actions = False
 
     command_resampling_time_s = 10.0
     standing_env_prob = 0.02

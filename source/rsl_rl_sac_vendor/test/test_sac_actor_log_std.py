@@ -58,3 +58,32 @@ def test_deterministic_export_supports_both_log_std_parameterizations():
         exported = torch.jit.script(_actor(state_dependent_std).as_jit())
         output = exported(obs)
         assert output.shape == (2, 3)
+
+
+def test_default_actor_initialization_remains_action_midpoint_centered():
+    actor = _actor(state_dependent_std=True)
+    actor.action_bias.copy_(torch.tensor([0.4, -0.8, 0.0]))
+    actor.action_range.copy_(torch.tensor([1.4, 2.6, 0.9]))
+    mean_bias_before = actor.mlp[-2].bias[:3].detach().clone()
+
+    torch.testing.assert_close(mean_bias_before, torch.zeros(3))
+    torch.testing.assert_close(actor._squash_and_scale(mean_bias_before), actor.action_bias)
+
+
+def test_q_offset_centering_initializes_mean_for_zero_action():
+    for state_dependent_std in (False, True):
+        actor = _actor(state_dependent_std=state_dependent_std)
+        actor.action_bias.copy_(torch.tensor([-0.4, 0.8, 0.0]))
+        actor.action_range.copy_(torch.tensor([1.4, 2.6, 0.9]))
+        log_std_before = None
+        if state_dependent_std:
+            log_std_before = actor.mlp[-2].bias[3:].detach().clone()
+
+        actor.initialize_mean_head_for_action(torch.zeros(3))
+
+        mean_bias = actor.mlp[-2].bias[:3] if state_dependent_std else actor.mlp[-1].bias
+        expected_latent_mean = torch.atanh(-actor.action_bias / actor.action_range)
+        torch.testing.assert_close(mean_bias, expected_latent_mean)
+        torch.testing.assert_close(actor._squash_and_scale(mean_bias), torch.zeros(3), atol=1.0e-7, rtol=0.0)
+        if state_dependent_std:
+            torch.testing.assert_close(actor.mlp[-2].bias[3:], log_std_before)
