@@ -1606,6 +1606,13 @@ def _save_command_tracking_plots(
     if soft_limits.shape != expected_limit_shape:
         raise ValueError(f"Soft joint limits must have shape {expected_limit_shape}, got {soft_limits.shape}.")
 
+    # IsaacLab stores joint telemetry and limits in radians. Convert only the
+    # presentation copies so simulation behavior and recorded telemetry remain unchanged.
+    q = np.rad2deg(q)
+    q_des = np.rad2deg(q_des)
+    physical_limits = np.rad2deg(physical_limits)
+    soft_limits = np.rad2deg(soft_limits)
+
     side_groups = {
         "left": [index for index, name in enumerate(joint_names) if name.startswith(("FL_", "RL_"))],
         "right": [index for index, name in enumerate(joint_names) if name.startswith(("FR_", "RR_"))],
@@ -1655,7 +1662,7 @@ def _save_command_tracking_plots(
                 linewidth=0.9,
             )
             decorate_cells(ax)
-            ax.set_ylabel("rad")
+            ax.set_ylabel("deg")
             ax.set_title(joint_names[joint_index], loc="left", fontsize=10)
         axes[0].legend(ncol=3, loc="upper right", fontsize=8)
         axes[-1].set_xlabel("Time [s]")

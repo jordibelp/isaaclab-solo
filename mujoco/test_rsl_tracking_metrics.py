@@ -82,13 +82,28 @@ def test_rsl_joint_plots_include_effective_soft_and_physical_limits(tmp_path, mo
     import matplotlib.axes
 
     horizontal_lines = []
+    joint_traces = []
+    ylabels = []
     original_axhline = matplotlib.axes.Axes.axhline
+    original_plot = matplotlib.axes.Axes.plot
+    original_set_ylabel = matplotlib.axes.Axes.set_ylabel
 
     def record_axhline(self, y=0, *args, **kwargs):
         horizontal_lines.append((float(y), kwargs.get("label")))
         return original_axhline(self, y, *args, **kwargs)
 
+    def record_plot(self, *args, **kwargs):
+        if kwargs.get("label") in {r"$q$", r"$q_{des}$"}:
+            joint_traces.append((np.asarray(args[1]), kwargs["label"]))
+        return original_plot(self, *args, **kwargs)
+
+    def record_set_ylabel(self, ylabel, *args, **kwargs):
+        ylabels.append(ylabel)
+        return original_set_ylabel(self, ylabel, *args, **kwargs)
+
     monkeypatch.setattr(matplotlib.axes.Axes, "axhline", record_axhline)
+    monkeypatch.setattr(matplotlib.axes.Axes, "plot", record_plot)
+    monkeypatch.setattr(matplotlib.axes.Axes, "set_ylabel", record_set_ylabel)
     paths = save_plots(
         tmp_path,
         [0.02, 0.04],
@@ -102,10 +117,13 @@ def test_rsl_joint_plots_include_effective_soft_and_physical_limits(tmp_path, mo
         np.asarray([[-0.8, 0.8], [-0.9, 0.9]]),
     )
 
-    assert (-0.8, "soft lower") in horizontal_lines
-    assert (0.9, "soft upper") in horizontal_lines
-    assert (-1.2, "hard lower") in horizontal_lines
-    assert (1.3, "hard upper") in horizontal_lines
+    assert (math.degrees(-0.8), "soft lower") in horizontal_lines
+    assert (math.degrees(0.9), "soft upper") in horizontal_lines
+    assert (math.degrees(-1.2), "hard lower") in horizontal_lines
+    assert (math.degrees(1.3), "hard upper") in horizontal_lines
+    np.testing.assert_allclose(joint_traces[0][0], np.rad2deg([0.0, 0.1]))
+    np.testing.assert_allclose(joint_traces[1][0], np.rad2deg([0.05, 0.1]))
+    assert ylabels.count("deg") == 2
     assert tmp_path / "joint_position_vs_limits_left.png" in paths
     assert tmp_path / "joint_position_vs_limits_right.png" in paths
 
