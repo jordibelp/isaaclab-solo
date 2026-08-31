@@ -669,6 +669,7 @@ class Solo12Env(DirectRLEnv):
     def _configure_joint_position_limits(self) -> None:
         """Apply configured physical limits and derive per-joint-type task soft limits."""
         joint_types = []
+        physical_limit_cfg_names = []
         for joint_name in self.cfg.joint_names:
             joint_type = next(
                 (name for name in ("hip", "thigh", "calf") if joint_name.endswith(f"_{name}_joint")), None
@@ -677,8 +678,21 @@ class Solo12Env(DirectRLEnv):
                 raise ValueError(f"Cannot select configured joint limits for unknown Solo12 joint '{joint_name}'.")
             joint_types.append(joint_type)
 
+            if joint_type == "thigh" and self.cfg.use_asymmetric_thigh_limits:
+                if joint_name.startswith(("FL_", "FR_")):
+                    physical_limit_cfg_names.append("joint_physical_limit_front_thigh")
+                elif joint_name.startswith(("RL_", "RR_")):
+                    physical_limit_cfg_names.append("joint_physical_limit_rear_thigh")
+                else:
+                    raise ValueError(
+                        "Cannot select front/rear thigh limits for unknown Solo12 leg in joint "
+                        f"'{joint_name}'."
+                    )
+            else:
+                physical_limit_cfg_names.append(f"joint_physical_limit_{joint_type}")
+
         physical_limits_degrees = torch.tensor(
-            [getattr(self.cfg, f"joint_physical_limit_{joint_type}") for joint_type in joint_types],
+            [getattr(self.cfg, config_name) for config_name in physical_limit_cfg_names],
             device=self._robot.data.joint_pos_limits.device,
             dtype=self._robot.data.joint_pos_limits.dtype,
         )
@@ -706,9 +720,16 @@ class Solo12Env(DirectRLEnv):
             self._robot.data.joint_pos_limits[:, self._joint_ids, :], soft_limit_deltas_degrees
         )
 
-        hard_limits_summary = ", ".join(
-            f"{joint_type}={getattr(self.cfg, f'joint_physical_limit_{joint_type}')} deg"
-            for joint_type in ("hip", "thigh", "calf")
+        if self.cfg.use_asymmetric_thigh_limits:
+            thigh_limits_summary = (
+                f"front_thigh={self.cfg.joint_physical_limit_front_thigh} deg, "
+                f"rear_thigh={self.cfg.joint_physical_limit_rear_thigh} deg"
+            )
+        else:
+            thigh_limits_summary = f"thigh={self.cfg.joint_physical_limit_thigh} deg"
+        hard_limits_summary = (
+            f"hip={self.cfg.joint_physical_limit_hip} deg, {thigh_limits_summary}, "
+            f"calf={self.cfg.joint_physical_limit_calf} deg"
         )
         soft_deltas_summary = ", ".join(
             f"{joint_type}={getattr(self.cfg, f'joint_soft_limit_{joint_type}_delta'):g} deg"

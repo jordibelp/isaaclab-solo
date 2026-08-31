@@ -677,6 +677,13 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     joint_physical_limit_thigh = (-90.0, 90.0)
     joint_physical_limit_calf = (-170.0, 170.0)
 
+    # Optionally replace the common thigh range above with front/rear-specific ranges.
+    # The asymmetric defaults shift equal-width ranges toward the joint directions used
+    # by the two-feet posture: negative for front thighs and positive for rear thighs.
+    use_asymmetric_thigh_limits = False
+    joint_physical_limit_front_thigh = (-135.0, 45.0)
+    joint_physical_limit_rear_thigh = (-45.0, 135.0)
+
     # Per-joint-type safety margins in degrees. The task's soft lower/upper limits are
     # the configured physical limits moved inward by these amounts on each side.
     joint_soft_limit_hip_delta = 5.0
