@@ -124,6 +124,13 @@ parser.add_argument(
 parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument(
+    "--skip-curriculum",
+    "--skip_curriculum",
+    action="store_true",
+    default=False,
+    help="Initialize an enabled environment curriculum directly at its final stage.",
+)
+parser.add_argument(
     "--agent", type=str, default="rsl_rl_cfg_entry_point", help="Name of the RL agent configuration entry point."
 )
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
@@ -1907,6 +1914,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     env_cfg.seed = agent_cfg.seed
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
+    if args_cli.skip_curriculum:
+        if not hasattr(env_cfg, "skip_curriculum"):
+            raise ValueError(f"Task {args_cli.task!r} does not support --skip_curriculum.")
+        env_cfg.skip_curriculum = True
     if args_cli.within_episode_fric_resample is not None and hasattr(env_cfg, "within_episode_fric_resample"):
         env_cfg.within_episode_fric_resample = bool(args_cli.within_episode_fric_resample)
     if args_cli.within_episode_fric_resample_time_range is not None and hasattr(

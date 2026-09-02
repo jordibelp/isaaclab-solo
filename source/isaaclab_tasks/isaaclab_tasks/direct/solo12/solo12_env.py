@@ -273,21 +273,29 @@ class Solo12Env(DirectRLEnv):
                 f"got {self.cfg.base_push_application_half_extents}."
             )
         self._max_velx_range_curriculum_values = self._parse_max_velx_range_curriculum()
-        self._max_velx_range_curriculum_idx = 0
+        self._max_velx_range_curriculum_idx = self._initial_curriculum_level_idx(
+            self._max_velx_range_curriculum_values
+        )
         self._base_push_force_curriculum_values = self._parse_base_push_force_curriculum()
-        self._base_push_force_curriculum_idx = 0
+        self._base_push_force_curriculum_idx = self._initial_curriculum_level_idx(
+            self._base_push_force_curriculum_values
+        )
         self._base_push_mean_reward_smooth: float | None = None
         self._base_push_last_curriculum_step = 0
-        self._two_feet_curriculum_phase = int(self.cfg.two_feet_curriculum_start_phase) if curriculum_two_feet else 0
+        self._two_feet_curriculum_phase = self._initial_two_feet_curriculum_phase() if curriculum_two_feet else 0
         self._curriculum_last_reward_ratio: float | None = None
         self._curriculum_event_randomization_active = False
         self._tricky_terrain_active = False
         if self._max_velx_range_curriculum_values:
-            self._set_max_velx_range_curriculum_level(0)
+            self._set_max_velx_range_curriculum_level(self._max_velx_range_curriculum_idx)
         if self._base_push_force_curriculum_values and not self._integrated_two_feet_curriculum_enabled():
-            self._set_base_push_force_curriculum_level(0)
+            self._set_base_push_force_curriculum_level(self._base_push_force_curriculum_idx)
         if curriculum_two_feet:
             self._set_two_feet_curriculum_phase(self._two_feet_curriculum_phase)
+        if bool(getattr(self.cfg, "skip_curriculum", False)):
+            curriculum_idx = self.get_curriculum_global_idx()
+            if curriculum_idx is not None:
+                print(f"[INFO]: Curriculum skip enabled; initialized at final index {curriculum_idx}.", flush=True)
         self._refresh_tricky_terrain_origins(force=True)
 
         self._episode_sums = {
@@ -798,6 +806,16 @@ class Solo12Env(DirectRLEnv):
 
     def _two_feet_curriculum_phase_count(self) -> int:
         return len(self._curriculum_values(self.cfg.two_feet_above_height_reward_scale_curriculum))
+
+    def _initial_curriculum_level_idx(self, values) -> int:
+        if bool(getattr(self.cfg, "skip_curriculum", False)) and values:
+            return len(values) - 1
+        return 0
+
+    def _initial_two_feet_curriculum_phase(self) -> int:
+        if bool(getattr(self.cfg, "skip_curriculum", False)):
+            return self._two_feet_curriculum_phase_count()
+        return int(self.cfg.two_feet_curriculum_start_phase)
 
     def _two_feet_curriculum_phase_index(self, phase: int | None = None) -> int:
         phase = self._two_feet_curriculum_phase if phase is None else phase

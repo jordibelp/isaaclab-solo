@@ -45,6 +45,38 @@ def test_two_feet_sac_profile_matches_requested_phase_table():
     assert cfg.include_events_randomization_curriculum == (False, False, True, True, True)
 
 
+def test_curriculum_initialization_preserves_configured_start_by_default():
+    cfg = Solo12TwoFeetEnvCfg()
+    env = _bare_env(cfg)
+
+    assert cfg.skip_curriculum is False
+    assert env._initial_two_feet_curriculum_phase() == 1
+    assert env._initial_curriculum_level_idx((0.5, 1.0, 1.5)) == 0
+
+
+def test_skip_curriculum_selects_and_applies_final_two_feet_profile():
+    cfg = Solo12TwoFeetEnvCfg()
+    cfg.skip_curriculum = True
+    env = _bare_env(cfg)
+
+    final_phase = env._initial_two_feet_curriculum_phase()
+    env._set_two_feet_curriculum_phase(final_phase)
+
+    assert final_phase == 5
+    assert env._initial_curriculum_level_idx((0.5, 1.0, 1.5)) == 2
+    assert env.get_curriculum_global_idx() == 4
+    assert cfg.two_feet_above_height_reward_scale == 1.5
+    assert cfg.track_lin_vel_xy_reward_scale == 1.5
+    assert cfg.two_feet_above_height_alpha == 25.0
+    assert cfg.actuation_delay_range == (0, 3)
+    assert cfg.tricky_terrain_curriculum[final_phase - 1] is True
+    assert cfg.opposite_direction_cmd_prob == 0.05
+    assert cfg.front_back_asymetry is True
+    assert cfg.base_push_force_xy_range == (-8.0, 8.0)
+    assert cfg.base_push_force_z_range == (-8.0, 8.0)
+    assert env._curriculum_event_randomization_active is True
+
+
 def test_curriculum_reward_ratio_uses_fixed_maximum_episode_horizon():
     cfg = Solo12TwoFeetEnvCfg()
     env = _bare_env(cfg)

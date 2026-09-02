@@ -525,6 +525,9 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     # velocity/force curriculum. Named profiles coordinate all phase-dependent settings.
     curriculum_profile = "legacy"
     curriculum_two_feet = False
+    # Start every enabled curriculum at its final stage. The training CLI exposes this as
+    # --skip_curriculum/--skip-curriculum; False preserves staged curriculum learning.
+    skip_curriculum = False
     two_feet_curriculum_start_phase = 1
     # Track planar commands against the world velocity expressed in a gravity-aligned heading frame.
     # The standard quadruped task keeps the original full-base-frame tracking behavior.
