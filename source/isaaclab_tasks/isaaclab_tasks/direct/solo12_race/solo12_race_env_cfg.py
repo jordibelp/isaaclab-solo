@@ -194,6 +194,12 @@ class Solo12RaceEnvCfg(DirectRLEnvCfg):
 
     joint_names = JOINT_NAMES
 
+    # Physical hard limits in degrees. These are written to PhysX at startup and override the limits authored in
+    # the race USD, keeping the runtime limits explicit and configurable independently of the scene asset.
+    joint_physical_limit_hip = (-50.0, 50.0)
+    joint_physical_limit_thigh = (-90.0, 90.0)
+    joint_physical_limit_calf = (-170.0, 170.0)
+
     # authored race scene
     scene_usd: sim_utils.UsdFileCfg = sim_utils.UsdFileCfg(usd_path=str(SOLO12_RACE_SCENE_USD_PATH))
     scene_prim_path = "/World/envs/env_.*/Scene"

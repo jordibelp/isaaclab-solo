@@ -4,6 +4,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import math
+from types import SimpleNamespace
 
 from isaaclab.app import AppLauncher
 
@@ -14,6 +15,7 @@ simulation_app = AppLauncher(headless=True).app
 import torch
 
 from isaaclab_tasks.direct.solo12_race.reward_utils import dense_reaction_force_reward
+from isaaclab_tasks.direct.solo12_race.solo12_race_env import Solo12RaceEnv
 
 
 def _force(alpha: float, azimuth: float, magnitude: float = 100.0) -> list[float]:
@@ -65,3 +67,44 @@ def test_dense_reaction_force_reward_clips_magnitude_and_ignores_invalid_contact
 
     # Only the first foot is valid: its angle is above alpha_static and therefore clips to 1.
     torch.testing.assert_close(reward, torch.tensor([1.0]), atol=1.0e-6, rtol=0.0)
+
+
+def test_race_physical_joint_limits_are_written_from_config():
+    env = object.__new__(Solo12RaceEnv)
+    env._is_closed = True
+    env._joint_ids = list(range(6))
+    env.cfg = SimpleNamespace(
+        joint_names=[
+            "FL_hip_joint",
+            "FL_thigh_joint",
+            "FL_calf_joint",
+            "FR_hip_joint",
+            "FR_thigh_joint",
+            "FR_calf_joint",
+        ],
+        joint_physical_limit_hip=(-40.0, 45.0),
+        joint_physical_limit_thigh=(-80.0, 85.0),
+        joint_physical_limit_calf=(-160.0, 165.0),
+    )
+    captured = {}
+    env._robot = SimpleNamespace(
+        data=SimpleNamespace(joint_pos_limits=torch.zeros(2, 6, 2)),
+        write_joint_position_limit_to_sim=lambda limits, joint_ids: captured.update(
+            limits=limits.clone(), joint_ids=joint_ids
+        ),
+    )
+
+    env._configure_joint_position_limits()
+
+    expected_degrees = torch.tensor(
+        [
+            [-40.0, 45.0],
+            [-80.0, 85.0],
+            [-160.0, 165.0],
+            [-40.0, 45.0],
+            [-80.0, 85.0],
+            [-160.0, 165.0],
+        ]
+    )
+    torch.testing.assert_close(torch.rad2deg(captured["limits"]), expected_degrees.expand(2, -1, -1))
+    assert captured["joint_ids"] == env._joint_ids

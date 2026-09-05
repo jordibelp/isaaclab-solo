@@ -124,6 +124,7 @@ class Solo12RaceEnv(DirectRLEnv):
         self._action_delay_steps = torch.zeros(self.num_envs, dtype=torch.int, device=self.device)
 
         self._joint_ids, _ = self._robot.find_joints(self.cfg.joint_names, preserve_order=True)
+        self._configure_joint_position_limits()
         self._feet_body_ids, self._feet_body_names = self._contact_sensor.find_bodies(".*_calf")
         self._feet_robot_body_ids, self._feet_robot_body_names = self._robot.find_bodies(".*_calf")
         self._gt_patch_mu_latched = torch.full(
@@ -171,6 +172,44 @@ class Solo12RaceEnv(DirectRLEnv):
                 "finish_reward",
             ]
         }
+
+    def _configure_joint_position_limits(self) -> None:
+        """Override the race USD's physical joint limits from the task configuration."""
+        joint_types = []
+        for joint_name in self.cfg.joint_names:
+            joint_type = next(
+                (name for name in ("hip", "thigh", "calf") if joint_name.endswith(f"_{name}_joint")), None
+            )
+            if joint_type is None:
+                raise ValueError(f"Cannot select configured joint limits for unknown Solo12 joint '{joint_name}'.")
+            joint_types.append(joint_type)
+
+        physical_limits_degrees = torch.tensor(
+            [getattr(self.cfg, f"joint_physical_limit_{joint_type}") for joint_type in joint_types],
+            device=self._robot.data.joint_pos_limits.device,
+            dtype=self._robot.data.joint_pos_limits.dtype,
+        )
+        if not torch.isfinite(physical_limits_degrees).all() or torch.any(
+            physical_limits_degrees[:, 0] >= physical_limits_degrees[:, 1]
+        ):
+            raise ValueError(
+                "Solo12 race physical joint limits must be finite (lower, upper) pairs with lower < upper; "
+                f"got {physical_limits_degrees}."
+            )
+
+        physical_limits = (
+            torch.deg2rad(physical_limits_degrees)
+            .unsqueeze(0)
+            .expand(self._robot.data.joint_pos_limits.shape[0], -1, -1)
+        )
+        self._robot.write_joint_position_limit_to_sim(physical_limits, joint_ids=self._joint_ids)
+        print(
+            "[INFO] Applied Solo12 race physical joint limits: "
+            f"hip={self.cfg.joint_physical_limit_hip} deg, "
+            f"thigh={self.cfg.joint_physical_limit_thigh} deg, "
+            f"calf={self.cfg.joint_physical_limit_calf} deg.",
+            flush=True,
+        )
 
     def _apply_backward_force(self):
         """Refresh the straight-track opposing force at the floating-base COM."""
