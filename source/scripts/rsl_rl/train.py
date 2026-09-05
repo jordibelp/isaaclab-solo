@@ -2081,6 +2081,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # initialization cost seen on 12k-env cluster jobs.
     render_mode = "rgb_array" if args_cli.video else None
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode=render_mode)
+    straight_track_start_to_end_distance_m = getattr(
+        env.unwrapped, "straight_track_start_to_end_distance_m", None
+    )
 
     env_cfg_py = inspect.getsourcefile(type(env_cfg))
     env_py = inspect.getsourcefile(env.unwrapped.__class__)
@@ -2317,10 +2320,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     if path
                 ],
             )
-            if input_checkpoint_name is not None:
-                import wandb
+            import wandb
 
-                if wandb.run is not None:
+            if wandb.run is not None:
+                if input_checkpoint_name is not None:
                     wandb.run.config.update(
                         {
                             "input_checkpoint_name": input_checkpoint_name,
@@ -2329,6 +2332,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                             "parent_model": input_checkpoint_name,
                         },
                         allow_val_change=True,
+                    )
+                if straight_track_start_to_end_distance_m is not None:
+                    wandb.run.config.update(
+                        {
+                            "straight_track_start_to_end_distance_m": straight_track_start_to_end_distance_m,
+                        },
+                        allow_val_change=True,
+                    )
+                    wandb.run.summary["straight_track_start_to_end_distance_m"] = (
+                        straight_track_start_to_end_distance_m
                     )
             snapshot_uploaded = True
 

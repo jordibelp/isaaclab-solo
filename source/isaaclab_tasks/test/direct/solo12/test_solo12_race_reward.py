@@ -15,7 +15,10 @@ simulation_app = AppLauncher(headless=True).app
 import torch
 
 from isaaclab_tasks.direct.solo12_race.reward_utils import dense_reaction_force_reward
-from isaaclab_tasks.direct.solo12_race.solo12_race_env import Solo12RaceEnv
+from isaaclab_tasks.direct.solo12_race.solo12_race_env import (
+    Solo12RaceEnv,
+    _straight_track_start_to_end_distance_m,
+)
 
 
 def _force(alpha: float, azimuth: float, magnitude: float = 100.0) -> list[float]:
@@ -108,3 +111,10 @@ def test_race_physical_joint_limits_are_written_from_config():
     )
     torch.testing.assert_close(torch.rad2deg(captured["limits"]), expected_degrees.expand(2, -1, -1))
     assert captured["joint_ids"] == env._joint_ids
+
+
+def test_straight_track_start_to_end_distance_is_planar_and_straight_only():
+    waypoints = torch.tensor([[1.0, 2.0, 5.0], [2.0, 3.0, -4.0], [4.0, 6.0, 10.0]])
+
+    assert _straight_track_start_to_end_distance_m("straightSimple", waypoints) == 5.0
+    assert _straight_track_start_to_end_distance_m("simple", waypoints) is None

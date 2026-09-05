@@ -25,6 +25,18 @@ from .reward_utils import dense_reaction_force_reward
 from .solo12_race_env_cfg import Solo12RaceEnvCfg, resolve_solo12_race_scene_usd_path
 
 
+def _straight_track_start_to_end_distance_m(race_scene: str, waypoints_w: torch.Tensor) -> float | None:
+    """Return planar start-to-end distance for the straight track, or ``None`` for other scenes."""
+    if race_scene != "straightSimple":
+        return None
+    if waypoints_w.ndim != 2 or waypoints_w.shape[0] < 2 or waypoints_w.shape[1] < 2:
+        raise ValueError(f"Expected at least two 2D/3D waypoints for straightSimple, got {tuple(waypoints_w.shape)}.")
+    distance_m = float(torch.linalg.vector_norm(waypoints_w[-1, :2] - waypoints_w[0, :2]).item())
+    if not math.isfinite(distance_m) or distance_m <= 0.0:
+        raise ValueError(f"straightSimple start-to-end distance must be finite and positive, got {distance_m} m.")
+    return distance_m
+
+
 class Solo12RaceEnv(DirectRLEnv):
     cfg: Solo12RaceEnvCfg
 
@@ -61,6 +73,7 @@ class Solo12RaceEnv(DirectRLEnv):
         self._gate_pillars_w = torch.empty(0, 2, 3)
         self._segment_lengths = torch.empty(0)
         self._track_total_length = torch.tensor(0.0)
+        self.straight_track_start_to_end_distance_m: float | None = None
         self._segment_cumulative = torch.empty(0)
         self._track_targets_w = torch.empty(0, 3)
         self._track_start_yaw = torch.tensor(0.0)
@@ -450,6 +463,15 @@ class Solo12RaceEnv(DirectRLEnv):
         self._track_start_yaw = torch.atan2(segment_vecs[0, 1], segment_vecs[0, 0])
         self._gate_count = len(gate_pillars_w)
         self._target_count = len(self._track_targets_w)
+        self.straight_track_start_to_end_distance_m = _straight_track_start_to_end_distance_m(
+            str(self.cfg.race_scene), self._track_waypoints_w
+        )
+        if self.straight_track_start_to_end_distance_m is not None:
+            print(
+                "[INFO] Solo12 straightSimple track start-to-end distance: "
+                f"{self.straight_track_start_to_end_distance_m:.6f} m.",
+                flush=True,
+            )
 
     def _try_find_gate_pillars(self, waypoint_prim, xform_cache):
         pillar_prims = [child for child in waypoint_prim.GetChildren() if child.GetName() in ("c1", "c2")]
