@@ -21,6 +21,7 @@ from isaaclab.envs import DirectRLEnv
 from isaaclab.sensors import ContactSensor, Imu, TiledCamera
 from isaaclab.utils.buffers import DelayBuffer
 
+from .reward_utils import dense_reaction_force_reward
 from .solo12_race_env_cfg import Solo12RaceEnvCfg, resolve_solo12_race_scene_usd_path
 
 
@@ -163,6 +164,7 @@ class Solo12RaceEnv(DirectRLEnv):
                 "undesired_contacts",
                 "flat_orientation_l2",
                 "foot_contact",
+                "dense_reaction_force",
                 "floor_collision",
                 "pillar_collision",
                 "reach_waypoint",
@@ -223,6 +225,7 @@ class Solo12RaceEnv(DirectRLEnv):
         contact_cfg = copy.deepcopy(self.cfg.contact_sensor)
         track_foot_contact_points = bool(getattr(contact_cfg, "track_contact_points", False))
         track_foot_friction_forces = bool(getattr(contact_cfg, "track_friction_forces", False))
+        use_dense_reaction_force_reward = float(getattr(self.cfg, "scale_dense_reaction_force_reward", 0.0)) != 0.0
         # IsaacLab filtered contact data is one sensor body to many filtered bodies. The main SoloFlat sensor tracks
         # many robot bodies, so keep it unfiltered and create one filtered reaction sensor per foot below when needed.
         contact_cfg.track_contact_points = False
@@ -232,7 +235,7 @@ class Solo12RaceEnv(DirectRLEnv):
         self.cfg.contact_sensor = contact_cfg
         self.scene.sensors["contact_sensor"] = self._contact_sensor
 
-        if track_foot_contact_points or track_foot_friction_forces:
+        if track_foot_contact_points or track_foot_friction_forces or use_dense_reaction_force_reward:
             floor_filter_paths = self._build_base_floor_filter_paths(stage)
             max_contact_count = max(int(getattr(self.cfg.contact_sensor, "max_contact_data_count_per_prim", 4)), 8)
             foot_reaction_update_period = float(
@@ -1133,6 +1136,56 @@ class Solo12RaceEnv(DirectRLEnv):
             excess_force = excess_force**2
         return torch.sum(excess_force, dim=1)
 
+    def _get_foot_friction_coefficients(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return the static and dynamic floor-friction coefficients below each foot."""
+        num_feet = len(self._feet_robot_body_ids)
+        default_static = float(self.cfg.sim.physics_material.static_friction)
+        default_dynamic = float(self.cfg.sim.physics_material.dynamic_friction)
+        if self._patch_friction_static.numel() == 0 or self._patch_xy_min.numel() == 0:
+            shape = (self.num_envs, num_feet)
+            return (
+                torch.full(shape, default_static, device=self.device),
+                torch.full(shape, default_dynamic, device=self.device),
+            )
+
+        foot_xy = self._get_foot_positions_w()[:, :, :2] - self.scene.env_origins[:, None, :2]
+        inside_patch = torch.logical_and(
+            foot_xy[:, :, None, :] >= self._patch_xy_min[None, None, :, :],
+            foot_xy[:, :, None, :] <= self._patch_xy_max[None, None, :, :],
+        ).all(dim=-1)
+        has_patch = inside_patch.any(dim=-1)
+        patch_ids = torch.argmax(inside_patch.to(torch.long), dim=-1)
+        static_friction = torch.gather(self._patch_friction_static, dim=1, index=patch_ids)
+        dynamic_friction = torch.gather(self._patch_friction_dynamic, dim=1, index=patch_ids)
+        return (
+            torch.where(has_patch, static_friction, torch.full_like(static_friction, default_static)),
+            torch.where(has_patch, dynamic_friction, torch.full_like(dynamic_friction, default_dynamic)),
+        )
+
+    def _compute_dense_reaction_force_reward(self) -> torch.Tensor:
+        reaction_forces = []
+        for label in self._foot_reaction_contact_sensor_labels:
+            force_matrix_w = self._foot_reaction_contact_sensors[label].data.force_matrix_w
+            if force_matrix_w is None:
+                reaction_forces.append(torch.zeros(self.num_envs, 3, device=self.device))
+            else:
+                reaction_forces.append(torch.sum(force_matrix_w, dim=(1, 2)))
+        reaction_forces_w = torch.stack(reaction_forces, dim=1)
+        foot_quat_w = self._robot.data.body_quat_w[:, self._feet_robot_body_ids, :]
+        foot_forward_b = torch.zeros_like(reaction_forces_w)
+        foot_forward_b[..., 0] = 1.0
+        foot_forward_axes_w = math_utils.quat_apply(
+            foot_quat_w.reshape(-1, 4), foot_forward_b.reshape(-1, 3)
+        ).reshape_as(reaction_forces_w)
+        mu_static, mu_dynamic = self._get_foot_friction_coefficients()
+        return dense_reaction_force_reward(
+            reaction_forces_w,
+            foot_forward_axes_w,
+            mu_static,
+            mu_dynamic,
+            self.cfg.base_contact_threshold,
+        )
+
     def _get_gt_foot_contact_forces_obs(self, root_quat_w: torch.Tensor) -> torch.Tensor:
         forces_w = self._contact_sensor.data.net_forces_w[:, self._feet_body_ids, :]
         num_feet = forces_w.shape[1]
@@ -1297,6 +1350,10 @@ class Solo12RaceEnv(DirectRLEnv):
 
         undesired_contacts = self._compute_contact_count(self._thigh_body_ids, self.cfg.undesired_contact_threshold)
         foot_contact = self._compute_foot_contact_penalty()
+        if self.cfg.scale_dense_reaction_force_reward != 0.0:
+            dense_reaction_force = self._compute_dense_reaction_force_reward()
+        else:
+            dense_reaction_force = torch.zeros(self.num_envs, device=self.device)
 
         pillar_collision = self._compute_filtered_base_contact(self._base_pillar_contact_sensor, self.cfg.base_contact_threshold)
         floor_collision = self._compute_filtered_base_contact(self._base_floor_contact_sensor, self.cfg.base_contact_threshold)
@@ -1320,6 +1377,7 @@ class Solo12RaceEnv(DirectRLEnv):
             "undesired_contacts": undesired_contacts * self.cfg.undesired_contact_reward_scale,
             "flat_orientation_l2": flat_orientation * self.cfg.base_tilt_penalty_reward_scale * self.step_dt,
             "foot_contact": foot_contact * self.cfg.foot_contact_reward_scale * self.step_dt,
+            "dense_reaction_force": dense_reaction_force * self.cfg.scale_dense_reaction_force_reward,
             "floor_collision": floor_collision.float() * self.cfg.floor_collision_penalty,
             "pillar_collision": pillar_collision.float() * self.cfg.pillar_collision_penalty,
             "reach_waypoint": gate_passed.float() * self.cfg.reward_reach_waypoint,

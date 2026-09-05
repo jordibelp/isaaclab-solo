@@ -305,6 +305,9 @@ class Solo12RaceEnvCfg(DirectRLEnvCfg):
     action_rate_reward_scale = 0.00
     joint_torque_reward_scale = 0.00
     foot_contact_reward_scale = 0.00
+    # Sum over feet of forward reaction-force alignment times the normalized friction-angle magnitude.
+    # This is a per-policy-step reward (it is not multiplied by step_dt). Zero preserves legacy behavior.
+    scale_dense_reaction_force_reward = 0.0
 
     # randomization / reset
     reset_x_pos = 0.0
