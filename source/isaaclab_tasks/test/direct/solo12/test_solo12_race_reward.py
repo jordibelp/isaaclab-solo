@@ -118,3 +118,39 @@ def test_straight_track_start_to_end_distance_is_planar_and_straight_only():
 
     assert _straight_track_start_to_end_distance_m("straightSimple", waypoints) == 5.0
     assert _straight_track_start_to_end_distance_m("simple", waypoints) is None
+
+
+def _make_backward_force_curriculum_env(stages=(1.0, 1.7), threshold=0.6, initial_force=0.0):
+    env = object.__new__(Solo12RaceEnv)
+    env._is_closed = True
+    env.cfg = SimpleNamespace(
+        backward_force=initial_force,
+        backward_force_curriculum=stages,
+        backward_force_curriculum_sr_threshold=threshold,
+        race_scene="straightSimple",
+    )
+    env._configure_backward_force_curriculum()
+    return env
+
+
+def test_backward_force_curriculum_advances_one_stage_per_threshold_crossing():
+    env = _make_backward_force_curriculum_env()
+
+    assert env.current_backward_force == 0.0
+    assert env.update_backward_force_curriculum(0.6) is False
+    assert env.current_backward_force == 0.0
+
+    assert env.update_backward_force_curriculum(0.6001) is True
+    assert env.current_backward_force == 1.0
+    assert env.update_backward_force_curriculum(0.9) is True
+    assert env.current_backward_force == 1.7
+    assert env.update_backward_force_curriculum(1.0) is False
+    assert env.current_backward_force == 1.7
+
+
+def test_empty_backward_force_curriculum_keeps_configured_force():
+    env = _make_backward_force_curriculum_env(stages=(), initial_force=2.5)
+
+    assert env.current_backward_force == 2.5
+    assert env.update_backward_force_curriculum(1.0) is False
+    assert env.current_backward_force == 2.5

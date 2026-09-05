@@ -41,13 +41,8 @@ class Solo12RaceEnv(DirectRLEnv):
     cfg: Solo12RaceEnvCfg
 
     def __init__(self, cfg: Solo12RaceEnvCfg, render_mode: str | None = None, **kwargs):
-        backward_force = float(cfg.backward_force)
-        if not math.isfinite(backward_force) or backward_force < 0.0:
-            raise ValueError(
-                f"backward_force must be a finite non-negative force in newtons, got {cfg.backward_force}."
-            )
-        if backward_force > 0.0 and str(cfg.race_scene) != "straightSimple":
-            raise ValueError("backward_force is only supported when race_scene='straightSimple'.")
+        self.cfg = cfg
+        self._configure_backward_force_curriculum()
 
         cfg.scene_usd = sim_utils.UsdFileCfg(usd_path=str(resolve_solo12_race_scene_usd_path(cfg.race_scene)))
         if not getattr(cfg, "enable_events_randomization", False):
@@ -186,6 +181,58 @@ class Solo12RaceEnv(DirectRLEnv):
             ]
         }
 
+    def _configure_backward_force_curriculum(self) -> None:
+        """Validate and initialize the global backward-force curriculum."""
+        initial_force = float(self.cfg.backward_force)
+        force_stages = tuple(float(force) for force in self.cfg.backward_force_curriculum)
+        all_forces = (initial_force, *force_stages)
+        if any(not math.isfinite(force) or force < 0.0 for force in all_forces):
+            raise ValueError(
+                "backward_force and backward_force_curriculum must contain finite non-negative forces in newtons, "
+                f"got {all_forces}."
+            )
+
+        threshold = float(self.cfg.backward_force_curriculum_sr_threshold)
+        if not math.isfinite(threshold) or not 0.0 <= threshold <= 1.0:
+            raise ValueError(
+                "backward_force_curriculum_sr_threshold must be finite and in [0, 1], "
+                f"got {self.cfg.backward_force_curriculum_sr_threshold}."
+            )
+        if any(force > 0.0 for force in all_forces) and str(self.cfg.race_scene) != "straightSimple":
+            raise ValueError("backward_force is only supported when race_scene='straightSimple'.")
+
+        self._backward_force_curriculum = force_stages
+        self._backward_force_curriculum_stage = 0
+        self._current_backward_force = initial_force
+
+    def update_backward_force_curriculum(self, success_rate: float) -> bool:
+        """Advance one force stage when the logged episode success rate clears the configured threshold."""
+        success_rate = float(success_rate)
+        if not math.isfinite(success_rate) or not 0.0 <= success_rate <= 1.0:
+            raise ValueError(f"Episode/successRate must be finite and in [0, 1], got {success_rate}.")
+        if self._backward_force_curriculum_stage >= len(self._backward_force_curriculum):
+            return False
+        if success_rate <= float(self.cfg.backward_force_curriculum_sr_threshold):
+            return False
+
+        previous_force = self._current_backward_force
+        self._current_backward_force = self._backward_force_curriculum[self._backward_force_curriculum_stage]
+        self._backward_force_curriculum_stage += 1
+        print(
+            "[INFO] Backward-force curriculum advanced: "
+            f"{previous_force:g} N -> {self._current_backward_force:g} N "
+            f"(Episode/successRate={success_rate:.4f} > "
+            f"{float(self.cfg.backward_force_curriculum_sr_threshold):.4f}; "
+            f"stage {self._backward_force_curriculum_stage}/{len(self._backward_force_curriculum)}).",
+            flush=True,
+        )
+        return True
+
+    @property
+    def current_backward_force(self) -> float:
+        """Backward force currently applied by the environment, in newtons."""
+        return self._current_backward_force
+
     def _configure_joint_position_limits(self) -> None:
         """Override the race USD's physical joint limits from the task configuration."""
         joint_types = []
@@ -226,20 +273,22 @@ class Solo12RaceEnv(DirectRLEnv):
 
     def _apply_backward_force(self):
         """Refresh the straight-track opposing force at the floating-base COM."""
-        force_magnitude = float(self.cfg.backward_force)
+        force_magnitude = self._current_backward_force
+        self._robot.permanent_wrench_composer.reset()
         if force_magnitude == 0.0:
             return
 
         straight_xy = self._track_waypoints_w[-1, :2] - self._track_waypoints_w[0, :2]
         straight_length = torch.linalg.vector_norm(straight_xy)
         if float(straight_length.item()) <= 1e-6:
-            raise ValueError("Cannot apply backward_force: waypoint_start and waypoint_end have identical XY positions.")
+            raise ValueError(
+                "Cannot apply backward_force: waypoint_start and waypoint_end have identical XY positions."
+            )
 
         forces_w = torch.zeros((self.num_envs, 1, 3), dtype=torch.float, device=self.device)
         forces_w[:, 0, :2] = -force_magnitude * straight_xy / straight_length
         # WrenchComposer stores forces in the link frame even when they are supplied globally. Refreshing it each
         # physics step keeps the force fixed in the world frame as the robot rotates.
-        self._robot.permanent_wrench_composer.reset()
         self._robot.permanent_wrench_composer.set_forces_and_torques(
             forces=forces_w,
             body_ids=[0],

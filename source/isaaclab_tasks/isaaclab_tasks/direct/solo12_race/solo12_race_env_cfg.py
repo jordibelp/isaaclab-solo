@@ -208,6 +208,11 @@ class Solo12RaceEnvCfg(DirectRLEnvCfg):
     # Constant world-frame force [N] applied at the base COM opposite the straightSimple
     # start-to-end direction. Zero disables it.
     backward_force: float = 0.0
+    # Success-rate curriculum stages applied after ``backward_force``. An empty sequence disables the curriculum and
+    # keeps using ``backward_force``. Each stage is activated after a training iteration whose
+    # Episode/successRate is strictly greater than ``backward_force_curriculum_sr_threshold``.
+    backward_force_curriculum: tuple[float, ...] = ()
+    backward_force_curriculum_sr_threshold: float = 0.6
     waypoint_names = SOLO12_RACE_WAYPOINT_NAMES
     patch_name_pattern = "patch.*"
 
