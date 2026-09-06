@@ -177,7 +177,7 @@ parser.add_argument(
     type=str,
     default=None,
     help=(
-        "Initialize a solo12-IMU-student-rl policy from a Solo12 base-IMU DAgger adapter checkpoint. "
+        "Initialize a compatible Solo12 TCN student policy from a DAgger adapter checkpoint. "
         "If --checkpoint points to an adapter checkpoint, this is inferred automatically."
     ),
 )
@@ -1178,6 +1178,94 @@ def _checkpoint_model_state_dict(path: str, map_location: str | torch.device = "
     raise ValueError(f"Could not find model state_dict in checkpoint: {path}")
 
 
+def _infer_mlp_hidden_dims(state_dict: dict[str, torch.Tensor], prefix: str) -> list[int] | None:
+    """Infer the hidden widths of an RSL-RL MLP from its saved Linear layers."""
+
+    layers = []
+    pattern = re.compile(rf"^{re.escape(prefix)}\.(\d+)\.weight$")
+    for key, value in state_dict.items():
+        match = pattern.match(str(key))
+        if match is not None and torch.is_tensor(value) and value.ndim == 2:
+            layers.append((int(match.group(1)), int(value.shape[0])))
+    layers.sort(key=lambda item: item[0])
+    return [width for _, width in layers[:-1]] if len(layers) >= 2 else None
+
+
+def _configure_student_policy_from_dagger_adapter(env_cfg, policy_cfg, adapter_checkpoint_path: str) -> None:
+    """Make a race TCN policy architecture match a saved DAgger adapter and teacher."""
+
+    checkpoint = torch.load(adapter_checkpoint_path, map_location="cpu", weights_only=False)
+    layout = checkpoint.get("layout")
+    dims = checkpoint.get("dims")
+    if not isinstance(layout, dict) or not isinstance(dims, dict):
+        raise RuntimeError(f"DAgger checkpoint is missing layout/dims metadata: {adapter_checkpoint_path}")
+
+    policy_layout = {
+        "joint-state": "joint_state",
+        "joint-state + foot-IMU": "joint_state_imu",
+    }.get(str(getattr(policy_cfg, "history_name", "")))
+    saved_layout = str(layout.get("kind", ""))
+    if policy_layout is not None and saved_layout != policy_layout:
+        raise RuntimeError(
+            f"DAgger adapter layout {saved_layout!r} is incompatible with student history "
+            f"{getattr(policy_cfg, 'history_name', None)!r}."
+        )
+
+    history_len = int(layout.get("history_len", 0))
+    decimation = int(getattr(env_cfg, "decimation", 1))
+    if history_len < 1 or history_len % decimation != 0:
+        raise RuntimeError(
+            f"DAgger history_len={history_len} is incompatible with env decimation={decimation}."
+        )
+    history_policy_steps = history_len // decimation
+    history_fields = (
+        ("joint_state_history_policy_steps", "joint_state_history_length")
+        if saved_layout == "joint_state"
+        else ("joint_imu_history_policy_steps", "joint_imu_history_length")
+    )
+    if hasattr(env_cfg, history_fields[0]):
+        setattr(env_cfg, history_fields[0], history_policy_steps)
+    if hasattr(env_cfg, history_fields[1]):
+        setattr(env_cfg, history_fields[1], history_len)
+    post_init = getattr(env_cfg, "__post_init__", None)
+    if callable(post_init):
+        post_init()
+
+    field_values = {
+        "history_len": layout.get("history_len"),
+        "history_dim": layout.get("history_dim"),
+        "imu_history_len": layout.get("history_len"),
+        "imu_dim": layout.get("history_dim"),
+        "tcn_channels": layout.get("channels"),
+        "tcn_latent_dim": dims.get("latent_dim"),
+        "tcn_kernel_size": layout.get("kernel_size"),
+        "tcn_activation": layout.get("activation"),
+        "current_obs_dim": dims.get("current_obs_dim"),
+    }
+    for field, value in field_values.items():
+        if value is not None and hasattr(policy_cfg, field):
+            setattr(policy_cfg, field, value)
+
+    teacher_checkpoint = checkpoint.get("teacher_checkpoint")
+    if not isinstance(teacher_checkpoint, str):
+        raise RuntimeError(f"DAgger checkpoint has no teacher_checkpoint: {adapter_checkpoint_path}")
+    teacher_checkpoint = _resolve_existing_model_path(teacher_checkpoint)
+    teacher_state = _checkpoint_model_state_dict(teacher_checkpoint)
+    for prefix, field in (("actor", "actor_hidden_dims"), ("critic", "critic_hidden_dims")):
+        hidden_dims = _infer_mlp_hidden_dims(teacher_state, prefix)
+        if hidden_dims is not None and hasattr(policy_cfg, field):
+            setattr(policy_cfg, field, hidden_dims)
+
+    print(
+        "[INFO]: Configured race TCN student from DAgger metadata: "
+        f"layout={saved_layout}, history={layout.get('history_len')}x{layout.get('history_dim')}, "
+        f"TCN={layout.get('channels')}ch/k{layout.get('kernel_size')}/{layout.get('activation')}, "
+        f"latent={dims.get('latent_dim')}, actor={getattr(policy_cfg, 'actor_hidden_dims', None)}, "
+        f"critic={getattr(policy_cfg, 'critic_hidden_dims', None)}.",
+        flush=True,
+    )
+
+
 def _copy_normalizer_state(target_state, target_prefix: str, source_state, source_prefix: str) -> list[str]:
     copied = []
     for suffix in ("_mean", "_var", "_std", "count"):
@@ -1236,10 +1324,56 @@ def _copy_dagger_actor_normalizer_state(target_state, adapter_checkpoint, teache
     return copied
 
 
+def _copy_race_dagger_normalizer_state(
+    target_state, target_prefix: str, teacher_state, teacher_prefix: str, adapter_checkpoint, policy
+) -> list[str]:
+    """Compose race-student normalization from teacher current observations and DAgger history stats."""
+
+    history_state = adapter_checkpoint.get("history_normalizer_state_dict")
+    if not isinstance(history_state, dict):
+        return []
+    current_dim = int(getattr(policy, "current_obs_dim"))
+    history_dim = int(getattr(policy, "imu_history_flat_dim"))
+    copied = []
+    for suffix in ("_mean", "_var", "_std"):
+        target_key = f"{target_prefix}.{suffix}"
+        teacher_value = teacher_state.get(f"{teacher_prefix}.{suffix}")
+        history_value = history_state.get(suffix)
+        if target_key not in target_state or not torch.is_tensor(teacher_value) or not torch.is_tensor(history_value):
+            continue
+        target_value = target_state[target_key].clone()
+        if teacher_value.shape[-1] < current_dim or history_value.shape[-1] != history_dim:
+            continue
+        target_value[:, :current_dim] = teacher_value[:, :current_dim].to(target_value.device)
+        target_value[:, current_dim : current_dim + history_dim] = history_value.to(target_value.device)
+        target_state[target_key] = target_value
+        copied.append(target_key)
+
+    count_key = f"{target_prefix}.count"
+    if count_key in target_state:
+        counts = [
+            value.to(target_state[count_key].device).reshape(())
+            for value in (teacher_state.get(f"{teacher_prefix}.count"), history_state.get("count"))
+            if torch.is_tensor(value)
+        ]
+        if counts:
+            target_state[count_key] = torch.stack(counts).max()
+            copied.append(count_key)
+    return copied
+
+
 def _initialize_student_from_dagger_adapter(runner, adapter_checkpoint_path: str) -> None:
     policy = runner.alg.policy
-    if not hasattr(policy, "actor_history_encoder"):
-        raise RuntimeError("DAgger adapter initialization requires a base-IMU student policy.")
+    if hasattr(policy, "actor_history_encoder"):
+        encoder_prefixes = ("actor_history_encoder", "critic_history_encoder")
+        current_sample_dim = int(getattr(policy, "history_sample_dim"))
+        race_tcn_policy = False
+    elif hasattr(policy, "actor_imu_encoder"):
+        encoder_prefixes = ("actor_imu_encoder", "critic_imu_encoder")
+        current_sample_dim = int(getattr(policy, "imu_dim"))
+        race_tcn_policy = True
+    else:
+        raise RuntimeError("DAgger adapter initialization requires a supported TCN student policy.")
 
     try:
         map_location = next(policy.parameters()).device
@@ -1252,8 +1386,12 @@ def _initialize_student_from_dagger_adapter(runner, adapter_checkpoint_path: str
         raise RuntimeError(f"Checkpoint is not a DAgger adapter checkpoint: {adapter_checkpoint_path}")
 
     saved_dims = adapter_checkpoint.get("dims", {})
-    saved_sample_dim = saved_dims.get("history_sample_dim") if isinstance(saved_dims, dict) else None
-    current_sample_dim = int(getattr(policy, "history_sample_dim"))
+    saved_layout = adapter_checkpoint.get("layout", {})
+    saved_sample_dim = None
+    if isinstance(saved_dims, dict):
+        saved_sample_dim = saved_dims.get("history_sample_dim")
+    if saved_sample_dim is None and isinstance(saved_layout, dict):
+        saved_sample_dim = saved_layout.get("history_dim")
     if saved_sample_dim is not None and int(saved_sample_dim) != current_sample_dim:
         raise RuntimeError(
             "DAgger adapter IMU layout is incompatible with the current student config: "
@@ -1275,7 +1413,7 @@ def _initialize_student_from_dagger_adapter(runner, adapter_checkpoint_path: str
     skipped = []
 
     for key, value in adapter_state.items():
-        for prefix in ("actor_history_encoder", "critic_history_encoder"):
+        for prefix in encoder_prefixes:
             target_key = f"{prefix}.{key}"
             if target_key not in target_state:
                 continue
@@ -1301,8 +1439,20 @@ def _initialize_student_from_dagger_adapter(runner, adapter_checkpoint_path: str
             target_state[key] = value.to(device=target_state[key].device).clone()
             copied_std.append(key)
 
-    copied_actor_norm = _copy_dagger_actor_normalizer_state(target_state, adapter_checkpoint, teacher_state, policy)
-    copied_critic_norm = _copy_normalizer_state(target_state, "critic_obs_normalizer", teacher_state, "critic_obs_normalizer")
+    if race_tcn_policy:
+        copied_actor_norm = _copy_race_dagger_normalizer_state(
+            target_state, "actor_obs_normalizer", teacher_state, "actor_obs_normalizer", adapter_checkpoint, policy
+        )
+        copied_critic_norm = _copy_race_dagger_normalizer_state(
+            target_state, "critic_obs_normalizer", teacher_state, "critic_obs_normalizer", adapter_checkpoint, policy
+        )
+    else:
+        copied_actor_norm = _copy_dagger_actor_normalizer_state(
+            target_state, adapter_checkpoint, teacher_state, policy
+        )
+        copied_critic_norm = _copy_normalizer_state(
+            target_state, "critic_obs_normalizer", teacher_state, "critic_obs_normalizer"
+        )
 
     if not copied_adapter:
         raise RuntimeError(f"No adapter tensors could be loaded into the student policy from: {adapter_checkpoint_path}")
@@ -1313,7 +1463,7 @@ def _initialize_student_from_dagger_adapter(runner, adapter_checkpoint_path: str
 
     policy.load_state_dict(target_state, strict=True)
     print(
-        "[INFO]: Initialized base-IMU student RL policy from DAgger adapter:\n"
+        "[INFO]: Initialized TCN student RL policy from DAgger adapter:\n"
         f"  adapter: {adapter_checkpoint_path}\n"
         f"  teacher: {teacher_checkpoint}\n"
         f"  adapter tensors: {len(copied_adapter)}\n"
@@ -1895,7 +2045,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         dagger_adapter_checkpoint_arg = args_cli.checkpoint
         print(
             "[INFO]: --checkpoint points to a DAgger adapter checkpoint; "
-            "initializing the base-IMU student policy instead of resuming RSL-RL optimizer state."
+            "initializing the TCN student policy instead of resuming RSL-RL optimizer state."
         )
     if args_cli.reuse_mlp:
         if agent_cfg.resume:
@@ -1979,6 +2129,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         agent_cfg.seed = seed
 
     _sync_base_imu_policy_cfg_from_env_cfg(env_cfg, agent_cfg)
+    if dagger_adapter_checkpoint_arg is not None:
+        dagger_adapter_checkpoint_arg = _resolve_existing_model_path(dagger_adapter_checkpoint_arg)
+        _configure_student_policy_from_dagger_adapter(env_cfg, agent_cfg.policy, dagger_adapter_checkpoint_arg)
     rnd_setup = solo12_rnd.configure_solo12_rnd(env_cfg, agent_cfg)
     if rnd_setup.enabled:
         print(
@@ -2186,7 +2339,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         print(f"[INFO]: Reusing actor/critic MLP weights from checkpoint: {resume_path}")
         _reuse_actor_critic_mlp_weights(runner, resume_path, args_cli.reuse_mlp_source_history_kind)
     elif dagger_adapter_checkpoint_arg is not None:
-        print(f"[INFO]: Initializing base-IMU student policy from DAgger adapter checkpoint: {resume_path}")
+        print(f"[INFO]: Initializing TCN student policy from DAgger adapter checkpoint: {resume_path}")
         _initialize_student_from_dagger_adapter(runner, resume_path)
     elif should_resume:
         print(f"[INFO]: Loading model checkpoint from: {resume_path}")
