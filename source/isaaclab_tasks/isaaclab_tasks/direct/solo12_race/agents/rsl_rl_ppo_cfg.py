@@ -36,6 +36,7 @@ class RslRlPpoSharedActorCriticCfg(RslRlPpoActorCriticCfg):
 class RslRlPpoActorCriticFootImuTcnCfg(RslRlPpoActorCriticCfg):
     class_name: str = "ActorCriticFootImuTcn"
     shared_networks: bool = shared_networks_default
+    asymmetric_actor_critic: bool = False
     current_obs_dim: int = _SOLO12_RACE_ENV_CFG.proprio_observation_dim
     history_name: str = "foot-IMU"
     imu_history_len: int = _SOLO12_RACE_ENV_CFG.foot_imu_history_length
@@ -44,12 +45,17 @@ class RslRlPpoActorCriticFootImuTcnCfg(RslRlPpoActorCriticCfg):
     tcn_latent_dim: int = _SOLO12_RACE_ENV_CFG.foot_imu_tcn_latent_dim
     tcn_kernel_size: int = _SOLO12_RACE_ENV_CFG.foot_imu_tcn_kernel_size
     tcn_activation: str = _SOLO12_RACE_ENV_CFG.foot_imu_tcn_activation
+    env_params_dim: int = _SOLO12_RACE_PARAMS_ENV_CFG.gt_env_params_obs_dim
+    env_params_encoder_hidden_dims: list[int] = [64, 32]
+    env_params_latent_dim: int = 8
+    env_params_encoder_activation: str = "elu"
 
 
 @configclass
 class RslRlPpoActorCriticJointStateTcnCfg(RslRlPpoActorCriticCfg):
     class_name: str = "ActorCriticFootImuTcn"
     shared_networks: bool = shared_networks_default
+    asymmetric_actor_critic: bool = True
     current_obs_dim: int = _SOLO12_RACE_ENV_CFG.proprio_observation_dim
     history_name: str = "joint-state"
     history_len: int = _SOLO12_RACE_ENV_CFG.joint_state_history_length
@@ -58,12 +64,17 @@ class RslRlPpoActorCriticJointStateTcnCfg(RslRlPpoActorCriticCfg):
     tcn_latent_dim: int = _SOLO12_RACE_ENV_CFG.joint_state_tcn_latent_dim
     tcn_kernel_size: int = _SOLO12_RACE_ENV_CFG.joint_state_tcn_kernel_size
     tcn_activation: str = _SOLO12_RACE_ENV_CFG.joint_state_tcn_activation
+    env_params_dim: int = _SOLO12_RACE_PARAMS_ENV_CFG.gt_env_params_obs_dim
+    env_params_encoder_hidden_dims: list[int] = [64, 32]
+    env_params_latent_dim: int = 8
+    env_params_encoder_activation: str = "elu"
 
 
 @configclass
 class RslRlPpoActorCriticJointStateImuTcnCfg(RslRlPpoActorCriticCfg):
     class_name: str = "ActorCriticFootImuTcn"
     shared_networks: bool = shared_networks_default
+    asymmetric_actor_critic: bool = True
     current_obs_dim: int = _SOLO12_RACE_ENV_CFG.proprio_observation_dim
     history_name: str = "joint-state + foot-IMU"
     history_len: int = _SOLO12_RACE_ENV_CFG.joint_imu_history_length
@@ -72,6 +83,10 @@ class RslRlPpoActorCriticJointStateImuTcnCfg(RslRlPpoActorCriticCfg):
     tcn_latent_dim: int = _SOLO12_RACE_ENV_CFG.joint_imu_tcn_latent_dim
     tcn_kernel_size: int = _SOLO12_RACE_ENV_CFG.joint_imu_tcn_kernel_size
     tcn_activation: str = _SOLO12_RACE_ENV_CFG.joint_imu_tcn_activation
+    env_params_dim: int = _SOLO12_RACE_PARAMS_ENV_CFG.gt_env_params_obs_dim
+    env_params_encoder_hidden_dims: list[int] = [64, 32]
+    env_params_latent_dim: int = 8
+    env_params_encoder_activation: str = "elu"
 
 
 @configclass
@@ -91,6 +106,7 @@ class RslRlPpoEnvParamsConditionedEncoderActorCfg(RslRlPpoActorCriticCfg):
     env_params_encoder_hidden_dims: list[int] = [64, 32]
     env_params_latent_dim: int = 8
     env_params_encoder_activation: str = "elu"
+    actor_critic_share_latent_encoding: bool = False
 
 
 @configclass
@@ -102,6 +118,7 @@ class Solo12RacePPORunnerCfg(RslRlOnPolicyRunnerCfg):
     run_name = "[ClusterIRI]-Solo12Race - reward_progress_scale=100; friction randomization"
     logger = "wandb"
     wandb_project = "borinotIsaacLab"
+    obs_groups = {"policy": ["policy"], "critic": ["policy"]}
     policy = RslRlPpoSharedActorCriticCfg(
         init_noise_std=1.0,
         noise_std_type="log",
@@ -144,6 +161,7 @@ class Solo12RaceIMUPPORunnerCfg(Solo12RacePPORunnerCfg):
 @configclass
 class Solo12RaceJointStateTcnPPORunnerCfg(Solo12RacePPORunnerCfg):
     run_name = "[ClusterIRI]-Solo12Race - joint-state TCN; reward_progress_scale=100; friction randomization"
+    obs_groups = {"policy": ["policy"], "critic": ["critic"]}
     policy = RslRlPpoActorCriticJointStateTcnCfg(
         init_noise_std=1.0,
         noise_std_type="log",
@@ -158,6 +176,7 @@ class Solo12RaceJointStateTcnPPORunnerCfg(Solo12RacePPORunnerCfg):
 @configclass
 class Solo12RaceJointStateImuTcnPPORunnerCfg(Solo12RacePPORunnerCfg):
     run_name = "[ClusterIRI]-Solo12Race - joint-state + foot IMU TCN; reward_progress_scale=100; friction randomization"
+    obs_groups = {"policy": ["policy"], "critic": ["critic"]}
     policy = RslRlPpoActorCriticJointStateImuTcnCfg(
         init_noise_std=1.0,
         noise_std_type="log",

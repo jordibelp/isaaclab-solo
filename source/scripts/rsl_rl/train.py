@@ -151,6 +151,17 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
+    "--actor-critic-share-latent-encoding",
+    "--actor_critic_share_latent_encoding",
+    dest="actor_critic_share_latent_encoding",
+    action="store_true",
+    default=False,
+    help=(
+        "Share only the privileged latent encoder between the teacher actor and critic while "
+        "keeping their policy/value heads and observation normalizers separate."
+    ),
+)
+parser.add_argument(
     "--reuse-mlp",
     action="store_true",
     default=False,
@@ -1155,10 +1166,22 @@ def _resolve_existing_model_path(path: str) -> str:
     candidates = [expanded]
     path_str = str(expanded)
     cluster_prefix = "/home/jbeltran/IsaacLab"
+    cluster_checkpoint_store_prefix = "/home/jbeltran/IsaacLab_dirty"
     local_prefix = "/home/jordibelp/IsaacLab"
-    if path_str.startswith(cluster_prefix):
-        candidates.append(Path(local_prefix + path_str[len(cluster_prefix) :]))
+    local_checkpoint_store_prefix = "/home/jordibelp/IsaacLab-dirty"
+    if path_str.startswith(cluster_checkpoint_store_prefix):
+        relative_path = path_str[len(cluster_checkpoint_store_prefix) :]
+        candidates.append(Path(local_checkpoint_store_prefix + relative_path))
+        candidates.append(Path(local_prefix + relative_path))
+    elif path_str.startswith(cluster_prefix):
+        relative_path = path_str[len(cluster_prefix) :]
+        candidates.append(Path(local_prefix + relative_path))
+        candidates.append(Path(local_checkpoint_store_prefix + relative_path))
+    elif path_str.startswith(local_checkpoint_store_prefix):
+        candidates.append(Path(local_prefix + path_str[len(local_checkpoint_store_prefix) :]))
+        candidates.append(Path(cluster_checkpoint_store_prefix + path_str[len(local_checkpoint_store_prefix) :]))
     elif path_str.startswith(local_prefix):
+        candidates.append(Path(local_checkpoint_store_prefix + path_str[len(local_prefix) :]))
         candidates.append(Path(cluster_prefix + path_str[len(local_prefix) :]))
     for candidate in candidates:
         if candidate.is_file():
@@ -1191,6 +1214,23 @@ def _infer_mlp_hidden_dims(state_dict: dict[str, torch.Tensor], prefix: str) -> 
     return [width for _, width in layers[:-1]] if len(layers) >= 2 else None
 
 
+def _infer_mlp_input_output_dims(
+    state_dict: dict[str, torch.Tensor], prefix: str
+) -> tuple[int, int] | None:
+    """Infer the input/output widths of an RSL-RL MLP from its saved Linear layers."""
+
+    layers = []
+    pattern = re.compile(rf"^{re.escape(prefix)}\.(\d+)\.weight$")
+    for key, value in state_dict.items():
+        match = pattern.match(str(key))
+        if match is not None and torch.is_tensor(value) and value.ndim == 2:
+            layers.append((int(match.group(1)), value))
+    layers.sort(key=lambda item: item[0])
+    if not layers:
+        return None
+    return int(layers[0][1].shape[1]), int(layers[-1][1].shape[0])
+
+
 def _configure_student_policy_from_dagger_adapter(env_cfg, policy_cfg, adapter_checkpoint_path: str) -> None:
     """Make a race TCN policy architecture match a saved DAgger adapter and teacher."""
 
@@ -1205,11 +1245,32 @@ def _configure_student_policy_from_dagger_adapter(env_cfg, policy_cfg, adapter_c
         "joint-state + foot-IMU": "joint_state_imu",
     }.get(str(getattr(policy_cfg, "history_name", "")))
     saved_layout = str(layout.get("kind", ""))
+    if saved_layout not in {"joint_state", "joint_state_imu"}:
+        raise RuntimeError(f"Unsupported DAgger adapter layout: {saved_layout!r}.")
     if policy_layout is not None and saved_layout != policy_layout:
         raise RuntimeError(
             f"DAgger adapter layout {saved_layout!r} is incompatible with student history "
             f"{getattr(policy_cfg, 'history_name', None)!r}."
         )
+
+    saved_current_obs_dim = int(dims.get("current_obs_dim", 0))
+    if saved_current_obs_dim < 1:
+        raise RuntimeError(f"DAgger checkpoint has invalid current_obs_dim={saved_current_obs_dim}.")
+    if hasattr(env_cfg, "remove_c_close_vectors_from_observation") and hasattr(env_cfg, "base_observation_dim"):
+        c_close_dim = 6
+        current_base_obs_dim = int(getattr(env_cfg, "base_observation_dim"))
+        current_removes_c_close = bool(getattr(env_cfg, "remove_c_close_vectors_from_observation"))
+        base_without_c_close = current_base_obs_dim - (0 if current_removes_c_close else c_close_dim)
+        if saved_current_obs_dim == base_without_c_close:
+            env_cfg.remove_c_close_vectors_from_observation = True
+        elif saved_current_obs_dim == base_without_c_close + c_close_dim:
+            env_cfg.remove_c_close_vectors_from_observation = False
+        else:
+            raise RuntimeError(
+                "DAgger current-observation width cannot be represented by the selected race task: "
+                f"checkpoint={saved_current_obs_dim}, supported={base_without_c_close} or "
+                f"{base_without_c_close + c_close_dim}."
+            )
 
     history_len = int(layout.get("history_len", 0))
     decimation = int(getattr(env_cfg, "decimation", 1))
@@ -1218,18 +1279,40 @@ def _configure_student_policy_from_dagger_adapter(env_cfg, policy_cfg, adapter_c
             f"DAgger history_len={history_len} is incompatible with env decimation={decimation}."
         )
     history_policy_steps = history_len // decimation
-    history_fields = (
-        ("joint_state_history_policy_steps", "joint_state_history_length")
+    history_policy_step_fields = (
+        ("joint_state_history_policy_steps",)
         if saved_layout == "joint_state"
-        else ("joint_imu_history_policy_steps", "joint_imu_history_length")
+        else (
+            "foot_imu_history_policy_steps",
+            "joint_state_history_policy_steps",
+            "joint_imu_history_policy_steps",
+        )
     )
-    if hasattr(env_cfg, history_fields[0]):
-        setattr(env_cfg, history_fields[0], history_policy_steps)
-    if hasattr(env_cfg, history_fields[1]):
-        setattr(env_cfg, history_fields[1], history_len)
+    for field in history_policy_step_fields:
+        if hasattr(env_cfg, field):
+            setattr(env_cfg, field, history_policy_steps)
     post_init = getattr(env_cfg, "__post_init__", None)
     if callable(post_init):
         post_init()
+
+    actual_current_obs_dim = int(getattr(env_cfg, "base_observation_dim", saved_current_obs_dim))
+    if actual_current_obs_dim != saved_current_obs_dim:
+        raise RuntimeError(
+            "Configured race task does not reproduce the DAgger current-observation layout: "
+            f"checkpoint={saved_current_obs_dim}, task={actual_current_obs_dim}."
+        )
+    actual_history_len = int(
+        getattr(
+            env_cfg,
+            "joint_state_history_length" if saved_layout == "joint_state" else "joint_imu_history_length",
+            history_len,
+        )
+    )
+    if actual_history_len != history_len:
+        raise RuntimeError(
+            "Configured race task does not reproduce the DAgger history length: "
+            f"checkpoint={history_len}, task={actual_history_len}."
+        )
 
     field_values = {
         "history_len": layout.get("history_len"),
@@ -1256,12 +1339,69 @@ def _configure_student_policy_from_dagger_adapter(env_cfg, policy_cfg, adapter_c
         if hidden_dims is not None and hasattr(policy_cfg, field):
             setattr(policy_cfg, field, hidden_dims)
 
+    teacher_actor_normalized = any(key.startswith("actor_obs_normalizer.") for key in teacher_state)
+    dagger_history_normalized = isinstance(checkpoint.get("history_normalizer_state_dict"), dict)
+    if hasattr(policy_cfg, "actor_obs_normalization"):
+        # One EmpiricalNormalization represents the two preprocessing branches used
+        # during DAgger: teacher-normalized current observations and optionally
+        # normalized history. Identity statistics preserve either unnormalized branch.
+        policy_cfg.actor_obs_normalization = teacher_actor_normalized or dagger_history_normalized
+    if hasattr(policy_cfg, "critic_obs_normalization"):
+        policy_cfg.critic_obs_normalization = any(
+            key.startswith("critic_obs_normalizer.") for key in teacher_state
+        )
+    if hasattr(policy_cfg, "noise_std_type"):
+        if "log_std" in teacher_state:
+            policy_cfg.noise_std_type = "log"
+        elif "std" in teacher_state:
+            policy_cfg.noise_std_type = "scalar"
+
+    actor_io = _infer_mlp_input_output_dims(teacher_state, "actor")
+    if actor_io is None or actor_io[0] != saved_current_obs_dim + int(dims.get("latent_dim", 0)):
+        raise RuntimeError(
+            "Teacher actor head is incompatible with the DAgger observation/latent metadata: "
+            f"actor_input={None if actor_io is None else actor_io[0]}, "
+            f"expected={saved_current_obs_dim + int(dims.get('latent_dim', 0))}."
+        )
+
+    critic_encoder_prefix = "critic_env_params_encoder"
+    critic_encoder_hidden_dims = _infer_mlp_hidden_dims(teacher_state, critic_encoder_prefix)
+    critic_encoder_io = _infer_mlp_input_output_dims(teacher_state, critic_encoder_prefix)
+    if bool(getattr(policy_cfg, "asymmetric_actor_critic", False)):
+        if critic_encoder_hidden_dims is None or critic_encoder_io is None:
+            raise RuntimeError(
+                "Asymmetric student initialization requires the teacher checkpoint to contain "
+                f"{critic_encoder_prefix}.* tensors."
+            )
+        env_params_dim, env_params_latent_dim = critic_encoder_io
+        if int(dims.get("env_params_dim", env_params_dim)) != env_params_dim:
+            raise RuntimeError(
+                "DAgger metadata and teacher critic encoder disagree on privileged env-param width: "
+                f"metadata={dims.get('env_params_dim')}, teacher={env_params_dim}."
+            )
+        for field, value in (
+            ("env_params_dim", env_params_dim),
+            ("env_params_encoder_hidden_dims", critic_encoder_hidden_dims),
+            ("env_params_latent_dim", env_params_latent_dim),
+        ):
+            if hasattr(policy_cfg, field):
+                setattr(policy_cfg, field, value)
+        critic_io = _infer_mlp_input_output_dims(teacher_state, "critic")
+        expected_critic_input = saved_current_obs_dim + env_params_latent_dim
+        if critic_io is None or critic_io[0] != expected_critic_input:
+            raise RuntimeError(
+                "Teacher critic head is incompatible with the privileged critic encoder: "
+                f"critic_input={None if critic_io is None else critic_io[0]}, "
+                f"expected={expected_critic_input}."
+            )
+
     print(
         "[INFO]: Configured race TCN student from DAgger metadata: "
         f"layout={saved_layout}, history={layout.get('history_len')}x{layout.get('history_dim')}, "
         f"TCN={layout.get('channels')}ch/k{layout.get('kernel_size')}/{layout.get('activation')}, "
         f"latent={dims.get('latent_dim')}, actor={getattr(policy_cfg, 'actor_hidden_dims', None)}, "
-        f"critic={getattr(policy_cfg, 'critic_hidden_dims', None)}.",
+        f"critic={getattr(policy_cfg, 'critic_hidden_dims', None)}, "
+        f"asymmetric_critic={getattr(policy_cfg, 'asymmetric_actor_critic', False)}.",
         flush=True,
     )
 
@@ -1331,7 +1471,7 @@ def _copy_race_dagger_normalizer_state(
 
     history_state = adapter_checkpoint.get("history_normalizer_state_dict")
     if not isinstance(history_state, dict):
-        return []
+        history_state = {}
     current_dim = int(getattr(policy, "current_obs_dim"))
     history_dim = int(getattr(policy, "imu_history_flat_dim"))
     copied = []
@@ -1339,13 +1479,22 @@ def _copy_race_dagger_normalizer_state(
         target_key = f"{target_prefix}.{suffix}"
         teacher_value = teacher_state.get(f"{teacher_prefix}.{suffix}")
         history_value = history_state.get(suffix)
-        if target_key not in target_state or not torch.is_tensor(teacher_value) or not torch.is_tensor(history_value):
+        if target_key not in target_state:
             continue
         target_value = target_state[target_key].clone()
-        if teacher_value.shape[-1] < current_dim or history_value.shape[-1] != history_dim:
+        copied_any = False
+        if torch.is_tensor(teacher_value):
+            if teacher_value.shape[-1] < current_dim:
+                continue
+            target_value[:, :current_dim] = teacher_value[:, :current_dim].to(target_value.device)
+            copied_any = True
+        if torch.is_tensor(history_value):
+            if history_value.shape[-1] != history_dim:
+                continue
+            target_value[:, current_dim : current_dim + history_dim] = history_value.to(target_value.device)
+            copied_any = True
+        if not copied_any:
             continue
-        target_value[:, :current_dim] = teacher_value[:, :current_dim].to(target_value.device)
-        target_value[:, current_dim : current_dim + history_dim] = history_value.to(target_value.device)
         target_state[target_key] = target_value
         copied.append(target_key)
 
@@ -1368,8 +1517,14 @@ def _initialize_student_from_dagger_adapter(runner, adapter_checkpoint_path: str
         encoder_prefixes = ("actor_history_encoder", "critic_history_encoder")
         current_sample_dim = int(getattr(policy, "history_sample_dim"))
         race_tcn_policy = False
+        asymmetric_actor_critic = False
     elif hasattr(policy, "actor_imu_encoder"):
-        encoder_prefixes = ("actor_imu_encoder", "critic_imu_encoder")
+        asymmetric_actor_critic = bool(getattr(policy, "asymmetric_actor_critic", False))
+        encoder_prefixes = (
+            ("actor_imu_encoder",)
+            if asymmetric_actor_critic
+            else ("actor_imu_encoder", "critic_imu_encoder")
+        )
         current_sample_dim = int(getattr(policy, "imu_dim"))
         race_tcn_policy = True
     else:
@@ -1409,43 +1564,91 @@ def _initialize_student_from_dagger_adapter(runner, adapter_checkpoint_path: str
     copied_adapter = []
     copied_actor = []
     copied_critic = []
+    copied_critic_encoder = []
     copied_std = []
-    skipped = []
+    transfer_errors = []
+
+    def copy_exact(source_key: str, target_key: str, value: torch.Tensor, bucket: list[str], label: str) -> None:
+        if target_key not in target_state:
+            transfer_errors.append(f"{label} tensor {source_key!r} has no target {target_key!r}")
+            return
+        if not torch.is_tensor(value):
+            transfer_errors.append(f"{label} tensor {source_key!r} is not a tensor")
+            return
+        if tuple(value.shape) != tuple(target_state[target_key].shape):
+            transfer_errors.append(
+                f"{label} tensor {source_key!r} shape {tuple(value.shape)} != "
+                f"target {target_key!r} shape {tuple(target_state[target_key].shape)}"
+            )
+            return
+        target_state[target_key] = value.to(device=target_state[target_key].device).clone()
+        bucket.append(target_key)
 
     for key, value in adapter_state.items():
         for prefix in encoder_prefixes:
             target_key = f"{prefix}.{key}"
-            if target_key not in target_state:
-                continue
-            if tuple(value.shape) != tuple(target_state[target_key].shape):
-                skipped.append((target_key, tuple(value.shape), tuple(target_state[target_key].shape)))
-                continue
-            target_state[target_key] = value.to(device=target_state[target_key].device).clone()
-            copied_adapter.append(target_key)
+            copy_exact(key, target_key, value, copied_adapter, "adapter")
 
-    for source_prefix, bucket in (("actor.", copied_actor), ("critic.", copied_critic)):
+    student_actor_state = adapter_checkpoint.get("student_actor_state_dict")
+    has_student_actor = isinstance(student_actor_state, dict)
+    objective = adapter_checkpoint.get("objective")
+    if isinstance(objective, dict):
+        declares_student_actor = bool(objective.get("finetune_student_actor", has_student_actor))
+        if declares_student_actor != has_student_actor:
+            raise RuntimeError(
+                "DAgger checkpoint has inconsistent actor-fine-tuning metadata: "
+                f"objective.finetune_student_actor={declares_student_actor}, "
+                f"student_actor_state_dict_present={has_student_actor}: {adapter_checkpoint_path}"
+            )
+    elif student_actor_state is not None and not has_student_actor:
+        raise RuntimeError(
+            f"DAgger checkpoint has an invalid student_actor_state_dict: {adapter_checkpoint_path}"
+        )
+
+    actor_source_state = student_actor_state if isinstance(student_actor_state, dict) else teacher_state
+    actor_source_prefix = "" if isinstance(student_actor_state, dict) else "actor."
+    for key, value in actor_source_state.items():
+        if not key.startswith(actor_source_prefix):
+            continue
+        target_key = f"actor.{key}" if actor_source_prefix == "" else key
+        copy_exact(key, target_key, value, copied_actor, "actor")
+
+    for key, value in teacher_state.items():
+        if not key.startswith("critic."):
+            continue
+        copy_exact(key, key, value, copied_critic, "critic")
+
+    if asymmetric_actor_critic:
         for key, value in teacher_state.items():
-            if not key.startswith(source_prefix) or key not in target_state:
+            if not key.startswith("critic_env_params_encoder."):
                 continue
-            if tuple(value.shape) != tuple(target_state[key].shape):
-                skipped.append((key, tuple(value.shape), tuple(target_state[key].shape)))
-                continue
-            target_state[key] = value.to(device=target_state[key].device).clone()
-            bucket.append(key)
+            copy_exact(key, key, value, copied_critic_encoder, "privileged critic encoder")
 
-    for key in ("std", "log_std"):
+    target_std_keys = [key for key in ("std", "log_std") if key in target_state]
+    for key in target_std_keys:
         value = teacher_state.get(key)
-        if torch.is_tensor(value) and key in target_state and tuple(value.shape) == tuple(target_state[key].shape):
-            target_state[key] = value.to(device=target_state[key].device).clone()
-            copied_std.append(key)
+        if value is None:
+            transfer_errors.append(f"teacher checkpoint has no required action-noise tensor {key!r}")
+        else:
+            copy_exact(key, key, value, copied_std, "action-noise")
 
     if race_tcn_policy:
         copied_actor_norm = _copy_race_dagger_normalizer_state(
             target_state, "actor_obs_normalizer", teacher_state, "actor_obs_normalizer", adapter_checkpoint, policy
         )
-        copied_critic_norm = _copy_race_dagger_normalizer_state(
-            target_state, "critic_obs_normalizer", teacher_state, "critic_obs_normalizer", adapter_checkpoint, policy
-        )
+        if asymmetric_actor_critic:
+            copied_critic_norm = _copy_normalizer_state(
+                target_state, "critic_obs_normalizer", teacher_state, "critic_obs_normalizer"
+            )
+        else:
+            copied_critic_norm = _copy_race_dagger_normalizer_state(
+                target_state,
+                "critic_obs_normalizer",
+                teacher_state,
+                "critic_obs_normalizer",
+                adapter_checkpoint,
+                policy,
+            )
     else:
         copied_actor_norm = _copy_dagger_actor_normalizer_state(
             target_state, adapter_checkpoint, teacher_state, policy
@@ -1454,12 +1657,57 @@ def _initialize_student_from_dagger_adapter(runner, adapter_checkpoint_path: str
             target_state, "critic_obs_normalizer", teacher_state, "critic_obs_normalizer"
         )
 
-    if not copied_adapter:
-        raise RuntimeError(f"No adapter tensors could be loaded into the student policy from: {adapter_checkpoint_path}")
+    if race_tcn_policy:
+        for prefix, copied in (
+            ("actor_obs_normalizer.", copied_actor_norm),
+            ("critic_obs_normalizer.", copied_critic_norm),
+        ):
+            expected = {key for key in target_state if key.startswith(prefix)}
+            missing = sorted(expected.difference(copied))
+            if missing:
+                transfer_errors.append(f"normalizer transfer did not initialize: {', '.join(missing)}")
+
+    required_transfer_groups = [
+        (
+            "adapter",
+            {
+                key
+                for key in target_state
+                if any(key.startswith(f"{prefix}.") for prefix in encoder_prefixes)
+            },
+            set(copied_adapter),
+        ),
+        ("actor", {key for key in target_state if key.startswith("actor.")}, set(copied_actor)),
+        ("critic", {key for key in target_state if key.startswith("critic.")}, set(copied_critic)),
+    ]
+    if asymmetric_actor_critic:
+        required_transfer_groups.append(
+            (
+                "privileged critic encoder",
+                {key for key in target_state if key.startswith("critic_env_params_encoder.")},
+                set(copied_critic_encoder),
+            )
+        )
+    for label, expected, copied in required_transfer_groups:
+        missing = sorted(expected.difference(copied))
+        if missing:
+            transfer_errors.append(f"{label} transfer did not initialize: {', '.join(missing)}")
+
+    if not adapter_state:
+        transfer_errors.append("adapter_state_dict is empty")
     if not copied_actor:
-        raise RuntimeError(f"No teacher actor tensors could be loaded from: {teacher_checkpoint}")
+        transfer_errors.append("actor source contains no transferable tensors")
     if not copied_critic:
-        raise RuntimeError(f"No teacher critic tensors could be loaded from: {teacher_checkpoint}")
+        transfer_errors.append("teacher checkpoint contains no transferable critic tensors")
+    if asymmetric_actor_critic and not copied_critic_encoder:
+        transfer_errors.append("teacher checkpoint contains no transferable privileged critic-encoder tensors")
+    if transfer_errors:
+        preview = "\n  - ".join(transfer_errors[:12])
+        suffix = f"\n  - ... and {len(transfer_errors) - 12} more" if len(transfer_errors) > 12 else ""
+        raise RuntimeError(
+            "DAgger-to-RL initialization must be an exact transfer; refusing a partial policy:\n  - "
+            f"{preview}{suffix}"
+        )
 
     policy.load_state_dict(target_state, strict=True)
     print(
@@ -1467,19 +1715,15 @@ def _initialize_student_from_dagger_adapter(runner, adapter_checkpoint_path: str
         f"  adapter: {adapter_checkpoint_path}\n"
         f"  teacher: {teacher_checkpoint}\n"
         f"  adapter tensors: {len(copied_adapter)}\n"
-        f"  actor tensors: {len(copied_actor)}\n"
+        f"  actor tensors: {len(copied_actor)} "
+        f"({'DAgger student actor' if isinstance(student_actor_state, dict) else 'teacher actor'})\n"
         f"  critic tensors: {len(copied_critic)}\n"
+        f"  privileged critic encoder tensors: {len(copied_critic_encoder)}\n"
         f"  std tensors: {len(copied_std)}\n"
         f"  actor normalizer tensors: {len(copied_actor_norm)}\n"
         f"  critic normalizer tensors: {len(copied_critic_norm)}",
         flush=True,
     )
-    if skipped:
-        preview = ", ".join(
-            f"{key}: adapter/teacher{src_shape}->student{dst_shape}" for key, src_shape, dst_shape in skipped[:8]
-        )
-        suffix = " ..." if len(skipped) > 8 else ""
-        print(f"[WARN]: Skipped {len(skipped)} tensors due to shape mismatch: {preview}{suffix}", flush=True)
 
 
 def _adapt_normalizer_buffer(
@@ -2038,6 +2282,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         agent_cfg.policy.shared_networks = True
         if getattr(agent_cfg.policy, "class_name", None) == "ActorCritic":
             agent_cfg.policy.class_name = "SharedActorCritic"
+    if args_cli.actor_critic_share_latent_encoding:
+        if not hasattr(agent_cfg.policy, "actor_critic_share_latent_encoding"):
+            raise ValueError(
+                "--actor-critic-share-latent-encoding was requested, but this policy has no privileged "
+                "latent encoder to share. Use the Solo12 race encoded teacher task."
+            )
+        agent_cfg.policy.actor_critic_share_latent_encoding = True
     if args_cli.reuse_mlp and args_cli.checkpoint is None:
         raise ValueError("--reuse-mlp requires --checkpoint.")
     dagger_adapter_checkpoint_arg = args_cli.init_from_dagger_adapter
@@ -2218,6 +2469,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     policy_cfg = getattr(agent_cfg, "policy", None)
     if getattr(policy_cfg, "shared_networks", False):
         full_run_name += "_shared-networks"
+    elif getattr(policy_cfg, "actor_critic_share_latent_encoding", False):
+        full_run_name += "_shared-latent-encoder"
+    if getattr(policy_cfg, "asymmetric_actor_critic", False):
+        full_run_name += "_asymmetric-critic"
 
     log_dir_name = full_run_name
     if agent_cfg.logger == "wandb":

@@ -1373,11 +1373,27 @@ class Solo12RaceEnv(DirectRLEnv):
         self._gt_patch_mu_latched = torch.where(contact_mask, measured_mu, self._gt_patch_mu_latched)
         return self._gt_patch_mu_latched
 
-    def _get_gt_env_params_obs(self, root_quat_w: torch.Tensor) -> torch.Tensor:
+    def _get_gt_env_params_obs(
+        self,
+        root_quat_w: torch.Tensor,
+        *,
+        include_forces: bool | None = None,
+        include_mu_coefs: bool | None = None,
+    ) -> torch.Tensor:
+        """Return privileged environment parameters in the teacher-compatible layout.
+
+        The optional selectors let the asymmetric student critic consume the complete
+        [body-frame foot forces, per-foot friction] vector without exposing it to the actor.
+        Existing teacher and DAgger callers keep using the policy-observation config flags.
+        """
+        if include_forces is None:
+            include_forces = self.cfg.include_forces_to_gt_obs
+        if include_mu_coefs is None:
+            include_mu_coefs = self.cfg.include_mu_coefs_to_gt_obs
         obs_terms = []
-        if self.cfg.include_forces_to_gt_obs:
+        if include_forces:
             obs_terms.append(self._get_gt_foot_contact_forces_obs(root_quat_w))
-        if self.cfg.include_mu_coefs_to_gt_obs:
+        if include_mu_coefs:
             obs_terms.append(self._get_gt_patch_mu_obs())
         if not obs_terms:
             return torch.empty(self.num_envs, 0, device=self.device)
@@ -1399,10 +1415,10 @@ class Solo12RaceEnv(DirectRLEnv):
             root_quat_w, following_gate_pillars_w[:, 1] - self._robot.data.root_pos_w
         )
 
-        obs_terms = []
+        current_obs_terms = []
         if self.cfg.include_root_lin_vel_b_obs:
-            obs_terms.append(self._maybe_corrupt(self._robot.data.root_lin_vel_b, self.cfg.base_lin_vel_noise))
-        obs_terms.extend(
+            current_obs_terms.append(self._maybe_corrupt(self._robot.data.root_lin_vel_b, self.cfg.base_lin_vel_noise))
+        current_obs_terms.extend(
             [
                 self._maybe_corrupt(self._robot.data.root_ang_vel_b, self.cfg.base_ang_vel_noise),
                 self._maybe_corrupt(self._robot.data.projected_gravity_b, self.cfg.projected_gravity_noise),
@@ -1418,22 +1434,32 @@ class Solo12RaceEnv(DirectRLEnv):
 
         if not getattr(self.cfg, "remove_c_close_vectors_from_observation", False):
             c_close_vectors_b = self._get_closest_pillar_vectors_b(root_quat_w)
-            obs_terms.extend([c_close_vectors_b[:, 0], c_close_vectors_b[:, 1]])
+            current_obs_terms.extend([c_close_vectors_b[:, 0], c_close_vectors_b[:, 1]])
+
+        current_obs = torch.cat(tuple(current_obs_terms), dim=-1)
+        policy_obs_terms = [current_obs]
 
         if self.cfg.include_forces_to_gt_obs or self.cfg.include_mu_coefs_to_gt_obs:
-            obs_terms.append(self._get_gt_env_params_obs(root_quat_w))
+            policy_obs_terms.append(self._get_gt_env_params_obs(root_quat_w))
 
         if self.cfg.include_foot_imu_obs and self.cfg.include_joint_state_history_obs:
             joint_imu_history = torch.cat((self._joint_state_history, self._foot_imu_history), dim=-1)
-            obs_terms.append(joint_imu_history.reshape(self.num_envs, -1))
+            policy_obs_terms.append(joint_imu_history.reshape(self.num_envs, -1))
         elif self.cfg.include_foot_imu_obs:
-            obs_terms.append(self._foot_imu_history.reshape(self.num_envs, -1))
+            policy_obs_terms.append(self._foot_imu_history.reshape(self.num_envs, -1))
         elif self.cfg.include_joint_state_history_obs:
-            obs_terms.append(self._joint_state_history.reshape(self.num_envs, -1))
+            policy_obs_terms.append(self._joint_state_history.reshape(self.num_envs, -1))
 
-        obs = torch.cat(tuple(obs_terms), dim=-1)
+        observations = {"policy": torch.cat(tuple(policy_obs_terms), dim=-1)}
+        if self.cfg.asymmetric_actor_critic:
+            privileged_env_params = self._get_gt_env_params_obs(
+                root_quat_w,
+                include_forces=True,
+                include_mu_coefs=True,
+            )
+            observations["critic"] = torch.cat((current_obs, privileged_env_params), dim=-1)
         self._previous_actions = self._actions.clone()
-        return {"policy": obs}
+        return observations
 
     def _get_rewards(self) -> torch.Tensor:
         base_pos_w = self._robot.data.root_pos_w

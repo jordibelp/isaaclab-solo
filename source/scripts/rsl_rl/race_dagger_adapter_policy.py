@@ -3,14 +3,15 @@
 
 """Utilities for playing/evaluating Solo12 race env-param DAgger adapters.
 
-A phase-2 DAgger checkpoint only contains the history->latent adapter. To act in
-an environment we also need the frozen phase-1 ParamsConditionedEnc teacher: the
-adapter predicts z_hat from history, then z_hat is fed through the teacher actor
-head together with the current race observation.
+The adapter predicts z_hat from history. Legacy/latent-only checkpoints feed it
+through the frozen phase-1 teacher actor head; checkpoints trained with action
+supervision instead carry the fine-tuned student actor head that must be used for
+faithful playback.
 """
 
 from __future__ import annotations
 
+import copy
 import os
 import re
 from pathlib import Path
@@ -87,6 +88,14 @@ def _apply_checkpoint_architecture(policy_kwargs: dict[str, Any], state_dict: di
             )
             policy_kwargs[cfg_key] = hidden_dims
 
+    topology_marker = state_dict.get("_sharing_topology_marker")
+    if torch.is_tensor(topology_marker):
+        sharing_topology = int(topology_marker.item())
+        if "shared_networks" in policy_kwargs:
+            policy_kwargs["shared_networks"] = sharing_topology == 2
+        if "actor_critic_share_latent_encoding" in policy_kwargs:
+            policy_kwargs["actor_critic_share_latent_encoding"] = sharing_topology == 1
+
 
 def apply_checkpoint_architecture_to_policy_cfg(policy_cfg: Any, checkpoint_path: str) -> None:
     """Mutate an RSL-RL policy config so actor/critic MLP widths match a checkpoint.
@@ -101,9 +110,15 @@ def apply_checkpoint_architecture_to_policy_cfg(policy_cfg: Any, checkpoint_path
     state_dict = _checkpoint_model_state_dict(checkpoint)
     policy_kwargs = _cfg_to_dict(policy_cfg)
     _apply_checkpoint_architecture(policy_kwargs, state_dict)
-    for key in ("actor_hidden_dims", "critic_hidden_dims"):
+    for key in (
+        "actor_hidden_dims",
+        "critic_hidden_dims",
+        "shared_networks",
+        "actor_critic_share_latent_encoding",
+    ):
         if key in policy_kwargs and hasattr(policy_cfg, key):
-            setattr(policy_cfg, key, list(policy_kwargs[key]))
+            value = policy_kwargs[key]
+            setattr(policy_cfg, key, list(value) if isinstance(value, (list, tuple)) else value)
 
 
 def load_dagger_adapter_checkpoint(path: str) -> dict[str, Any] | None:
@@ -142,10 +157,27 @@ def resolve_teacher_checkpoint(
     if saved_path:
         candidate_paths.append(saved_path)
 
+    cluster_prefix = "/home/jbeltran/IsaacLab"
+    cluster_checkpoint_store_prefix = "/home/jbeltran/IsaacLab_dirty"
+    local_prefix = "/home/jordibelp/IsaacLab"
+    local_checkpoint_store_prefix = "/home/jordibelp/IsaacLab-dirty"
     for candidate in candidate_paths:
         expanded = os.path.abspath(os.path.expanduser(candidate))
-        if os.path.isfile(expanded):
-            return expanded
+        variants = [expanded]
+        if expanded.startswith(cluster_checkpoint_store_prefix):
+            relative_path = expanded[len(cluster_checkpoint_store_prefix) :]
+            variants.extend((local_checkpoint_store_prefix + relative_path, local_prefix + relative_path))
+        elif expanded.startswith(cluster_prefix):
+            relative_path = expanded[len(cluster_prefix) :]
+            variants.extend((local_prefix + relative_path, local_checkpoint_store_prefix + relative_path))
+        elif expanded.startswith(local_checkpoint_store_prefix):
+            variants.append(local_prefix + expanded[len(local_checkpoint_store_prefix) :])
+            variants.append(cluster_checkpoint_store_prefix + expanded[len(local_checkpoint_store_prefix) :])
+        elif expanded.startswith(local_prefix):
+            variants.append(local_checkpoint_store_prefix + expanded[len(local_prefix) :])
+        for variant in variants:
+            if os.path.isfile(variant):
+                return variant
 
     adapter_path = Path(adapter_checkpoint_path).expanduser().resolve()
     search_roots = [
@@ -155,6 +187,8 @@ def resolve_teacher_checkpoint(
         Path.cwd() / "logs" / "rsl_rl",
         Path("/home/jordibelp/IsaacLab/logs/skrl/checkpoints"),
         Path("/home/jordibelp/IsaacLab/logs/rsl_rl"),
+        Path("/home/jordibelp/IsaacLab-dirty/logs/skrl/checkpoints"),
+        Path("/home/jordibelp/IsaacLab-dirty/logs/rsl_rl"),
     ]
     tokens = list(dict.fromkeys(re.findall(r"[0-9a-z]{8}", saved_path)))
     # Prefer the last id in the original training run name. For f50n1qmb-style
@@ -191,6 +225,10 @@ def configure_env_cfg_for_dagger_adapter(env_cfg: Any, adapter_checkpoint: dict[
         raise ValueError(f"Unsupported DAgger adapter layout kind: {kind!r}")
 
     # The saved DAgger dims expect current race obs + privileged GT env params + history.
+    # This is the phase-2 collection/playback layout, not the phase-3 asymmetric
+    # actor/critic layout used by student RL.
+    if hasattr(env_cfg, "asymmetric_actor_critic"):
+        env_cfg.asymmetric_actor_critic = False
     if int(dims.get("env_params_dim", 0)) > 0:
         if hasattr(env_cfg, "include_forces_to_gt_obs"):
             env_cfg.include_forces_to_gt_obs = True
@@ -205,6 +243,25 @@ def configure_env_cfg_for_dagger_adapter(env_cfg: Any, adapter_checkpoint: dict[
         env_cfg.policy_model = (
             "env_params_dagger_joint_state_imu_tcn" if kind == "joint_state_imu" else "env_params_dagger_joint_state_tcn"
         )
+
+    saved_current_obs_dim = int(dims.get("current_obs_dim", 0))
+    if saved_current_obs_dim < 1:
+        raise ValueError(f"DAgger checkpoint has invalid current_obs_dim={saved_current_obs_dim}.")
+    if hasattr(env_cfg, "remove_c_close_vectors_from_observation") and hasattr(env_cfg, "base_observation_dim"):
+        c_close_dim = 6
+        current_base_obs_dim = int(getattr(env_cfg, "base_observation_dim"))
+        current_removes_c_close = bool(getattr(env_cfg, "remove_c_close_vectors_from_observation"))
+        base_without_c_close = current_base_obs_dim - (0 if current_removes_c_close else c_close_dim)
+        if saved_current_obs_dim == base_without_c_close:
+            env_cfg.remove_c_close_vectors_from_observation = True
+        elif saved_current_obs_dim == base_without_c_close + c_close_dim:
+            env_cfg.remove_c_close_vectors_from_observation = False
+        else:
+            raise ValueError(
+                "DAgger current-observation width cannot be represented by the selected race task: "
+                f"checkpoint={saved_current_obs_dim}, supported={base_without_c_close} or "
+                f"{base_without_c_close + c_close_dim}."
+            )
 
     history_len = int(layout.get("history_len") or 0)
     decimation = int(getattr(env_cfg, "decimation", 1))
@@ -227,6 +284,13 @@ def configure_env_cfg_for_dagger_adapter(env_cfg: Any, adapter_checkpoint: dict[
     post_init = getattr(env_cfg, "__post_init__", None)
     if callable(post_init):
         post_init()
+
+    actual_current_obs_dim = int(getattr(env_cfg, "base_observation_dim", saved_current_obs_dim))
+    if actual_current_obs_dim != saved_current_obs_dim:
+        raise ValueError(
+            "Configured race task does not reproduce the DAgger current-observation layout: "
+            f"checkpoint={saved_current_obs_dim}, task={actual_current_obs_dim}."
+        )
 
     expected_obs_dim = int(dims.get("history_start", 0)) + int(dims.get("history_flat_dim", layout.get("flat_dim", 0)))
     actual_obs_dim = int(getattr(env_cfg, "observation_space", expected_obs_dim))
@@ -274,9 +338,12 @@ def _load_teacher(
 
 
 def _actor_mean_and_std(
-    teacher: EnvParamsConditionedEncoderActor, actor_input: torch.Tensor
+    teacher: EnvParamsConditionedEncoderActor,
+    actor_input: torch.Tensor,
+    *,
+    actor: nn.Module | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
-    output = teacher.actor(actor_input)
+    output = (teacher.actor if actor is None else actor)(actor_input)
     if teacher.state_dependent_std:
         if teacher.noise_std_type == "scalar":
             mean, std = torch.unbind(output, dim=-2)
@@ -306,6 +373,7 @@ class DaggerLatentPolicy(nn.Module):
         *,
         teacher: EnvParamsConditionedEncoderActor,
         adapter: nn.Module,
+        student_actor: nn.Module | None,
         history_normalizer: EmpiricalNormalization | None,
         dims: dict[str, int],
         stochastic_actions: bool = False,
@@ -313,6 +381,7 @@ class DaggerLatentPolicy(nn.Module):
         super().__init__()
         self.teacher = teacher
         self.adapter = adapter
+        self.student_actor = student_actor
         self.history_normalizer = history_normalizer
         self.dims = {k: int(v) for k, v in dims.items()}
         self.stochastic_actions = bool(stochastic_actions)
@@ -347,7 +416,7 @@ class DaggerLatentPolicy(nn.Module):
         teacher_obs = self.teacher.actor_obs_normalizer(teacher_obs_raw)
         current_obs = teacher_obs[:, : self.teacher.current_obs_dim]
         actor_input = torch.cat((current_obs, z_hat), dim=-1)
-        mean, std = _actor_mean_and_std(self.teacher, actor_input)
+        mean, std = _actor_mean_and_std(self.teacher, actor_input, actor=self.student_actor)
         if self.stochastic_actions:
             return mean + torch.randn_like(mean) * std
         return mean
@@ -394,6 +463,26 @@ def load_dagger_latent_policy(
     for param in adapter.parameters():
         param.requires_grad_(False)
 
+    student_actor = None
+    student_actor_state = adapter_checkpoint.get("student_actor_state_dict")
+    objective = adapter_checkpoint.get("objective")
+    has_student_actor = isinstance(student_actor_state, dict)
+    if isinstance(objective, dict):
+        declares_student_actor = bool(objective.get("finetune_student_actor", has_student_actor))
+        if declares_student_actor != has_student_actor:
+            raise ValueError(
+                "DAgger checkpoint has inconsistent actor-fine-tuning metadata: "
+                f"objective.finetune_student_actor={declares_student_actor}, "
+                f"student_actor_state_dict_present={has_student_actor}: {adapter_checkpoint_path}"
+            )
+    if isinstance(student_actor_state, dict):
+        student_actor = copy.deepcopy(teacher.actor)
+        student_actor.load_state_dict(student_actor_state, strict=True)
+        student_actor.eval()
+        for param in student_actor.parameters():
+            param.requires_grad_(False)
+        print("[INFO] Loaded the fine-tuned DAgger student actor head for policy playback.", flush=True)
+
     history_normalizer = None
     normalizer_state = adapter_checkpoint.get("history_normalizer_state_dict")
     if normalizer_state is not None:
@@ -406,6 +495,7 @@ def load_dagger_latent_policy(
     policy = DaggerLatentPolicy(
         teacher=teacher,
         adapter=adapter,
+        student_actor=student_actor,
         history_normalizer=history_normalizer,
         dims=dims,
         stochastic_actions=stochastic_actions,

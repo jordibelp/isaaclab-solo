@@ -11,16 +11,20 @@ Phase 1 is the already-trained ``Solo12-Race-ParamsConditionedEnc-Direct-v0`` po
 This script implements phase 2:
     history [joint errors, optionally foot IMUs]
     -> randomly initialized TCN adapter -> 8D z_hat
-    -> frozen phase-1 actor MLP -> action
+    -> frozen phase-1 actor MLP, or an optionally trainable copy -> action
 
 Data is aggregated on-policy with the current adapter (DAgger-style), while the
 supervision target is the frozen phase-1 teacher latent z = mu(e_gt) on each
-visited state. No RL update is performed.
+visited state. By default only the adapter is optimized, preserving the original
+latent-only objective. Optionally, the copied student actor head is also optimized
+with the action-imitation term from Eq. (1) of Lee et al. (2020). No RL update is
+performed.
 """
 
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import math
@@ -169,9 +173,28 @@ parser.add_argument(
     default=None,
     help=argparse.SUPPRESS,  # Deprecated: --policy-eval-seed now controls eval friction too.
 )
-parser.add_argument("--learning_rate", type=float, default=3.0e-4, help="Adapter optimizer learning rate.")
-parser.add_argument("--weight_decay", type=float, default=0.0, help="AdamW weight decay for the adapter.")
-parser.add_argument("--max_grad_norm", type=float, default=1.0, help="Adapter gradient clipping norm.")
+parser.add_argument("--learning_rate", type=float, default=3.0e-4, help="Supervised optimizer learning rate.")
+parser.add_argument("--weight_decay", type=float, default=0.0, help="AdamW weight decay.")
+parser.add_argument("--max_grad_norm", type=float, default=1.0, help="Supervised gradient clipping norm.")
+parser.add_argument(
+    "--finetune-student-actor",
+    "--finetune_student_actor",
+    dest="finetune_student_actor",
+    action="store_true",
+    default=False,
+    help=(
+        "Also optimize a student actor head initialized from the frozen teacher. The supervised objective becomes "
+        "MSE(z_teacher, z_hat) + action_loss_weight * MSE(a_teacher, a_hat)."
+    ),
+)
+parser.add_argument(
+    "--action-loss-weight",
+    "--action_loss_weight",
+    dest="action_loss_weight",
+    type=float,
+    default=0.5,
+    help="Weight of the action MSE when --finetune-student-actor is enabled (default: 0.5).",
+)
 parser.add_argument(
     "--dataset_capacity",
     type=int,
@@ -190,7 +213,7 @@ parser.add_argument(
     "--stochastic-actions",
     action="store_true",
     default=False,
-    help="Sample from the frozen actor distribution instead of using deterministic actor means during rollouts.",
+    help="Sample from the current student policy distribution instead of using deterministic means during rollouts.",
 )
 parser.add_argument(
     "--dagger_experiment_name",
@@ -238,22 +261,68 @@ from isaaclab_tasks.direct.solo12_race.agents.imu_tcn_actor_critic import FootIm
 
 
 class ReplayBuffer:
-    """Simple CPU ring buffer for aggregated supervised DAgger samples."""
+    """Simple CPU ring buffer for aggregated supervised DAgger samples.
 
-    def __init__(self, capacity: int, history_dim: int, latent_dim: int) -> None:
+    The current-observation and teacher-action arrays are allocated only for the
+    optional actor fine-tuning objective. This keeps the default adapter-only data
+    path and memory footprint unchanged.
+    """
+
+    def __init__(
+        self,
+        capacity: int,
+        history_dim: int,
+        latent_dim: int,
+        *,
+        current_obs_dim: int | None = None,
+        action_dim: int | None = None,
+    ) -> None:
+        if (current_obs_dim is None) != (action_dim is None):
+            raise ValueError("current_obs_dim and action_dim must either both be set or both be omitted.")
         self.capacity = int(capacity)
         self.history = torch.empty((self.capacity, history_dim), dtype=torch.float32, device="cpu")
         self.target_z = torch.empty((self.capacity, latent_dim), dtype=torch.float32, device="cpu")
+        self.current_obs = (
+            torch.empty((self.capacity, int(current_obs_dim)), dtype=torch.float32, device="cpu")
+            if current_obs_dim is not None
+            else None
+        )
+        self.target_action = (
+            torch.empty((self.capacity, int(action_dim)), dtype=torch.float32, device="cpu")
+            if action_dim is not None
+            else None
+        )
         self.size = 0
         self.pos = 0
 
-    def add(self, history: torch.Tensor, target_z: torch.Tensor) -> None:
+    @property
+    def stores_action_targets(self) -> bool:
+        return self.current_obs is not None
+
+    def add(
+        self,
+        history: torch.Tensor,
+        target_z: torch.Tensor,
+        *,
+        current_obs: torch.Tensor | None = None,
+        target_action: torch.Tensor | None = None,
+    ) -> None:
         history = history.detach().to(device="cpu", dtype=torch.float32)
         target_z = target_z.detach().to(device="cpu", dtype=torch.float32)
+        if self.stores_action_targets:
+            if current_obs is None or target_action is None:
+                raise ValueError("This replay buffer requires current_obs and target_action for every sample.")
+            current_obs = current_obs.detach().to(device="cpu", dtype=torch.float32)
+            target_action = target_action.detach().to(device="cpu", dtype=torch.float32)
+        elif current_obs is not None or target_action is not None:
+            raise ValueError("This adapter-only replay buffer does not store action-supervision fields.")
         num = history.shape[0]
         if num >= self.capacity:
             self.history.copy_(history[-self.capacity :])
             self.target_z.copy_(target_z[-self.capacity :])
+            if self.current_obs is not None and self.target_action is not None:
+                self.current_obs.copy_(current_obs[-self.capacity :])
+                self.target_action.copy_(target_action[-self.capacity :])
             self.size = self.capacity
             self.pos = 0
             return
@@ -262,20 +331,37 @@ class ReplayBuffer:
         if end <= self.capacity:
             self.history[self.pos : end].copy_(history)
             self.target_z[self.pos : end].copy_(target_z)
+            if self.current_obs is not None and self.target_action is not None:
+                self.current_obs[self.pos : end].copy_(current_obs)
+                self.target_action[self.pos : end].copy_(target_action)
         else:
             first = self.capacity - self.pos
             self.history[self.pos :].copy_(history[:first])
             self.target_z[self.pos :].copy_(target_z[:first])
             self.history[: end - self.capacity].copy_(history[first:])
             self.target_z[: end - self.capacity].copy_(target_z[first:])
+            if self.current_obs is not None and self.target_action is not None:
+                self.current_obs[self.pos :].copy_(current_obs[:first])
+                self.target_action[self.pos :].copy_(target_action[:first])
+                self.current_obs[: end - self.capacity].copy_(current_obs[first:])
+                self.target_action[: end - self.capacity].copy_(target_action[first:])
         self.pos = end % self.capacity
         self.size = min(self.capacity, self.size + num)
 
-    def sample(self, batch_size: int, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
+    def sample(self, batch_size: int, device: torch.device) -> tuple[torch.Tensor, ...]:
         if self.size <= 0:
             raise RuntimeError("Cannot sample from an empty replay buffer.")
         indices = torch.randint(self.size, (batch_size,), device="cpu")
-        return self.history[indices].to(device=device), self.target_z[indices].to(device=device)
+        samples = (
+            self.history[indices].to(device=device),
+            self.target_z[indices].to(device=device),
+        )
+        if self.current_obs is not None and self.target_action is not None:
+            samples += (
+                self.current_obs[indices].to(device=device),
+                self.target_action[indices].to(device=device),
+            )
+        return samples
 
 
 def _cfg_to_dict(cfg: Any) -> dict[str, Any]:
@@ -325,6 +411,19 @@ def _linear_stack_dims(state_dict: dict[str, torch.Tensor], prefix: str) -> tupl
     return out_dims[:-1], out_dims[-1]
 
 
+def _linear_stack_input_dim(state_dict: dict[str, torch.Tensor], prefix: str) -> int | None:
+    layers: list[tuple[int, int]] = []
+    layer_prefix = f"{prefix}."
+    for key, value in state_dict.items():
+        if not key.startswith(layer_prefix) or not key.endswith(".weight") or value.ndim != 2:
+            continue
+        parts = key.split(".")
+        if len(parts) >= 3 and parts[1].isdigit():
+            layers.append((int(parts[1]), int(value.shape[1])))
+    layers.sort(key=lambda item: item[0])
+    return layers[0][1] if layers else None
+
+
 def _set_policy_cfg_if_changed(policy_cfg: Any, attr: str, value: Any) -> bool:
     if not hasattr(policy_cfg, attr) or value is None:
         return False
@@ -349,6 +448,10 @@ def _apply_teacher_checkpoint_policy_arch(policy_cfg: Any, checkpoint_path: str)
     actor_hidden_dims, actor_output_dim = _linear_stack_dims(state_dict, "actor")
     critic_hidden_dims, critic_output_dim = _linear_stack_dims(state_dict, "critic")
     encoder_hidden_dims, encoder_output_dim = _linear_stack_dims(state_dict, "actor_env_params_encoder")
+    actor_input_dim = _linear_stack_input_dim(state_dict, "actor")
+    encoder_input_dim = _linear_stack_input_dim(state_dict, "actor_env_params_encoder")
+    topology_marker = state_dict.get("_sharing_topology_marker")
+    sharing_topology = int(topology_marker.item()) if torch.is_tensor(topology_marker) else None
 
     changed = False
     if actor_hidden_dims:
@@ -359,6 +462,19 @@ def _apply_teacher_checkpoint_policy_arch(policy_cfg: Any, checkpoint_path: str)
         changed |= _set_policy_cfg_if_changed(policy_cfg, "env_params_encoder_hidden_dims", encoder_hidden_dims)
     if encoder_output_dim is not None:
         changed |= _set_policy_cfg_if_changed(policy_cfg, "env_params_latent_dim", int(encoder_output_dim))
+    if encoder_input_dim is not None:
+        changed |= _set_policy_cfg_if_changed(policy_cfg, "env_params_dim", int(encoder_input_dim))
+    inferred_current_obs_dim = (
+        actor_input_dim - encoder_output_dim
+        if actor_input_dim is not None and encoder_output_dim is not None
+        else None
+    )
+    if inferred_current_obs_dim is not None and inferred_current_obs_dim < 1:
+        raise RuntimeError(
+            f"Teacher checkpoint implies invalid current_obs_dim={inferred_current_obs_dim}."
+        )
+    if inferred_current_obs_dim is not None:
+        changed |= _set_policy_cfg_if_changed(policy_cfg, "current_obs_dim", int(inferred_current_obs_dim))
     if "log_std" in state_dict:
         changed |= _set_policy_cfg_if_changed(policy_cfg, "noise_std_type", "log")
     elif "std" in state_dict:
@@ -373,6 +489,13 @@ def _apply_teacher_checkpoint_policy_arch(policy_cfg: Any, checkpoint_path: str)
         "critic_obs_normalization",
         any(key.startswith("critic_obs_normalizer.") for key in state_dict),
     )
+    if sharing_topology is not None:
+        changed |= _set_policy_cfg_if_changed(policy_cfg, "shared_networks", sharing_topology == 2)
+        changed |= _set_policy_cfg_if_changed(
+            policy_cfg,
+            "actor_critic_share_latent_encoding",
+            sharing_topology == 1,
+        )
 
     inferred = {
         "actor_hidden_dims": actor_hidden_dims,
@@ -381,13 +504,48 @@ def _apply_teacher_checkpoint_policy_arch(policy_cfg: Any, checkpoint_path: str)
         "critic_output_dim": critic_output_dim,
         "env_params_encoder_hidden_dims": encoder_hidden_dims,
         "env_params_latent_dim": encoder_output_dim,
+        "env_params_dim": encoder_input_dim,
+        "current_obs_dim": inferred_current_obs_dim,
         "noise_std_type": "log" if "log_std" in state_dict else "scalar" if "std" in state_dict else None,
         "actor_obs_normalization": any(key.startswith("actor_obs_normalizer.") for key in state_dict),
         "critic_obs_normalization": any(key.startswith("critic_obs_normalizer.") for key in state_dict),
+        "sharing_topology": sharing_topology,
         "changed_policy_cfg": changed,
     }
     print(f"[INFO] Inferred teacher checkpoint architecture: {json.dumps(inferred, sort_keys=True)}", flush=True)
     return inferred
+
+
+def _configure_env_current_obs_from_teacher(env_cfg: Any, current_obs_dim: int) -> None:
+    """Select the 57D/63D race layout used by the teacher checkpoint."""
+
+    if not hasattr(env_cfg, "remove_c_close_vectors_from_observation") or not hasattr(
+        env_cfg, "base_observation_dim"
+    ):
+        return
+    c_close_dim = 6
+    current_base_obs_dim = int(getattr(env_cfg, "base_observation_dim"))
+    currently_removes_c_close = bool(getattr(env_cfg, "remove_c_close_vectors_from_observation"))
+    base_without_c_close = current_base_obs_dim - (0 if currently_removes_c_close else c_close_dim)
+    if current_obs_dim == base_without_c_close:
+        env_cfg.remove_c_close_vectors_from_observation = True
+    elif current_obs_dim == base_without_c_close + c_close_dim:
+        env_cfg.remove_c_close_vectors_from_observation = False
+    else:
+        raise ValueError(
+            "Teacher current-observation width cannot be represented by the selected DAgger race task: "
+            f"checkpoint={current_obs_dim}, supported={base_without_c_close} or "
+            f"{base_without_c_close + c_close_dim}."
+        )
+    post_init = getattr(env_cfg, "__post_init__", None)
+    if callable(post_init):
+        post_init()
+    actual_current_obs_dim = int(getattr(env_cfg, "base_observation_dim", current_obs_dim))
+    if actual_current_obs_dim != current_obs_dim:
+        raise ValueError(
+            "Configured DAgger task does not reproduce the teacher current-observation layout: "
+            f"checkpoint={current_obs_dim}, task={actual_current_obs_dim}."
+        )
 
 
 def _load_teacher(
@@ -494,8 +652,15 @@ def _apply_history_policy_steps_override(env_cfg: Any) -> None:
         post_init()
 
 
-def _actor_mean_and_std(teacher: EnvParamsConditionedEncoderActor, actor_input: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor | None]:
-    output = teacher.actor(actor_input)
+def _actor_mean_and_std(
+    teacher: EnvParamsConditionedEncoderActor,
+    actor_input: torch.Tensor,
+    *,
+    actor: nn.Module | None = None,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Evaluate either the frozen teacher head or its trainable student copy."""
+
+    output = (teacher.actor if actor is None else actor)(actor_input)
     if teacher.state_dependent_std:
         if teacher.noise_std_type == "scalar":
             mean, std = torch.unbind(output, dim=-2)
@@ -513,6 +678,37 @@ def _actor_mean_and_std(teacher: EnvParamsConditionedEncoderActor, actor_input: 
     else:
         raise ValueError(f"Unsupported teacher noise_std_type: {teacher.noise_std_type}")
     return output, std
+
+
+def _make_student_actor(teacher: EnvParamsConditionedEncoderActor) -> nn.Module:
+    """Clone the teacher actor head without unfreezing any teacher parameters."""
+
+    student_actor = copy.deepcopy(teacher.actor)
+    student_actor.load_state_dict(teacher.actor.state_dict(), strict=True)
+    for param in student_actor.parameters():
+        param.requires_grad_(True)
+    return student_actor
+
+
+def _compute_dagger_losses(
+    pred_z: torch.Tensor,
+    target_z: torch.Tensor,
+    *,
+    pred_action: torch.Tensor | None = None,
+    target_action: torch.Tensor | None = None,
+    action_loss_weight: float = 0.0,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return total, latent, and action losses for the supervised student objective."""
+
+    latent_mse = F.mse_loss(pred_z, target_z)
+    if pred_action is None and target_action is None:
+        action_mse = latent_mse.new_zeros(())
+    elif pred_action is None or target_action is None:
+        raise ValueError("pred_action and target_action must either both be set or both be omitted.")
+    else:
+        action_mse = F.mse_loss(pred_action, target_action)
+    total_loss = latent_mse + float(action_loss_weight) * action_mse
+    return total_loss, latent_mse, action_mse
 
 
 @torch.no_grad()
@@ -536,33 +732,84 @@ def _teacher_latent_and_student_action(
     return z_teacher, actions, mean
 
 
+@torch.no_grad()
+def _teacher_targets_and_trainable_student_action(
+    teacher: EnvParamsConditionedEncoderActor,
+    student_actor: nn.Module,
+    teacher_obs_raw: torch.Tensor,
+    z_hat: torch.Tensor,
+    *,
+    stochastic_actions: bool,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Build Eq. (1) targets and the on-policy action for actor-head fine-tuning.
+
+    ``a_teacher`` is always computed by the frozen teacher from ``z_teacher``.
+    ``a_hat`` and the rollout action are computed by the trainable student actor
+    from ``z_hat``. The returned current observation is already normalized by the
+    frozen teacher normalizer and can therefore be stored directly in replay.
+    """
+
+    teacher_obs = teacher.actor_obs_normalizer(teacher_obs_raw)
+    current_obs = teacher_obs[:, : teacher.current_obs_dim]
+    gt_env_params = teacher_obs[:, teacher.current_obs_dim : teacher.current_obs_dim + teacher.env_params_dim]
+    z_teacher = teacher.actor_env_params_encoder(gt_env_params)
+
+    teacher_actor_input = torch.cat((current_obs, z_teacher), dim=-1)
+    teacher_action, _ = _actor_mean_and_std(teacher, teacher_actor_input)
+
+    student_actor_input = torch.cat((current_obs, z_hat), dim=-1)
+    student_action, student_std = _actor_mean_and_std(teacher, student_actor_input, actor=student_actor)
+    if stochastic_actions:
+        actions = student_action + torch.randn_like(student_action) * student_std
+    else:
+        actions = student_action
+    return z_teacher, teacher_action, actions, student_action, current_obs
+
+
 def _save_checkpoint(
     *,
     path: str,
     adapter: nn.Module,
+    student_actor: nn.Module | None,
     history_normalizer: EmpiricalNormalization | None,
     optimizer: torch.optim.Optimizer,
     iteration: int,
     samples: int,
     best_loss: float,
+    best_latent_mse: float,
     teacher_checkpoint: str,
     layout: dict[str, Any],
     dims: dict[str, int],
+    action_loss_weight: float,
     selection_metric_name: str | None = None,
     selection_metric_value: float | None = None,
     policy_eval: dict[str, Any] | None = None,
 ) -> None:
     checkpoint = {
         "adapter_state_dict": adapter.state_dict(),
+        "student_actor_state_dict": student_actor.state_dict() if student_actor is not None else None,
         "history_normalizer_state_dict": history_normalizer.state_dict() if history_normalizer is not None else None,
         "optimizer_state_dict": optimizer.state_dict(),
         "iteration": int(iteration),
         "samples": int(samples),
         "best_loss": float(best_loss),
+        "best_latent_mse": float(best_latent_mse),
         "teacher_checkpoint": teacher_checkpoint,
         "layout": layout,
         "dims": dims,
         "args": vars(args_cli),
+        "objective": {
+            "schema_version": 1,
+            "name": "latent_mse_plus_action_mse" if student_actor is not None else "latent_mse",
+            "finetune_student_actor": student_actor is not None,
+            "latent_loss_weight": 1.0,
+            "action_loss_weight": float(action_loss_weight) if student_actor is not None else 0.0,
+            "configured_action_loss_weight": float(action_loss_weight),
+            "teacher_frozen": True,
+            "student_actor_initialized_from": "teacher.actor" if student_actor is not None else None,
+            "teacher_action_target": "teacher.actor(current_obs, z_teacher)" if student_actor is not None else None,
+            "student_action_prediction": "student_actor(current_obs, z_hat)" if student_actor is not None else None,
+        },
     }
     if selection_metric_name is not None:
         checkpoint["selection_metric_name"] = selection_metric_name
@@ -576,6 +823,7 @@ def _load_adapter_checkpoint(
     *,
     checkpoint_path: str,
     adapter: nn.Module,
+    student_actor: nn.Module | None,
     history_normalizer: EmpiricalNormalization | None,
     optimizer: torch.optim.Optimizer,
     layout: dict[str, Any],
@@ -596,6 +844,46 @@ def _load_adapter_checkpoint(
         # Allow passing a bare adapter state_dict for quick local experiments.
         adapter_state = checkpoint
     adapter.load_state_dict(adapter_state, strict=True)
+
+    student_actor_state = checkpoint.get("student_actor_state_dict")
+    objective = checkpoint.get("objective")
+    checkpoint_has_actor_state = isinstance(student_actor_state, dict)
+    checkpoint_finetunes_actor = checkpoint_has_actor_state
+    if isinstance(objective, dict):
+        checkpoint_finetunes_actor = bool(objective.get("finetune_student_actor", checkpoint_finetunes_actor))
+        if checkpoint_finetunes_actor != checkpoint_has_actor_state:
+            raise ValueError(
+                "Adapter checkpoint has inconsistent actor-fine-tuning metadata: "
+                f"objective.finetune_student_actor={checkpoint_finetunes_actor}, "
+                f"student_actor_state_dict_present={checkpoint_has_actor_state}: {checkpoint_path}"
+            )
+        saved_action_loss_weight = objective.get("action_loss_weight")
+        if (
+            checkpoint_finetunes_actor
+            and saved_action_loss_weight is not None
+            and float(saved_action_loss_weight) != float(args_cli.action_loss_weight)
+        ):
+            print(
+                "[INFO] Continuing actor fine-tuning with a changed action loss weight: "
+                f"checkpoint={float(saved_action_loss_weight):g}, current={float(args_cli.action_loss_weight):g}.",
+                flush=True,
+            )
+
+    student_actor_loaded = False
+    if student_actor is not None and isinstance(student_actor_state, dict):
+        student_actor.load_state_dict(student_actor_state, strict=True)
+        student_actor_loaded = True
+    elif student_actor is not None:
+        print(
+            "[WARN] Adapter checkpoint has no fine-tuned student actor; keeping the actor initialized from the "
+            "current teacher checkpoint.",
+            flush=True,
+        )
+    elif isinstance(student_actor_state, dict):
+        raise ValueError(
+            "Adapter checkpoint contains a fine-tuned student actor. Resume with "
+            "--finetune-student-actor so rollout and optimization semantics remain faithful to the checkpoint."
+        )
 
     ckpt_layout = checkpoint.get("layout")
     if isinstance(ckpt_layout, dict):
@@ -632,6 +920,14 @@ def _load_adapter_checkpoint(
         print("[WARN] Adapter checkpoint contains history normalizer state but --no-history-normalization is set; ignoring it.", flush=True)
 
     if load_optimizer:
+        if checkpoint_finetunes_actor != (student_actor is not None):
+            checkpoint_mode = "adapter + student actor" if checkpoint_finetunes_actor else "adapter only"
+            current_mode = "adapter + student actor" if student_actor is not None else "adapter only"
+            raise ValueError(
+                "Cannot restore optimizer state across different DAgger objectives: "
+                f"checkpoint={checkpoint_mode}, current={current_mode}. Omit --load-adapter-optimizer to load "
+                "model weights with a fresh optimizer."
+            )
         optimizer_state = checkpoint.get("optimizer_state_dict")
         if optimizer_state is None:
             print("[WARN] --load-adapter-optimizer was set, but checkpoint has no optimizer_state_dict.", flush=True)
@@ -643,7 +939,8 @@ def _load_adapter_checkpoint(
 
     print(
         f"[INFO] Initialized adapter from checkpoint: {checkpoint_path} "
-        f"(checkpoint iteration={checkpoint.get('iteration', 'unknown')}, optimizer_loaded={load_optimizer})",
+        f"(checkpoint iteration={checkpoint.get('iteration', 'unknown')}, "
+        f"student_actor_loaded={student_actor_loaded}, optimizer_loaded={load_optimizer})",
         flush=True,
     )
     return checkpoint
@@ -806,6 +1103,7 @@ def _adapter_policy_action(
     *,
     teacher: EnvParamsConditionedEncoderActor,
     adapter: nn.Module,
+    student_actor: nn.Module | None,
     history_normalizer: EmpiricalNormalization | None,
     policy_obs: torch.Tensor,
     dims: dict[str, int],
@@ -817,7 +1115,7 @@ def _adapter_policy_action(
     teacher_obs = teacher.actor_obs_normalizer(teacher_obs_raw)
     current_obs = teacher_obs[:, : teacher.current_obs_dim]
     actor_input = torch.cat((current_obs, z_hat), dim=-1)
-    action_mean, _ = _actor_mean_and_std(teacher, actor_input)
+    action_mean, _ = _actor_mean_and_std(teacher, actor_input, actor=student_actor)
     return action_mean
 
 
@@ -826,6 +1124,7 @@ def _evaluate_current_adapter_policy(
     vec_env: RslRlVecEnvWrapper,
     teacher: EnvParamsConditionedEncoderActor,
     adapter: nn.Module,
+    student_actor: nn.Module | None,
     history_normalizer: EmpiricalNormalization | None,
     dims: dict[str, int],
     eval_n: int,
@@ -845,6 +1144,7 @@ def _evaluate_current_adapter_policy(
 
     adapter_was_training = adapter.training
     teacher_was_training = teacher.training
+    student_actor_was_training = student_actor.training if student_actor is not None else False
     normalizer_was_training = history_normalizer.training if history_normalizer is not None else False
     saved_flags = _set_policy_eval_env_flags(raw_env)
     old_friction_seed = getattr(raw_env.cfg, "friction_seed", None)
@@ -887,6 +1187,8 @@ def _evaluate_current_adapter_policy(
 
     adapter.eval()
     teacher.eval()
+    if student_actor is not None:
+        student_actor.eval()
     if history_normalizer is not None:
         history_normalizer.eval()
 
@@ -927,6 +1229,7 @@ def _evaluate_current_adapter_policy(
             actions = _adapter_policy_action(
                 teacher=teacher,
                 adapter=adapter,
+                student_actor=student_actor,
                 history_normalizer=history_normalizer,
                 policy_obs=obs["policy"],
                 dims=dims,
@@ -1025,13 +1328,23 @@ def _evaluate_current_adapter_policy(
         _restore_policy_eval_env_flags(raw_env, saved_flags)
         adapter.train(adapter_was_training)
         teacher.train(teacher_was_training)
+        if student_actor is not None:
+            student_actor.train(student_actor_was_training)
         if history_normalizer is not None:
             history_normalizer.train(normalizer_was_training)
+
+
+def _validate_action_loss_weight(value: float) -> float:
+    weight = float(value)
+    if not math.isfinite(weight) or weight < 0.0:
+        raise ValueError(f"--action-loss-weight must be finite and >= 0, got {value}.")
+    return weight
 
 
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     agent_cfg = cli_args.update_rsl_rl_cfg(agent_cfg, args_cli)
+    args_cli.action_loss_weight = _validate_action_loss_weight(args_cli.action_loss_weight)
     if args_cli.run_name is not None:
         agent_cfg.run_name = args_cli.run_name
     if args_cli.teacher_shared_networks and hasattr(agent_cfg.policy, "shared_networks"):
@@ -1050,6 +1363,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     teacher_checkpoint = _resolve_teacher_checkpoint()
     teacher_checkpoint_arch = _apply_teacher_checkpoint_policy_arch(agent_cfg.policy, teacher_checkpoint)
+    _configure_env_current_obs_from_teacher(env_cfg, int(agent_cfg.policy.current_obs_dim))
     _apply_history_policy_steps_override(env_cfg)
     layout = _infer_history_layout(env_cfg)
     # Keep CLI/config/checkpoint/W&B metadata aligned with the actual env config used to build observations.
@@ -1101,6 +1415,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         f"T={layout['history_len']}, D={layout['history_dim']}, flat={layout['flat_dim']} -> z_hat[{latent_dim}]",
         flush=True,
     )
+    print(
+        "[INFO] DAgger objective: "
+        + (
+            f"latent MSE + {args_cli.action_loss_weight:g} * action MSE; adapter and student actor are trainable"
+            if args_cli.finetune_student_actor
+            else "latent MSE only; only the adapter is trainable"
+        ),
+        flush=True,
+    )
 
     dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
     dump_yaml(os.path.join(log_dir, "params", "agent.yaml"), agent_cfg)
@@ -1130,6 +1453,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         num_actions=vec_env.num_actions,
         device=device,
     )
+    student_actor = _make_student_actor(teacher).to(device) if args_cli.finetune_student_actor else None
 
     dims = {
         "current_obs_dim": int(teacher.current_obs_dim),
@@ -1138,6 +1462,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         "history_start": int(teacher.current_obs_dim + teacher.env_params_dim),
         "history_flat_dim": int(layout["flat_dim"]),
         "latent_dim": int(latent_dim),
+        "action_dim": int(vec_env.num_actions),
     }
     expected_obs_dim = dims["history_start"] + dims["history_flat_dim"]
     first_obs = vec_env.get_observations()
@@ -1166,12 +1491,23 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         history_normalizer = EmpiricalNormalization(dims["history_flat_dim"]).to(device)
         history_normalizer.train()
 
-    optimizer = torch.optim.AdamW(adapter.parameters(), lr=args_cli.learning_rate, weight_decay=args_cli.weight_decay)
+    if student_actor is None:
+        # Preserve the original optimizer construction exactly for adapter-only training.
+        optimizer = torch.optim.AdamW(
+            adapter.parameters(), lr=args_cli.learning_rate, weight_decay=args_cli.weight_decay
+        )
+    else:
+        optimizer = torch.optim.AdamW(
+            list(adapter.parameters()) + list(student_actor.parameters()),
+            lr=args_cli.learning_rate,
+            weight_decay=args_cli.weight_decay,
+        )
     initial_adapter_checkpoint: dict[str, Any] | None = None
     if args_cli.adapter_checkpoint is not None:
         initial_adapter_checkpoint = _load_adapter_checkpoint(
             checkpoint_path=args_cli.adapter_checkpoint,
             adapter=adapter,
+            student_actor=student_actor,
             history_normalizer=history_normalizer,
             optimizer=optimizer,
             layout=layout,
@@ -1179,7 +1515,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             load_optimizer=bool(args_cli.load_adapter_optimizer),
             device=device,
         )
-    buffer = ReplayBuffer(args_cli.dataset_capacity, dims["history_flat_dim"], latent_dim)
+    buffer = ReplayBuffer(
+        args_cli.dataset_capacity,
+        dims["history_flat_dim"],
+        latent_dim,
+        current_obs_dim=dims["current_obs_dim"] if student_actor is not None else None,
+        action_dim=dims["action_dim"] if student_actor is not None else None,
+    )
     policy_eval_enabled = int(args_cli.policy_eval_every_dag_it) > 0
 
     wandb_run = _maybe_init_wandb(
@@ -1216,6 +1558,22 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             "adapter_tcn_activation": str(layout["activation"]),
             "history_normalization": not bool(args_cli.no_history_normalization),
             "stochastic_actions": bool(args_cli.stochastic_actions),
+            "dagger_objective": (
+                "latent_mse_plus_action_mse" if args_cli.finetune_student_actor else "latent_mse"
+            ),
+            "finetune_student_actor": bool(args_cli.finetune_student_actor),
+            "action_loss_weight": float(args_cli.action_loss_weight),
+            "effective_action_loss_weight": (
+                float(args_cli.action_loss_weight) if args_cli.finetune_student_actor else 0.0
+            ),
+            "teacher_frozen": True,
+            "student_actor_initialized_from": "teacher.actor" if args_cli.finetune_student_actor else None,
+            "teacher_action_target": (
+                "teacher.actor(current_obs, z_teacher)" if args_cli.finetune_student_actor else None
+            ),
+            "student_action_prediction": (
+                "student_actor(current_obs, z_hat)" if args_cli.finetune_student_actor else None
+            ),
             "policy_eval_every_dag_it": args_cli.policy_eval_every_dag_it,
             "policy_eval_enabled": policy_eval_enabled,
             "n_env_eval": args_cli.n_env_eval,
@@ -1241,22 +1599,34 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     obs = first_obs
     total_steps = 0
     best_loss = float("inf")
+    best_latent_mse = float("inf")
     best_eval_finish_time_steps = float("inf")
-    best_latent_path = os.path.join(
+    supervised_selection_metric = "dagger/loss" if student_actor is not None else "dagger/latent_mse"
+    if policy_eval_enabled:
+        best_supervised_filename = (
+            "adapter_best_supervised_loss.pt" if student_actor is not None else "adapter_best_latent_mse.pt"
+        )
+    else:
+        best_supervised_filename = "adapter_best.pt"
+    best_supervised_path = os.path.join(
         log_dir,
         "checkpoints",
-        "adapter_best_latent_mse.pt" if policy_eval_enabled else "adapter_best.pt",
+        best_supervised_filename,
     )
     start_time = time.time()
 
     for iteration in range(1, num_iterations + 1):
         adapter.eval()
+        if student_actor is not None:
+            student_actor.eval()
         reward_sum = 0.0
         done_sum = 0.0
         action_mean_abs_sum = 0.0
         z_hat_abs_sum = 0.0
         z_teacher_abs_sum = 0.0
         new_data_loss_sum = 0.0
+        new_data_latent_loss_sum = 0.0
+        new_data_action_loss_sum = 0.0
         collected = 0
 
         for _ in range(num_steps_per_iter):
@@ -1271,17 +1641,50 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
             with torch.no_grad():
                 z_hat = adapter(adapter_input)
-                z_teacher, actions, action_mean = _teacher_latent_and_student_action(
-                    teacher,
-                    teacher_obs_raw,
-                    z_hat,
-                    stochastic_actions=args_cli.stochastic_actions,
+                if student_actor is None:
+                    # Keep the original adapter-only rollout path unchanged.
+                    z_teacher, actions, action_mean = _teacher_latent_and_student_action(
+                        teacher,
+                        teacher_obs_raw,
+                        z_hat,
+                        stochastic_actions=args_cli.stochastic_actions,
+                    )
+                else:
+                    z_teacher, teacher_action, actions, action_mean, current_obs = (
+                        _teacher_targets_and_trainable_student_action(
+                            teacher,
+                            student_actor,
+                            teacher_obs_raw,
+                            z_hat,
+                            stochastic_actions=args_cli.stochastic_actions,
+                        )
+                    )
+            if student_actor is None:
+                buffer.add(history_raw, z_teacher)
+            else:
+                buffer.add(
+                    history_raw,
+                    z_teacher,
+                    current_obs=current_obs,
+                    target_action=teacher_action,
                 )
-
-            buffer.add(history_raw, z_teacher)
             obs, rewards, dones, _ = vec_env.step(actions)
 
-            new_data_loss_sum += float(F.mse_loss(z_hat, z_teacher).item())
+            if student_actor is None:
+                latent_loss = F.mse_loss(z_hat, z_teacher)
+                action_loss = latent_loss.new_zeros(())
+                collection_loss = latent_loss
+            else:
+                collection_loss, latent_loss, action_loss = _compute_dagger_losses(
+                    z_hat,
+                    z_teacher,
+                    pred_action=action_mean,
+                    target_action=teacher_action,
+                    action_loss_weight=args_cli.action_loss_weight,
+                )
+            new_data_loss_sum += float(collection_loss.item())
+            new_data_latent_loss_sum += float(latent_loss.item())
+            new_data_action_loss_sum += float(action_loss.item())
             reward_sum += float(rewards.mean().item())
             done_sum += float(dones.float().mean().item())
             action_mean_abs_sum += float(action_mean.abs().mean().item())
@@ -1291,6 +1694,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             total_steps += policy_obs.shape[0]
 
         adapter.train()
+        if student_actor is not None:
+            student_actor.train()
         if buffer.size < 1:
             raise RuntimeError("No DAgger samples were collected; cannot train adapter.")
         if args_cli.updates_per_iter is None:
@@ -1299,20 +1704,49 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             updates = int(args_cli.updates_per_iter)
 
         loss_sum = 0.0
+        latent_loss_sum = 0.0
+        action_loss_sum = 0.0
         for _ in range(updates):
-            history_batch, target_z_batch = buffer.sample(args_cli.mini_batch_size, device)
+            batch = buffer.sample(args_cli.mini_batch_size, device)
+            history_batch, target_z_batch = batch[:2]
             if history_normalizer is not None:
                 history_batch = history_normalizer(history_batch)
             pred_z = adapter(history_batch)
-            loss = F.mse_loss(pred_z, target_z_batch)
+            if student_actor is None:
+                # Keep the original adapter-only objective unchanged.
+                latent_loss = F.mse_loss(pred_z, target_z_batch)
+                action_loss = latent_loss.new_zeros(())
+                loss = latent_loss
+            else:
+                current_obs_batch, target_action_batch = batch[2:]
+                actor_input = torch.cat((current_obs_batch, pred_z), dim=-1)
+                pred_action, _ = _actor_mean_and_std(teacher, actor_input, actor=student_actor)
+                loss, latent_loss, action_loss = _compute_dagger_losses(
+                    pred_z,
+                    target_z_batch,
+                    pred_action=pred_action,
+                    target_action=target_action_batch,
+                    action_loss_weight=args_cli.action_loss_weight,
+                )
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             if args_cli.max_grad_norm > 0.0:
-                nn.utils.clip_grad_norm_(adapter.parameters(), args_cli.max_grad_norm)
+                if student_actor is None:
+                    nn.utils.clip_grad_norm_(adapter.parameters(), args_cli.max_grad_norm)
+                else:
+                    nn.utils.clip_grad_norm_(
+                        list(adapter.parameters()) + list(student_actor.parameters()), args_cli.max_grad_norm
+                    )
             optimizer.step()
             loss_sum += float(loss.item())
+            latent_loss_sum += float(latent_loss.item())
+            action_loss_sum += float(action_loss.item())
         mean_loss = loss_sum / max(updates, 1)
+        mean_latent_mse = latent_loss_sum / max(updates, 1)
+        mean_action_mse = action_loss_sum / max(updates, 1)
         new_data_loss_before_update = new_data_loss_sum / max(num_steps_per_iter, 1)
+        new_data_latent_mse_before_update = new_data_latent_loss_sum / max(num_steps_per_iter, 1)
+        new_data_action_mse_before_update = new_data_action_loss_sum / max(num_steps_per_iter, 1)
 
         mean_reward_per_step = reward_sum / max(num_steps_per_iter, 1)
         mean_done_per_step = done_sum / max(num_steps_per_iter, 1)
@@ -1321,20 +1755,24 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         mean_z_teacher_abs = z_teacher_abs_sum / max(num_steps_per_iter, 1)
         elapsed = time.time() - start_time
 
+        best_latent_mse = min(best_latent_mse, mean_latent_mse)
         if mean_loss < best_loss:
             best_loss = mean_loss
             _save_checkpoint(
-                path=best_latent_path,
+                path=best_supervised_path,
                 adapter=adapter,
+                student_actor=student_actor,
                 history_normalizer=history_normalizer,
                 optimizer=optimizer,
                 iteration=iteration,
                 samples=buffer.size,
                 best_loss=best_loss,
+                best_latent_mse=best_latent_mse,
                 teacher_checkpoint=teacher_checkpoint,
                 layout=layout,
                 dims=dims,
-                selection_metric_name="dagger/latent_mse",
+                action_loss_weight=args_cli.action_loss_weight,
+                selection_metric_name=supervised_selection_metric,
                 selection_metric_value=best_loss,
             )
 
@@ -1347,6 +1785,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 vec_env=vec_env,
                 teacher=teacher,
                 adapter=adapter,
+                student_actor=student_actor,
                 history_normalizer=history_normalizer,
                 dims=dims,
                 eval_n=int(args_cli.n_env_eval),
@@ -1358,14 +1797,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 _save_checkpoint(
                     path=os.path.join(log_dir, "checkpoints", "adapter_best.pt"),
                     adapter=adapter,
+                    student_actor=student_actor,
                     history_normalizer=history_normalizer,
                     optimizer=optimizer,
                     iteration=iteration,
                     samples=buffer.size,
                     best_loss=best_loss,
+                    best_latent_mse=best_latent_mse,
                     teacher_checkpoint=teacher_checkpoint,
                     layout=layout,
                     dims=dims,
+                    action_loss_weight=args_cli.action_loss_weight,
                     selection_metric_name="policy_eval/Episode/finishTimeSteps",
                     selection_metric_value=best_eval_finish_time_steps,
                     policy_eval=policy_eval_metrics,
@@ -1375,16 +1817,19 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             _save_checkpoint(
                 path=os.path.join(log_dir, "checkpoints", "adapter_latest.pt"),
                 adapter=adapter,
+                student_actor=student_actor,
                 history_normalizer=history_normalizer,
                 optimizer=optimizer,
                 iteration=iteration,
                 samples=buffer.size,
                 best_loss=best_loss,
+                best_latent_mse=best_latent_mse,
                 teacher_checkpoint=teacher_checkpoint,
                 layout=layout,
                 dims=dims,
+                action_loss_weight=args_cli.action_loss_weight,
                 selection_metric_name=(
-                    "policy_eval/Episode/finishTimeSteps" if policy_eval_enabled else "dagger/latent_mse"
+                    "policy_eval/Episode/finishTimeSteps" if policy_eval_enabled else supervised_selection_metric
                 ),
                 selection_metric_value=(best_eval_finish_time_steps if policy_eval_enabled else best_loss),
             )
@@ -1393,10 +1838,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             "dagger/iteration": iteration,
             "dagger/num_iterations": num_iterations,
             "dagger/loss": mean_loss,
-            "dagger/latent_mse": mean_loss,
+            "dagger/latent_mse": mean_latent_mse,
+            "dagger/action_mse": mean_action_mse,
+            "dagger/weighted_action_mse": float(args_cli.action_loss_weight) * mean_action_mse,
             "dagger/best_loss": best_loss,
-            "dagger/best_latent_mse": best_loss,
+            "dagger/best_latent_mse": best_latent_mse,
             "dagger/new_data_loss_before_update": new_data_loss_before_update,
+            "dagger/new_data_latent_mse_before_update": new_data_latent_mse_before_update,
+            "dagger/new_data_action_mse_before_update": new_data_action_mse_before_update,
             "policy_eval/best_finishTimeSteps": (
                 best_eval_finish_time_steps if math.isfinite(best_eval_finish_time_steps) else None
             ),
@@ -1426,7 +1875,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         if wandb_run is not None:
             wandb_run.log({key: value for key, value in metrics.items() if value is not None}, step=iteration)
             wandb_run.summary["dagger/best_loss"] = best_loss
+            wandb_run.summary["dagger/best_latent_mse"] = best_latent_mse
             wandb_run.summary["dagger/latest_loss"] = mean_loss
+            wandb_run.summary["dagger/latest_latent_mse"] = mean_latent_mse
+            wandb_run.summary["dagger/latest_action_mse"] = mean_action_mse
             wandb_run.summary["dagger/latest_new_data_loss_before_update"] = new_data_loss_before_update
             if math.isfinite(best_eval_finish_time_steps):
                 wandb_run.summary["policy_eval/best_finishTimeSteps"] = best_eval_finish_time_steps
@@ -1436,7 +1888,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         if iteration % args_cli.log_interval == 0:
             print(
                 f"[DAgger] iter={iteration:05d}/{num_iterations} "
-                f"loss={mean_loss:.6f} best={best_loss:.6f} "
+                f"loss={mean_loss:.6f} latent={mean_latent_mse:.6f} action={mean_action_mse:.6f} "
+                f"best={best_loss:.6f} "
                 f"reward_perStep={mean_reward_per_step:.3f} done_perStep={mean_done_per_step:.3f} "
                 f"buffer={buffer.size} updates={updates} elapsed={elapsed/60.0:.1f}m",
                 flush=True,
@@ -1445,15 +1898,20 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     _save_checkpoint(
         path=os.path.join(log_dir, "checkpoints", "adapter_latest.pt"),
         adapter=adapter,
+        student_actor=student_actor,
         history_normalizer=history_normalizer,
         optimizer=optimizer,
         iteration=num_iterations,
         samples=buffer.size,
         best_loss=best_loss,
+        best_latent_mse=best_latent_mse,
         teacher_checkpoint=teacher_checkpoint,
         layout=layout,
         dims=dims,
-        selection_metric_name=("policy_eval/Episode/finishTimeSteps" if policy_eval_enabled else "dagger/latent_mse"),
+        action_loss_weight=args_cli.action_loss_weight,
+        selection_metric_name=(
+            "policy_eval/Episode/finishTimeSteps" if policy_eval_enabled else supervised_selection_metric
+        ),
         selection_metric_value=(best_eval_finish_time_steps if policy_eval_enabled else best_loss),
     )
     if wandb_run is not None:
@@ -1465,7 +1923,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             f"(policy_eval/Episode/finishTimeSteps={best_eval_finish_time_steps:.3f})",
             flush=True,
         )
-        print(f"[INFO] Best latent-MSE adapter: {best_latent_path}", flush=True)
+        label = "supervised-loss" if student_actor is not None else "latent-MSE"
+        print(f"[INFO] Best {label} adapter: {best_supervised_path}", flush=True)
     else:
         print(f"[INFO] Best adapter: {os.path.join(log_dir, 'checkpoints', 'adapter_best.pt')}", flush=True)
     vec_env.close()

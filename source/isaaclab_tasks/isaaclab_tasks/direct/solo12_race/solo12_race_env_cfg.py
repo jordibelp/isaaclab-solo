@@ -228,6 +228,10 @@ class Solo12RaceEnvCfg(DirectRLEnvCfg):
     include_foot_imu_obs = False
     include_joint_state_history_obs = False
     include_root_lin_vel_b_obs = True
+    # Use a history-conditioned actor with a privileged critic. The policy observation remains
+    # [current race obs, history], while the critic receives [current race obs, GT forces, GT friction].
+    # This stays disabled on the base config so old/custom TCN tasks keep their symmetric layout.
+    asymmetric_actor_critic = False
 
     # Set True to recover the legacy 57D race observation used by checkpoints/exported policies
     # trained before cClose/cClose1 were added. Default False keeps the new 63D observation.
@@ -487,6 +491,12 @@ class Solo12RaceEnvCfg(DirectRLEnvCfg):
             self.gt_env_params_obs_dim += self.gt_foot_contact_force_obs_dim
         if self.include_mu_coefs_to_gt_obs:
             self.gt_env_params_obs_dim += self.gt_patch_mu_obs_dim
+        self.privileged_env_params_obs_dim = self.gt_foot_contact_force_obs_dim + self.gt_patch_mu_obs_dim
+        if self.asymmetric_actor_critic and self.gt_env_params_obs_dim:
+            raise ValueError(
+                "asymmetric_actor_critic expects privileged GT parameters only in the critic observation; "
+                "disable include_forces_to_gt_obs/include_mu_coefs_to_gt_obs for the policy."
+            )
         obs_dim += self.gt_env_params_obs_dim
         self.proprio_observation_dim = obs_dim
         self.foot_imu_history_length = self.decimation * self.foot_imu_history_policy_steps
@@ -502,6 +512,11 @@ class Solo12RaceEnvCfg(DirectRLEnvCfg):
         elif self.include_joint_state_history_obs:
             obs_dim += self.joint_state_history_length * self.joint_state_history_obs_dim
         self.observation_space = obs_dim
+        self.state_space = (
+            self.base_observation_dim + self.privileged_env_params_obs_dim
+            if self.asymmetric_actor_critic
+            else 0
+        )
 
 
 @configclass
@@ -521,6 +536,7 @@ class Solo12RaceIMUEnvCfg(Solo12RaceEnvCfg):
 class Solo12RaceJointStateTcnEnvCfg(Solo12RaceEnvCfg):
     policy_model = "tcn_joint_states_encoder"
     include_joint_state_history_obs = True
+    asymmetric_actor_critic = True
 
 
 @configclass
@@ -528,6 +544,7 @@ class Solo12RaceJointStateImuTcnEnvCfg(Solo12RaceEnvCfg):
     policy_model = "tcn_joint_states_foot_imu_encoder"
     include_foot_imu_obs = True
     include_joint_state_history_obs = True
+    asymmetric_actor_critic = True
 
 
 @configclass
@@ -569,6 +586,7 @@ class Solo12RaceIMUEvalCameraEnvCfg(Solo12RaceEvalCameraEnvCfg):
 class Solo12RaceJointStateTcnEvalCameraEnvCfg(Solo12RaceEvalCameraEnvCfg):
     policy_model = "tcn_joint_states_encoder"
     include_joint_state_history_obs = True
+    asymmetric_actor_critic = True
 
 
 @configclass
@@ -576,3 +594,4 @@ class Solo12RaceJointStateImuTcnEvalCameraEnvCfg(Solo12RaceEvalCameraEnvCfg):
     policy_model = "tcn_joint_states_foot_imu_encoder"
     include_foot_imu_obs = True
     include_joint_state_history_obs = True
+    asymmetric_actor_critic = True

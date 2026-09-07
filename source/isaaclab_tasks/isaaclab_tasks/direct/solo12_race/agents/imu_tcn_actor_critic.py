@@ -106,14 +106,15 @@ class FootImuTcnEncoder(nn.Module):
 
 
 class ActorCriticFootImuTcn(nn.Module):
-    """RSL-RL actor-critic with a TCN encoder over foot-IMU history.
+    """RSL-RL actor-critic with a TCN encoder over sensor history.
 
     The env exposes a flat policy observation:
         [current proprio/race obs, flattened IMU history]
 
-    The actor and critic each encode the IMU history with their own TCN and then feed
-    [current obs, imu latent] through the usual MLP heads. Hidden dimensions are kept
-    configurable so the IMU policy can reuse the baseline [256, 128, 64] head.
+    By default the actor and critic each encode the history with their own TCN. With
+    ``asymmetric_actor_critic=True``, only the actor uses history; the critic instead
+    receives ``[current obs, privileged env params]`` and encodes the privileged suffix
+    with the same MLP architecture and state-dict names as the teacher critic.
     """
 
     is_recurrent: bool = False
@@ -142,6 +143,11 @@ class ActorCriticFootImuTcn(nn.Module):
         tcn_kernel_size: int = 5,
         tcn_activation: str = "elu",
         shared_networks: bool = False,
+        asymmetric_actor_critic: bool = False,
+        env_params_dim: int = 16,
+        env_params_encoder_hidden_dims: tuple[int] | list[int] = (64, 32),
+        env_params_latent_dim: int = 8,
+        env_params_encoder_activation: str = "elu",
         **kwargs: dict[str, Any],
     ) -> None:
         if kwargs:
@@ -163,8 +169,13 @@ class ActorCriticFootImuTcn(nn.Module):
         self.imu_dim = imu_dim
         self.imu_history_flat_dim = imu_history_len * imu_dim
         self.tcn_latent_dim = tcn_latent_dim
+        self.asymmetric_actor_critic = bool(asymmetric_actor_critic)
+        self.env_params_dim = int(env_params_dim)
+        self.env_params_latent_dim = int(env_params_latent_dim)
         self.state_dependent_std = state_dependent_std
         self.shared_networks = bool(shared_networks)
+        if self.asymmetric_actor_critic and self.shared_networks:
+            raise ValueError("shared_networks=True is incompatible with an asymmetric actor-critic.")
 
         num_actor_obs = self._obs_dim(obs, obs_groups["policy"])
         num_critic_obs = self._obs_dim(obs, obs_groups["critic"])
@@ -176,14 +187,22 @@ class ActorCriticFootImuTcn(nn.Module):
                 flush=True,
             )
             self.current_obs_dim = inferred_current_obs_dim
-        expected_obs_dim = self.current_obs_dim + self.imu_history_flat_dim
-        if num_actor_obs != expected_obs_dim:
+        expected_actor_obs_dim = self.current_obs_dim + self.imu_history_flat_dim
+        if num_actor_obs != expected_actor_obs_dim:
             raise ValueError(
-                f"Actor observation dim {num_actor_obs} != expected {history_name} TCN dim {expected_obs_dim}."
+                f"Actor observation dim {num_actor_obs} != expected {history_name} TCN dim "
+                f"{expected_actor_obs_dim}."
             )
-        if num_critic_obs != expected_obs_dim:
+        expected_critic_obs_dim = (
+            self.current_obs_dim + self.env_params_dim
+            if self.asymmetric_actor_critic
+            else expected_actor_obs_dim
+        )
+        if num_critic_obs != expected_critic_obs_dim:
             raise ValueError(
-                f"Critic observation dim {num_critic_obs} != expected {history_name} TCN dim {expected_obs_dim}."
+                f"Critic observation dim {num_critic_obs} != expected "
+                f"{'privileged env-parameter' if self.asymmetric_actor_critic else history_name + ' TCN'} "
+                f"dim {expected_critic_obs_dim}."
             )
 
         self.actor_obs_normalization = actor_obs_normalization
@@ -209,12 +228,22 @@ class ActorCriticFootImuTcn(nn.Module):
             "activation": tcn_activation,
         }
         self.actor_imu_encoder = FootImuTcnEncoder(**encoder_kwargs)
-        if self.shared_networks:
+        if self.asymmetric_actor_critic:
+            self.critic_env_params_encoder = MLP(
+                input_dim=self.env_params_dim,
+                output_dim=self.env_params_latent_dim,
+                hidden_dims=list(env_params_encoder_hidden_dims),
+                activation=env_params_encoder_activation,
+            )
+        elif self.shared_networks:
             self.critic_imu_encoder = self.actor_imu_encoder
         else:
             self.critic_imu_encoder = FootImuTcnEncoder(**encoder_kwargs)
 
-        head_input_dim = self.current_obs_dim + tcn_latent_dim
+        actor_head_input_dim = self.current_obs_dim + tcn_latent_dim
+        critic_head_input_dim = self.current_obs_dim + (
+            self.env_params_latent_dim if self.asymmetric_actor_critic else tcn_latent_dim
+        )
         if self.shared_networks:
             if list(actor_hidden_dims) != list(critic_hidden_dims):
                 print(
@@ -223,21 +252,24 @@ class ActorCriticFootImuTcn(nn.Module):
                     flush=True,
                 )
             self.actor, self.critic = make_shared_actor_critic_mlps(
-                head_input_dim,
+                actor_head_input_dim,
                 num_actions,
                 actor_hidden_dims,
                 activation,
                 state_dependent_std=state_dependent_std,
             )
         elif state_dependent_std:
-            self.actor = MLP(head_input_dim, [2, num_actions], actor_hidden_dims, activation)
+            self.actor = MLP(actor_head_input_dim, [2, num_actions], actor_hidden_dims, activation)
         else:
-            self.actor = MLP(head_input_dim, num_actions, actor_hidden_dims, activation)
+            self.actor = MLP(actor_head_input_dim, num_actions, actor_hidden_dims, activation)
         if not self.shared_networks:
-            self.critic = MLP(head_input_dim, 1, critic_hidden_dims, activation)
+            self.critic = MLP(critic_head_input_dim, 1, critic_hidden_dims, activation)
         print(f"Actor {history_name} TCN: {self.actor_imu_encoder}")
         print(f"Actor MLP: {self.actor}")
-        print(f"Critic {history_name} TCN: {self.critic_imu_encoder}")
+        if self.asymmetric_actor_critic:
+            print(f"Critic env-param encoder: {self.critic_env_params_encoder}")
+        else:
+            print(f"Critic {history_name} TCN: {self.critic_imu_encoder}")
         print(f"Critic MLP: {self.critic}")
 
         self.noise_std_type = noise_std_type
@@ -288,15 +320,20 @@ class ActorCriticFootImuTcn(nn.Module):
     def get_critic_obs(self, obs: TensorDict) -> torch.Tensor:
         return torch.cat([obs[obs_group] for obs_group in self.obs_groups["critic"]], dim=-1)
 
-    def _encode(self, obs: torch.Tensor, encoder: FootImuTcnEncoder) -> torch.Tensor:
+    def _encode_history(self, obs: torch.Tensor, encoder: FootImuTcnEncoder) -> torch.Tensor:
         current_obs = obs[:, : self.current_obs_dim]
         imu_history = obs[:, self.current_obs_dim :]
         return torch.cat((current_obs, encoder(imu_history)), dim=-1)
 
+    def _encode_env_params(self, obs: torch.Tensor) -> torch.Tensor:
+        current_obs = obs[:, : self.current_obs_dim]
+        env_params = obs[:, self.current_obs_dim : self.current_obs_dim + self.env_params_dim]
+        return torch.cat((current_obs, self.critic_env_params_encoder(env_params)), dim=-1)
+
     def _update_distribution(self, obs: TensorDict) -> None:
         obs = self.get_actor_obs(obs)
         obs = self.actor_obs_normalizer(obs)
-        actor_input = self._encode(obs, self.actor_imu_encoder)
+        actor_input = self._encode_history(obs, self.actor_imu_encoder)
         if self.state_dependent_std:
             mean_and_std = self.actor(actor_input)
             if self.noise_std_type == "scalar":
@@ -323,7 +360,7 @@ class ActorCriticFootImuTcn(nn.Module):
     def act_inference(self, obs: TensorDict) -> torch.Tensor:
         obs = self.get_actor_obs(obs)
         obs = self.actor_obs_normalizer(obs)
-        actor_input = self._encode(obs, self.actor_imu_encoder)
+        actor_input = self._encode_history(obs, self.actor_imu_encoder)
         if self.state_dependent_std:
             return self.actor(actor_input)[..., 0, :]
         return self.actor(actor_input)
@@ -331,7 +368,10 @@ class ActorCriticFootImuTcn(nn.Module):
     def evaluate(self, obs: TensorDict, **kwargs: dict[str, Any]) -> torch.Tensor:
         obs = self.get_critic_obs(obs)
         obs = self.critic_obs_normalizer(obs)
-        critic_input = self._encode(obs, self.critic_imu_encoder)
+        if self.asymmetric_actor_critic:
+            critic_input = self._encode_env_params(obs)
+        else:
+            critic_input = self._encode_history(obs, self.critic_imu_encoder)
         return self.critic(critic_input)
 
     def get_actions_log_prob(self, actions: torch.Tensor) -> torch.Tensor:
@@ -355,19 +395,25 @@ class ActorCriticFootImuTcn(nn.Module):
         copy_dim = old_shared_dim if source_current_dim == 52 else source_current_dim
         adapted[..., :copy_dim] = source[..., :copy_dim]
 
-    def _adapt_head_input_tensor(self, source: torch.Tensor, target: torch.Tensor) -> torch.Tensor | None:
-        target_dim = self.current_obs_dim + self.tcn_latent_dim
+    def _adapt_head_input_tensor(
+        self,
+        source: torch.Tensor,
+        target: torch.Tensor,
+        *,
+        latent_dim: int,
+    ) -> torch.Tensor | None:
+        target_dim = self.current_obs_dim + latent_dim
         if source.ndim != 2 or target.ndim != 2 or target.shape[-1] != target_dim or source.shape[0] != target.shape[0]:
             return None
 
-        source_current_dim = self._source_current_obs_dim(source.shape[-1], self.tcn_latent_dim)
+        source_current_dim = self._source_current_obs_dim(source.shape[-1], latent_dim)
         if source_current_dim is None:
             return None
 
         adapted = torch.zeros_like(target)
         self._copy_current_obs_columns(adapted, source, source_current_dim)
         adapted[..., self.current_obs_dim : target_dim] = source[
-            ..., source_current_dim : source_current_dim + self.tcn_latent_dim
+            ..., source_current_dim : source_current_dim + latent_dim
         ]
         return adapted
 
@@ -376,26 +422,32 @@ class ActorCriticFootImuTcn(nn.Module):
         source: torch.Tensor,
         target: torch.Tensor,
         *,
+        trailing_dim: int,
         zero_missing_columns: bool,
     ) -> torch.Tensor | None:
-        target_dim = self.current_obs_dim + self.imu_history_flat_dim
+        target_dim = self.current_obs_dim + trailing_dim
         if target.shape[-1] != target_dim:
             return None
 
-        source_current_dim = self._source_current_obs_dim(source.shape[-1], self.imu_history_flat_dim)
+        source_current_dim = self._source_current_obs_dim(source.shape[-1], trailing_dim)
         if source_current_dim is None:
             return None
 
         adapted = torch.zeros_like(target) if zero_missing_columns else target.clone()
         self._copy_current_obs_columns(adapted, source, source_current_dim)
         adapted[..., self.current_obs_dim : target_dim] = source[
-            ..., source_current_dim : source_current_dim + self.imu_history_flat_dim
+            ..., source_current_dim : source_current_dim + trailing_dim
         ]
         return adapted
 
     def _adapt_input_tensor(self, key: str, source: torch.Tensor, target: torch.Tensor) -> torch.Tensor | None:
         if key.startswith(("actor.", "critic.")) and key.endswith(".weight"):
-            return self._adapt_head_input_tensor(source, target)
+            latent_dim = (
+                self.env_params_latent_dim
+                if self.asymmetric_actor_critic and key.startswith("critic.")
+                else self.tcn_latent_dim
+            )
+            return self._adapt_head_input_tensor(source, target, latent_dim=latent_dim)
 
         if (
             key.startswith(("actor_obs_normalizer.", "critic_obs_normalizer."))
@@ -404,7 +456,17 @@ class ActorCriticFootImuTcn(nn.Module):
             and target.ndim == 2
             and source.shape[0] == target.shape[0] == 1
         ):
-            return self._adapt_raw_obs_tensor(source, target, zero_missing_columns=False)
+            trailing_dim = (
+                self.env_params_dim
+                if self.asymmetric_actor_critic and key.startswith("critic_obs_normalizer.")
+                else self.imu_history_flat_dim
+            )
+            return self._adapt_raw_obs_tensor(
+                source,
+                target,
+                trailing_dim=trailing_dim,
+                zero_missing_columns=False,
+            )
 
         if key.startswith(("actor_obs_normalizer.", "critic_obs_normalizer.")) and key.endswith(".count"):
             return torch.zeros_like(target)

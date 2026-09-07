@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from typing import Any, NoReturn
 
 import torch
@@ -25,6 +26,11 @@ class EnvParamsConditionedEncoderActor(nn.Module):
     Internally, actor and critic normalize the full observation, encode only the GT env
     params with a small MLP, and feed the heads with:
         [current race obs, env-param encoding]
+
+    The actor and critic use separate env-param encoders by default. Setting
+    ``actor_critic_share_latent_encoding`` makes both branches reference the same
+    encoder module without otherwise sharing their policy/value heads or observation
+    normalizers.
     """
 
     is_recurrent: bool = False
@@ -48,6 +54,7 @@ class EnvParamsConditionedEncoderActor(nn.Module):
         env_params_latent_dim: int = 8,
         env_params_encoder_activation: str = "elu",
         shared_networks: bool = False,
+        actor_critic_share_latent_encoding: bool = False,
         **kwargs: dict[str, Any],
     ) -> None:
         if kwargs:
@@ -63,6 +70,18 @@ class EnvParamsConditionedEncoderActor(nn.Module):
         self.env_params_latent_dim = int(env_params_latent_dim)
         self.state_dependent_std = state_dependent_std
         self.shared_networks = bool(shared_networks)
+        self.actor_critic_share_latent_encoding = bool(actor_critic_share_latent_encoding)
+        # Full actor/critic network sharing already implied a shared encoder. Keep that
+        # behavior while allowing the encoder to be shared independently of the heads.
+        self._share_env_params_encoder = self.shared_networks or self.actor_critic_share_latent_encoding
+        sharing_topology = 2 if self.shared_networks else 1 if self.actor_critic_share_latent_encoding else 0
+        # Persist parameter-alias topology because equal actor/critic tensors alone cannot
+        # distinguish a truly shared module from two independent modules. RSL-RL uses the
+        # bool returned by load_state_dict to decide whether optimizer state is safe to load.
+        self.register_buffer(
+            "_sharing_topology_marker",
+            torch.tensor(sharing_topology, dtype=torch.uint8),
+        )
 
         num_actor_obs = self._obs_dim(obs, obs_groups["policy"])
         num_critic_obs = self._obs_dim(obs, obs_groups["critic"])
@@ -105,7 +124,7 @@ class EnvParamsConditionedEncoderActor(nn.Module):
             "activation": env_params_encoder_activation,
         }
         self.actor_env_params_encoder = MLP(**encoder_kwargs)
-        if self.shared_networks:
+        if self._share_env_params_encoder:
             self.critic_env_params_encoder = self.actor_env_params_encoder
         else:
             self.critic_env_params_encoder = MLP(**encoder_kwargs)
@@ -329,9 +348,87 @@ class EnvParamsConditionedEncoderActor(nn.Module):
 
         return None
 
+    def _align_shared_encoder_state_dict(self, state_dict: dict) -> tuple[OrderedDict, bool]:
+        """Make aliased actor/critic encoder checkpoint entries deterministic.
+
+        PyTorch intentionally emits both attribute paths for an aliased module in a
+        state dict while de-duplicating that module's parameters for optimizers. A
+        checkpoint produced with a shared encoder therefore has identical actor and
+        critic entries. When warm-starting shared encoding from an older checkpoint
+        containing two different encoders, preserve the actor encoder and mirror it to
+        the critic alias. This keeps the teacher's policy behavior intact and avoids
+        the otherwise implicit, traversal-order-dependent "last alias wins" behavior.
+        """
+
+        aligned_state_dict = OrderedDict(state_dict)
+        if hasattr(state_dict, "_metadata"):
+            aligned_state_dict._metadata = state_dict._metadata
+
+        marker_key = "_sharing_topology_marker"
+        target_topology = int(self._sharing_topology_marker.item())
+        source_marker = aligned_state_dict.get(marker_key)
+        # The marker is new. Every older checkpoint used independent latent encoders
+        # unless the newly introduced sharing option was available, so legacy means 0.
+        source_topology = int(source_marker.item()) if torch.is_tensor(source_marker) else 0
+        topology_adapted = source_topology != target_topology
+        if topology_adapted and source_topology != 0:
+            topology_names = {0: "separate", 1: "shared latent encoder", 2: "fully shared networks"}
+            raise ValueError(
+                "Teacher checkpoint sharing topology does not match the requested model: "
+                f"checkpoint={topology_names.get(source_topology, source_topology)}, "
+                f"model={topology_names.get(target_topology, target_topology)}. Resume with the same "
+                "sharing option, or use the explicit MLP warm-start path instead of optimizer resume."
+            )
+        # Always inject/overwrite the marker so legacy checkpoints remain strict-loadable
+        # and permitted separate->shared warm starts retain the target topology.
+        aligned_state_dict[marker_key] = self._sharing_topology_marker.detach().clone()
+        if not self._share_env_params_encoder:
+            return aligned_state_dict, topology_adapted
+
+        actor_prefix = "actor_env_params_encoder."
+        critic_prefix = "critic_env_params_encoder."
+        suffixes = {
+            key[len(actor_prefix) :]
+            for key in aligned_state_dict
+            if key.startswith(actor_prefix)
+        }
+        suffixes.update(
+            key[len(critic_prefix) :]
+            for key in aligned_state_dict
+            if key.startswith(critic_prefix)
+        )
+
+        adapted = topology_adapted
+        conflicting_suffixes: list[str] = []
+        for suffix in suffixes:
+            actor_key = actor_prefix + suffix
+            critic_key = critic_prefix + suffix
+            actor_value = aligned_state_dict.get(actor_key)
+            critic_value = aligned_state_dict.get(critic_key)
+            if actor_value is None:
+                aligned_state_dict[actor_key] = critic_value
+                adapted = True
+            elif critic_value is None:
+                aligned_state_dict[critic_key] = actor_value
+                adapted = True
+            elif actor_value.shape != critic_value.shape or not torch.equal(actor_value, critic_value):
+                aligned_state_dict[critic_key] = actor_value
+                conflicting_suffixes.append(suffix)
+                adapted = True
+
+        if conflicting_suffixes:
+            print(
+                "[WARN]: Loading separate actor/critic env-param encoders into shared latent encoding; "
+                f"preserving the actor encoder for {len(conflicting_suffixes)} tensors and mirroring it "
+                "to the critic alias.",
+                flush=True,
+            )
+        return aligned_state_dict, adapted
+
     def load_state_dict(self, state_dict: dict, strict: bool = True) -> bool:
+        state_dict, shared_encoder_adapted = self._align_shared_encoder_state_dict(state_dict)
         target_state = self.state_dict()
-        exact_match = True
+        exact_match = not shared_encoder_adapted
         adapted_keys: list[str] = []
         skipped_keys: list[str] = []
 
