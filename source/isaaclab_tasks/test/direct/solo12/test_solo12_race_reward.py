@@ -182,6 +182,7 @@ def _make_patch_boundary_env() -> Solo12RaceEnv:
         penalty_leaving_patches=-20.0,
         reset_on_leaving_patches=True,
         apply_penalty_leaving_patches_and_reset_only_after_seconds=0.0,
+        race_scene="straightSimple",
         sim=SimpleNamespace(dt=0.02),
         decimation=1,
         episode_length_s=2.0,
@@ -225,6 +226,32 @@ def test_base_outside_patches_gets_penalty_and_terminates():
     terminated, time_out = env._get_dones()
     torch.testing.assert_close(terminated, expected_outside)
     assert not torch.any(time_out)
+
+
+def test_straight_track_enclosing_boundary_bridges_internal_patch_gaps():
+    env = _make_patch_boundary_env()
+    env._patch_xy_min = torch.tensor([[0.0, 0.0], [0.0, 1.1]])
+    env._patch_xy_max = torch.tensor([[1.0, 0.9], [1.0, 2.0]])
+    local_root_pos = torch.tensor(
+        [
+            [0.5, 0.5, 0.4],
+            [0.5, 1.0, 0.4],
+            [0.5, 1.5, 0.4],
+            [1.01, 1.0, 0.4],
+        ]
+    )
+    env._robot.data.root_pos_w = local_root_pos + env.scene.env_origins
+
+    expected_outside = torch.tensor([False, False, False, True])
+    torch.testing.assert_close(env._compute_base_outside_patches(), expected_outside)
+    torch.testing.assert_close(env._compute_leaving_patches_penalty(), expected_outside.float() * -20.0)
+    terminated, _ = env._get_dones()
+    torch.testing.assert_close(terminated, expected_outside)
+
+    env.cfg.race_scene = "simple_zigzag"
+    torch.testing.assert_close(
+        env._compute_base_outside_patches(), torch.tensor([False, True, False, True])
+    )
 
 
 def test_leaving_patch_reset_can_be_disabled_without_disabling_penalty():

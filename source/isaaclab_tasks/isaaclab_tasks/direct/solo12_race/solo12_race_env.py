@@ -1248,11 +1248,17 @@ class Solo12RaceEnv(DirectRLEnv):
         return torch.sum(excess_force, dim=1)
 
     def _compute_base_outside_patches(self) -> torch.Tensor:
-        """Return whether each robot base center is outside every authored friction patch."""
+        """Return whether each robot base center is outside the friction-patch track boundary."""
         if self._patch_xy_min.numel() == 0:
             return torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
 
         base_xy = self._robot.data.root_pos_w[:, :2] - self.scene.env_origins[:, :2]
+        if self.cfg.race_scene == "straightSimple":
+            boundary_min = torch.amin(self._patch_xy_min, dim=0)
+            boundary_max = torch.amax(self._patch_xy_max, dim=0)
+            inside_boundary = torch.logical_and(base_xy >= boundary_min, base_xy <= boundary_max).all(dim=-1)
+            return ~inside_boundary
+
         inside_patch = torch.logical_and(
             base_xy[:, None, :] >= self._patch_xy_min[None, :, :],
             base_xy[:, None, :] <= self._patch_xy_max[None, :, :],
