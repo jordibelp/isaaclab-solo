@@ -1570,10 +1570,7 @@ class Solo12RaceEnv(DirectRLEnv):
         episode_timed_out = self.reset_time_outs[env_ids]
         episode_completion = self._compute_episode_completion(env_ids)
         finish_ratio = torch.mean(episode_finished.float()).item()
-        if torch.any(episode_finished):
-            finish_time_steps = torch.mean(self.episode_length_buf[env_ids][episode_finished].float()).item()
-        else:
-            finish_time_steps = float(self.max_episode_length)
+        finish_time_steps = self._compute_finish_time_steps(env_ids, episode_finished)
         finish_time_seconds = finish_time_steps * self.step_dt
 
         self._robot.reset(env_ids)
@@ -1657,6 +1654,16 @@ class Solo12RaceEnv(DirectRLEnv):
         extras["Episode_Termination/terminated"] = torch.count_nonzero(episode_terminated).item()
         extras["Episode_Termination/time_out"] = torch.count_nonzero(episode_timed_out).item()
         self.extras["log"] = extras
+
+    def _compute_finish_time_steps(self, env_ids: torch.Tensor, episode_finished: torch.Tensor) -> float:
+        """Average finish time, assigning the full episode horizon to every unsuccessful episode."""
+        episode_lengths = self.episode_length_buf[env_ids]
+        penalized_lengths = torch.where(
+            episode_finished,
+            episode_lengths,
+            torch.full_like(episode_lengths, self.max_episode_length),
+        )
+        return torch.mean(penalized_lengths.float()).item()
 
     def _compute_episode_completion(self, env_ids: torch.Tensor) -> torch.Tensor:
         if self._target_count <= 0:

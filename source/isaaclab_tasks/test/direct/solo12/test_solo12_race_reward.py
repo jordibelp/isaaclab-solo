@@ -200,6 +200,19 @@ def test_leaving_patch_config_defaults_enable_penalty_and_reset():
     assert cfg.reset_on_leaving_patches is True
 
 
+def test_finish_time_assigns_maximum_duration_to_unsuccessful_episodes():
+    env = object.__new__(Solo12RaceEnv)
+    env._is_closed = True
+    env.cfg = SimpleNamespace(sim=SimpleNamespace(dt=0.002), decimation=10, episode_length_s=20.0)
+    env.episode_length_buf = torch.tensor([275, 40, 999])
+    env_ids = torch.tensor([0, 1, 2])
+    episode_finished = torch.tensor([True, False, False])
+
+    finish_time_steps = env._compute_finish_time_steps(env_ids, episode_finished)
+
+    assert math.isclose(finish_time_steps, (275 + 1000 + 1000) / 3, rel_tol=1.0e-6)
+
+
 def test_base_outside_patches_gets_penalty_and_terminates():
     env = _make_patch_boundary_env()
 
