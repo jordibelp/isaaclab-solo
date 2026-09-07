@@ -1259,8 +1259,15 @@ class Solo12RaceEnv(DirectRLEnv):
         ).all(dim=-1)
         return ~inside_patch.any(dim=-1)
 
+    def _compute_base_outside_patches_after_grace_period(self) -> torch.Tensor:
+        """Return off-patch environments whose episode-start grace period has elapsed."""
+        grace_period_elapsed = self.episode_length_buf * self.step_dt >= (
+            self.cfg.apply_penalty_leaving_patches_and_reset_only_after_seconds
+        )
+        return self._compute_base_outside_patches() & grace_period_elapsed
+
     def _compute_leaving_patches_penalty(self) -> torch.Tensor:
-        return self._compute_base_outside_patches().float() * self.cfg.penalty_leaving_patches
+        return self._compute_base_outside_patches_after_grace_period().float() * self.cfg.penalty_leaving_patches
 
     def _get_foot_friction_coefficients(self) -> tuple[torch.Tensor, torch.Tensor]:
         """Return the static and dynamic floor-friction coefficients below each foot."""
@@ -1554,7 +1561,7 @@ class Solo12RaceEnv(DirectRLEnv):
         finished = self._current_gate_idx >= self._target_count
         terminated = floor_collision | finished
         if self.cfg.reset_on_leaving_patches:
-            terminated |= self._compute_base_outside_patches()
+            terminated |= self._compute_base_outside_patches_after_grace_period()
         return terminated, time_out
 
     def _reset_idx(self, env_ids: torch.Tensor | None):
@@ -1565,7 +1572,7 @@ class Solo12RaceEnv(DirectRLEnv):
         episode_floor_collision = self._compute_filtered_base_contact(
             self._base_floor_contact_sensor, self.cfg.base_contact_threshold
         )[env_ids]
-        episode_leaving_patches = self._compute_base_outside_patches()[env_ids]
+        episode_leaving_patches = self._compute_base_outside_patches_after_grace_period()[env_ids]
         episode_terminated = self.reset_terminated[env_ids]
         episode_timed_out = self.reset_time_outs[env_ids]
         episode_completion = self._compute_episode_completion(env_ids)

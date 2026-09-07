@@ -181,6 +181,7 @@ def _make_patch_boundary_env() -> Solo12RaceEnv:
         base_contact_threshold=1.0,
         penalty_leaving_patches=-20.0,
         reset_on_leaving_patches=True,
+        apply_penalty_leaving_patches_and_reset_only_after_seconds=0.0,
         sim=SimpleNamespace(dt=0.02),
         decimation=1,
         episode_length_s=2.0,
@@ -198,6 +199,7 @@ def test_leaving_patch_config_defaults_enable_penalty_and_reset():
 
     assert cfg.penalty_leaving_patches == -20.0
     assert cfg.reset_on_leaving_patches is True
+    assert cfg.apply_penalty_leaving_patches_and_reset_only_after_seconds == 1.0
 
 
 def test_finish_time_assigns_maximum_duration_to_unsuccessful_episodes():
@@ -233,6 +235,16 @@ def test_leaving_patch_reset_can_be_disabled_without_disabling_penalty():
 
     assert not torch.any(terminated)
     torch.testing.assert_close(env._compute_leaving_patches_penalty(), torch.tensor([0.0, 0.0, -20.0, -20.0]))
+
+
+def test_leaving_patch_penalty_and_reset_start_after_configured_grace_period():
+    env = _make_patch_boundary_env()
+    env.cfg.apply_penalty_leaving_patches_and_reset_only_after_seconds = 1.0
+    env.episode_length_buf = torch.tensor([50, 50, 49, 50])
+
+    torch.testing.assert_close(env._compute_leaving_patches_penalty(), torch.tensor([0.0, 0.0, 0.0, -20.0]))
+    terminated, _ = env._get_dones()
+    torch.testing.assert_close(terminated, torch.tensor([False, False, False, True]))
 
 
 def test_missing_patches_do_not_penalize_or_terminate():
