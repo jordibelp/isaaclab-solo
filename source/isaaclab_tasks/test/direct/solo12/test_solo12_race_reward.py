@@ -19,6 +19,7 @@ from isaaclab_tasks.direct.solo12_race.solo12_race_env import (
     Solo12RaceEnv,
     _straight_track_start_to_end_distance_m,
 )
+from isaaclab_tasks.direct.solo12_race.solo12_race_env_cfg import Solo12RaceEnvCfg
 
 
 def _force(alpha: float, azimuth: float, magnitude: float = 100.0) -> list[float]:
@@ -154,3 +155,79 @@ def test_empty_backward_force_curriculum_keeps_configured_force():
     assert env.current_backward_force == 2.5
     assert env.update_backward_force_curriculum(1.0) is False
     assert env.current_backward_force == 2.5
+
+
+def _make_patch_boundary_env() -> Solo12RaceEnv:
+    env = object.__new__(Solo12RaceEnv)
+    env._is_closed = True
+    num_envs = 4
+    env.sim = SimpleNamespace(device="cpu")
+    env._patch_xy_min = torch.tensor([[0.0, 0.0], [0.0, 1.0]])
+    env._patch_xy_max = torch.tensor([[1.0, 1.0], [1.0, 2.0]])
+    env.scene = SimpleNamespace(
+        num_envs=num_envs,
+        env_origins=torch.tensor([[10.0, 20.0, 0.0]] * num_envs),
+    )
+    local_root_pos = torch.tensor(
+        [
+            [0.5, 0.5, 0.4],
+            [0.5, 1.5, 0.4],
+            [1.01, 0.5, 0.4],
+            [-0.01, 1.5, 0.4],
+        ]
+    )
+    env._robot = SimpleNamespace(data=SimpleNamespace(root_pos_w=local_root_pos + env.scene.env_origins))
+    env.cfg = SimpleNamespace(
+        base_contact_threshold=1.0,
+        penalty_leaving_patches=-20.0,
+        reset_on_leaving_patches=True,
+        sim=SimpleNamespace(dt=0.02),
+        decimation=1,
+        episode_length_s=2.0,
+    )
+    env.episode_length_buf = torch.zeros(env.num_envs, dtype=torch.long)
+    env._current_gate_idx = torch.zeros(env.num_envs, dtype=torch.long)
+    env._target_count = 8
+    env._base_floor_contact_sensor = object()
+    env._compute_filtered_base_contact = lambda sensor, threshold: torch.zeros(env.num_envs, dtype=torch.bool)
+    return env
+
+
+def test_leaving_patch_config_defaults_enable_penalty_and_reset():
+    cfg = Solo12RaceEnvCfg()
+
+    assert cfg.penalty_leaving_patches == -20.0
+    assert cfg.reset_on_leaving_patches is True
+
+
+def test_base_outside_patches_gets_penalty_and_terminates():
+    env = _make_patch_boundary_env()
+
+    expected_outside = torch.tensor([False, False, True, True])
+    torch.testing.assert_close(env._compute_base_outside_patches(), expected_outside)
+    torch.testing.assert_close(env._compute_leaving_patches_penalty(), expected_outside.float() * -20.0)
+
+    terminated, time_out = env._get_dones()
+    torch.testing.assert_close(terminated, expected_outside)
+    assert not torch.any(time_out)
+
+
+def test_leaving_patch_reset_can_be_disabled_without_disabling_penalty():
+    env = _make_patch_boundary_env()
+    env.cfg.reset_on_leaving_patches = False
+
+    terminated, _ = env._get_dones()
+
+    assert not torch.any(terminated)
+    torch.testing.assert_close(env._compute_leaving_patches_penalty(), torch.tensor([0.0, 0.0, -20.0, -20.0]))
+
+
+def test_missing_patches_do_not_penalize_or_terminate():
+    env = _make_patch_boundary_env()
+    env._patch_xy_min = torch.empty(0, 2)
+    env._patch_xy_max = torch.empty(0, 2)
+
+    assert not torch.any(env._compute_base_outside_patches())
+    assert not torch.any(env._compute_leaving_patches_penalty())
+    terminated, _ = env._get_dones()
+    assert not torch.any(terminated)

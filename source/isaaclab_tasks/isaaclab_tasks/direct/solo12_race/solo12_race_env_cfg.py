@@ -305,6 +305,10 @@ class Solo12RaceEnvCfg(DirectRLEnvCfg):
     gate_progress_bodyrate_coeff = 0.00
     floor_collision_penalty = -10.0
     pillar_collision_penalty = -5.0
+    # Keep the robot base center over at least one authored ``patch_*`` footprint. The penalty is applied on the
+    # terminal transition when resetting is enabled, or on every off-patch step when only the penalty is enabled.
+    penalty_leaving_patches = -20.0
+    reset_on_leaving_patches = True
     reward_reach_waypoint = 5.0
     finish_reward = 50.0
 

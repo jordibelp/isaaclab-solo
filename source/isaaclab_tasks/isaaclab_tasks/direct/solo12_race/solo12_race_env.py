@@ -176,6 +176,7 @@ class Solo12RaceEnv(DirectRLEnv):
                 "dense_reaction_force",
                 "floor_collision",
                 "pillar_collision",
+                "leaving_patches",
                 "reach_waypoint",
                 "finish_reward",
             ]
@@ -1246,6 +1247,21 @@ class Solo12RaceEnv(DirectRLEnv):
             excess_force = excess_force**2
         return torch.sum(excess_force, dim=1)
 
+    def _compute_base_outside_patches(self) -> torch.Tensor:
+        """Return whether each robot base center is outside every authored friction patch."""
+        if self._patch_xy_min.numel() == 0:
+            return torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+
+        base_xy = self._robot.data.root_pos_w[:, :2] - self.scene.env_origins[:, :2]
+        inside_patch = torch.logical_and(
+            base_xy[:, None, :] >= self._patch_xy_min[None, :, :],
+            base_xy[:, None, :] <= self._patch_xy_max[None, :, :],
+        ).all(dim=-1)
+        return ~inside_patch.any(dim=-1)
+
+    def _compute_leaving_patches_penalty(self) -> torch.Tensor:
+        return self._compute_base_outside_patches().float() * self.cfg.penalty_leaving_patches
+
     def _get_foot_friction_coefficients(self) -> tuple[torch.Tensor, torch.Tensor]:
         """Return the static and dynamic floor-friction coefficients below each foot."""
         num_feet = len(self._feet_robot_body_ids)
@@ -1516,6 +1532,7 @@ class Solo12RaceEnv(DirectRLEnv):
             "dense_reaction_force": dense_reaction_force * self.cfg.scale_dense_reaction_force_reward,
             "floor_collision": floor_collision.float() * self.cfg.floor_collision_penalty,
             "pillar_collision": pillar_collision.float() * self.cfg.pillar_collision_penalty,
+            "leaving_patches": self._compute_leaving_patches_penalty(),
             "reach_waypoint": gate_passed.float() * self.cfg.reward_reach_waypoint,
             "finish_reward": finished.float() * self.cfg.finish_reward,
         }
@@ -1533,11 +1550,11 @@ class Solo12RaceEnv(DirectRLEnv):
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         time_out = self.episode_length_buf >= self.max_episode_length - 1
-        base_pos_w = self._robot.data.root_pos_w
-        pillar_collision = self._compute_filtered_base_contact(self._base_pillar_contact_sensor, self.cfg.base_contact_threshold)
         floor_collision = self._compute_filtered_base_contact(self._base_floor_contact_sensor, self.cfg.base_contact_threshold)
         finished = self._current_gate_idx >= self._target_count
         terminated = floor_collision | finished
+        if self.cfg.reset_on_leaving_patches:
+            terminated |= self._compute_base_outside_patches()
         return terminated, time_out
 
     def _reset_idx(self, env_ids: torch.Tensor | None):
@@ -1548,6 +1565,7 @@ class Solo12RaceEnv(DirectRLEnv):
         episode_floor_collision = self._compute_filtered_base_contact(
             self._base_floor_contact_sensor, self.cfg.base_contact_threshold
         )[env_ids]
+        episode_leaving_patches = self._compute_base_outside_patches()[env_ids]
         episode_terminated = self.reset_terminated[env_ids]
         episode_timed_out = self.reset_time_outs[env_ids]
         episode_completion = self._compute_episode_completion(env_ids)
@@ -1632,6 +1650,9 @@ class Solo12RaceEnv(DirectRLEnv):
         extras["Episode/finishTimeSeconds"] = finish_time_seconds
         extras["Episode_Termination/base_contact"] = torch.count_nonzero(episode_floor_collision).item()
         extras["Episode_Termination/floor_collision"] = torch.count_nonzero(episode_floor_collision).item()
+        extras["Episode_Termination/leaving_patches"] = torch.count_nonzero(
+            episode_leaving_patches & self.cfg.reset_on_leaving_patches
+        ).item()
         extras["Episode_Termination/finish"] = torch.count_nonzero(episode_finished).item()
         extras["Episode_Termination/terminated"] = torch.count_nonzero(episode_terminated).item()
         extras["Episode_Termination/time_out"] = torch.count_nonzero(episode_timed_out).item()
