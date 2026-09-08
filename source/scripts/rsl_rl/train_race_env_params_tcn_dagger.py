@@ -30,6 +30,7 @@ import json
 import math
 import os
 import random
+import shlex
 import sys
 import time
 from datetime import datetime
@@ -54,6 +55,15 @@ _WANDB_SOURCE_FILE_REL_PATHS = (
     "source/isaaclab_tasks/isaaclab_tasks/direct/solo12_race/agents/rsl_rl_ppo_cfg.py",
     "source/isaaclab_tasks/isaaclab_tasks/direct/solo12_race/agents/env_params_conditioned_encoder_actor.py",
     "source/isaaclab_tasks/isaaclab_tasks/direct/solo12_race/agents/imu_tcn_actor_critic.py",
+)
+
+_REPRODUCIBLE_COMMAND = shlex.join(
+    [
+        "./isaaclab.sh",
+        "-p",
+        "source/scripts/rsl_rl/train_race_env_params_tcn_dagger.py",
+        *sys.argv[1:],
+    ]
 )
 
 from isaaclab.app import AppLauncher
@@ -1002,13 +1012,14 @@ def _maybe_init_wandb(log_dir: str, run_name: str, config: dict[str, Any]):
         return None
 
     project = args_cli.log_project_name or "borinotIsaacLab"
+    wandb_config = {**config, "command": _REPRODUCIBLE_COMMAND}
     try:
         run = wandb.init(
             project=project,
             entity=args_cli.wandb_entity,
             name=args_cli.wandb_name or run_name,
             dir=log_dir,
-            config=config,
+            config=wandb_config,
         )
         logged_source_files = _snapshot_wandb_run_files(wandb, log_dir)
         run.config.update({"wandb_source_files": logged_source_files}, allow_val_change=True)

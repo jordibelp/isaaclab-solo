@@ -2,10 +2,13 @@ import ast
 import copy
 import math
 import os
+import shlex
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 import torch
 import torch.nn as nn
@@ -58,6 +61,53 @@ def _argument_keywords(flag):
 
 
 class TestRaceDaggerActionSupervision(unittest.TestCase):
+    def test_reproducible_command_round_trips_shell_sensitive_arguments(self):
+        arguments = [
+            "--run-name=JointState DAgger teacher",
+            "--teacher-checkpoint=/tmp/teacher run/model.pt",
+            "env.friction_static_range=[0.5, 1.5]",
+        ]
+        (_,), namespace = _load_definitions(
+            "_maybe_init_wandb",
+            extra_namespace={
+                "Any": object,
+                "_REPRODUCIBLE_COMMAND": shlex.join(
+                    [
+                        "./isaaclab.sh",
+                        "-p",
+                        "source/scripts/rsl_rl/train_race_env_params_tcn_dagger.py",
+                        *arguments,
+                    ]
+                ),
+                "_snapshot_wandb_run_files": lambda *_args: [],
+                "args_cli": SimpleNamespace(
+                    disable_wandb=False,
+                    log_project_name=None,
+                    wandb_entity=None,
+                    wandb_name=None,
+                ),
+            },
+        )
+        maybe_init_wandb = namespace["_maybe_init_wandb"]
+        captured = {}
+        fake_run = SimpleNamespace(config=SimpleNamespace(update=lambda *_args, **_kwargs: None))
+        fake_wandb = SimpleNamespace(
+            init=lambda **kwargs: captured.update(kwargs) or fake_run,
+            define_metric=lambda *_args, **_kwargs: None,
+        )
+
+        with mock.patch.dict(sys.modules, {"wandb": fake_wandb}):
+            maybe_init_wandb("/tmp/log", "test-run", {"task": "test-task"})
+
+        expected_tokens = [
+            "./isaaclab.sh",
+            "-p",
+            "source/scripts/rsl_rl/train_race_env_params_tcn_dagger.py",
+            *arguments,
+        ]
+        self.assertEqual(shlex.split(captured["config"]["command"]), expected_tokens)
+        self.assertEqual(captured["config"]["task"], "test-task")
+
     def test_actor_finetuning_is_opt_in_and_action_weight_defaults_to_half(self):
         finetune_keywords = _argument_keywords("--finetune-student-actor")
         weight_keywords = _argument_keywords("--action-loss-weight")
