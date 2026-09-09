@@ -181,6 +181,7 @@ def _make_patch_boundary_env() -> Solo12RaceEnv:
         base_contact_threshold=1.0,
         penalty_leaving_patches=-20.0,
         reset_on_leaving_patches=True,
+        leaving_patches_single_feet_outside=False,
         apply_penalty_leaving_patches_and_reset_only_after_seconds=0.0,
         race_scene="straightSimple",
         sim=SimpleNamespace(dt=0.02),
@@ -200,6 +201,7 @@ def test_leaving_patch_config_defaults_enable_penalty_and_reset():
 
     assert cfg.penalty_leaving_patches == -20.0
     assert cfg.reset_on_leaving_patches is True
+    assert cfg.leaving_patches_single_feet_outside is False
     assert cfg.apply_penalty_leaving_patches_and_reset_only_after_seconds == 1.0
 
 
@@ -220,7 +222,7 @@ def test_base_outside_patches_gets_penalty_and_terminates():
     env = _make_patch_boundary_env()
 
     expected_outside = torch.tensor([False, False, True, True])
-    torch.testing.assert_close(env._compute_base_outside_patches(), expected_outside)
+    torch.testing.assert_close(env._compute_outside_patches(), expected_outside)
     torch.testing.assert_close(env._compute_leaving_patches_penalty(), expected_outside.float() * -20.0)
 
     terminated, time_out = env._get_dones()
@@ -243,14 +245,14 @@ def test_straight_track_enclosing_boundary_bridges_internal_patch_gaps():
     env._robot.data.root_pos_w = local_root_pos + env.scene.env_origins
 
     expected_outside = torch.tensor([False, False, False, True])
-    torch.testing.assert_close(env._compute_base_outside_patches(), expected_outside)
+    torch.testing.assert_close(env._compute_outside_patches(), expected_outside)
     torch.testing.assert_close(env._compute_leaving_patches_penalty(), expected_outside.float() * -20.0)
     terminated, _ = env._get_dones()
     torch.testing.assert_close(terminated, expected_outside)
 
     env.cfg.race_scene = "simple_zigzag"
     torch.testing.assert_close(
-        env._compute_base_outside_patches(), torch.tensor([False, True, False, True])
+        env._compute_outside_patches(), torch.tensor([False, True, False, True])
     )
 
 
@@ -279,7 +281,71 @@ def test_missing_patches_do_not_penalize_or_terminate():
     env._patch_xy_min = torch.empty(0, 2)
     env._patch_xy_max = torch.empty(0, 2)
 
-    assert not torch.any(env._compute_base_outside_patches())
+    assert not torch.any(env._compute_outside_patches())
     assert not torch.any(env._compute_leaving_patches_penalty())
     terminated, _ = env._get_dones()
     assert not torch.any(terminated)
+
+
+def _set_boundary_test_feet(env):
+    # All bases stay inside. Each environment has a different offending foot;
+    # the first has only lifted feet, which must remain valid.
+    env._robot.data.root_pos_w[:] = env.scene.env_origins + torch.tensor([0.5, 0.5, 0.4])
+    local_feet = torch.tensor([[[0.5, 0.5, 0.0]] * 4] * env.num_envs)
+    local_feet[0, :, 2] = 2.0
+    local_feet[1, 0, 0] = -0.01
+    local_feet[2, 1, 0] = 1.01
+    local_feet[2, 1, 2] = 2.0  # An airborne foot outside XY still violates the boundary.
+    local_feet[3, 3, 1] = 2.01
+    env._feet_robot_body_ids = list(range(4))
+    env._feet_robot_body_to_foot_offsets_b = torch.tensor([[0.0, 0.0, -0.2]] * 4)
+    env._robot.data.body_pos_w = (
+        local_feet + env.scene.env_origins[:, None, :] - env._feet_robot_body_to_foot_offsets_b
+    )
+    env._robot.data.body_quat_w = torch.tensor([[[1.0, 0.0, 0.0, 0.0]] * 4] * env.num_envs)
+
+
+def test_any_foot_outside_xy_catches_hack_but_legacy_mode_ignores_feet():
+    env = _make_patch_boundary_env()
+    _set_boundary_test_feet(env)
+    assert not torch.any(env._compute_leaving_patches_penalty())
+    assert not torch.any(env._get_dones()[0])
+
+    env.cfg.leaving_patches_single_feet_outside = True
+    outside = torch.tensor([False, True, True, True])
+    torch.testing.assert_close(env._compute_leaving_patches_penalty(), outside.float() * -20.0)
+    torch.testing.assert_close(env._get_dones()[0], outside)
+
+    env.cfg.apply_penalty_leaving_patches_and_reset_only_after_seconds = 1.0
+    env.episode_length_buf = torch.tensor([50, 49, 50, 51])
+    outside = torch.tensor([False, False, True, True])
+    torch.testing.assert_close(env._compute_leaving_patches_penalty(), outside.float() * -20.0)
+    torch.testing.assert_close(env._get_dones()[0], outside)
+
+    env.cfg.reset_on_leaving_patches = False
+    assert not torch.any(env._get_dones()[0])
+    torch.testing.assert_close(env._compute_leaving_patches_penalty(), outside.float() * -20.0)
+
+
+def test_any_foot_boundary_allows_straight_patch_seams_and_edges():
+    env = _make_patch_boundary_env()
+    _set_boundary_test_feet(env)
+    env.cfg.leaving_patches_single_feet_outside = True
+    env._patch_xy_min = torch.tensor([[0.0, 0.0], [0.0, 1.1]])
+    env._patch_xy_max = torch.tensor([[1.0, 0.9], [1.0, 2.0]])
+    # Put all four feet at corners of the outer boundary, then one at an internal seam.
+    local_feet = torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 2.0, 0.0], [1.0, 2.0, 0.0]])
+    env._robot.data.body_pos_w = (
+        local_feet[None, :, :] + env.scene.env_origins[:, None, :] - env._feet_robot_body_to_foot_offsets_b
+    )
+    env._robot.data.body_pos_w[1, 2, :2] = env.scene.env_origins[1, :2] + torch.tensor([0.5, 1.0])
+    assert not torch.any(env._compute_leaving_patches_penalty())
+    assert not torch.any(env._get_dones()[0])
+
+    env.cfg.race_scene = "simple_zigzag"
+    torch.testing.assert_close(env._get_dones()[0], torch.tensor([False, True, False, False]))
+
+    env._patch_xy_min = torch.empty(0, 2)
+    env._patch_xy_max = torch.empty(0, 2)
+    assert not torch.any(env._compute_leaving_patches_penalty())
+    assert not torch.any(env._get_dones()[0])

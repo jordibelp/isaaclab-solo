@@ -1247,33 +1247,37 @@ class Solo12RaceEnv(DirectRLEnv):
             excess_force = excess_force**2
         return torch.sum(excess_force, dim=1)
 
-    def _compute_base_outside_patches(self) -> torch.Tensor:
-        """Return whether each robot base center is outside the friction-patch track boundary."""
+    def _compute_outside_patches(self) -> torch.Tensor:
+        """Check the base center, or any foot tip, against the track boundary in XY only."""
         if self._patch_xy_min.numel() == 0:
             return torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
 
-        base_xy = self._robot.data.root_pos_w[:, :2] - self.scene.env_origins[:, :2]
+        if self.cfg.leaving_patches_single_feet_outside:
+            positions_w = self._get_foot_positions_w()
+        else:
+            positions_w = self._robot.data.root_pos_w[:, None, :]
+        positions_xy = positions_w[..., :2] - self.scene.env_origins[:, None, :2]
         if self.cfg.race_scene == "straightSimple":
             boundary_min = torch.amin(self._patch_xy_min, dim=0)
             boundary_max = torch.amax(self._patch_xy_max, dim=0)
-            inside_boundary = torch.logical_and(base_xy >= boundary_min, base_xy <= boundary_max).all(dim=-1)
-            return ~inside_boundary
+            inside_boundary = torch.logical_and(positions_xy >= boundary_min, positions_xy <= boundary_max).all(dim=-1)
+            return ~inside_boundary.all(dim=-1)
 
         inside_patch = torch.logical_and(
-            base_xy[:, None, :] >= self._patch_xy_min[None, :, :],
-            base_xy[:, None, :] <= self._patch_xy_max[None, :, :],
+            positions_xy[:, :, None, :] >= self._patch_xy_min[None, None, :, :],
+            positions_xy[:, :, None, :] <= self._patch_xy_max[None, None, :, :],
         ).all(dim=-1)
-        return ~inside_patch.any(dim=-1)
+        return ~inside_patch.any(dim=-1).all(dim=-1)
 
-    def _compute_base_outside_patches_after_grace_period(self) -> torch.Tensor:
+    def _compute_outside_patches_after_grace_period(self) -> torch.Tensor:
         """Return off-patch environments whose episode-start grace period has elapsed."""
         grace_period_elapsed = self.episode_length_buf * self.step_dt >= (
             self.cfg.apply_penalty_leaving_patches_and_reset_only_after_seconds
         )
-        return self._compute_base_outside_patches() & grace_period_elapsed
+        return self._compute_outside_patches() & grace_period_elapsed
 
     def _compute_leaving_patches_penalty(self) -> torch.Tensor:
-        return self._compute_base_outside_patches_after_grace_period().float() * self.cfg.penalty_leaving_patches
+        return self._compute_outside_patches_after_grace_period().float() * self.cfg.penalty_leaving_patches
 
     def _get_foot_friction_coefficients(self) -> tuple[torch.Tensor, torch.Tensor]:
         """Return the static and dynamic floor-friction coefficients below each foot."""
@@ -1567,7 +1571,7 @@ class Solo12RaceEnv(DirectRLEnv):
         finished = self._current_gate_idx >= self._target_count
         terminated = floor_collision | finished
         if self.cfg.reset_on_leaving_patches:
-            terminated |= self._compute_base_outside_patches_after_grace_period()
+            terminated |= self._compute_outside_patches_after_grace_period()
         return terminated, time_out
 
     def _reset_idx(self, env_ids: torch.Tensor | None):
@@ -1578,7 +1582,7 @@ class Solo12RaceEnv(DirectRLEnv):
         episode_floor_collision = self._compute_filtered_base_contact(
             self._base_floor_contact_sensor, self.cfg.base_contact_threshold
         )[env_ids]
-        episode_leaving_patches = self._compute_base_outside_patches_after_grace_period()[env_ids]
+        episode_leaving_patches = self._compute_outside_patches_after_grace_period()[env_ids]
         episode_terminated = self.reset_terminated[env_ids]
         episode_timed_out = self.reset_time_outs[env_ids]
         episode_completion = self._compute_episode_completion(env_ids)
