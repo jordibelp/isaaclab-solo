@@ -237,6 +237,7 @@ from rsl_rl.runners import DistillationRunner, OnPolicyRunner
 from isaaclab.envs import DirectMARLEnv, DirectMARLEnvCfg, DirectRLEnvCfg, ManagerBasedRLEnvCfg, multi_agent_to_single_agent
 from isaaclab_rl.rsl_rl import RslRlBaseRunnerCfg, RslRlVecEnvWrapper
 from isaaclab_tasks.utils.hydra import hydra_task_config
+from isaaclab_tasks.direct.solo12_race.agents.rsl_rl_ppo_cfg import configure_race_actor_critic
 
 import isaaclab_tasks  # noqa: F401
 import borinotIsaacLab.tasks  # noqa: F401
@@ -1034,8 +1035,6 @@ def _load_policy(
         print(f"[INFO] Loaded frozen teacher checkpoint from: {teacher_path}", flush=True)
         return None, policy
 
-    apply_checkpoint_architecture_to_policy_cfg(agent_cfg.policy, resume_path)
-
     if agent_cfg.class_name == "OnPolicyRunner":
         runner = OnPolicyRunner(vec_env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
     elif agent_cfg.class_name == "DistillationRunner":
@@ -1540,6 +1539,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             print("[WARN] --friction-seed was provided, but this task config has no friction_seed field.", flush=True)
 
     dagger_adapter_checkpoint = load_dagger_adapter_checkpoint(resume_path)
+    if dagger_adapter_checkpoint is None:
+        apply_checkpoint_architecture_to_policy_cfg(agent_cfg.policy, resume_path)
+        configure_race_actor_critic(env_cfg, agent_cfg)
     teacher_checkpoint_for_config = None
     if dagger_adapter_checkpoint is not None:
         teacher_checkpoint_for_config = args_cli.dagger_teacher_checkpoint or dagger_adapter_checkpoint.get("teacher_checkpoint")

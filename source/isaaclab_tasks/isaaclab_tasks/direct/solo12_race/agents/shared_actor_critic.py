@@ -78,6 +78,8 @@ class SharedActorCritic(nn.Module):
 
     When ``shared_networks`` is false this behaves like the upstream flat ActorCritic.
     When true, actor and critic use a shared MLP trunk and separate action/value output heads.
+    ``asymmetric_actor_critic`` keeps the flat actor and gives only the critic the
+    same normalized GT-parameter MLP encoder used by EnvParamsConditionedEncoderActor.
     """
 
     is_recurrent: bool = False
@@ -96,6 +98,11 @@ class SharedActorCritic(nn.Module):
         noise_std_type: str = "scalar",
         state_dependent_std: bool = False,
         shared_networks: bool = False,
+        asymmetric_actor_critic: bool = False,
+        env_params_dim: int = 16,
+        env_params_encoder_hidden_dims: tuple[int] | list[int] = (64, 32),
+        env_params_latent_dim: int = 8,
+        env_params_encoder_activation: str = "elu",
         min_action_std: float = _DEFAULT_MIN_ACTION_STD,
         max_action_std: float | None = _DEFAULT_MAX_ACTION_STD,
         **kwargs: dict[str, Any],
@@ -106,6 +113,7 @@ class SharedActorCritic(nn.Module):
 
         self.obs_groups = obs_groups
         self.shared_networks = bool(shared_networks)
+        self.asymmetric_actor_critic = bool(asymmetric_actor_critic)
         self.state_dependent_std = state_dependent_std
         self.min_action_std = max(float(min_action_std), _DEFAULT_MIN_ACTION_STD)
         self.max_action_std = None if max_action_std is None else float(max_action_std)
@@ -118,6 +126,17 @@ class SharedActorCritic(nn.Module):
 
         num_actor_obs = self._obs_dim(obs, obs_groups["policy"])
         num_critic_obs = self._obs_dim(obs, obs_groups["critic"])
+        self.current_obs_dim = num_actor_obs
+        self.env_params_dim = int(env_params_dim)
+        self.env_params_latent_dim = int(env_params_latent_dim)
+        if self.asymmetric_actor_critic:
+            if self.shared_networks:
+                raise ValueError("asymmetric_actor_critic=True requires shared_networks=False.")
+            if num_critic_obs != num_actor_obs + self.env_params_dim:
+                raise ValueError(
+                    "Asymmetric critic requires [actor observations, privileged env parameters]: "
+                    f"expected {num_actor_obs} + {self.env_params_dim}, got {num_critic_obs}."
+                )
         if self.shared_networks and num_actor_obs != num_critic_obs:
             raise ValueError(
                 f"shared_networks=True requires actor and critic observation dims to match, "
@@ -145,7 +164,19 @@ class SharedActorCritic(nn.Module):
                 self.actor = MLP(num_actor_obs, [2, num_actions], actor_hidden_dims, activation)
             else:
                 self.actor = MLP(num_actor_obs, num_actions, actor_hidden_dims, activation)
-            self.critic = MLP(num_critic_obs, 1, critic_hidden_dims, activation)
+            critic_input_dim = num_critic_obs
+            if self.asymmetric_actor_critic:
+                # Identical MLP implementation, dimensions and normalization order to
+                # the encoded teacher; only its privileged branch is needed here.
+                self.critic_env_params_encoder = MLP(
+                    input_dim=self.env_params_dim,
+                    output_dim=self.env_params_latent_dim,
+                    hidden_dims=list(env_params_encoder_hidden_dims),
+                    activation=env_params_encoder_activation,
+                )
+                critic_input_dim = self.current_obs_dim + self.env_params_latent_dim
+                print(f"Critic env-param encoder: {self.critic_env_params_encoder}")
+            self.critic = MLP(critic_input_dim, 1, critic_hidden_dims, activation)
         print(f"Actor MLP: {self.actor}")
         print(f"Critic MLP: {self.critic}")
 
@@ -292,6 +323,10 @@ class SharedActorCritic(nn.Module):
 
     def evaluate(self, obs: TensorDict, **kwargs: dict[str, Any]) -> torch.Tensor:
         obs = self.critic_obs_normalizer(self.get_critic_obs(obs))
+        if self.asymmetric_actor_critic:
+            current_obs = obs[:, : self.current_obs_dim]
+            env_params = obs[:, self.current_obs_dim :]
+            obs = torch.cat((current_obs, self.critic_env_params_encoder(env_params)), dim=-1)
         return self.critic(obs)
 
     def get_actions_log_prob(self, actions: torch.Tensor) -> torch.Tensor:
@@ -349,7 +384,7 @@ class SharedActorCritic(nn.Module):
 
     def load_state_dict(self, state_dict: dict, strict: bool = True) -> bool:
         target_state = self.state_dict()
-        exact_match = True
+        exact_match = state_dict.keys() == target_state.keys()
         adapted_keys: list[str] = []
         skipped_keys: list[str] = []
 

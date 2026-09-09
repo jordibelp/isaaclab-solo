@@ -516,6 +516,7 @@ from isaaclab_rl.rsl_rl import RslRlBaseRunnerCfg, RslRlSymmetryCfg, RslRlVecEnv
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
+from isaaclab_tasks.direct.solo12_race.agents.rsl_rl_ppo_cfg import configure_race_actor_critic
 
 import borinotIsaacLab.tasks  # noqa: F401
 import solo12_symmetry
@@ -2380,6 +2381,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         agent_cfg.seed = seed
 
     _sync_base_imu_policy_cfg_from_env_cfg(env_cfg, agent_cfg)
+    configure_race_actor_critic(env_cfg, agent_cfg)
     if dagger_adapter_checkpoint_arg is not None:
         dagger_adapter_checkpoint_arg = _resolve_existing_model_path(dagger_adapter_checkpoint_arg)
         _configure_student_policy_from_dagger_adapter(env_cfg, agent_cfg.policy, dagger_adapter_checkpoint_arg)

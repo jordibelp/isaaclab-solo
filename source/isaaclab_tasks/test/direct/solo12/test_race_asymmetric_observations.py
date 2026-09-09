@@ -13,17 +13,79 @@ from isaaclab.app import AppLauncher
 simulation_app = AppLauncher(headless=True).app
 
 
+import pytest
 import torch
 
+from isaaclab_tasks.direct.solo12_race.agents.rsl_rl_ppo_cfg import (
+    Solo12RacePPORunnerCfg,
+    Solo12RaceParamsConditionedEncPPORunnerCfg,
+    configure_race_actor_critic,
+)
 from isaaclab_tasks.direct.solo12_race.solo12_race_env import Solo12RaceEnv
 from isaaclab_tasks.direct.solo12_race.solo12_race_env_cfg import (
+    Solo12RaceEnvCfg,
     Solo12RaceJointStateImuTcnEnvCfg,
     Solo12RaceJointStateImuTcnEvalCameraEnvCfg,
     Solo12RaceJointStateTcnEnvCfg,
     Solo12RaceJointStateTcnEvalCameraEnvCfg,
+    Solo12RaceParamsConditionedEncEnvCfg,
     Solo12RaceParamsDaggerJointStateImuTcnEnvCfg,
     Solo12RaceParamsDaggerJointStateTcnEnvCfg,
 )
+
+
+@pytest.mark.parametrize("legacy_obs", [False, True])
+def test_robust_hydra_switch_wires_encoder_and_refreshes_spaces(legacy_obs):
+    from hydra import compose, initialize
+    from omegaconf import OmegaConf
+
+    from isaaclab.utils import replace_strings_with_slices
+    from isaaclab_tasks.utils.hydra import register_task_to_hydra
+
+    task = "Isaac-Solo12-Race-Direct-v0"
+    env_cfg, agent_cfg = register_task_to_hydra(task, "rsl_rl_cfg_entry_point")
+    with initialize(version_base="1.3", config_path=None):
+        cfg = compose(
+            config_name=task,
+            overrides=[
+                "agent.policy.asymmetric_actor_critic=True",
+                f"env.remove_c_close_vectors_from_observation={legacy_obs}",
+            ],
+        )
+    cfg_dict = replace_strings_with_slices(OmegaConf.to_container(cfg, resolve=True))
+    env_cfg.from_dict(cfg_dict["env"])
+    agent_cfg.from_dict(cfg_dict["agent"])
+    configure_race_actor_critic(env_cfg, agent_cfg)
+    assert env_cfg.observation_space == (57 if legacy_obs else 63)
+    assert env_cfg.state_space == env_cfg.observation_space + 16
+    assert agent_cfg.obs_groups == {"policy": ["policy"], "critic": ["critic"]}
+    assert not env_cfg.include_forces_to_gt_obs and not env_cfg.include_mu_coefs_to_gt_obs
+    teacher = Solo12RaceParamsConditionedEncPPORunnerCfg().policy
+    for field in (
+        "env_params_dim", "env_params_encoder_hidden_dims", "env_params_latent_dim", "env_params_encoder_activation"
+    ):
+        assert getattr(agent_cfg.policy, field) == getattr(teacher, field)
+
+
+def test_robust_switch_leaves_baseline_and_teacher_configs_unchanged():
+    for env_cfg, agent_cfg in (
+        (Solo12RaceEnvCfg(), Solo12RacePPORunnerCfg()),
+        (Solo12RaceParamsConditionedEncEnvCfg(), Solo12RaceParamsConditionedEncPPORunnerCfg()),
+    ):
+        before = (env_cfg.to_dict(), agent_cfg.to_dict())
+        configure_race_actor_critic(env_cfg, agent_cfg)
+        assert (env_cfg.to_dict(), agent_cfg.to_dict()) == before
+
+
+@pytest.mark.parametrize(
+    "field", ["include_mu_coefs_to_gt_obs", "include_forces_to_gt_obs", "include_joint_state_history_obs"]
+)
+def test_robust_switch_rejects_changed_actor_information(field):
+    env_cfg, agent_cfg = Solo12RaceEnvCfg(), Solo12RacePPORunnerCfg()
+    agent_cfg.policy.asymmetric_actor_critic = True
+    setattr(env_cfg, field, True)
+    with pytest.raises(ValueError, match="robust asymmetric"):
+        configure_race_actor_critic(env_cfg, agent_cfg)
 
 
 def test_student_and_eval_configs_declare_asymmetric_policy_and_critic_spaces():

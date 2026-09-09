@@ -88,6 +88,25 @@ def _apply_checkpoint_architecture(policy_kwargs: dict[str, Any], state_dict: di
             )
             policy_kwargs[cfg_key] = hidden_dims
 
+    # The robust ablation still has a plain actor. Restore its critic-only encoder
+    # before environment creation so playback also exposes the right critic group.
+    if policy_kwargs.get("class_name") == "SharedActorCritic":
+        encoder_prefix = "critic_env_params_encoder"
+        encoder_weights = [
+            (int(match.group(1)), value)
+            for key, value in state_dict.items()
+            if (match := re.fullmatch(rf"{encoder_prefix}\.(\d+)\.weight", key)) and value.ndim == 2
+        ]
+        encoder_weights.sort(key=lambda item: item[0])
+        if encoder_weights:
+            policy_kwargs["asymmetric_actor_critic"] = True
+            policy_kwargs["shared_networks"] = False
+            policy_kwargs["env_params_dim"] = int(encoder_weights[0][1].shape[1])
+            policy_kwargs["env_params_latent_dim"] = int(encoder_weights[-1][1].shape[0])
+            policy_kwargs["env_params_encoder_hidden_dims"] = [
+                int(weight.shape[0]) for _, weight in encoder_weights[:-1]
+            ]
+
     topology_marker = state_dict.get("_sharing_topology_marker")
     if torch.is_tensor(topology_marker):
         sharing_topology = int(topology_marker.item())
@@ -115,6 +134,10 @@ def apply_checkpoint_architecture_to_policy_cfg(policy_cfg: Any, checkpoint_path
         "critic_hidden_dims",
         "shared_networks",
         "actor_critic_share_latent_encoding",
+        "asymmetric_actor_critic",
+        "env_params_dim",
+        "env_params_encoder_hidden_dims",
+        "env_params_latent_dim",
     ):
         if key in policy_kwargs and hasattr(policy_cfg, key):
             value = policy_kwargs[key]

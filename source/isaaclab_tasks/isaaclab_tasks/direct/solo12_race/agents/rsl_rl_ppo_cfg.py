@@ -30,6 +30,12 @@ shared_networks_default = False
 class RslRlPpoSharedActorCriticCfg(RslRlPpoActorCriticCfg):
     class_name: str = "SharedActorCritic"
     shared_networks: bool = shared_networks_default
+    # One Hydra switch for the robust flat actor + encoded privileged critic ablation.
+    asymmetric_actor_critic: bool = False
+    env_params_dim: int = _SOLO12_RACE_PARAMS_ENV_CFG.gt_env_params_obs_dim
+    env_params_encoder_hidden_dims: list[int] = [64, 32]
+    env_params_latent_dim: int = 8
+    env_params_encoder_activation: str = "elu"
 
 
 @configclass
@@ -216,4 +222,34 @@ class Solo12RaceParamsConditionedEncPPORunnerCfg(Solo12RacePPORunnerCfg):
         actor_hidden_dims=[256, 128, 64],
         critic_hidden_dims=[256, 128, 64],
         activation="elu",
+    )
+
+
+def configure_race_actor_critic(env_cfg, agent_cfg) -> None:
+    """Resolve the robust ablation's single policy switch before constructing the env.
+
+    Leave teacher/TCN tasks and the default symmetric baseline unchanged. The base
+    actor never gains GT parameters or a history encoder through this switch.
+    """
+    policy = getattr(agent_cfg, "policy", None)
+    if not isinstance(env_cfg, Solo12RaceEnvCfg) or getattr(policy, "class_name", None) != "SharedActorCritic":
+        return
+    if not getattr(policy, "asymmetric_actor_critic", False):
+        return
+    if policy.shared_networks:
+        raise ValueError("agent.policy.asymmetric_actor_critic=True requires agent.policy.shared_networks=False.")
+    if env_cfg.include_forces_to_gt_obs or env_cfg.include_mu_coefs_to_gt_obs:
+        raise ValueError("The robust asymmetric actor must not receive privileged GT observations.")
+    if env_cfg.include_foot_imu_obs or env_cfg.include_joint_state_history_obs:
+        raise ValueError("The robust asymmetric ablation uses a flat actor without history; use a TCN task for history.")
+    env_cfg.asymmetric_actor_critic = True
+    env_cfg.__post_init__()  # Refresh dimensions after Hydra's from_dict overrides.
+    if policy.env_params_dim != env_cfg.privileged_env_params_obs_dim:
+        raise ValueError(f"Race privileged env_params_dim must be {env_cfg.privileged_env_params_obs_dim}.")
+    agent_cfg.obs_groups = {"policy": ["policy"], "critic": ["critic"]}
+    print(
+        f"[INFO]: Robust asymmetric actor-critic: actor={env_cfg.observation_space}D (no privilege/history), "
+        f"critic={env_cfg.state_space}D with teacher-compatible "
+        f"{policy.env_params_dim}->{policy.env_params_encoder_hidden_dims}->{policy.env_params_latent_dim} encoder.",
+        flush=True,
     )
