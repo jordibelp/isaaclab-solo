@@ -8,6 +8,7 @@ from __future__ import annotations
 import copy
 import math
 import re
+from collections import deque
 
 import gymnasium as gym
 import torch
@@ -148,6 +149,7 @@ class Solo12RaceEnv(DirectRLEnv):
         self._joint_wrench_body_ids, _ = self._robot.find_bodies([".*_thigh", ".*_calf"])
 
         self._current_gate_idx = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self._backward_force_episode_stage = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
 
         self._active_camera_name = self.cfg.active_camera
 
@@ -202,41 +204,102 @@ class Solo12RaceEnv(DirectRLEnv):
         if any(force > 0.0 for force in all_forces) and str(self.cfg.race_scene) != "straightSimple":
             raise ValueError("backward_force is only supported when race_scene='straightSimple'.")
 
-        minimum = self.cfg.min_iterations_with_curriculum_stage
-        if isinstance(minimum, bool) or not isinstance(minimum, int) or minimum < 1:
-            raise ValueError(f"min_iterations_with_curriculum_stage must be a positive integer, got {minimum!r}.")
+        for name in (
+            "min_iterations_with_curriculum_stage",
+            "backward_force_curriculum_window_iterations",
+            "backward_force_curriculum_min_episodes",
+        ):
+            value = getattr(self.cfg, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{name} must be a positive integer, got {value!r}.")
 
         self._backward_force_curriculum = force_stages
         self._backward_force_curriculum_stage = 0
         self._backward_force_curriculum_stage_iterations = 0
+        self._backward_force_curriculum_history: deque[tuple[int, int, int]] = deque()
+        self._backward_force_curriculum_metrics: dict[str, float | int] = {}
         self._current_backward_force = initial_force
 
-    def update_backward_force_curriculum(self, success_rate: float | None) -> bool:
-        """Called once per completed rollout; require both minimum stage age and current success rate."""
-        if success_rate is not None:
-            success_rate = float(success_rate)
-            if not math.isfinite(success_rate) or not 0.0 <= success_rate <= 1.0:
-                raise ValueError(f"Episode/successRate must be finite and in [0, 1], got {success_rate}.")
+    def _backward_force_episode_statistics(
+        self, env_ids: torch.Tensor, episode_finished: torch.Tensor
+    ) -> dict[str, int]:
+        """Record actual endings before reset, then tag the newly started episodes with this stage."""
+        ended = self.reset_terminated[env_ids] | self.reset_time_outs[env_ids]
+        # A startup/manual reset without a simulated episode is not an outcome.
+        ended &= self.episode_length_buf[env_ids] > 0
+        eligible = ended & (self._backward_force_episode_stage[env_ids] == self._backward_force_curriculum_stage)
+        statistics = {
+            "Episode/success_count": torch.count_nonzero(ended & episode_finished).item(),
+            "Episode/completed_count": torch.count_nonzero(ended).item(),
+            "Curriculum/backward_force_eligible_success_count": torch.count_nonzero(eligible & episode_finished).item(),
+            "Curriculum/backward_force_eligible_completed_count": torch.count_nonzero(eligible).item(),
+        }
+        self._backward_force_episode_stage[env_ids] = self._backward_force_curriculum_stage
+        return statistics
+
+    def update_backward_force_curriculum(self, successful_episodes: int, completed_episodes: int) -> bool:
+        """Consume one rollout's stage-pure counts and consider promotion using a recent evidence window."""
+        if (
+            any(isinstance(count, bool) or not isinstance(count, int) for count in (successful_episodes, completed_episodes))
+            or not 0 <= successful_episodes <= completed_episodes
+        ):
+            raise ValueError("Curriculum episode counts must be integers with 0 <= successes <= completed.")
         self._backward_force_curriculum_stage_iterations += 1
-        if self._backward_force_curriculum_stage >= len(self._backward_force_curriculum):
-            return False
-        if self._backward_force_curriculum_stage_iterations < self.cfg.min_iterations_with_curriculum_stage:
-            return False
-        if success_rate is None or success_rate <= float(self.cfg.backward_force_curriculum_sr_threshold):
+        iteration = self._backward_force_curriculum_stage_iterations
+        history = self._backward_force_curriculum_history
+        if completed_episodes:
+            history.append((iteration, successful_episodes, completed_episodes))
+        successes = sum(entry[1] for entry in history)
+        completed = sum(entry[2] for entry in history)
+        recent_start = iteration - self.cfg.backward_force_curriculum_window_iterations + 1
+        # Keep all recent rollouts, plus only as many older whole rollouts as needed for the sample floor.
+        while history and history[0][0] < recent_start:
+            oldest = history[0]
+            if completed - oldest[2] < self.cfg.backward_force_curriculum_min_episodes:
+                break
+            history.popleft()
+            successes -= oldest[1]
+            completed -= oldest[2]
+        success_rate = successes / completed if completed else None
+        window_start = max(1, min(recent_start, history[0][0])) if history else max(1, recent_start)
+        metrics: dict[str, float | int] = {
+            "Curriculum/backward_force_window_episodes": completed,
+            "Curriculum/backward_force_window_successes": successes,
+            "Curriculum/backward_force_window_iterations": iteration - window_start + 1,
+            "Curriculum/backward_force_rollout_stage": self._backward_force_curriculum_stage,
+            "Curriculum/backward_force_rollout_stage_iterations": iteration,
+            "Curriculum/backward_force_promoted": 0,
+        }
+        if success_rate is not None:
+            metrics["Curriculum/backward_force_success_rate"] = success_rate
+        # Preserve the decision snapshot even if promotion clears the history below.
+        self._backward_force_curriculum_metrics = metrics
+        if (
+            self._backward_force_curriculum_stage >= len(self._backward_force_curriculum)
+            or iteration < self.cfg.min_iterations_with_curriculum_stage
+            or completed < self.cfg.backward_force_curriculum_min_episodes
+            or completed_episodes == 0
+            or success_rate <= float(self.cfg.backward_force_curriculum_sr_threshold)
+        ):
             return False
 
         previous_force = self._current_backward_force
         self._current_backward_force = self._backward_force_curriculum[self._backward_force_curriculum_stage]
         self._backward_force_curriculum_stage += 1
+        # Resets on the rollout's last step have not yet experienced the old force in their new episode.
+        self._backward_force_episode_stage[self.episode_length_buf == 0] = self._backward_force_curriculum_stage
         print(
             "[INFO] Backward-force curriculum advanced: "
             f"{previous_force:g} N -> {self._current_backward_force:g} N "
-            f"(Episode/successRate={success_rate:.4f} > "
+            f"(stage-pure success rate={success_rate:.4f} > "
             f"{float(self.cfg.backward_force_curriculum_sr_threshold):.4f}; "
+            f"{successes}/{completed} eligible episodes over {iteration - window_start + 1} rollouts; "
             f"after {self._backward_force_curriculum_stage_iterations} iterations at previous force; "
             f"stage {self._backward_force_curriculum_stage}/{len(self._backward_force_curriculum)}).",
             flush=True,
         )
+        metrics["Curriculum/backward_force_promoted"] = 1
+        history.clear()
         self._backward_force_curriculum_stage_iterations = 0
         return True
 
@@ -1568,6 +1631,14 @@ class Solo12RaceEnv(DirectRLEnv):
         reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
         step_log = {f"RewardsPerStep/{key}": torch.mean(value).item() for key, value in rewards.items()}
         step_log["RewardsPerStep/total"] = torch.mean(reward).item()
+        # Reset replaces these with counts of actual outcomes. Explicit zeros make empty-rollout
+        # sample counts visible without fabricating a zero success rate.
+        step_log.update({
+            "Episode/success_count": 0,
+            "Episode/completed_count": 0,
+            "Curriculum/backward_force_eligible_success_count": 0,
+            "Curriculum/backward_force_eligible_completed_count": 0,
+        })
         self.extras["log"] = step_log
 
         for key, value in rewards.items():
@@ -1600,6 +1671,7 @@ class Solo12RaceEnv(DirectRLEnv):
         finish_ratio = torch.mean(episode_finished.float()).item()
         finish_time_steps = self._compute_finish_time_steps(env_ids, episode_finished)
         finish_time_seconds = finish_time_steps * self.step_dt
+        episode_counts = self._backward_force_episode_statistics(env_ids, episode_finished)
 
         self._robot.reset(env_ids)
         super()._reset_idx(env_ids)
@@ -1671,6 +1743,7 @@ class Solo12RaceEnv(DirectRLEnv):
         extras["Episode/gateProgressRatio"] = torch.mean(episode_completion).item()
         extras["Episode/finishRatio"] = finish_ratio
         extras["Episode/successRate"] = finish_ratio
+        extras.update(episode_counts)
         extras["Episode/finishTimeSteps"] = finish_time_steps
         extras["Episode/finishTimeSeconds"] = finish_time_seconds
         extras["Episode_Termination/base_contact"] = torch.count_nonzero(episode_floor_collision).item()

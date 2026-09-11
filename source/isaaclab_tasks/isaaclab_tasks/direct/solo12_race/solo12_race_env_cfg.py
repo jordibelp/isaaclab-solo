@@ -209,16 +209,18 @@ class Solo12RaceEnvCfg(DirectRLEnvCfg):
     # start-to-end direction. Zero disables it.
     backward_force: float = 0.0
     # Success-rate curriculum stages applied after ``backward_force``. An empty sequence disables the curriculum and
-    # keeps using ``backward_force``. Each stage is activated after a training iteration whose
-    # Episode/successRate is strictly greater than ``backward_force_curriculum_sr_threshold``.
+    # keeps using ``backward_force``. Promotion uses episode-weighted, current-stage-only outcomes;
+    # see FORCE_CURRICULUM.md for the evidence window, logging, and restart semantics.
     backward_force_curriculum: tuple[float, ...] = ()
-    backward_force_curriculum_sr_threshold: float = 0.6
-    # Minimum completed training rollouts at the initial force and at each subsequent stage. The current
-    # rollout must still clear the success threshold; this is not a count of consecutive successful rollouts.
-    # One preserves the original behavior. Five prevents single-iteration jumps but does not exclude episodes
-    # spanning a force change. With 32 steps/rollout, dt=0.01 s and a 20 s horizon, use 64 for a clean rollout
-    # after a full horizon of washout. New/resumed environments start counting from zero at backward_force.
-    min_iterations_with_curriculum_stage: int = 1
+    backward_force_curriculum_sr_threshold: float = 0.7  # Strictly greater than, not greater than or equal.
+    # Minimum completed rollouts at each force, independent of the evidence window. At 32 steps/rollout
+    # and dt=0.01 s, 64 gives 20.48 s of residence (a conservative default for a 20 s episode horizon).
+    # Mixed-force episodes are explicitly excluded even with a shorter residence time.
+    min_iterations_with_curriculum_stage: int = 64
+    # Pool the last N rollouts. Retain older nonempty rollouts from this stage only when removing them
+    # would leave fewer than the minimum episode count. Empty rollouts cannot trigger promotion.
+    backward_force_curriculum_window_iterations: int = 10
+    backward_force_curriculum_min_episodes: int = 500
     waypoint_names = SOLO12_RACE_WAYPOINT_NAMES
     patch_name_pattern = "patch.*"
 

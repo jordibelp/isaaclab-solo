@@ -625,24 +625,43 @@ def _safe_run_dir_name(run_name: str) -> str:
     return re.sub(r"[\\/]+", "-", run_name).strip()
 
 
-def _mean_episode_info(ep_infos: list[dict], key: str) -> float | None:
-    """Match RSL-RL's unweighted mean for one scalar episode-info metric."""
-    values = []
-    for ep_info in ep_infos:
-        if key in ep_info:
-            values.append(torch.as_tensor(ep_info[key], dtype=torch.float32).reshape(-1))
-    if not values:
-        return None
-    return float(torch.cat(values).mean().item())
+def _aggregate_race_episode_statistics(ep_infos: list[dict]) -> None:
+    """Make PPO log pooled episode counts/rates once, rather than average unequal reset-step batches."""
+    count_keys = (
+        "Episode/success_count",
+        "Episode/completed_count",
+        "Curriculum/backward_force_eligible_success_count",
+        "Curriculum/backward_force_eligible_completed_count",
+    )
+    if not any("Episode/completed_count" in info for info in ep_infos):
+        return  # Other tasks keep their existing metric definitions.
+    totals = {key: 0 for key in count_keys}
+    for info in ep_infos:
+        for key in count_keys:
+            totals[key] += int(torch.as_tensor(info.pop(key, 0)).sum().item())
+        info.pop("Episode/successRate", None)
+        info.pop("Episode/finishRatio", None)
+    ep_infos[0].update(totals)
+    if totals["Episode/completed_count"]:
+        success_rate = totals["Episode/success_count"] / totals["Episode/completed_count"]
+        ep_infos[0]["Episode/successRate"] = success_rate
+        ep_infos[0]["Episode/finishRatio"] = success_rate
 
 
 def _update_backward_force_curriculum(runner, ep_infos: list[dict]) -> None:
-    """Count one completed rollout, then consider its logged success-rate aggregate for promotion."""
+    """Count one completed rollout; only explicitly stage-pure episode counts can support promotion."""
     raw_env = getattr(runner.env, "unwrapped", None)
     if raw_env is None or not hasattr(raw_env, "update_backward_force_curriculum"):
         return
-    success_rate = _mean_episode_info(ep_infos, "Episode/successRate")
-    raw_env.update_backward_force_curriculum(success_rate)
+    successes = sum(
+        int(torch.as_tensor(info.get("Curriculum/backward_force_eligible_success_count", 0)).sum().item())
+        for info in ep_infos
+    )
+    completed = sum(
+        int(torch.as_tensor(info.get("Curriculum/backward_force_eligible_completed_count", 0)).sum().item())
+        for info in ep_infos
+    )
+    raw_env.update_backward_force_curriculum(successes, completed)
 
 
 def _get_curriculum_state_from_runner(runner) -> dict | None:
@@ -2367,6 +2386,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             "and regenerative references remain exactly synchronized."
         )
 
+    if getattr(env_cfg, "backward_force_curriculum", ()) and (
+        args_cli.distributed or agent_cfg.class_name != "OnPolicyRunner"
+    ):
+        raise ValueError("The race backward-force curriculum currently requires single-process RSL-RL PPO training.")
+
     if args_cli.distributed and args_cli.device is not None and "cpu" in args_cli.device:
         raise ValueError(
             "Distributed training is not supported when using CPU device. Please use GPU device (e.g., --device cuda)."
@@ -2828,6 +2852,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 # reset-step payload first so sparse episodic metrics are included.
                 richest_index = max(range(len(ep_infos)), key=lambda index: len(ep_infos[index]))
                 ep_infos[0], ep_infos[richest_index] = ep_infos[richest_index], ep_infos[0]
+                _aggregate_race_episode_statistics(ep_infos)
         original_log(*log_args, **log_kwargs)
 
         raw_env = getattr(runner.env, "unwrapped", None)
@@ -2859,6 +2884,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     int(getattr(raw_env, "_backward_force_curriculum_stage", 0)),
                     locs["it"],
                 )
+                for key, value in raw_env._backward_force_curriculum_metrics.items():
+                    runner.writer.add_scalar(key, value, locs["it"])
         rewbuffer = locs.get("rewbuffer")
         if rewbuffer is None or len(rewbuffer) == 0:
             return

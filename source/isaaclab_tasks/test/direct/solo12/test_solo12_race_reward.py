@@ -129,9 +129,13 @@ def _make_backward_force_curriculum_env(stages=(1.0, 1.7), threshold=0.6, initia
         backward_force_curriculum=stages,
         backward_force_curriculum_sr_threshold=threshold,
         min_iterations_with_curriculum_stage=1,
+        backward_force_curriculum_window_iterations=1,
+        backward_force_curriculum_min_episodes=1,
         race_scene="straightSimple",
     )
     env._configure_backward_force_curriculum()
+    env._backward_force_episode_stage = torch.zeros(1, dtype=torch.long)
+    env.episode_length_buf = torch.ones(1, dtype=torch.long)
     return env
 
 
@@ -139,14 +143,14 @@ def test_backward_force_curriculum_advances_one_stage_per_threshold_crossing():
     env = _make_backward_force_curriculum_env()
 
     assert env.current_backward_force == 0.0
-    assert env.update_backward_force_curriculum(0.6) is False
+    assert env.update_backward_force_curriculum(6, 10) is False
     assert env.current_backward_force == 0.0
 
-    assert env.update_backward_force_curriculum(0.6001) is True
+    assert env.update_backward_force_curriculum(6001, 10000) is True
     assert env.current_backward_force == 1.0
-    assert env.update_backward_force_curriculum(0.9) is True
+    assert env.update_backward_force_curriculum(9, 10) is True
     assert env.current_backward_force == 1.7
-    assert env.update_backward_force_curriculum(1.0) is False
+    assert env.update_backward_force_curriculum(10, 10) is False
     assert env.current_backward_force == 1.7
 
 
@@ -154,7 +158,7 @@ def test_empty_backward_force_curriculum_keeps_configured_force():
     env = _make_backward_force_curriculum_env(stages=(), initial_force=2.5)
 
     assert env.current_backward_force == 2.5
-    assert env.update_backward_force_curriculum(1.0) is False
+    assert env.update_backward_force_curriculum(10, 10) is False
     assert env.current_backward_force == 2.5
 
 
