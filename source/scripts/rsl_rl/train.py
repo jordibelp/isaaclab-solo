@@ -133,7 +133,20 @@ parser.add_argument(
 parser.add_argument(
     "--agent", type=str, default="rsl_rl_cfg_entry_point", help="Name of the RL agent configuration entry point."
 )
-parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
+parser.add_argument(
+    "--seed",
+    type=int,
+    default=None,
+    help="Experiment/agent RNG seed. The environment RNG stream defaults to the same numeric seed.",
+)
+parser.add_argument(
+    "--env-seed",
+    "--env_seed",
+    dest="env_seed",
+    type=int,
+    default=None,
+    help="Optional independent environment RNG seed. Defaults to --seed/agent_cfg.seed.",
+)
 parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy training iterations.")
 parser.add_argument(
     "--run-name",
@@ -511,6 +524,7 @@ from continual_backprop import build_continual_backprop_manager, collect_actor_c
 from isaaclab.envs import DirectMARLEnv, DirectMARLEnvCfg, DirectRLEnvCfg, ManagerBasedRLEnvCfg, multi_agent_to_single_agent
 from isaaclab.utils.dict import print_dict
 from isaaclab.utils.io import dump_yaml
+from isaaclab.utils.seed import RngStream, configure_seed
 from isaaclab_rl.rsl_rl import RslRlBaseRunnerCfg, RslRlSymmetryCfg, RslRlVecEnvWrapper
 
 import isaaclab_tasks  # noqa: F401
@@ -2353,7 +2367,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 flush=True,
             )
 
-    env_cfg.seed = agent_cfg.seed
+    base_agent_seed = int(configure_seed(agent_cfg.seed))
+    base_env_seed = (
+        int(configure_seed(args_cli.env_seed))
+        if args_cli.env_seed is not None
+        else base_agent_seed
+    )
+    agent_cfg.seed = base_agent_seed
+    env_cfg.seed = base_env_seed
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
     if args_cli.skip_curriculum:
         if not hasattr(env_cfg, "skip_curriculum"):
@@ -2399,9 +2420,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if args_cli.distributed:
         env_cfg.sim.device = f"cuda:{app_launcher.local_rank}"
         agent_cfg.device = f"cuda:{app_launcher.local_rank}"
-        seed = agent_cfg.seed + app_launcher.local_rank
-        env_cfg.seed = seed
-        agent_cfg.seed = seed
+        agent_cfg.seed = base_agent_seed + app_launcher.local_rank
+        env_cfg.seed = base_env_seed + app_launcher.local_rank
+
+    agent_seed = int(agent_cfg.seed)
+    environment_seed = int(env_cfg.seed)
 
     _sync_base_imu_policy_cfg_from_env_cfg(env_cfg, agent_cfg)
     configure_race_actor_critic(env_cfg, agent_cfg)
@@ -2534,7 +2557,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # switch render_mode to rgb_array only while recording, which avoids the huge render-product
     # initialization cost seen on 12k-env cluster jobs.
     render_mode = "rgb_array" if args_cli.video else None
-    env = gym.make(args_cli.task, cfg=env_cfg, render_mode=render_mode)
+    print(
+        "[INFO]: Experiment seed streams: "
+        f"agent/model={agent_seed}, environment={environment_seed} "
+        "(separate RNG states for paired algorithm comparisons).",
+        flush=True,
+    )
+    configure_seed(agent_seed)
+    env_rng_stream = RngStream.from_seed(environment_seed)
+    with env_rng_stream.use():
+        env = gym.make(args_cli.task, cfg=env_cfg, render_mode=render_mode)
+    configure_seed(agent_seed)
     straight_track_start_to_end_distance_m = getattr(
         env.unwrapped, "straight_track_start_to_end_distance_m", None
     )
@@ -2571,7 +2604,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     start_time = time.time()
     if agent_cfg.logger == "wandb":
         _patch_rsl_rl_wandb_writer_for_single_stream()
-    env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
+    env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions, rng_stream=env_rng_stream)
     if args_cli.plasticity_loss_exp:
         env = observation_permutation.ObservationPermutationVecEnv(
             env,
@@ -2724,6 +2757,19 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
     dump_yaml(os.path.join(log_dir, "params", "agent.yaml"), agent_cfg)
+    dump_yaml(
+        os.path.join(log_dir, "params", "seeding.yaml"),
+        {
+            "agent_seed": agent_seed,
+            "environment_seed": environment_seed,
+            "environment_seed_overridden": args_cli.env_seed is not None,
+            "separate_environment_rng_stream": True,
+            "seed_argument_semantics": (
+                "--seed controls the agent/model RNG stream; the environment stream defaults to the same "
+                "numeric seed and can be overridden with --env-seed."
+            ),
+        },
+    )
     dump_yaml(
         os.path.join(log_dir, "params", "plasticity_mitigation.yaml"),
         {
@@ -3083,7 +3129,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 episodes=int(args_cli.periodic_eval_video_episodes),
                 speed=float(args_cli.periodic_eval_video_speed),
                 max_steps=int(args_cli.periodic_eval_video_max_steps),
-                seed=args_cli.seed,
+                seed=environment_seed,
                 simple_video=bool(args_cli.periodic_eval_simple_video),
                 group_all_patches_single_bucket=(
                     bool(env_cfg.group_all_patches_single_bucket)
@@ -3123,7 +3169,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             flush=True,
         )
     if num_learning_iterations > 0:
-        runner.learn(num_learning_iterations=num_learning_iterations, init_at_random_ep_len=True)
+        initial_episode_randomizer = getattr(env, "randomize_episode_length_buf", None)
+        if callable(initial_episode_randomizer):
+            initial_episode_randomizer()
+        else:
+            env.episode_length_buf = torch.randint_like(
+                env.episode_length_buf, high=int(env.max_episode_length)
+            )
+        runner.learn(num_learning_iterations=num_learning_iterations, init_at_random_ep_len=False)
     else:
         print("[INFO]: Plasticity permutation schedule is already complete; no training iterations remain.")
 

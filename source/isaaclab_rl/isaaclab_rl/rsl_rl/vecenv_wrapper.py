@@ -9,6 +9,7 @@ from rsl_rl.env import VecEnv
 from tensordict import TensorDict
 
 from isaaclab.envs import DirectRLEnv, ManagerBasedRLEnv
+from isaaclab.utils.seed import RngStream
 
 
 class RslRlVecEnvWrapper(VecEnv):
@@ -23,7 +24,12 @@ class RslRlVecEnvWrapper(VecEnv):
         https://github.com/leggedrobotics/rsl_rl/blob/master/rsl_rl/env/vec_env.py
     """
 
-    def __init__(self, env: ManagerBasedRLEnv | DirectRLEnv, clip_actions: float | None = None):
+    def __init__(
+        self,
+        env: ManagerBasedRLEnv | DirectRLEnv,
+        clip_actions: float | None = None,
+        rng_stream: RngStream | None = None,
+    ):
         """Initializes the wrapper.
 
         Note:
@@ -32,6 +38,8 @@ class RslRlVecEnvWrapper(VecEnv):
         Args:
             env: The environment to wrap around.
             clip_actions: The clipping value for actions. If ``None``, then no clipping is done.
+            rng_stream: Optional process-global RNG stream to use for environment calls. This keeps environment
+                randomization independent from policy initialization and training randomness.
 
         Raises:
             ValueError: When the environment is not an instance of :class:`ManagerBasedRLEnv` or :class:`DirectRLEnv`.
@@ -47,6 +55,7 @@ class RslRlVecEnvWrapper(VecEnv):
         # initialize the wrapper
         self.env = env
         self.clip_actions = clip_actions
+        self.rng_stream = rng_stream
 
         # store information required by wrapper
         self.num_envs = self.unwrapped.num_envs
@@ -63,7 +72,7 @@ class RslRlVecEnvWrapper(VecEnv):
         self._modify_action_space()
 
         # reset at the start since the RSL-RL runner does not call reset
-        self.env.reset()
+        self._call_env(self.env.reset)
 
     def __str__(self):
         """Returns the wrapper name and the :attr:`env` representation string."""
@@ -133,19 +142,21 @@ class RslRlVecEnvWrapper(VecEnv):
     """
 
     def seed(self, seed: int = -1) -> int:  # noqa: D102
-        return self.unwrapped.seed(seed)
+        if self.rng_stream is None:
+            return self.unwrapped.seed(seed)
+        with self.rng_stream.use():
+            resolved_seed = self.unwrapped.seed(seed)
+        self.rng_stream.seed = resolved_seed
+        return resolved_seed
 
     def reset(self) -> tuple[TensorDict, dict]:  # noqa: D102
         # reset the environment
-        obs_dict, extras = self.env.reset()
+        obs_dict, extras = self._call_env(self.env.reset)
         return TensorDict(obs_dict, batch_size=[self.num_envs]), extras
 
     def get_observations(self) -> TensorDict:
         """Returns the current observations of the environment."""
-        if hasattr(self.unwrapped, "observation_manager"):
-            obs_dict = self.unwrapped.observation_manager.compute()
-        else:
-            obs_dict = self.unwrapped._get_observations()
+        obs_dict = self._call_env(self._compute_observations)
         return TensorDict(obs_dict, batch_size=[self.num_envs])
 
     def step(self, actions: torch.Tensor) -> tuple[TensorDict, torch.Tensor, torch.Tensor, dict]:
@@ -153,7 +164,7 @@ class RslRlVecEnvWrapper(VecEnv):
         if self.clip_actions is not None:
             actions = torch.clamp(actions, -self.clip_actions, self.clip_actions)
         # record step information
-        obs_dict, rew, terminated, truncated, extras = self.env.step(actions)
+        obs_dict, rew, terminated, truncated, extras = self._call_env(self.env.step, actions)
         # compute dones for compatibility with RSL-RL
         dones = (terminated | truncated).to(dtype=torch.long)
         # move time out information to the extras dict
@@ -165,12 +176,33 @@ class RslRlVecEnvWrapper(VecEnv):
         # return the step information
         return TensorDict(obs_dict, batch_size=[self.num_envs]), rew, dones, extras
 
+    def randomize_episode_length_buf(self) -> None:
+        """Randomize initial episode phases using the environment RNG stream."""
+
+        def _randomize() -> None:
+            self.env.unwrapped.episode_length_buf = torch.randint_like(
+                self.env.unwrapped.episode_length_buf, high=int(self.max_episode_length)
+            )
+
+        self._call_env(_randomize)
+
     def close(self):  # noqa: D102
         return self.env.close()
 
     """
     Helper functions
     """
+
+    def _call_env(self, func, *args, **kwargs):
+        if self.rng_stream is None:
+            return func(*args, **kwargs)
+        with self.rng_stream.use():
+            return func(*args, **kwargs)
+
+    def _compute_observations(self):
+        if hasattr(self.unwrapped, "observation_manager"):
+            return self.unwrapped.observation_manager.compute()
+        return self.unwrapped._get_observations()
 
     def _modify_action_space(self):
         """Modifies the action space to the clip range."""
