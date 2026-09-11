@@ -202,18 +202,27 @@ class Solo12RaceEnv(DirectRLEnv):
         if any(force > 0.0 for force in all_forces) and str(self.cfg.race_scene) != "straightSimple":
             raise ValueError("backward_force is only supported when race_scene='straightSimple'.")
 
+        minimum = self.cfg.min_iterations_with_curriculum_stage
+        if isinstance(minimum, bool) or not isinstance(minimum, int) or minimum < 1:
+            raise ValueError(f"min_iterations_with_curriculum_stage must be a positive integer, got {minimum!r}.")
+
         self._backward_force_curriculum = force_stages
         self._backward_force_curriculum_stage = 0
+        self._backward_force_curriculum_stage_iterations = 0
         self._current_backward_force = initial_force
 
-    def update_backward_force_curriculum(self, success_rate: float) -> bool:
-        """Advance one force stage when the logged episode success rate clears the configured threshold."""
-        success_rate = float(success_rate)
-        if not math.isfinite(success_rate) or not 0.0 <= success_rate <= 1.0:
-            raise ValueError(f"Episode/successRate must be finite and in [0, 1], got {success_rate}.")
+    def update_backward_force_curriculum(self, success_rate: float | None) -> bool:
+        """Called once per completed rollout; require both minimum stage age and current success rate."""
+        if success_rate is not None:
+            success_rate = float(success_rate)
+            if not math.isfinite(success_rate) or not 0.0 <= success_rate <= 1.0:
+                raise ValueError(f"Episode/successRate must be finite and in [0, 1], got {success_rate}.")
+        self._backward_force_curriculum_stage_iterations += 1
         if self._backward_force_curriculum_stage >= len(self._backward_force_curriculum):
             return False
-        if success_rate <= float(self.cfg.backward_force_curriculum_sr_threshold):
+        if self._backward_force_curriculum_stage_iterations < self.cfg.min_iterations_with_curriculum_stage:
+            return False
+        if success_rate is None or success_rate <= float(self.cfg.backward_force_curriculum_sr_threshold):
             return False
 
         previous_force = self._current_backward_force
@@ -224,9 +233,11 @@ class Solo12RaceEnv(DirectRLEnv):
             f"{previous_force:g} N -> {self._current_backward_force:g} N "
             f"(Episode/successRate={success_rate:.4f} > "
             f"{float(self.cfg.backward_force_curriculum_sr_threshold):.4f}; "
+            f"after {self._backward_force_curriculum_stage_iterations} iterations at previous force; "
             f"stage {self._backward_force_curriculum_stage}/{len(self._backward_force_curriculum)}).",
             flush=True,
         )
+        self._backward_force_curriculum_stage_iterations = 0
         return True
 
     @property

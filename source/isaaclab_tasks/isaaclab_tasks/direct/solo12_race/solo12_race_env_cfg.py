@@ -213,6 +213,12 @@ class Solo12RaceEnvCfg(DirectRLEnvCfg):
     # Episode/successRate is strictly greater than ``backward_force_curriculum_sr_threshold``.
     backward_force_curriculum: tuple[float, ...] = ()
     backward_force_curriculum_sr_threshold: float = 0.6
+    # Minimum completed training rollouts at the initial force and at each subsequent stage. The current
+    # rollout must still clear the success threshold; this is not a count of consecutive successful rollouts.
+    # One preserves the original behavior. Five prevents single-iteration jumps but does not exclude episodes
+    # spanning a force change. With 32 steps/rollout, dt=0.01 s and a 20 s horizon, use 64 for a clean rollout
+    # after a full horizon of washout. New/resumed environments start counting from zero at backward_force.
+    min_iterations_with_curriculum_stage: int = 1
     waypoint_names = SOLO12_RACE_WAYPOINT_NAMES
     patch_name_pattern = "patch.*"
 

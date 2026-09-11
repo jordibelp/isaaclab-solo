@@ -128,6 +128,7 @@ def _make_backward_force_curriculum_env(stages=(1.0, 1.7), threshold=0.6, initia
         backward_force=initial_force,
         backward_force_curriculum=stages,
         backward_force_curriculum_sr_threshold=threshold,
+        min_iterations_with_curriculum_stage=1,
         race_scene="straightSimple",
     )
     env._configure_backward_force_curriculum()

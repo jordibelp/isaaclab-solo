@@ -637,13 +637,12 @@ def _mean_episode_info(ep_infos: list[dict], key: str) -> float | None:
 
 
 def _update_backward_force_curriculum(runner, ep_infos: list[dict]) -> None:
-    """Advance the race force curriculum from the same success-rate aggregate logged by RSL-RL."""
+    """Count one completed rollout, then consider its logged success-rate aggregate for promotion."""
     raw_env = getattr(runner.env, "unwrapped", None)
     if raw_env is None or not hasattr(raw_env, "update_backward_force_curriculum"):
         return
     success_rate = _mean_episode_info(ep_infos, "Episode/successRate")
-    if success_rate is not None:
-        raw_env.update_backward_force_curriculum(success_rate)
+    raw_env.update_backward_force_curriculum(success_rate)
 
 
 def _get_curriculum_state_from_runner(runner) -> dict | None:
@@ -2831,6 +2830,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 ep_infos[0], ep_infos[richest_index] = ep_infos[richest_index], ep_infos[0]
         original_log(*log_args, **log_kwargs)
 
+        raw_env = getattr(runner.env, "unwrapped", None)
+        rollout_backward_force = getattr(raw_env, "current_backward_force", None)
         if log_args:
             _update_backward_force_curriculum(runner, log_args[0].get("ep_infos") or [])
 
@@ -2845,7 +2846,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             _log_plasticity_metrics(runner, locs, args_cli.plasticity_metrics_interval)
             raw_env = getattr(runner.env, "unwrapped", None)
             if raw_env is not None and hasattr(raw_env, "current_backward_force"):
+                # Keep the existing post-update force metric, and disambiguate the force used to collect this row.
+                runner.writer.add_scalar("Curriculum/backward_force_rollout_N", rollout_backward_force, locs["it"])
                 runner.writer.add_scalar("Curriculum/backward_force_N", raw_env.current_backward_force, locs["it"])
+                runner.writer.add_scalar(
+                    "Curriculum/backward_force_stage_iterations",
+                    raw_env._backward_force_curriculum_stage_iterations,
+                    locs["it"],
+                )
                 runner.writer.add_scalar(
                     "Curriculum/backward_force_stage",
                     int(getattr(raw_env, "_backward_force_curriculum_stage", 0)),
