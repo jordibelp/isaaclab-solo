@@ -516,6 +516,7 @@ import torch
 from rsl_rl.runners import DistillationRunner, OnPolicyRunner
 from rsl_rl_sac.runners import OffPolicyRunner
 
+import local_redundancy
 import plasticity_metrics
 import plasticity_mitigation
 import observation_permutation
@@ -2260,6 +2261,7 @@ def _patch_runner_learn_with_periodic_eval_video(runner, recorder) -> None:
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     agent_cfg = cli_args.update_rsl_rl_cfg(agent_cfg, args_cli)
+    local_redundancy.validate_config(agent_cfg.local_redundancy.to_dict())
     mitigation_spec = plasticity_mitigation.resolve_strategy(args_cli.plasticity_mitigation_strategy)
     args_cli.plasticity_mitigation_strategy = mitigation_spec.name
     if args_cli.plasticity_loss_exp_reset_all and not args_cli.plasticity_loss_exp:
@@ -2717,13 +2719,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if cbp_manager is not None and should_resume and not args_cli.reuse_mlp:
         _restore_cbp_state_from_checkpoint(cbp_manager, resume_path)
     _attach_plasticity_metrics_to_runner(runner, args_cli)
-    if isinstance(runner, OffPolicyRunner) and hasattr(runner, "_borinot_plasticity_groups"):
+    local_redundancy.attach(runner, agent_cfg.local_redundancy.to_dict())
+    if isinstance(runner, OffPolicyRunner):
         def _log_sac_iteration_plasticity(locs):
             _log_plasticity_metrics(
                 runner,
                 locs,
                 args_cli.plasticity_metrics_interval,
             )
+            local_redundancy.log(runner, locs)
 
         runner._iteration_callback = _log_sac_iteration_plasticity
     reset_all_controller = None
@@ -2814,6 +2818,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         __file__,
                         _THIS_DIR / "continual_backprop.py",
                         _THIS_DIR / "plasticity_metrics.py",
+                        _THIS_DIR / "local_redundancy.py",
                         _THIS_DIR / "plasticity_mitigation.py" if mitigation_spec.name != "none" else None,
                         _THIS_DIR / "observation_permutation.py" if args_cli.plasticity_loss_exp else None,
                     ]
@@ -2915,6 +2920,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         if getattr(runner, "writer", None) is not None:
             runner.writer.add_scalar("env_steps", runner.tot_timesteps, locs["it"])
             _log_plasticity_metrics(runner, locs, args_cli.plasticity_metrics_interval)
+            local_redundancy.log(runner, locs)
             raw_env = getattr(runner.env, "unwrapped", None)
             if raw_env is not None and hasattr(raw_env, "current_backward_force"):
                 # Keep the existing post-update force metric, and disambiguate the force used to collect this row.

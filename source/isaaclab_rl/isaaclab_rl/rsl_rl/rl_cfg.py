@@ -188,11 +188,33 @@ class RslRlSacAlgorithmCfg:
 
 
 @configclass
+class RslRlLocalRedundancyCfg:
+    """Read-only regression-gradient probe; see source/scripts/rsl_rl/LOCAL_REDUNDANCY.md."""
+
+    enabled: bool = True
+    actor: bool = True
+    critic: bool = True
+    interval: int = 100
+    num_samples: int = 4096
+    batch_size: int = 16
+    input_mode: Literal["gaussian", "observations"] = "gaussian"
+    input_std: float = 1.0
+    actor_target_std: float = 1.0
+    critic_target_std: float = 1.0
+    sac_action_source: Literal["uniform", "policy_mean"] = "uniform"
+    seed: int = 1729
+    resample: bool = False
+
+
+@configclass
 class RslRlBaseRunnerCfg:
     """Base configuration of the runner."""
 
     seed: int = 42
     """The seed for the experiment. Default is 42."""
+
+    local_redundancy: RslRlLocalRedundancyCfg = RslRlLocalRedundancyCfg(enabled=False)
+    """Hydra-configurable actor/critic local-redundancy diagnostics for PPO and SAC."""
 
     device: str = "cuda:0"
     """The device for the rl-agent. Default is cuda:0."""
@@ -296,6 +318,8 @@ class RslRlOnPolicyRunnerCfg(RslRlBaseRunnerCfg):
     class_name: str = "OnPolicyRunner"
     """The runner class name. Default is OnPolicyRunner."""
 
+    local_redundancy: RslRlLocalRedundancyCfg = RslRlLocalRedundancyCfg()
+
     policy: RslRlPpoActorCriticCfg = MISSING
     """The policy configuration."""
 
@@ -308,6 +332,7 @@ class RslRlOffPolicyRunnerCfg(RslRlBaseRunnerCfg):
     """Configuration for the RSL-RL-SAC off-policy runner."""
 
     class_name: str = "OffPolicyRunner"
+    local_redundancy: RslRlLocalRedundancyCfg = RslRlLocalRedundancyCfg()
     actor: RslRlSacActorModelCfg = MISSING
     critic: RslRlSacCriticModelCfg = MISSING
     algorithm: RslRlSacAlgorithmCfg = MISSING
