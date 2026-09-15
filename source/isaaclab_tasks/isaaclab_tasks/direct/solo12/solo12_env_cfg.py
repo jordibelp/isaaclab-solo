@@ -519,7 +519,9 @@ class Solo12EnvCfg(DirectRLEnvCfg):
 
     forces_applied_to_base_curriculum = [5.0]
     max_velx_range_curriculum = [1.0, 1.5]
-    forces_curriculum_threshold_reward = 28.0
+    # Advance the velocity/force curriculum once the smoothed episodic return reaches this fraction of
+    # the maximum attainable return (every bounded positive term at its kernel maximum for the whole episode).
+    forces_curriculum_threshold_reward_max_ratio = 0.63
     forces_curriculum_smoothing = 0.05
     # ``legacy`` preserves the original reward-only two-feet curriculum plus the separate
     # velocity/force curriculum. Named profiles coordinate all phase-dependent settings.

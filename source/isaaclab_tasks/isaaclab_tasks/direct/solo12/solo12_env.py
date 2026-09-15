@@ -44,6 +44,13 @@ _EPISODE_REWARD_KEYS = (
 )
 
 _REWARD_KEYS_WITHOUT_STEP_DT = frozenset(("soft_qlim_penalty",))
+# Terms built by ``_scale_bounded_positive_reward``: kernel in [0, 1], so each earns at most scale per second.
+_BOUNDED_POSITIVE_REWARD_KEYS = (
+    "track_lin_vel_xy_exp",
+    "track_ang_vel_z_exp",
+    "two_feet_above_height",
+    "track_base_height_exp",
+)
 
 
 def _reward_step_factor(key: str, step_dt: float) -> float:
@@ -941,6 +948,11 @@ class Solo12Env(DirectRLEnv):
                 "forces_curriculum_smoothing must be in (0, 1], "
                 f"got {self.cfg.forces_curriculum_smoothing}."
             )
+        if not 0.0 <= self.cfg.forces_curriculum_threshold_reward_max_ratio <= 1.0:
+            raise ValueError(
+                "forces_curriculum_threshold_reward_max_ratio must be in [0, 1], "
+                f"got {self.cfg.forces_curriculum_threshold_reward_max_ratio}."
+            )
         return values
 
     def _parse_max_velx_range_curriculum(self) -> tuple[float, ...]:
@@ -1114,7 +1126,8 @@ class Solo12Env(DirectRLEnv):
                 (1.0 - smoothing) * self._base_push_mean_reward_smooth + smoothing * mean_reward
             )
 
-        if self._base_push_mean_reward_smooth < self.cfg.forces_curriculum_threshold_reward:
+        threshold = self.cfg.forces_curriculum_threshold_reward_max_ratio * self._max_episode_reward()
+        if self._base_push_mean_reward_smooth < threshold:
             return
 
         if can_increase_velx:
@@ -1124,6 +1137,13 @@ class Solo12Env(DirectRLEnv):
         self._base_push_mean_reward_smooth = None
         self._base_push_last_curriculum_step = self.common_step_counter
         self._refresh_tricky_terrain_origins()
+
+    def _max_episode_reward(self) -> float:
+        """Return the episodic return when every bounded positive term stays at its kernel maximum of 1."""
+        reward_scales = self._reward_scales()
+        return self.max_episode_length_s * sum(
+            max(reward_scales[key], 0.0) for key in _BOUNDED_POSITIVE_REWARD_KEYS
+        )
 
     def _episode_reward_metric(self, key: str, env_ids: torch.Tensor) -> float:
         return torch.mean(self._episode_sums[key][env_ids]).abs().item() / self.max_episode_length_s

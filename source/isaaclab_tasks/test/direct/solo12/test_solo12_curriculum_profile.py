@@ -10,7 +10,7 @@ simulation_app = AppLauncher(headless=True).app
 import torch
 
 from isaaclab_tasks.direct.solo12.solo12_env import Solo12Env, _episode_reward_ratios
-from isaaclab_tasks.direct.solo12.solo12_env_cfg import Solo12TwoFeetEnvCfg
+from isaaclab_tasks.direct.solo12.solo12_env_cfg import Solo12EnvCfg, Solo12TwoFeetEnvCfg
 
 
 def _bare_env(cfg: Solo12TwoFeetEnvCfg) -> Solo12Env:
@@ -165,3 +165,50 @@ def test_force_phases_apply_five_then_eight_newtons_and_vertical_range():
     env._set_two_feet_curriculum_phase(5)
     assert cfg.base_push_force_xy_range == (-8.0, 8.0)
     assert cfg.base_push_force_z_range == (-8.0, 8.0)
+
+
+def _bare_velx_force_env(cfg: Solo12EnvCfg) -> Solo12Env:
+    env = Solo12Env.__new__(Solo12Env)
+    env.cfg = cfg
+    env._is_closed = True
+    env._max_velx_range_curriculum_values = env._parse_max_velx_range_curriculum()
+    env._base_push_force_curriculum_values = env._parse_base_push_force_curriculum()
+    env._max_velx_range_curriculum_idx = 0
+    env._base_push_force_curriculum_idx = 0
+    env._base_push_mean_reward_smooth = None
+    env._base_push_last_curriculum_step = 0
+    env.common_step_counter = env.max_episode_length
+    env._refresh_tricky_terrain_origins = lambda *args, **kwargs: None
+    return env
+
+
+def test_max_episode_reward_sums_bounded_positive_scales_over_episode():
+    cfg = Solo12EnvCfg()
+    env = _bare_velx_force_env(cfg)
+
+    # track_lin_vel_xy 1.5 + track_ang_vel_z 0.75 over 20 s; unbounded/negative terms are excluded.
+    assert env._max_episode_reward() == pytest.approx(45.0)
+
+
+def test_velx_force_curriculum_advances_at_max_reward_ratio():
+    cfg = Solo12EnvCfg()
+    cfg.max_velx_range_curriculum = [1.0, 1.5]
+    cfg.forces_applied_to_base_curriculum = [10.0, 13.0]
+    env = _bare_velx_force_env(cfg)
+    threshold = cfg.forces_curriculum_threshold_reward_max_ratio * env._max_episode_reward()
+
+    env._update_base_push_force_curriculum(torch.full((4,), threshold - 0.01, dtype=torch.float64))
+    assert env._max_velx_range_curriculum_idx == 0
+
+    env._base_push_mean_reward_smooth = None
+    env._update_base_push_force_curriculum(torch.full((4,), threshold, dtype=torch.float64))
+    assert env._max_velx_range_curriculum_idx == 1
+    assert cfg.command_lin_vel_x_range == (-1.5, 1.5)
+
+
+def test_velx_force_curriculum_rejects_ratio_outside_unit_interval():
+    cfg = Solo12EnvCfg()
+    cfg.forces_curriculum_threshold_reward_max_ratio = 1.5
+
+    with pytest.raises(ValueError, match="forces_curriculum_threshold_reward_max_ratio"):
+        _bare_velx_force_env(cfg)
