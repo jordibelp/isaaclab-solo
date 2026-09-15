@@ -135,7 +135,8 @@ def measure(runner, obs, cfg: dict, iteration: int) -> dict[str, dict[str, float
     microbatch sizes). No live module is forwarded, so even training hooks and
     cached action distributions remain untouched.
     """
-    seed = (cfg["seed"] + (iteration if cfg["resample"] else 0)) % (2**63)
+    # Stride 3 keeps each iteration's input (+0) and noise (+1, +2) seeds disjoint across iterations.
+    seed = (cfg["seed"] + (3 * iteration if cfg["resample"] else 0)) % (2**63)
     device = torch.device(runner.device)
     with torch.inference_mode(False), torch.enable_grad(), torch.autocast(device_type=device.type, enabled=False):
         generator = torch.Generator(device="cpu").manual_seed(seed)

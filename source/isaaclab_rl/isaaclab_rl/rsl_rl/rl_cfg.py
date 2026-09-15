@@ -203,7 +203,7 @@ class RslRlLocalRedundancyCfg:
     critic_target_std: float = 1.0
     sac_action_source: Literal["uniform", "policy_mean"] = "uniform"
     seed: int = 1729
-    resample: bool = False
+    resample: bool = True
 
 
 @configclass

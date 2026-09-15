@@ -118,7 +118,7 @@ def test_large_prediction_keeps_unit_noise(device):
 @pytest.mark.parametrize("factory", [ppo, sac])
 def test_microbatch_invariance_and_sampling_config(cfg, device, factory):
     runner, obs = factory(device)
-    expected = lr.measure(runner, obs, cfg, 0)
+    expected = lr.measure(runner, obs, cfg, 200)
     for size in (1, 7):
         actual = lr.measure(runner, obs, {**cfg, "batch_size": size}, 200)
         for name in expected:
@@ -126,8 +126,10 @@ def test_microbatch_invariance_and_sampling_config(cfg, device, factory):
                 assert actual[name][key] == pytest.approx(expected[name][key], rel=2.0e-6, abs=1.0e-8)
     real = lr.measure(runner, obs, {**cfg, "input_mode": "observations", "num_samples": 100}, 0)
     assert real["actor"]["local_redundancy_num_samples"] == 23
-    changed = lr.measure(runner, obs, {**cfg, "resample": True}, 200)
-    assert changed["actor"]["local_redundancy"] != expected["actor"]["local_redundancy"]
+    resampled = lr.measure(runner, obs, {**cfg, "resample": True}, 0)
+    assert resampled["actor"]["local_redundancy"] != expected["actor"]["local_redundancy"]
+    fixed = {**cfg, "resample": False}
+    assert lr.measure(runner, obs, fixed, 200) == lr.measure(runner, obs, fixed, 0)
 
 
 @pytest.mark.parametrize("factory", [ppo, sac])

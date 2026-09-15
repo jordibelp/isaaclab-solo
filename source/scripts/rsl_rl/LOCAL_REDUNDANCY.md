@@ -113,7 +113,7 @@ and work identically for both agent entry points. Normal overrides need no `+`.
 | `critic_target_std` | `1.0` | Fixed value/Q regression noise/likelihood standard deviation |
 | `sac_action_source` | `uniform` | `uniform` or `policy_mean`; ignored for PPO |
 | `seed` | `1729` | Independent diagnostic seed, deliberately separate from training seed |
-| `resample` | `false` | Reuse base inputs/noise across measurements; `true` adds absolute iteration to seed |
+| `resample` | `true` | Fresh inputs/noise (and SAC probe actions) at every measurement, seeded by `seed + 3 * iteration`; `false` reuses one fixed probe set |
 
 For your existing command, **no additions are required**. Example overrides:
 
@@ -137,7 +137,7 @@ Under `Plasticity/actor/`, `Plasticity/critic/`, and SAC's
 `Plasticity/critic1/` and `Plasticity/critic2/`:
 
 - `local_redundancy`: mean squared per-example gradient norm; higher means more
-  local gradient responsiveness under this fixed probe, not guaranteed better RL performance.
+  local gradient responsiveness under this probe, not guaranteed better RL performance.
 - `local_redundancy_per_output`: divide the raw score by output dimension, useful
   when contrasting a multi-action mean with a scalar value. Still architecture-
   and parameterization-dependent; it does not make arbitrary architectures comparable.
@@ -162,9 +162,12 @@ Each measurement uses temporary FP32 evaluation-mode network copies, without
 optimizer state or training hooks. No live parameters, gradients, buffers,
 normalizers, cached distributions, CBP captures, or RNG streams are modified.
 Noise is produced by private CPU generators, transferred to the model device,
-and shared consistently across microbatch partitions. Fixed-seed probes resume
-without extra checkpoint state. The inputs/noise are fixed for a given input
-layout; their target **centers** are always recomputed at the current weights.
+and shared consistently across microbatch partitions. By default (`resample=true`)
+each measurement draws fresh inputs/noise from `seed + 3 * iteration`, as the paper
+regenerates its synthetic data at every measurement; any given iteration stays
+reproducible, so probes resume without extra checkpoint state. `resample=false`
+reuses one fixed input/noise set at every measurement (smoother curves, but tied
+to a single probe draw). Target **centers** are always recomputed at the current weights.
 
 Supports feed-forward PPO/SAC and feed-forward TCN history encoders. Stateful
 recurrent policies are rejected explicitly when enabled. Distillation does not
