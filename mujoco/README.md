@@ -214,7 +214,7 @@ merged checkpoint at `--num_envs=1`.
   --checkpoint=/absolute/path/to/model_22043.pt \
   --run-name="mujoco LoRA|all layers" --symmetry-mode=augmentation --headless \
   env.curriculum_two_feet=False env.initial_position=safe \
-  env.front_back_asymetry=True env.finish_on_front_feet_contact=False \
+  env.front_back_asymetry=True env.three_or_more_feet_contact_triggers_reset=False \
   env.tricky_terrain=False env.include_events_randomization=False \
   'env.forces_applied_to_base_curriculum=[0.0]' \
   'env.base_push_force_z_range=[0.0,0.0]' 'env.actuation_delay_range=[0,3]' \

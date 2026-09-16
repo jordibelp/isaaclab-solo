@@ -1757,14 +1757,7 @@ class Solo12Env(DirectRLEnv):
 
         feet_contact_mask = self._get_feet_contact_mask(self.cfg.feet_ground_contact_threshold)
         two_feet_above_height = self._compute_two_feet_above_height_reward(feet_contact_mask)
-        front_thigh_contact_mask = None
-        if self.cfg.front_back_asymetry:
-            front_thigh_contact_mask = self._get_body_contact_mask(
-                self._thigh_body_ids, self.cfg.feet_ground_contact_threshold
-            )[:, self._front_thigh_contact_indices]
-        three_or_more_feet_contact = self._compute_three_or_more_feet_contact_penalty(
-            feet_contact_mask, front_thigh_contact_mask
-        )
+        three_or_more_feet_contact = self._get_forbidden_feet_contact_indicator()
         undesired_contacts = self._compute_contact_count(self._thigh_body_ids, self.cfg.undesired_contact_threshold)
         force_transmited_through_joints = self._compute_force_transmited_through_joints()
         foot_contact = self._compute_foot_contact_penalty()
@@ -1838,13 +1831,8 @@ class Solo12Env(DirectRLEnv):
         )
         max_external_force = torch.amax(torch.norm(external_forces, dim=-1), dim=(1, 2))
         self._base_collision_terminated = max_external_force > self.cfg.base_contact_threshold
-        if self.cfg.finish_on_front_feet_contact:
-            grace_period_finished = (
-                self.episode_length_buf * self.step_dt >= self.cfg.finish_on_front_feet_contact_after
-            )
-            self._forbidden_feet_contact_terminated = (
-                self._get_forbidden_feet_contact_indicator().bool() & grace_period_finished
-            )
+        if self.cfg.three_or_more_feet_contact_triggers_reset:
+            self._forbidden_feet_contact_terminated = self._get_forbidden_feet_contact_indicator().bool()
         else:
             self._forbidden_feet_contact_terminated.zero_()
         terminated = self._base_collision_terminated | self._forbidden_feet_contact_terminated
@@ -2059,14 +2047,16 @@ class Solo12Env(DirectRLEnv):
         return (torch.sum(feet_contact_mask, dim=1) >= 3).float()
 
     def _get_forbidden_feet_contact_indicator(self) -> torch.Tensor:
-        """Return the same contact indicator used by the mode-dependent reward penalty."""
+        """Return the contact indicator shared by the penalty and reset, zeroed during the start grace period."""
         feet_contact_mask = self._get_feet_contact_mask(self.cfg.feet_ground_contact_threshold)
         front_thigh_contact_mask = None
         if self.cfg.front_back_asymetry:
             front_thigh_contact_mask = self._get_body_contact_mask(
                 self._thigh_body_ids, self.cfg.feet_ground_contact_threshold
             )[:, self._front_thigh_contact_indices]
-        return self._compute_three_or_more_feet_contact_penalty(feet_contact_mask, front_thigh_contact_mask)
+        contact = self._compute_three_or_more_feet_contact_penalty(feet_contact_mask, front_thigh_contact_mask)
+        elapsed = self.episode_length_buf * self.step_dt
+        return contact * (elapsed >= self.cfg.three_or_more_feet_contact_triggers_after)
 
     def _two_feet_height_kernel(self, avg_height: torch.Tensor) -> torch.Tensor:
         threshold = self.cfg.two_feet_above_height_threshold

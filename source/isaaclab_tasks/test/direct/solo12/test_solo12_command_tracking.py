@@ -274,10 +274,10 @@ def test_base_collision_filters_are_updated_reciprocally(monkeypatch):
 
 
 def test_forbidden_feet_contact_termination_is_opt_in():
-    assert Solo12EnvCfg().finish_on_front_feet_contact is False
-    assert Solo12EnvCfg().finish_on_front_feet_contact_after == 1.5
-    assert Solo12TwoFeetEnvCfg().finish_on_front_feet_contact is False
-    assert Solo12TwoFeetEnvCfg().finish_on_front_feet_contact_after == 1.5
+    assert Solo12EnvCfg().three_or_more_feet_contact_triggers_reset is False
+    assert Solo12EnvCfg().three_or_more_feet_contact_triggers_after == 0.5
+    assert Solo12TwoFeetEnvCfg().three_or_more_feet_contact_triggers_reset is False
+    assert Solo12TwoFeetEnvCfg().three_or_more_feet_contact_triggers_after == 0.5
 
 
 def test_external_contact_forces_exclude_base_self_collisions():
@@ -489,12 +489,26 @@ def test_contact_penalty_keeps_three_feet_rule_without_front_back_asymmetry():
     torch.testing.assert_close(actual, torch.tensor((0.0, 0.0, 1.0)))
 
 
-def test_termination_indicator_reuses_asymmetric_front_foot_and_thigh_predicate():
+def _forbidden_contact_env(front_back_asymetry: bool, episode_length_buf: torch.Tensor, triggers_after: float = 0.5):
     env = object.__new__(Solo12Env)
     env._is_closed = True
     env.cfg = type(
-        "Cfg", (), {"front_back_asymetry": True, "feet_ground_contact_threshold": 1.0}
+        "Cfg",
+        (),
+        {
+            "front_back_asymetry": front_back_asymetry,
+            "feet_ground_contact_threshold": 1.0,
+            "three_or_more_feet_contact_triggers_after": triggers_after,
+            "sim": type("Sim", (), {"dt": 0.005})(),
+            "decimation": 4,
+        },
     )()
+    env.episode_length_buf = episode_length_buf
+    return env
+
+
+def test_termination_indicator_reuses_asymmetric_front_foot_and_thigh_predicate():
+    env = _forbidden_contact_env(True, torch.full((3,), 100, dtype=torch.long))
     env._front_feet_contact_indices = [0, 1]
     env._thigh_body_ids = [10, 11, 12, 13]
     env._front_thigh_contact_indices = [0, 1]
@@ -513,11 +527,7 @@ def test_termination_indicator_reuses_asymmetric_front_foot_and_thigh_predicate(
 
 
 def test_termination_indicator_reuses_symmetric_three_feet_predicate():
-    env = object.__new__(Solo12Env)
-    env._is_closed = True
-    env.cfg = type(
-        "Cfg", (), {"front_back_asymetry": False, "feet_ground_contact_threshold": 1.0}
-    )()
+    env = _forbidden_contact_env(False, torch.full((3,), 100, dtype=torch.long))
     feet_contacts = torch.tensor(
         ((True, False, True, False), (True, True, True, False), (True, True, True, True))
     )
@@ -528,6 +538,16 @@ def test_termination_indicator_reuses_symmetric_three_feet_predicate():
     torch.testing.assert_close(actual, torch.tensor((0.0, 1.0, 1.0)))
 
 
+def test_forbidden_contact_indicator_is_zero_during_start_grace_period():
+    # With step_dt=0.02, step 75 is exactly 1.5 seconds into the episode.
+    env = _forbidden_contact_env(False, torch.tensor((0, 74, 75, 76), dtype=torch.long), triggers_after=1.5)
+    env._get_feet_contact_mask = lambda threshold: torch.ones((4, 4), dtype=torch.bool)
+
+    actual = env._get_forbidden_feet_contact_indicator()
+
+    torch.testing.assert_close(actual, torch.tensor((0.0, 0.0, 1.0, 1.0)))
+
+
 def test_get_dones_enables_forbidden_contact_termination_from_config():
     env = object.__new__(Solo12Env)
     env._is_closed = True
@@ -535,16 +555,14 @@ def test_get_dones_enables_forbidden_contact_termination_from_config():
         "Cfg",
         (),
         {
-            "finish_on_front_feet_contact": True,
-            "finish_on_front_feet_contact_after": 1.5,
+            "three_or_more_feet_contact_triggers_reset": True,
             "base_contact_threshold": 1.0,
             "episode_length_s": 2.0,
             "sim": type("Sim", (), {"dt": 0.005})(),
             "decimation": 4,
         },
     )()
-    # With step_dt=0.02, step 75 is exactly 1.5 seconds into the episode.
-    env.episode_length_buf = torch.tensor((74, 75, 76), dtype=torch.long)
+    env.episode_length_buf = torch.zeros(3, dtype=torch.long)
     env._base_external_contact_sensor = type(
         "Sensor",
         (),
@@ -560,7 +578,7 @@ def test_get_dones_enables_forbidden_contact_termination_from_config():
         },
     )()
     env._forbidden_feet_contact_terminated = torch.zeros(3, dtype=torch.bool)
-    env._get_forbidden_feet_contact_indicator = lambda: torch.ones(3)
+    env._get_forbidden_feet_contact_indicator = lambda: torch.tensor((0.0, 1.0, 1.0))
 
     terminated, time_out = env._get_dones()
 
@@ -575,7 +593,7 @@ def test_get_dones_disables_forbidden_contact_termination_by_default():
         "Cfg",
         (),
         {
-            "finish_on_front_feet_contact": False,
+            "three_or_more_feet_contact_triggers_reset": False,
             "base_contact_threshold": 1.0,
             "episode_length_s": 2.0,
             "sim": type("Sim", (), {"dt": 0.005})(),

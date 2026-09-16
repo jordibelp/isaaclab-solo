@@ -122,8 +122,8 @@ DEFAULT_ENV = {
     "foot_contact_reward_scale": -1.0e-3,
     "front_back_asymetry": True,
     "rear_feet_in_contact_for_twofeet": False,
-    "finish_on_front_feet_contact": False,
-    "finish_on_front_feet_contact_after": 1.3,
+    "three_or_more_feet_contact_triggers_reset": False,
+    "three_or_more_feet_contact_triggers_after": 1.3,
     "include_events_randomization": False,
     "forces_applied_to_base_curriculum": (0.0,),
     "base_push_force_z_range": (0.0, 0.0),
@@ -652,7 +652,9 @@ def make_training_functions(info: ModelInfo, cfg: dict, num_envs: int):
         foot_forces, thigh_forces, front_thigh_force = forces[:, :4], forces[:, 4:8], forces[:, 8]
         feet_contact = foot_forces > 1.0
         front_contact = jnp.any(feet_contact[:,:2],-1) | (front_thigh_force > 1.0)
+        steps = state.episode_steps+1
         forbidden = front_contact if cfg["front_back_asymetry"] else jnp.sum(feet_contact,-1)>=3
+        forbidden &= steps*STEP_DT>=cfg["three_or_more_feet_contact_triggers_after"]
         forbidden_contact = cfg["three_or_more_feet_contact_penalty_reward_scale"]*forbidden*STEP_DT
         foot_h = data.xpos[:,foot_bodies,2]
         front_h = jnp.mean(foot_h[:,:2],-1)
@@ -667,10 +669,9 @@ def make_training_functions(info: ModelInfo, cfg: dict, num_envs: int):
                                   two_feet_height,undesired_contacts,foot_contact),axis=-1)
         reward = jnp.sum(reward_terms,axis=-1)
         base_hit = force_against_ground(terms,base_membership) > 1.0
-        steps = state.episode_steps+1
         timeout = steps>=max_episode_steps
         diverged = ~jnp.isfinite(data.qpos).all(-1)
-        terminate_front = cfg["finish_on_front_feet_contact"] & forbidden & (steps*STEP_DT>=cfg["finish_on_front_feet_contact_after"])
+        terminate_front = cfg["three_or_more_feet_contact_triggers_reset"] & forbidden
         terminated = base_hit | terminate_front | diverged
         done = terminated | timeout
         reward_terms = jnp.where(diverged[:,None],0.0,reward_terms)
