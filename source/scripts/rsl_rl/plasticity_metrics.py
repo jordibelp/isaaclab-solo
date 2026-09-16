@@ -10,11 +10,10 @@ Parallelized Data Collection on Deep Reinforcement Learning Networks"
   (a) feature rank      - approximate rank (Yang et al. 2019): smallest k such
                           that the top-k squared singular values of the feature
                           matrix retain >= 99% of the total squared-singular-
-                          value energy. ``feature_rank`` reports the median raw
-                          rank (in units/neurons) across the hidden layers;
-                          ``feature_rank_i`` reports layer i's rank divided by
-                          that layer's feature count. ``feature_num`` and
-                          ``feature_num_i`` report the layer widths.
+                          value energy. ``feature_rank`` is the raw rank (in
+                          units/neurons), ``feature_rank_frac`` divides it by the
+                          layer's feature count, and ``feature_num`` is the layer
+                          width.
   (b) % dormant units   - percentage of hidden units whose mean |activation| over
                           a batch is below eps=1e-5 (the paper's reading of
                           Sokar et al. 2023). The Sokar-normalized variant
@@ -25,6 +24,10 @@ Parallelized Data Collection on Deep Reinforcement Learning Networks"
   (d) gradient kurtosis - kurtosis E[(L - mu)^4] / var(L)^2 of the log-transformed
                           absolute gradients L = log(|g| + eps), pooled over all
                           gradient entries of the network (Garg et al. 2021).
+
+:func:`activation_plasticity_metrics` returns (a) and (b) twice: once per hidden
+layer, and once as a network-level summary (dormant percentages pooled over all
+units, feature-rank statistics as the median across layers).
 """
 
 from __future__ import annotations
@@ -85,32 +88,21 @@ def _feature_count(features: torch.Tensor) -> int:
     return int(features.shape[-1])
 
 
-def dormant_metrics(
-    activations: list[torch.Tensor],
+def dormant_counts(
+    activations: torch.Tensor,
     eps: float = DEFAULT_DORMANT_EPS,
     tau: float = DEFAULT_DORMANT_TAU,
-) -> dict[str, float]:
-    """Network-wide dormant-unit percentages pooled over the given hidden activations."""
-    total_units = 0
-    dormant_eps_units = 0
-    dormant_tau_units = 0
-    for act in activations:
-        a = act.detach().float()
-        a = a.reshape(-1, a.shape[-1])
-        score = a.abs().mean(dim=0)
-        total_units += score.numel()
-        dormant_eps_units += int((score < eps).sum().item())
-        layer_mean = float(score.mean().item())
-        if layer_mean > 0.0:
-            dormant_tau_units += int((score / layer_mean <= tau).sum().item())
-        else:
-            dormant_tau_units += score.numel()
-    if total_units == 0:
-        return {}
-    return {
-        "dormant_pct": 100.0 * dormant_eps_units / total_units,
-        "dormant_tau_pct": 100.0 * dormant_tau_units / total_units,
-    }
+) -> tuple[int, int, int]:
+    """Dormant-unit counts ``(units, dormant_eps, dormant_tau)`` for one hidden layer."""
+    a = activations.detach().float()
+    a = a.reshape(-1, a.shape[-1])
+    score = a.abs().mean(dim=0)
+    layer_mean = float(score.mean().item())
+    if layer_mean > 0.0:
+        dormant_tau = int((score / layer_mean <= tau).sum().item())
+    else:
+        dormant_tau = score.numel()
+    return score.numel(), int((score < eps).sum().item()), dormant_tau
 
 
 def weight_norm(params) -> float:
@@ -176,34 +168,62 @@ def collect_hidden_activations(module: nn.Module, forward_fn, sample_cap: int = 
     return records
 
 
+def _median(values: list[float]) -> float:
+    finite = sorted(value for value in values if value == value)  # drop NaN
+    if not finite:
+        return float("nan")
+    mid = len(finite) // 2
+    return finite[mid] if len(finite) % 2 else 0.5 * (finite[mid - 1] + finite[mid])
+
+
 def activation_plasticity_metrics(
     activations: list[torch.Tensor],
     *,
     rank_threshold: float = DEFAULT_RANK_THRESHOLD,
     dormant_eps: float = DEFAULT_DORMANT_EPS,
     dormant_tau: float = DEFAULT_DORMANT_TAU,
-) -> dict[str, float]:
-    """Feature-rank fractions and dormant-unit percentages over collected hidden activations."""
+) -> tuple[dict[str, float], dict[str, list[float]]]:
+    """Feature-rank and dormant-unit metrics over collected hidden activations.
+
+    Returns ``(summary, per_layer)``. ``per_layer`` maps each metric name to one
+    value per hidden layer, in execution order; ``summary`` holds the same metric
+    names reduced to one scalar for the whole network (dormant percentages pooled
+    over every unit, feature ranks as the median across layers).
+    """
     if not activations:
-        return {}
-    metrics = dormant_metrics(activations, eps=dormant_eps, tau=dormant_tau)
-    layer_nums = [_feature_count(act) for act in activations]
-    layer_ranks = [feature_rank(act, threshold=rank_threshold) for act in activations]
-    layer_rank_fractions = [
-        rank / float(num_features) if num_features > 0 else float("nan")
-        for rank, num_features in zip(layer_ranks, layer_nums)
-    ]
-    finite_ranks = sorted(rank for rank in layer_ranks if rank == rank)
-    if finite_ranks:
-        mid = len(finite_ranks) // 2
-        median_rank = finite_ranks[mid] if len(finite_ranks) % 2 else 0.5 * (finite_ranks[mid - 1] + finite_ranks[mid])
-    else:
-        median_rank = float("nan")
-    metrics["feature_rank"] = median_rank
-    metrics["feature_num"] = float(layer_nums[-1])
-    metrics.update({f"feature_rank_{i}": rank for i, rank in enumerate(layer_rank_fractions)})
-    metrics.update({f"feature_num_{i}": float(num_features) for i, num_features in enumerate(layer_nums)})
-    return metrics
+        return {}, {}
+
+    per_layer: dict[str, list[float]] = {
+        "dormant_pct": [],
+        "dormant_tau_pct": [],
+        "feature_rank": [],
+        "feature_rank_frac": [],
+        "feature_num": [],
+    }
+    total_units = 0
+    total_dormant_eps = 0
+    total_dormant_tau = 0
+    for act in activations:
+        units, dormant_eps_units, dormant_tau_units = dormant_counts(act, eps=dormant_eps, tau=dormant_tau)
+        total_units += units
+        total_dormant_eps += dormant_eps_units
+        total_dormant_tau += dormant_tau_units
+        num_features = _feature_count(act)
+        rank = feature_rank(act, threshold=rank_threshold)
+        per_layer["dormant_pct"].append(100.0 * dormant_eps_units / units if units else float("nan"))
+        per_layer["dormant_tau_pct"].append(100.0 * dormant_tau_units / units if units else float("nan"))
+        per_layer["feature_rank"].append(rank)
+        per_layer["feature_rank_frac"].append(rank / float(num_features) if num_features > 0 else float("nan"))
+        per_layer["feature_num"].append(float(num_features))
+
+    summary = {
+        "dormant_pct": 100.0 * total_dormant_eps / total_units if total_units else float("nan"),
+        "dormant_tau_pct": 100.0 * total_dormant_tau / total_units if total_units else float("nan"),
+        "feature_rank": _median(per_layer["feature_rank"]),
+        "feature_rank_frac": _median(per_layer["feature_rank_frac"]),
+        "feature_num": per_layer["feature_num"][-1],
+    }
+    return summary, per_layer
 
 
 class GradKurtosisCapture:

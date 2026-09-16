@@ -274,7 +274,9 @@ parser.add_argument(
     default=True,
     help=(
         "Log plasticity diagnostics (feature rank, %% dormant units, weight norm, gradient kurtosis; "
-        "arXiv:2506.03404 Appendix B) for the actor and critic MLPs as W&B/TensorBoard scalars."
+        "arXiv:2506.03404 Appendix B) as W&B/TensorBoard scalars, one group per network "
+        "(PPO actor/critic, SAC actor/critic1/critic2) under Plasticity/summary/<net>/<metric> and "
+        "Plasticity/per_layer/<net>/<metric>/layer_<i>."
     ),
 )
 parser.add_argument(
@@ -1063,24 +1065,20 @@ def _attach_plasticity_metrics_to_runner(runner, parsed_args) -> None:
         actor = getattr(runner.alg, "actor", None)
         critic = getattr(runner.alg, "critic", None)
         actor_mlp = getattr(actor, "mlp", None)
-        critic_mlps = [
-            module
-            for name in ("critic1", "critic2")
-            if isinstance(module := getattr(critic, name, None), torch.nn.Module)
-        ]
         groups = {}
+        optimizers = {}
+        forward_fns = {}
         if isinstance(actor_mlp, torch.nn.Module):
             groups["actor"] = actor_mlp
-        if critic_mlps:
-            groups["critic"] = torch.nn.ModuleList(critic_mlps)
-        optimizers = {
-            "actor": getattr(runner.alg, "actor_optimizer", None),
-            "critic": getattr(runner.alg, "critic_optimizer", None),
-        }
-        forward_fns = {
-            "actor": lambda obs: actor(obs),
-            "critic": lambda obs: critic.evaluate_all_q(obs, actor(obs)),
-        }
+            optimizers["actor"] = getattr(runner.alg, "actor_optimizer", None)
+            forward_fns["actor"] = lambda obs: actor(obs)
+        # Twin Q networks stay separate: pooling them hides a single collapsing critic.
+        for name in ("critic1", "critic2"):
+            module = getattr(critic, name, None)
+            if isinstance(module, torch.nn.Module):
+                groups[name] = module
+                optimizers[name] = getattr(runner.alg, "critic_optimizer", None)
+                forward_fns[name] = lambda obs: critic.evaluate_all_q(obs, actor(obs))
 
     if not groups or any(optimizers.get(name) is None for name in groups):
         print("[WARN]: Plasticity metrics disabled: actor/critic modules or optimizers were not found.", flush=True)
@@ -1095,10 +1093,18 @@ def _attach_plasticity_metrics_to_runner(runner, parsed_args) -> None:
     if sample_cap < 1:
         raise ValueError("--plasticity-metrics-sample-cap must be a positive integer.")
 
+    # Groups sharing an optimizer (PPO actor/critic, SAC critic1/critic2) share one
+    # capture, so the optimizer's step is wrapped exactly once.
+    captures_by_optimizer: dict[int, plasticity_metrics.GradKurtosisCapture] = {}
     grad_captures = {}
     for name, module in groups.items():
-        grad_capture = plasticity_metrics.GradKurtosisCapture({name: list(module.parameters())})
-        grad_capture.wrap_optimizer(optimizers[name])
+        optimizer = optimizers[name]
+        grad_capture = captures_by_optimizer.get(id(optimizer))
+        if grad_capture is None:
+            grad_capture = plasticity_metrics.GradKurtosisCapture({})
+            grad_capture.wrap_optimizer(optimizer)
+            captures_by_optimizer[id(optimizer)] = grad_capture
+        grad_capture.param_groups[name] = list(module.parameters())
         grad_captures[name] = grad_capture
     runner._borinot_plasticity_groups = groups
     runner._borinot_plasticity_grad_captures = grad_captures
@@ -1138,17 +1144,19 @@ def _log_plasticity_metrics(runner, locs: dict, interval: int) -> None:
     sample_cap = int(getattr(runner, "_borinot_plasticity_sample_cap", plasticity_metrics.DEFAULT_SAMPLE_CAP))
     forward_fns = runner._borinot_plasticity_forward_fns
     for name, module in groups.items():
-        scalars = {"weight_norm": plasticity_metrics.weight_norm(module.parameters())}
+        summary = {"weight_norm": plasticity_metrics.weight_norm(module.parameters())}
+        per_layer: dict[str, list[float]] = {}
         kurtosis = grad_captures[name].last.get(name)
         if kurtosis is not None:
-            scalars["grad_kurtosis"] = kurtosis
+            summary["grad_kurtosis"] = kurtosis
         forward_fn = forward_fns.get(name)
         if obs is not None and forward_fn is not None and activation_ok.get(name, False):
             try:
                 activations = plasticity_metrics.collect_hidden_activations(
                     module, lambda: forward_fn(obs), sample_cap=sample_cap
                 )
-                scalars.update(plasticity_metrics.activation_plasticity_metrics(activations))
+                activation_summary, per_layer = plasticity_metrics.activation_plasticity_metrics(activations)
+                summary.update(activation_summary)
             except Exception as exc:
                 activation_ok[name] = False
                 print(
@@ -1156,9 +1164,13 @@ def _log_plasticity_metrics(runner, locs: dict, interval: int) -> None:
                     f"({type(exc).__name__}: {exc}); weight norm and gradient kurtosis stay enabled.",
                     flush=True,
                 )
-        for key, value in scalars.items():
+        for key, value in summary.items():
             if value == value:  # skip NaN
-                writer.add_scalar(f"Plasticity/{name}/{key}", value, it)
+                writer.add_scalar(f"Plasticity/summary/{name}/{key}", value, it)
+        for key, values in per_layer.items():
+            for layer, value in enumerate(values):
+                if value == value:  # skip NaN
+                    writer.add_scalar(f"Plasticity/per_layer/{name}/{key}/layer_{layer:02d}", value, it)
 
 
 def _infer_checkpoint_history_dim(checkpoint_state: dict) -> int | None:

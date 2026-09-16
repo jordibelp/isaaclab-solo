@@ -2,8 +2,9 @@
 
 Enabled by default in `source/scripts/rsl_rl/train.py` for both
 `rsl_rl_cfg_entry_point` (PPO) and `rsl_rl_sac_cfg_entry_point` (SAC).
-No environment-specific changes or extra CLI flags are needed. Existing
-`Plasticity/*` metrics remain unchanged.
+No environment-specific changes or extra CLI flags are needed. Its scalars share
+the `Plasticity/summary/<net>/` namespace with the `--plasticity-metrics`
+diagnostics, which are computed independently of this probe.
 
 ## What is measured
 
@@ -133,8 +134,8 @@ For a no-plasticity-diagnostics control, set both.
 
 ## W&B / TensorBoard scalars
 
-Under `Plasticity/actor/`, `Plasticity/critic/`, and SAC's
-`Plasticity/critic1/` and `Plasticity/critic2/`:
+Under `Plasticity/summary/actor/`, `Plasticity/summary/critic/`, and SAC's
+`Plasticity/summary/critic1/` and `Plasticity/summary/critic2/`:
 
 - `local_redundancy`: mean squared per-example gradient norm; higher means more
   local gradient responsiveness under this probe, not guaranteed better RL performance.
@@ -147,8 +148,8 @@ Under `Plasticity/actor/`, `Plasticity/critic/`, and SAC's
   trainable parameter tensors reached by the path; a state-dependent actor's
   combined mean/std tensor includes the unused std rows in this metadata only.
 
-SAC's aggregate `critic/` reports the first two scalars; detailed statistics are
-on `critic1/` and `critic2/`. Standard errors are sampling diagnostics, not
+SAC's aggregate `summary/critic/` reports the first two scalars; detailed statistics
+are on `summary/critic1/` and `summary/critic2/`. Standard errors are sampling diagnostics, not
 confidence intervals accounting for correlated environment observations.
 
 Global `Plasticity/local_redundancy_seconds` measures probe wall time.

@@ -431,15 +431,20 @@ def _plasticity_metrics(
             "critic": (agent.value.net, feat),
         }
         for name, (net, x) in walks.items():
-            scalars = {"weight_norm": plasticity_metrics.weight_norm(capture.param_groups[name])}
+            summary = {"weight_norm": plasticity_metrics.weight_norm(capture.param_groups[name])}
             kurtosis = capture.last.get(name)
             if kurtosis is not None:
-                scalars["grad_kurtosis"] = kurtosis
+                summary["grad_kurtosis"] = kurtosis
             activations = plasticity_metrics.mlp_hidden_activations(net, x)
-            scalars.update(plasticity_metrics.activation_plasticity_metrics(activations))
-            for key, value in scalars.items():
+            activation_summary, per_layer = plasticity_metrics.activation_plasticity_metrics(activations)
+            summary.update(activation_summary)
+            for key, value in summary.items():
                 if value == value:  # skip NaN
-                    metrics[f"Plasticity/{name}/{key}"] = float(value)
+                    metrics[f"Plasticity/summary/{name}/{key}"] = float(value)
+            for key, values in per_layer.items():
+                for layer, value in enumerate(values):
+                    if value == value:  # skip NaN
+                        metrics[f"Plasticity/per_layer/{name}/{key}/layer_{layer:02d}"] = float(value)
     return metrics
 
 

@@ -252,6 +252,6 @@ def log(runner, locs: dict) -> None:
         return
     for name, scalars in metrics.items():
         for key, value in scalars.items():
-            writer.add_scalar(f"Plasticity/{name}/{key}", value, iteration)
+            writer.add_scalar(f"Plasticity/summary/{name}/{key}", value, iteration)
     writer.add_scalar("Plasticity/local_redundancy_valid", 1, iteration)
     writer.add_scalar("Plasticity/local_redundancy_seconds", time.perf_counter() - start, iteration)
