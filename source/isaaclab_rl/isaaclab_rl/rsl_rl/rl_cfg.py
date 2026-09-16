@@ -92,6 +92,10 @@ class RslRlSacCriticModelCfg:
     activation: str = MISSING
     obs_normalization: bool = MISSING
     layer_norm: bool = False
+    distributional_num_bins: int = 255
+    """Odd number of symmetrically spaced symexp atoms (CE mode only)."""
+    distributional_symlog_limit: float = 8.0
+    """Support is symexp(linspace(-limit, limit, num_bins)), in reward units."""
 
 
 ############################
@@ -332,6 +336,8 @@ class RslRlOffPolicyRunnerCfg(RslRlBaseRunnerCfg):
     """Configuration for the RSL-RL-SAC off-policy runner."""
 
     class_name: str = "OffPolicyRunner"
+    distributional_critic_ce: bool = False
+    """Use Dreamer-style symexp two-hot CE critics instead of scalar MSE critics."""
     local_redundancy: RslRlLocalRedundancyCfg = RslRlLocalRedundancyCfg()
     actor: RslRlSacActorModelCfg = MISSING
     critic: RslRlSacCriticModelCfg = MISSING

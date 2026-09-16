@@ -15,3 +15,6 @@ Upstream: https://github.com/leggedrobotics/rsl_rl_sac
 Paper: https://arxiv.org/abs/2605.24975
 
 License: BSD-3-Clause (the source files retain their upstream headers).
+
+Local opt-in extension: [symexp two-hot CE critics](../scripts/rsl_rl/SAC_DISTRIBUTIONAL_CRITIC.md),
+enabled with `agent.distributional_critic_ce=True` (default `False`).

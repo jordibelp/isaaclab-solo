@@ -195,7 +195,12 @@ def measure(runner, obs, cfg: dict, iteration: int) -> dict[str, dict[str, float
                 for name in ("critic1", "critic2"):
                     network = getattr(critic, name)
                     results[name] = _measure(
-                        lambda batch, net=network: net(batch["q"]),
+                        # Keep this a scalar-Q probe when the heads output CE logits.
+                        lambda batch, net=network: (
+                            critic.q_from_output(net(batch["q"]))
+                            if getattr(critic, "distributional_critic_ce", False)
+                            else net(batch["q"])
+                        ),
                         [p for p in network.parameters() if p.requires_grad],
                         {"q": q_inputs},
                         cfg=cfg,

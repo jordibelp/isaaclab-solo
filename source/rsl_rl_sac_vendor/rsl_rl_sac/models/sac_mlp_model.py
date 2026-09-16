@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import copy
+import math
 
 import torch
 import torch.nn as nn
@@ -239,6 +240,9 @@ class SACCriticModel(MLPModel):
         obs_normalization: bool = False,
         num_actions: int = 0,
         layer_norm: bool = False,
+        distributional_critic_ce: bool = False,
+        distributional_num_bins: int = 255,
+        distributional_symlog_limit: float = 8.0,
         **kwargs,
     ) -> None:
         """Initialize the SAC critic model.
@@ -253,6 +257,9 @@ class SACCriticModel(MLPModel):
             obs_normalization: Whether to normalize observations.
             num_actions: Dimension of the action space (concatenated with observations).
             layer_norm: Whether to apply layer normalization in MLP hidden layers.
+            distributional_critic_ce: Fit scalar TD targets with symexp two-hot cross entropy.
+            distributional_num_bins: Odd number of categorical atoms, including zero.
+            distributional_symlog_limit: Symmetric log-space bound for the raw-unit support.
         """
         super().__init__(
             obs,
@@ -267,14 +274,31 @@ class SACCriticModel(MLPModel):
         )
 
         self.num_actions = num_actions
+        self.distributional_critic_ce = distributional_critic_ce
+        if distributional_critic_ce:
+            if output_dim != 1:
+                raise ValueError("Two-hot SAC requires scalar Q-values (output_dim=1).")
+            if distributional_num_bins < 3 or distributional_num_bins % 2 != 1:
+                raise ValueError("distributional_num_bins must be odd and at least 3.")
+            if not math.isfinite(distributional_symlog_limit) or not 0 < distributional_symlog_limit <= 80:
+                raise ValueError("distributional_symlog_limit must be finite and in (0, 80] for float32.")
+            # Build exact +/- pairs and an exact zero atom, avoiding linspace roundoff.
+            positive = torch.linspace(0, distributional_symlog_limit, distributional_num_bins // 2 + 1).expm1()
+            self.register_buffer("value_support", torch.cat((-positive[1:].flip(0), positive)))
 
         # Override parent's MLP — critic input is obs_dim + num_actions
         q_input_dim = self.obs_dim + num_actions
         self.mlp = None  # type: ignore[assignment]
 
         # Twin Q-networks
-        self.critic1 = MLP(q_input_dim, output_dim, hidden_dims, activation, layer_norm=layer_norm)
-        self.critic2 = MLP(q_input_dim, output_dim, hidden_dims, activation, layer_norm=layer_norm)
+        head_dim = distributional_num_bins if distributional_critic_ce else output_dim
+        self.critic1 = MLP(q_input_dim, head_dim, hidden_dims, activation, layer_norm=layer_norm)
+        self.critic2 = MLP(q_input_dim, head_dim, hidden_dims, activation, layer_norm=layer_norm)
+        if distributional_critic_ce:
+            # Dreamer initialization: random logits on this wide support imply enormous Q.
+            for network in (self.critic1, self.critic2):
+                nn.init.zeros_(network[-1].weight)
+                nn.init.zeros_(network[-1].bias)
 
         # Frozen target networks — never updated by gradient descent
         self.critic1_target = copy.deepcopy(self.critic1)
@@ -307,7 +331,50 @@ class SACCriticModel(MLPModel):
         obs = unpad_trajectories(obs, masks) if masks is not None and not self.is_recurrent else obs
         latent = self.get_latent(obs, masks, hidden_state)
         q_input = torch.cat([latent, actions], dim=-1)
-        return self.critic1(q_input)
+        return self.q_from_output(self.critic1(q_input))
+
+    def q_from_output(self, output: torch.Tensor) -> torch.Tensor:
+        """Decode the raw-unit mean, not symexp(E[symlog(Q)]); keep action gradients."""
+        if not self.distributional_critic_ce:
+            return output
+        probs = output.float().softmax(dim=-1)
+        mid = self.value_support.numel() // 2
+        # Sum opposite atoms together so a symmetric distribution gives exactly zero,
+        # even with wide supports. Algebraically this is E[B]. The default limit
+        # is 8, not Dreamer's 20: SAC also differentiates this mean through actions,
+        # where enormous +/- atoms cause float32 cancellation in head backprop.
+        return ((probs[..., mid + 1 :] - probs[..., :mid].flip(-1)) * self.value_support[mid + 1 :]).sum(
+            dim=-1, keepdim=True
+        )
+
+    def two_hot(self, targets: torch.Tensor) -> torch.Tensor:
+        """Project detached scalar targets onto adjacent atoms in *raw reward units*.
+
+        Preserves the clipped target's expectation. This is a scalar Bellman-target
+        regression, not a C51 distributional Bellman projection.
+        """
+        support = self.value_support
+        targets = targets.detach().to(dtype=support.dtype).clamp(support[0], support[-1])
+        upper = torch.searchsorted(support, targets.contiguous()).clamp(1, support.numel() - 1)
+        lower = upper - 1
+        upper_weight = (targets - support[lower]) / (support[upper] - support[lower])
+        labels = targets.new_zeros(*targets.shape[:-1], support.numel())
+        labels.scatter_add_(-1, lower, 1 - upper_weight)
+        labels.scatter_add_(-1, upper, upper_weight)
+        return labels
+
+    def td_losses(
+        self, obs: TensorDict, actions: torch.Tensor, targets: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Twin critic losses; the default branch retains the original scalar MSE."""
+        latent = torch.cat([self.get_latent(obs), actions], dim=-1)
+        output1, output2 = self.critic1(latent), self.critic2(latent)
+        if not self.distributional_critic_ce:
+            return nn.functional.mse_loss(output1, targets), nn.functional.mse_loss(output2, targets)
+        labels = self.two_hot(targets)
+        loss1 = -(labels * output1.float().log_softmax(-1)).sum(-1).mean()
+        loss2 = -(labels * output2.float().log_softmax(-1)).sum(-1).mean()
+        return loss1, loss2
 
     def evaluate_all_q(self, obs: TensorDict, actions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute Q1 and Q2 for the given observations and actions.
@@ -321,7 +388,7 @@ class SACCriticModel(MLPModel):
         """
         latent = self.get_latent(obs)
         latent = torch.cat([latent, actions], dim=-1)
-        return self.critic1(latent), self.critic2(latent)
+        return self.q_from_output(self.critic1(latent)), self.q_from_output(self.critic2(latent))
 
     def evaluate_all_target_q(self, obs: TensorDict, actions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute target Q1 and target Q2 for the given observations and actions.
@@ -337,7 +404,7 @@ class SACCriticModel(MLPModel):
         """
         latent = self.get_latent(obs)
         latent = torch.cat([latent, actions], dim=-1)
-        return self.critic1_target(latent), self.critic2_target(latent)
+        return self.q_from_output(self.critic1_target(latent)), self.q_from_output(self.critic2_target(latent))
 
     def init_target_networks(self) -> None:
         """Initialize the target networks with the current critic network parameters."""
