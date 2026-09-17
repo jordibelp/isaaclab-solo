@@ -368,6 +368,12 @@ parser.add_argument("--wandb_entity", type=str, default=None, help="W&B entity/t
 parser.add_argument("--wandb_name", type=str, default=None, help="W&B run name.")
 parser.add_argument("--verbose_play", action="store_true", default=False, help="Print per-step telemetry to the terminal.")
 parser.add_argument(
+    "--q_value_log",
+    type=str,
+    default=None,
+    help="SAC only: save per-step twin-critic Q(s, a), rewards, and categorical probabilities (CE critics) to this .npz.",
+)
+parser.add_argument(
     "--keep_training_stochasticity",
     action="store_true",
     default=False,
@@ -2254,6 +2260,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             flush=True,
         )
 
+    q_critic = None
     dagger_adapter_checkpoint = _load_dagger_adapter_checkpoint(resume_path)
     if dagger_adapter_checkpoint is not None:
         policy = _build_base_imu_dagger_adapter_policy(
@@ -2291,15 +2298,26 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             )
         runner.load(
             resume_path,
-            load_cfg={"actor": True, "critic": False, "optimizer": False, "iteration": True, "rnd": False},
+            load_cfg={
+                "actor": True,
+                "critic": args_cli.q_value_log is not None,
+                "optimizer": False,
+                "iteration": True,
+                "rnd": False,
+            },
             map_location=agent_cfg.device,
         )
         policy = runner.get_inference_policy(device=vec_env.unwrapped.device)
+        if args_cli.q_value_log is not None:
+            q_critic = runner.alg.critic.to(vec_env.unwrapped.device)
+            q_log = {"q": [], "probs": [], "reward": [], "done": [], "time_out": []}
         del runner
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
     else:
         raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
+    if args_cli.q_value_log is not None and q_critic is None:
+        raise ValueError("--q_value_log requires a SAC/OffPolicyRunner checkpoint.")
 
     run = None
     if args_cli.wandb:
@@ -2389,7 +2407,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
         with torch.inference_mode():
             actions = policy(obs)
-            obs, _, dones, _ = vec_env.step(actions)
+            if q_critic is not None:
+                q_input = torch.cat([q_critic.get_latent(obs), actions], dim=-1)
+                q_heads = (q_critic.critic1(q_input), q_critic.critic2(q_input))
+            obs, rewards, dones, extras = vec_env.step(actions)
+            if q_critic is not None:
+                q_log["q"].append(torch.cat([q_critic.q_from_output(head) for head in q_heads], dim=-1).cpu())
+                if q_critic.distributional_critic_ce:
+                    q_log["probs"].append(torch.stack([head.float().softmax(-1) for head in q_heads], dim=1).cpu())
+                q_log["reward"].append(rewards.cpu())
+                q_log["done"].append(dones.cpu())
+                q_log["time_out"].append(extras["time_outs"].cpu())
             if TRACKING_COMMANDS:
                 tracking_resets += int(torch.count_nonzero(dones).item())
             try:
@@ -2548,6 +2576,20 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     if sequence_recorder is not None:
         sequence_recorder.finish(env_config=env_cfg, agent_config=agent_cfg.to_dict())
+
+    if q_critic is not None:
+        q_log_path = Path(args_cli.q_value_log)
+        q_log_path.parent.mkdir(parents=True, exist_ok=True)
+        # Arrays are (steps, num_envs, ...); q/probs index the twin critics on axis 2.
+        np.savez_compressed(
+            q_log_path,
+            **{key: torch.stack(values).numpy() for key, values in q_log.items() if values},
+            value_support=q_critic.value_support.cpu().numpy() if q_critic.distributional_critic_ce else np.array([]),
+            gamma=float(agent_cfg.algorithm.gamma),
+            dt=float(dt),
+            checkpoint=resume_path,
+        )
+        print(f"[RESULT] Q-value log: {q_log_path}", flush=True)
 
     if TRACKING_COMMANDS:
         checkpoint_stem = Path(resume_path).stem
