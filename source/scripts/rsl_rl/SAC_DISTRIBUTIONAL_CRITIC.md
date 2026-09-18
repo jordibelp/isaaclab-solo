@@ -333,3 +333,31 @@ Run the numerical suite from the repository root:
 ```bash
 PYTHONPATH=source/rsl_rl_sac_vendor:source/scripts/rsl_rl /home/jordibelp/miniconda3/envs/env_isaaclab/bin/python -m pytest -q source/rsl_rl_sac_vendor/test source/scripts/rsl_rl/test/test_local_redundancy.py source/scripts/rsl_rl/test/test_plasticity_metrics.py source/scripts/rsl_rl/test/test_q_spread_plots.py
 ```
+
+## The env-side contract SAC depends on
+
+`DirectRLEnv.step` publishes `extras["time_outs_obs"]`, the observation reached
+at a timeout before the automatic reset overwrites it. `SAC.process_env_step`
+needs it to store the true next state and to mark the transition as
+bootstrappable, which is the "timeout-aware critic targets" contribution of
+[Bridging the Gap](https://arxiv.org/abs/2605.24975).
+
+**An env that overrides `step` opts out of that block.** Every consumer guards
+with `if "time_outs_obs" in extras` and degrades silently, so the only symptom
+is a critic that treats every truncation as a terminal state worth zero while
+storing the post-reset observation as the transition's next state. `Solo12Env`
+carried exactly that defect from 2026-06-24 until 2026-09-18, because its
+override predates the SAC integration that patched the base class.
+
+`test_timeout_obs_contract.py` fails on any direct-task env class that overrides
+`step` without republishing the key, so the next one is caught at test time
+rather than rediscovered from a suspicious value plot. If it fires, copy the
+reset block from `DirectRLEnv.step`:
+
+```python
+time_outs_obs = self._get_observations()
+if self.cfg.observation_noise_model:
+    time_outs_obs["policy"] = self._observation_noise_model(time_outs_obs["policy"])
+self.extras["time_outs_obs"] = {key: value.detach().clone() for key, value in time_outs_obs.items()}
+self._reset_idx(reset_env_ids)
+```
