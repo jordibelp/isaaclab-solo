@@ -890,11 +890,21 @@ def _bootstrap_value(actor, critic, next_obs, extras: dict) -> tuple[torch.Tenso
     entropy term. Sampling here advances the RNG, so a ``--q_value_log`` rollout is not
     bit-identical to one recorded without it.
     """
-    if "time_outs_obs" in extras and "time_outs" in extras:
+    timed_out = extras["time_outs"].reshape(-1, 1).bool() if "time_outs" in extras else None
+    if timed_out is not None and timed_out.any():
+        if "time_outs_obs" not in extras:
+            # Silently using the post-reset observation here yields a bootstrap value for the
+            # *next* episode's first state, which looks plausible and is simply wrong.
+            raise RuntimeError(
+                "This environment timed out without publishing 'time_outs_obs', so the value used "
+                "to bootstrap the truncated episode would come from the state after the reset. "
+                "The environment's step() must capture the pre-reset observation the way "
+                "DirectRLEnv.step does. Note that SAC training reads the same key, so it is also "
+                "treating every timeout as a terminal state on this task."
+            )
         # time_outs_obs is only refreshed on reset steps, so the mask must select it.
-        mask = extras["time_outs"].int().squeeze(-1).bool()[:, None]
         next_obs = TensorDict(
-            {key: torch.where(mask, value, next_obs[key]) for key, value in extras["time_outs_obs"].items()},
+            {key: torch.where(timed_out, value, next_obs[key]) for key, value in extras["time_outs_obs"].items()},
             batch_size=next_obs.batch_size,
         )
     next_actions, next_log_prob = actor.sample_action_logp(next_obs)
