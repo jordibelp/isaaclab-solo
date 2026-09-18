@@ -234,13 +234,23 @@ class SACActorModel(MLPModel):
         x_t = self.distribution.rsample()
         tanh_x = torch.tanh(x_t)
         action = self.action_range * tanh_x + self.action_bias
+        return action, self._corrected_log_prob(x_t, tanh_x)
 
-        # Log-probability with Tanh Jacobian correction and action scale correction
+    def _corrected_log_prob(self, x_t: torch.Tensor, tanh_x: torch.Tensor) -> torch.Tensor:
+        """Log-probability with Tanh Jacobian correction and action scale correction."""
         log_prob = self.distribution.log_prob(x_t).sum(dim=-1, keepdim=True)
         log_prob -= torch.log(1 - tanh_x.pow(2) + 1e-6).sum(dim=-1, keepdim=True)
-        log_prob -= self.log_action_range
+        return log_prob - self.log_action_range
 
-        return action, log_prob
+    def executed_action_logp(self, actions: torch.Tensor) -> torch.Tensor:
+        """Log-probability of already-scaled actions under the last :meth:`forward` distribution.
+
+        Used by evaluation tooling to recover SAC's entropy bonus for actions that were
+        actually stepped, including deterministic ones. The pre-squash latent is recovered
+        with ``atanh``, so precision degrades for actions pinned against their bounds.
+        """
+        tanh_x = ((actions - self.action_bias) / self.action_range).clamp(-1 + 1e-6, 1 - 1e-6)
+        return self._corrected_log_prob(torch.atanh(tanh_x), tanh_x)
 
     def _update_distribution(self, latent: torch.Tensor) -> None:
         """Update the Gaussian distribution with log-std clamping."""

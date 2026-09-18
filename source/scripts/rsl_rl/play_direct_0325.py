@@ -2322,7 +2322,19 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         policy = runner.get_inference_policy(device=vec_env.unwrapped.device)
         if args_cli.q_value_log is not None:
             q_critic = runner.alg.critic.to(vec_env.unwrapped.device)
-            q_log = {"q": [], "probs": [], "reward": [], "done": [], "time_out": []}
+            q_log = {"q": [], "probs": [], "reward": [], "done": [], "time_out": [], "log_prob": []}
+            # Needed to rebuild the discounted return Q is meant to predict. Read alpha out of
+            # the checkpoint: training tunes it, and SAC.load only restores it together with the
+            # optimizer state, which play deliberately skips.
+            q_gamma = float(runner.alg.gamma)
+            if checkpoint.get("log_alpha") is not None:
+                q_alpha = float(checkpoint["log_alpha"].exp())
+            elif checkpoint.get("alpha") is not None:
+                q_alpha = float(checkpoint["alpha"])
+            else:
+                q_alpha = float(runner.alg.alpha)
+                print("[WARN] Checkpoint stores no alpha; using the configured value.", flush=True)
+            print(f"[INFO] Q-value log uses training gamma={q_gamma:g}, alpha={q_alpha:g}.", flush=True)
         del runner
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -2429,6 +2441,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         with torch.inference_mode():
             actions = policy(obs, stochastic_output=True) if q_sample_policy else policy(obs)
             if q_critic is not None:
+                # Read the distribution the forward pass just set, before anything overwrites it.
+                action_log_prob = policy.executed_action_logp(actions)
                 q_input = torch.cat([q_critic.get_latent(obs), actions], dim=-1)
                 q_heads = (q_critic.critic1(q_input), q_critic.critic2(q_input))
             obs, rewards, dones, extras = vec_env.step(actions)
@@ -2436,6 +2450,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 q_log["q"].append(torch.cat([q_critic.q_from_output(head) for head in q_heads], dim=-1).cpu())
                 if q_critic.distributional_critic_ce:
                     q_log["probs"].append(torch.stack([head.float().softmax(-1) for head in q_heads], dim=1).cpu())
+                q_log["log_prob"].append(action_log_prob.squeeze(-1).cpu())
                 q_log["reward"].append(rewards.cpu())
                 q_log["done"].append(dones.cpu())
                 q_log["time_out"].append(extras["time_outs"].cpu())
@@ -2616,8 +2631,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             **{key: torch.stack(values).numpy() for key, values in q_log.items() if values},
             value_support=q_critic.value_support.cpu().numpy() if q_critic.distributional_critic_ce else np.array([]),
             gamma=float(agent_cfg.algorithm.gamma),
+            alpha=q_alpha,
             dt=float(dt),
             checkpoint=resume_path,
+            deterministic=not q_sample_policy,
         )
         print(f"[RESULT] Q-value log: {q_log_path}", flush=True)
 

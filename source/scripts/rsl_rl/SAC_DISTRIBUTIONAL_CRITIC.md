@@ -183,6 +183,35 @@ Runs with different limits can be overlaid because the axis is symlog:
 ./isaaclab.sh -p source/scripts/rsl_rl/q_spread_plots.py a.npz b.npz --labels "limit 5.0" "limit 4.0" --out spread.png --no-show
 ```
 
+### Estimation error `Q - G`
+
+The same figure ends with `min(Q1, Q2)` against the return it predicts, and the
+error between them, in raw reward units. `gamma` and `alpha` come from the log,
+so the comparison uses training values rather than assumed ones.
+
+Three corrections matter, and skipping any of them produces a plausible-looking
+but wrong error:
+
+- **Entropy.** Q predicts the *soft* return, which adds `alpha * -log_pi` for
+  every step *after* the evaluated action — never for the action itself, which Q
+  already conditions on. The summary prints the error with and without this term.
+- **Truncation.** A timed-out episode is missing a `gamma ** (remaining + 1)`
+  tail. Each step reports how much of its return was observed; `--min-observed`
+  (default 0.9) restricts the statistics, and excluded steps are drawn faintly
+  rather than hidden. Terminated episodes are complete and always count.
+- **Determinism.** Q is defined under the stochastic policy. A deterministic
+  rollout is a different trajectory distribution; `--q_value_log_stochastic`
+  removes that mismatch.
+
+With SAC's `gamma=0.97` at 50 Hz control, the effective horizon is about 33
+steps, so a 5 s episode leaves roughly the last 1.5 s below the default
+threshold and keeps about 70–80% of steps. Longer `--episode_length_s` keeps
+proportionally more. A run where nothing passes the threshold means the episodes
+are short relative to `1/(1-gamma)`, not that the critic is bad.
+
+Sign convention: positive mean error is the critic **overestimating** the return
+it will actually collect.
+
 ## Has this been explored before?
 
 - **Direct SAC + categorical critics in locomotion:**
@@ -254,8 +283,8 @@ of the large-error-loss hypothesis; CE plus LayerNorm is a useful combined arm.
 
 ## Verification of the spread diagnostics (2026-09-18)
 
-- 83 tests pass across the SAC, local-redundancy, and plasticity suites, using
-  the command below.
+- 93 tests pass across the SAC, local-redundancy, plasticity, and spread suites,
+  using the command below.
 - `CriticDist/*` is checked against closed-form values on CPU and CUDA: a
   one-hot distribution reports zero width and one active atom; a uniform
   distribution reports `effective_atoms == num_bins` and `edge_mass == 2/bins`;
@@ -267,11 +296,19 @@ of the large-error-loss hypothesis; CE plus LayerNorm is a useful combined arm.
 - `q_spread_plots.py` was run end-to-end on `.npz` files written through the real
   critic and the real save call, for two different `distributional_symlog_limit`
   values overlaid in one figure.
+- The discounted-return reconstruction is checked against hand-computed values:
+  terminated versus timed-out episodes, a log that ends mid-episode, no leakage
+  across an episode boundary, per-env independence, the geometric observed
+  fraction, and the entropy bonus starting one step *after* the evaluated action.
+- `executed_action_logp` is checked to reproduce `sample_action_logp`'s value for
+  the same action to 2e-4, and to score the distribution mode above a sample.
 - **Not yet verified:** no long training run or Isaac Sim rollout has been logged
-  with these metrics, so their behavior on a converged policy is unmeasured.
+  with these metrics, so their behavior on a converged policy is unmeasured. The
+  `alpha` used for the entropy correction is the checkpoint's final value, which
+  is only the value in force during training if `auto_alpha` had settled.
 
 Run the numerical suite from the repository root:
 
 ```bash
-PYTHONPATH=source/rsl_rl_sac_vendor:source/scripts/rsl_rl /home/jordibelp/miniconda3/envs/env_isaaclab/bin/python -m pytest -q source/rsl_rl_sac_vendor/test source/scripts/rsl_rl/test/test_local_redundancy.py source/scripts/rsl_rl/test/test_plasticity_metrics.py
+PYTHONPATH=source/rsl_rl_sac_vendor:source/scripts/rsl_rl /home/jordibelp/miniconda3/envs/env_isaaclab/bin/python -m pytest -q source/rsl_rl_sac_vendor/test source/scripts/rsl_rl/test/test_local_redundancy.py source/scripts/rsl_rl/test/test_plasticity_metrics.py source/scripts/rsl_rl/test/test_q_spread_plots.py
 ```
