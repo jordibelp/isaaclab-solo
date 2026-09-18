@@ -299,9 +299,10 @@ class SACCriticModel(MLPModel):
         obs_normalization: bool = False,
         num_actions: int = 0,
         layer_norm: bool = False,
-        distributional_critic_ce: bool = False,
+        distributional_loss: str = "mse",
         distributional_num_bins: int = 255,
         distributional_symlog_limit: float = 8.0,
+        hl_gauss_sigma_ratio: float = 0.75,
         **kwargs,
     ) -> None:
         """Initialize the SAC critic model.
@@ -316,9 +317,11 @@ class SACCriticModel(MLPModel):
             obs_normalization: Whether to normalize observations.
             num_actions: Dimension of the action space (concatenated with observations).
             layer_norm: Whether to apply layer normalization in MLP hidden layers.
-            distributional_critic_ce: Fit scalar TD targets with symexp two-hot cross entropy.
+            distributional_loss: ``"mse"`` for the original scalar heads, or a categorical
+                cross-entropy head whose labels are ``"two_hot"`` or ``"hl_gauss"``.
             distributional_num_bins: Odd number of categorical atoms, including zero.
             distributional_symlog_limit: Symmetric log-space bound for the raw-unit support.
+            hl_gauss_sigma_ratio: HL-Gauss label width, as a fraction of the atom spacing.
         """
         super().__init__(
             obs,
@@ -333,10 +336,14 @@ class SACCriticModel(MLPModel):
         )
 
         self.num_actions = num_actions
-        self.distributional_critic_ce = distributional_critic_ce
-        if distributional_critic_ce:
+        if distributional_loss not in ("mse", "two_hot", "hl_gauss"):
+            raise ValueError("distributional_loss must be one of 'mse', 'two_hot', 'hl_gauss'.")
+        self.distributional_loss = distributional_loss
+        # Every consumer only ever asks "is the head logits or a scalar?", so keep that one name.
+        self.distributional_critic_ce = distributional_loss != "mse"
+        if self.distributional_critic_ce:
             if output_dim != 1:
-                raise ValueError("Two-hot SAC requires scalar Q-values (output_dim=1).")
+                raise ValueError("Categorical SAC requires scalar Q-values (output_dim=1).")
             if distributional_num_bins < 3 or distributional_num_bins % 2 != 1:
                 raise ValueError("distributional_num_bins must be odd and at least 3.")
             if not math.isfinite(distributional_symlog_limit) or not 0 < distributional_symlog_limit <= 80:
@@ -345,15 +352,36 @@ class SACCriticModel(MLPModel):
             positive = torch.linspace(0, distributional_symlog_limit, distributional_num_bins // 2 + 1).expm1()
             self.register_buffer("value_support", torch.cat((-positive[1:].flip(0), positive)))
 
+        if distributional_loss == "hl_gauss":
+            if not math.isfinite(hl_gauss_sigma_ratio) or hl_gauss_sigma_ratio <= 0:
+                raise ValueError("hl_gauss_sigma_ratio must be finite and positive.")
+            spacing = 2 * distributional_symlog_limit / (distributional_num_bins - 1)
+            self.hl_gauss_sigma = hl_gauss_sigma_ratio * spacing
+            # The atoms are bin centers, so the outer edges sit half a spacing past the limit.
+            edges = torch.linspace(
+                -distributional_symlog_limit - spacing / 2,
+                distributional_symlog_limit + spacing / 2,
+                distributional_num_bins + 1,
+            )
+            # Non-persistent: two-hot and HL-Gauss checkpoints stay loadable in either mode.
+            self.register_buffer("support_edges_symlog", edges, persistent=False)
+
+        if self.distributional_critic_ce:
+            print(
+                f"SAC critic: {distributional_loss} labels on {distributional_num_bins} symexp atoms"
+                f" (symlog limit {distributional_symlog_limit}); worst decoded-mean bias"
+                f" {self.label_decode_bias():.2e}."
+            )
+
         # Override parent's MLP — critic input is obs_dim + num_actions
         q_input_dim = self.obs_dim + num_actions
         self.mlp = None  # type: ignore[assignment]
 
         # Twin Q-networks
-        head_dim = distributional_num_bins if distributional_critic_ce else output_dim
+        head_dim = distributional_num_bins if self.distributional_critic_ce else output_dim
         self.critic1 = MLP(q_input_dim, head_dim, hidden_dims, activation, layer_norm=layer_norm)
         self.critic2 = MLP(q_input_dim, head_dim, hidden_dims, activation, layer_norm=layer_norm)
-        if distributional_critic_ce:
+        if self.distributional_critic_ce:
             # Dreamer initialization: random logits on this wide support imply enormous Q.
             for network in (self.critic1, self.critic2):
                 nn.init.zeros_(network[-1].weight)
@@ -422,6 +450,61 @@ class SACCriticModel(MLPModel):
         labels.scatter_add_(-1, upper, upper_weight)
         return labels
 
+    def hl_gauss(self, targets: torch.Tensor) -> torch.Tensor:
+        """Spread detached scalar targets over neighbouring atoms with a Gaussian label.
+
+        HL-Gauss (`Imani and White 2018 <https://arxiv.org/abs/1806.04613>`_;
+        `Farebrother et al. 2024 <https://arxiv.org/abs/2403.03950>`_) integrates
+        ``N(target, sigma)`` over each bin instead of splitting the target across the two
+        adjacent atoms. The reference implementation's support is evenly spaced in reward
+        units; ours is evenly spaced in *symlog* units, so the kernel lives there and
+        ``hl_gauss_sigma_ratio`` keeps its published meaning of sigma per bin width.
+
+        A Gaussian that is symmetric in symlog units is right-skewed after symexp, which
+        would multiply every decoded mean by ``exp(sigma^2 / 2)`` and compound through the
+        Bellman backup. Centering at ``z - sign(z) * sigma^2 / 2`` cancels that to first
+        order and restores the mean preservation that :meth:`two_hot` has exactly; see
+        :meth:`label_decode_bias` for the remainder.
+        """
+        support = self.value_support
+        sigma = self.hl_gauss_sigma
+        targets = targets.detach().to(dtype=support.dtype).clamp(support[0], support[-1])
+        centers = targets.sign() * targets.abs().log1p()
+        centers = centers - centers.sign() * (0.5 * sigma * sigma)
+        cdf = torch.erf((self.support_edges_symlog - centers) / (math.sqrt(2.0) * sigma))
+        labels = cdf[..., 1:] - cdf[..., :-1]
+        # Dividing by the sum is the reference implementation's renormalization: the sum
+        # telescopes to cdf[-1] - cdf[0], the mass the truncated support actually keeps.
+        return labels / labels.sum(-1, keepdim=True)
+
+    def categorical_labels(self, targets: torch.Tensor) -> torch.Tensor:
+        """Project detached scalar targets onto the support using the configured label scheme."""
+        return self.hl_gauss(targets) if self.distributional_loss == "hl_gauss" else self.two_hot(targets)
+
+    @torch.no_grad()
+    def label_decode_bias(self) -> float:
+        """Worst gap between a label's decoded mean and the target it was built from.
+
+        Relative for targets past 1.0 and absolute below, maximized over the interior of the
+        support, so it is a worst-case envelope rather than a typical error. Two-hot returns
+        ~0 by construction.
+
+        For HL-Gauss the part that matters is systematic: what survives the skew correction
+        still pushes ``|Q|`` outward by roughly ``0.1 * sigma^2`` at every decode, some five
+        times less than the ``sigma^2 / 2`` the correction removes. Being systematic, it
+        compounds — a constant relative bias ``b`` moves the Bellman fixed point by roughly
+        ``(1 - gamma) / (1 - gamma * (1 + b))``, so 2e-4 costs ~0.5% of Q at gamma=0.97, 1e-3
+        costs ~1.4%, and 1e-2 costs ~50%. Skipping the correction is what reaches that last
+        regime. Raising ``distributional_num_bins`` shrinks sigma and the bias with it.
+        """
+        limit = self.support_symlog()[-1].item()
+        # Stay four sigma inside the support: clipped labels are a separate, reported effect.
+        inner = max(limit - 4.0 * getattr(self, "hl_gauss_sigma", 0.0), 0.0)
+        probe = torch.linspace(-inner, inner, 4 * self.value_support.numel(), device=self.value_support.device)
+        probe = probe.sign() * probe.abs().expm1()
+        decoded = (self.categorical_labels(probe.unsqueeze(-1)) * self.value_support).sum(-1)
+        return ((decoded - probe).abs() / probe.abs().clamp(min=1.0)).max().item()
+
     def critic_outputs(self, obs: TensorDict, actions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Raw twin-critic head outputs: scalar Q values, or categorical logits under CE."""
         latent = torch.cat([self.get_latent(obs), actions], dim=-1)
@@ -433,7 +516,7 @@ class SACCriticModel(MLPModel):
         """Twin critic losses; the default branch retains the original scalar MSE."""
         if not self.distributional_critic_ce:
             return nn.functional.mse_loss(output1, targets), nn.functional.mse_loss(output2, targets)
-        labels = self.two_hot(targets)
+        labels = self.categorical_labels(targets)
         loss1 = -(labels * output1.float().log_softmax(-1)).sum(-1).mean()
         loss2 = -(labels * output2.float().log_softmax(-1)).sum(-1).mean()
         return loss1, loss2

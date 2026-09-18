@@ -4,7 +4,7 @@
 """Plot how much of a categorical SAC critic's support is used, and how wrong it is.
 
 Input is one or more ``.npz`` files written by ``play_direct_0325.py --q_value_log``,
-from a checkpoint trained with ``agent.distributional_critic_ce=True``.
+from a checkpoint trained with ``agent.critic.distributional_loss=two_hot`` or ``=hl_gauss``.
 
 The spread panels are reported in **symlog units**: the ``x`` in ``Q = sign(x)(exp|x| - 1)``,
 so the axes are directly comparable to ``agent.critic.distributional_symlog_limit``. Runs

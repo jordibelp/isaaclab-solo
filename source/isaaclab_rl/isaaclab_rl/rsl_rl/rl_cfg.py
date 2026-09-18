@@ -92,10 +92,14 @@ class RslRlSacCriticModelCfg:
     activation: str = MISSING
     obs_normalization: bool = MISSING
     layer_norm: bool = False
+    distributional_loss: str = "mse"
+    """Critic loss: "mse" scalar heads, or categorical cross entropy with "two_hot" or "hl_gauss" labels."""
     distributional_num_bins: int = 255
-    """Odd number of symmetrically spaced symexp atoms (CE mode only)."""
+    """Odd number of symmetrically spaced symexp atoms (categorical modes only)."""
     distributional_symlog_limit: float = 8.0
     """Support is symexp(linspace(-limit, limit, num_bins)), in reward units."""
+    hl_gauss_sigma_ratio: float = 0.75
+    """HL-Gauss label width as a fraction of the atom spacing; 0.75 is the published default."""
 
 
 ############################
@@ -337,7 +341,7 @@ class RslRlOffPolicyRunnerCfg(RslRlBaseRunnerCfg):
 
     class_name: str = "OffPolicyRunner"
     distributional_critic_ce: bool = False
-    """Use Dreamer-style symexp two-hot CE critics instead of scalar MSE critics."""
+    """Deprecated alias for critic.distributional_loss="two_hot"; set that instead."""
     local_redundancy: RslRlLocalRedundancyCfg = RslRlLocalRedundancyCfg()
     actor: RslRlSacActorModelCfg = MISSING
     critic: RslRlSacCriticModelCfg = MISSING

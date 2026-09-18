@@ -1,29 +1,39 @@
-# SAC with a symexp two-hot cross-entropy critic
+# SAC with a categorical cross-entropy critic on a symexp support
 
 ## Use
 
-Append this to an existing **SAC** training command:
+One flag on an existing **SAC** training command picks the critic loss:
 
 ```text
-agent.distributional_critic_ce=True
+agent.critic.distributional_loss=mse       # default: the original scalar heads
+agent.critic.distributional_loss=two_hot   # two-hot labels, Dreamer style
+agent.critic.distributional_loss=hl_gauss  # Gaussian labels, Farebrother et al. 2024
 ```
 
-Default is `False`: the original scalar heads, MSE, initialization, state-dict
-keys, and optimizer behavior are retained. PPO is unchanged. Start a **fresh
-experiment** when switching modes; scalar and categorical critic checkpoints
-have incompatible head shapes. Resume CE checkpoints with CE enabled and the
-same number of bins; the support is stored in the checkpoint. Actor-only
-inference/export is unchanged.
+`mse` keeps the original scalar heads, MSE, initialization, state-dict keys, and
+optimizer behavior. PPO is unchanged in all three modes.
+
+Start a **fresh experiment** when you move between `mse` and either categorical
+mode, because the head shapes differ. `two_hot` and `hl_gauss` share the same
+head and the same state dict, so you can resume one from the other's checkpoint
+and change only the labels. Keep the number of bins the same when you resume;
+the support is stored in the checkpoint. Actor-only inference and export are
+unchanged.
+
+The old flag `agent.distributional_critic_ce=True` still works and now selects
+`two_hot`. It prints a deprecation line. Setting both flags at once is an error.
 
 Optional settings:
 
 ```text
 agent.critic.distributional_num_bins=255 agent.critic.distributional_symlog_limit=8.0
+agent.critic.hl_gauss_sigma_ratio=0.75
 ```
 
 The number of bins must be odd and at least 3. The symmetric support includes
 zero and is `symexp(linspace(-8, 8, 255))`, approximately **[-2979.96, 2979.96]**
-in reward units. Neither rewards nor environment penalties are modified.
+in reward units. `hl_gauss_sigma_ratio` only applies to `hl_gauss`. Neither
+rewards nor environment penalties are modified.
 
 ## What problem does this address?
 
@@ -90,6 +100,92 @@ This is a categorical representation trained on scalar Bellman targets. It is
 **not C51's full distributional Bellman projection**, so its spread should not
 be interpreted as a calibrated full-return uncertainty estimate. See
 [C51](https://proceedings.mlr.press/v70/bellemare17a.html) for that distinction.
+
+## HL-Gauss labels
+
+`hl_gauss` changes the label `t` and nothing else. The support, the scalar
+target `y`, the decode `Q = sum(p * B)`, the actor, and the temperature are all
+exactly as above.
+
+Two-hot puts every bit of mass on the two atoms next to the target. HL-Gauss
+spreads it with a Gaussian instead:
+
+```text
+sigma = hl_gauss_sigma_ratio * atom_spacing
+t_i   = Phi((e_(i+1) - z) / sigma) - Phi((e_i - z) / sigma),  rescaled to sum to 1
+```
+
+Here `e_i` are the bin edges and `z` is the target. The atoms are treated as bin
+centers, so the outer edges sit half a spacing past the limit. At the default
+ratio 0.75 the mass lands on about three atoms. That is the point: the label
+says "the return is somewhere near here" instead of "the return is between these
+two exact atoms".
+
+[Farebrother et al. (2024)](https://arxiv.org/abs/2403.03950) report that this
+beats two-hot across their domains. They also find that the best ratio does not
+depend on the number of bins, which is why one default is reasonable. They use
+0.75, so we use 0.75.
+
+### Why the Gaussian lives in symlog space
+
+The paper's support is evenly spaced in reward units. Ours is not. Ours is
+evenly spaced in **symlog** units, so the gap between neighbouring atoms grows
+from about 0.04 near zero to about 5.8 near the edge at `limit=5`. A single
+`sigma` in reward units would therefore cover hundreds of atoms near zero and
+less than one atom near the edge.
+
+So we put the Gaussian in symlog space, where the atoms really are evenly
+spaced. `hl_gauss_sigma_ratio` then keeps the meaning it has in the paper: sigma
+as a fraction of the bin width. The label covers about three atoms everywhere on
+the support.
+
+We kept the symexp support instead of switching to an evenly spaced one for two
+reasons. It resolves small Q values far more finely, which matters when rewards
+are order 1 and returns are order 10. And it keeps `two_hot` and `hl_gauss`
+differing **only** in the label, which is the comparison the paper actually
+makes.
+
+### The skew correction
+
+A Gaussian that is symmetric in symlog units is **not** symmetric after
+`symexp`. Its upper tail stretches more than its lower tail. So the decoded mean
+comes out too large, by a factor of about `exp(sigma^2 / 2)`.
+
+Per decode that is tiny. But the critic decodes once per Bellman backup, so it
+compounds. A constant relative bias `b` moves the fixed point by roughly
+`(1 - gamma) / (1 - gamma * (1 + b))`. At `gamma = 0.97`, with no correction:
+
+| bins | limit | bias per decode | resulting Q inflation |
+|---|---|---|---|
+| 255 | 5.0 | 4.4e-4 | 1.4% |
+| 255 | 8.0 | 1.1e-3 | 3.7% |
+| 101 | 8.0 | 7.2e-3 | **31%** |
+| 51 | 5.0 | 1.1e-2 | **58%** |
+
+The paper's own bin count is 101, so a perfectly reasonable-looking setting
+lands in the bad rows. We therefore center the Gaussian at
+`z - sign(z) * sigma^2 / 2` rather than at `z`. That cancels the skew to first
+order. The shift is less than a twentieth of one bin width, so the smoothing
+behavior is unchanged.
+
+What survives is a much smaller outward skew of about `0.1 * sigma^2`: roughly
+9e-5 at `limit=5` and 2e-4 at `limit=8`, both with 255 bins. Those cost about
+0.3% and 0.65% of Q. This part is still systematic, so it still compounds. It is
+simply five times smaller than what the correction removed.
+
+`SACCriticModel.label_decode_bias()` measures the error, and every categorical
+run prints it at startup:
+
+```text
+SAC critic: hl_gauss labels on 255 symexp atoms (symlog limit 5.0); worst decoded-mean bias 3.33e-04
+```
+
+That printed number is a **worst-case envelope** over the whole support, not the
+systematic part on its own. It is relative for targets past 1.0 and absolute
+below, and near zero it is dominated by a fixed offset of the order of
+`sigma^2 / 2` rather than by anything that compounds. Two-hot prints about 1e-7,
+because its label preserves the mean exactly by construction. If you sweep the
+bin count, watch this line.
 
 ## Why the default support is narrower than Dreamer's
 
@@ -241,8 +337,9 @@ step is itself the diagnostic.
 - **Classification rather than regression:**
   [Farebrother et al., Stop Regressing (2024)](https://arxiv.org/html/2403.03950v1)
   studies categorical value losses. HL-Gauss, which smooths labels over nearby
-  bins, outperforms simple two-hot in their evaluated settings. It is a good
-  next loss variant, not proof of superiority on Solo12.
+  bins, outperforms simple two-hot in their evaluated settings. It is now
+  implemented here as `distributional_loss=hl_gauss`, but their result is not
+  proof of superiority on Solo12; that still has to be measured.
 - **Related continuous-control method:**
   [TD-MPC2](https://arxiv.org/html/2310.16828v2) uses soft CE reward/value
   prediction in log-transformed space and separately balances the policy's
@@ -262,7 +359,7 @@ step is itself the diagnostic.
 | Scalar symlog MSE | Compresses large targets | Inverse-transformed mean in log-space is not the raw expected return |
 | Fixed positive reward scaling | Cheap magnitude reduction | Leaves relative tail severity unchanged; preserving SAC's objective requires corresponding entropy-temperature scaling |
 | PopArt | Adaptive target normalization while preserving unnormalized outputs | More moving parts; does not by itself fix rare-event sampling or policy-gradient scale |
-| HL-Gauss | Smooth categorical targets; promising empirical results | Adds a smoothing bandwidth/support choice; not implemented here |
+| HL-Gauss | Smooth categorical targets; promising empirical results | Adds a smoothing bandwidth; on this log support it needs the skew correction above |
 
 Relevant primary references: [RLPD / Ball et al.](https://proceedings.mlr.press/v202/ball23a.html)
 for critic LayerNorm and [PopArt / van Hasselt et al.](https://arxiv.org/abs/1602.07714)
@@ -277,6 +374,13 @@ long enough to reach the previously observed late-training failure regime.
 Measure return, collisions/forbidden contacts, dormancy, feature rank, weight
 norm, shifted-input refitting, and target clipping. CE alone is the clean test
 of the large-error-loss hypothesis; CE plus LayerNorm is a useful combined arm.
+
+Treat `two_hot` versus `hl_gauss` as a **separate, later** question. They differ
+only in the label, so comparing them answers "does label smoothing help here?",
+which is a much narrower question than "does classification beat regression
+here?". Settle the MSE-versus-CE arm first, then run the label comparison from
+the winning CE configuration. Both share a state dict, so the second comparison
+can branch off a common checkpoint if you want to control for early training.
 
 ## Verification (2026-09-16)
 
@@ -294,6 +398,43 @@ of the large-error-loss hypothesis; CE plus LayerNorm is a useful combined arm.
   dictionaries on both CPU and CUDA.
 - These checks establish implementation/numerical behavior, **not a demonstrated
   cure for long-run plasticity loss or an improvement in task performance**.
+
+## Verification of HL-Gauss (2026-09-18)
+
+- 123 tests pass with the command below, up from 98. The new ones cover the
+  HL-Gauss label and the flag rename.
+- The label is checked to be non-negative, to sum to one, to carry no gradient,
+  and to clamp out-of-support targets onto the edge exactly like two-hot.
+- Mass spread is measured, not assumed: at ratio 0.75 the label occupies about
+  3.3 effective atoms against two-hot's at-most-2, and ratios 0.375 / 0.75 / 1.5
+  give about 2.0 / 3.3 / 6.3 atoms.
+- The decoded mean is checked against the target it encodes. The systematic part
+  is measured **on one side of zero only**, because a probe symmetric about zero
+  cancels an outward skew and makes any correction look perfect.
+- The skew correction is checked to do real work: on a deliberately coarse
+  51-bin support, the uncorrected kernel biases the decode by more than 1e-2
+  relative, and the correction cuts that by more than five times. Near zero the
+  leftover is verified to be a bounded offset rather than an error that grows
+  with the target.
+- Logit gradients are confirmed to stay `p - t` with L1 norm at most 2, so
+  HL-Gauss keeps the bounded-gradient property that motivated CE in the first
+  place.
+- `float32` and `float64` agree on the decode bias to three digits, so the
+  reported number is real discretization, not float32 noise.
+- Checkpoints are confirmed interchangeable: the bin edges are a non-persistent
+  buffer, so a `two_hot` state dict loads into an `hl_gauss` critic with
+  `strict=True`.
+- The local-redundancy probe is re-checked against both categorical modes. That
+  test had silently stopped constructing a categorical critic during the rename,
+  and it now asserts the head really is wider than one output before probing.
+- Real `solo12-two-feet` headless smoke with `distributional_loss=hl_gauss`:
+  64 envs, five iterations, two minibatches of 128, `symlog_limit=5.0`,
+  critic LayerNorm on. Startup reported a worst decoded-mean bias of 3.33e-04
+  and target clipping stayed at zero for every iteration.
+- **Not verified:** no long run and no converged policy. Whether HL-Gauss helps
+  Solo12 is unmeasured. The `CriticDist/symlog_std_within_state` value near 2.89
+  in the smoke log is just the zero-initialized head being uniform over
+  `[-5, 5]`, not a trained prediction.
 
 ## Verification of the spread diagnostics (2026-09-18)
 

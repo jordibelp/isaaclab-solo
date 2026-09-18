@@ -60,7 +60,7 @@ def ppo(device="cpu", *, state_dependent_std=False):
     return SimpleNamespace(alg=SimpleNamespace(policy=policy), device=device), obs
 
 
-def sac(device="cpu", *, state_dependent_std=True, distributional_critic_ce=False):
+def sac(device="cpu", *, state_dependent_std=True, distributional_loss="mse"):
     obs = TensorDict({"policy": torch.randn(23, 7, device=device)}, batch_size=[23])
     groups = {"actor": ["policy"], "critic": ["policy"]}
     actor = SACActorModel(
@@ -80,7 +80,7 @@ def sac(device="cpu", *, state_dependent_std=True, distributional_critic_ce=Fals
         1,
         hidden_dims=[8, 5],
         num_actions=3,
-        distributional_critic_ce=distributional_critic_ce,
+        distributional_loss=distributional_loss,
         obs_normalization=True,
         layer_norm=True,
     ).to(device)
@@ -90,8 +90,10 @@ def sac(device="cpu", *, state_dependent_std=True, distributional_critic_ce=Fals
     return SimpleNamespace(alg=SimpleNamespace(actor=actor, critic=critic), device=device), obs
 
 
-def test_ce_critic_probe_still_measures_scalar_q(cfg, device):
-    runner, obs = sac(device, distributional_critic_ce=True)
+@pytest.mark.parametrize("distributional_loss", ["two_hot", "hl_gauss"])
+def test_ce_critic_probe_still_measures_scalar_q(cfg, device, distributional_loss):
+    runner, obs = sac(device, distributional_loss=distributional_loss)
+    assert runner.alg.critic.critic1[-1].out_features > 1
     measured = lr.measure(runner, obs, cfg, 0)
     for name in ("critic1", "critic2"):
         assert measured[name]["local_redundancy_output_dim"] == 1

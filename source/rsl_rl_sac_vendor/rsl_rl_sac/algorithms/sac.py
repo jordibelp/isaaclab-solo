@@ -586,10 +586,16 @@ class SAC:
             print("SAC actor initialization: latent Gaussian centered on the environment q offset.")
 
         # Initialize the critic
+        critic_cfg = dict(cfg["critic"])
+        if cfg.get("distributional_critic_ce", False):
+            if critic_cfg.get("distributional_loss", "mse") != "mse":
+                raise ValueError(
+                    "Set either agent.distributional_critic_ce or agent.critic.distributional_loss, not both."
+                )
+            print("[DEPRECATED] agent.distributional_critic_ce=True -> agent.critic.distributional_loss='two_hot'")
+            critic_cfg["distributional_loss"] = "two_hot"
         critic: SACCriticModel = critic_class(
-            obs, cfg["obs_groups"], "critic", 1, num_actions=env.num_actions,
-            distributional_critic_ce=cfg.get("distributional_critic_ce", False),
-            **cfg["critic"],
+            obs, cfg["obs_groups"], "critic", 1, num_actions=env.num_actions, **critic_cfg
         ).to(device)
         print(f"SAC Critic: {critic}")
 

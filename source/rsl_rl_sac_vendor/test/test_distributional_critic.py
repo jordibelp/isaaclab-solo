@@ -23,15 +23,18 @@ def device(request):
     return request.param
 
 
-def models(device="cpu", ce=True, **kwargs):
+def models(device="cpu", loss="two_hot", **kwargs):
     obs = TensorDict({"policy": torch.randn(8, 4, device=device)}, batch_size=[8])
     groups = {"actor": ["policy"], "critic": ["policy"]}
     actor = SACActorModel(obs, groups, "actor", 2, hidden_dims=[16, 8], init_noise_std=0.15).to(device)
     critic = SACCriticModel(
         obs, groups, "critic", 1, hidden_dims=[16, 8], num_actions=2,
-        distributional_critic_ce=ce, **kwargs,
+        distributional_loss=loss, **kwargs,
     ).to(device)
     return obs, actor, critic
+
+
+CATEGORICAL = ["two_hot", "hl_gauss"]
 
 
 def test_projection_edges_and_mean_in_reward_units(device):
@@ -66,8 +69,94 @@ def test_logit_gradients_bounded_for_large_targets(device):
     assert mse_grad[-1].abs() == 2e12
 
 
+def test_hl_gauss_labels_are_a_normalized_gaussian_over_neighbouring_atoms(device):
+    _, _, critic = models(device, loss="hl_gauss")
+    b = critic.value_support
+    values = torch.cat((b, (b[:-1] + b[1:]) / 2, b.new_tensor([-1e12, -10, -2, 0, 0.045, 1e12])))[:, None]
+    values.requires_grad_()
+    labels = critic.hl_gauss(values)
+    assert not labels.requires_grad
+    assert (labels >= 0).all()
+    torch.testing.assert_close(labels.sum(-1), torch.ones_like(values[:, 0]))
+    # sigma/spacing = 0.75 is meant to put the mass on roughly three neighbours, and that is
+    # the whole difference from two-hot, which never uses more than two.
+    spread = torch.exp(-(labels.clamp_min(1e-12) * labels.clamp_min(1e-12).log()).sum(-1))
+    assert 2.5 < spread.mean() < 4.0
+    assert (critic.two_hot(values) > 0).sum(-1).max() <= 2
+    # Targets past the support land on its edge, exactly as two-hot clamps them.
+    torch.testing.assert_close(labels[values[:, 0] == 1e12], labels[values[:, 0] == b[-1]])
+
+
+def test_hl_gauss_decoded_mean_tracks_the_target_it_encodes(device):
+    _, _, critic = models(device, loss="hl_gauss")
+    b = critic.value_support
+    assert critic.label_decode_bias() < 1e-3
+    assert models(device, loss="two_hot")[2].label_decode_bias() < 1e-6
+    # What survives the correction is a systematic outward skew, so measure it signed and on
+    # one side only: a probe symmetric about zero would cancel it and look perfect. It has to
+    # stay well under the sigma^2/2 the correction removes, since this part does compound.
+    probe = torch.linspace(1.0, b[-1].item() * 0.5, 2000, device=device)[:, None]
+    signed = (((critic.hl_gauss(probe) * b).sum(-1, keepdim=True) - probe) / probe).mean().item()
+    assert 0 < signed < critic.hl_gauss_sigma**2 / 2 / 3
+    # The property the whole scalar-target design rests on: a rare catastrophic penalty keeps
+    # its arithmetic weight, so 99% of +1 and 1% of -100 still decodes to about -0.01.
+    mixture = 0.99 * critic.hl_gauss(b.new_tensor([[1.0]])) + 0.01 * critic.hl_gauss(b.new_tensor([[-100.0]]))
+    torch.testing.assert_close(critic.q_from_output(mixture.log()), b.new_tensor([[-0.01]]), atol=1e-3, rtol=0)
+
+
+def test_hl_gauss_skew_correction_is_what_keeps_coarse_supports_usable(device):
+    # A symlog-symmetric Gaussian is right-skewed in reward units. Without the correction the
+    # decoded mean is multiplied by exp(sigma^2/2) on every backup, which compounds.
+    coarse = dict(loss="hl_gauss", distributional_num_bins=51, distributional_symlog_limit=5.0)
+    _, _, critic = models(device, **coarse)
+    sigma = critic.hl_gauss_sigma
+    probe = torch.linspace(-4.0, 4.0, 400, device=device)
+    probe = (probe.sign() * probe.abs().expm1())[:, None]
+
+    def decode(centers):
+        cdf = torch.erf((critic.support_edges_symlog - centers) / (2**0.5 * sigma))
+        labels = cdf[..., 1:] - cdf[..., :-1]
+        return ((labels / labels.sum(-1, keepdim=True)) * critic.value_support).sum(-1)
+
+    raw_centers = probe.sign() * probe.abs().log1p()
+    gap_uncorrected = (decode(raw_centers) - probe[:, 0]).abs()
+    gap_corrected = ((critic.hl_gauss(probe) * critic.value_support).sum(-1) - probe[:, 0]).abs()
+    # Past |y| = 1 the error is multiplicative, and that is the part a Bellman backup compounds.
+    large = probe[:, 0].abs() >= 1.0
+    relative = lambda gap: (gap[large] / probe[large, 0].abs()).max().item()  # noqa: E731
+    assert relative(gap_uncorrected) > 1e-2
+    assert relative(gap_corrected) < relative(gap_uncorrected) / 5
+    # Near zero the leftover is a fixed offset of the order of the sigma^2/2 shift itself,
+    # rather than an error that grows with the target.
+    assert gap_corrected[~large].max() <= sigma**2
+    assert critic.label_decode_bias() >= relative(gap_corrected)
+
+
+def test_hl_gauss_gradients_stay_bounded_and_checkpoints_stay_interchangeable(device):
+    _, _, critic = models(device, loss="hl_gauss")
+    targets = torch.tensor([0.01, -2, -10, -1e6, 1e6, 1e12], device=device)[:, None]
+    logits = torch.zeros(6, 255, device=device, requires_grad=True)
+    labels = critic.hl_gauss(targets)
+    grad, = torch.autograd.grad(-(labels * logits.log_softmax(-1)).sum(), logits)
+    torch.testing.assert_close(grad, logits.softmax(-1) - labels)
+    assert grad.abs().max() <= 1
+    assert (grad.abs().sum(-1) <= 2.00001).all()
+    # Bin edges are derived, not saved, so a run can switch label scheme and resume.
+    _, _, two_hot_critic = models(device, loss="two_hot")
+    assert "support_edges_symlog" not in critic.state_dict()
+    critic.load_state_dict(two_hot_critic.state_dict(), strict=True)
+
+
+@pytest.mark.parametrize("ratio,expected", [(0.375, 2.0), (0.75, 3.3), (1.5, 6.3)])
+def test_hl_gauss_sigma_ratio_sets_how_many_atoms_carry_mass(ratio, expected):
+    _, _, critic = models(loss="hl_gauss", hl_gauss_sigma_ratio=ratio)
+    labels = critic.hl_gauss(torch.tensor([[1.0], [-3.0], [0.2]]))
+    spread = torch.exp(-(labels.clamp_min(1e-12) * labels.clamp_min(1e-12).log()).sum(-1))
+    assert spread.mean().item() == pytest.approx(expected, abs=0.4)
+
+
 def test_scalar_default_is_exact_legacy_mse_and_state_dict(device):
-    obs, _, critic = models(device, ce=False)
+    obs, _, critic = models(device, loss="mse")
     actions = torch.randn(8, 2, device=device)
     target = torch.randn(8, 1, device=device)
     latent = torch.cat((critic.get_latent(obs), actions), -1)
@@ -127,10 +216,10 @@ def test_default_action_gradient_matches_float64_reference(device):
     torch.testing.assert_close(grad, grad64.float(), atol=2e-7, rtol=2e-3)
 
 
-@pytest.mark.parametrize("ce", [False, True])
-def test_complete_sac_update_bootstrap_and_checkpoint(device, ce):
+@pytest.mark.parametrize("loss", ["mse", *CATEGORICAL])
+def test_complete_sac_update_bootstrap_and_checkpoint(device, loss):
     torch.manual_seed(21)
-    obs, actor, critic = models(device, ce=ce)
+    obs, actor, critic = models(device, loss=loss)
     actions = torch.randn(8, 2, device=device)
     rewards = torch.tensor([-10., -2., 0.045, -1e9, 1., 2., 3., 4.], device=device)[:, None]
     dones = torch.tensor([1., 1., 0., 1., 0., 0., 0., 0.], device=device)[:, None]
@@ -162,13 +251,13 @@ def test_complete_sac_update_bootstrap_and_checkpoint(device, ce):
     torch.testing.assert_close(seen[0], expected)
     assert all(torch.isfinite(torch.tensor(value)) for value in losses.values())
     assert any(not torch.equal(a, b) for a, b in zip(before, actor.parameters()))
-    if ce:
-        assert losses["critic_target_clipped_fraction"] == 1 / 8
-    else:
+    if loss == "mse":
         assert "critic_target_clipped_fraction" not in losses
+    else:
+        assert losses["critic_target_clipped_fraction"] == 1 / 8
     assert all(p.grad is None for p in critic.critic1_target.parameters())
     saved = copy.deepcopy(alg.save())
-    _, actor2, critic2 = models(device, ce=ce)
+    _, actor2, critic2 = models(device, loss=loss)
     resumed = SAC(actor2, critic2, replay, device=device)
     assert resumed.load(saved, load_cfg=None, strict=True)
     for original, restored in zip(critic.evaluate_all_q(obs, actions), critic2.evaluate_all_q(obs, actions)):
@@ -177,27 +266,44 @@ def test_complete_sac_update_bootstrap_and_checkpoint(device, ce):
     assert all(torch.isfinite(torch.tensor(v)) for v in resumed.update().values())
 
 
-@pytest.mark.parametrize("ce", [False, True])
-def test_runner_flag_constructs_requested_head(monkeypatch, ce):
+def build_runner(monkeypatch, **cfg_extra):
     obs, _, _ = models()
     env = SimpleNamespace(num_actions=2, num_envs=8)
     monkeypatch.setattr(SAC, "_compute_action_scaling", lambda env, device: (torch.ones(2), torch.ones(2)))
     cfg = dict(
-        distributional_critic_ce=ce, num_steps_per_env=2,
+        num_steps_per_env=2,
         obs_groups={"actor": ["policy"], "critic": ["policy"]},
         actor=dict(class_name="SACActorModel", hidden_dims=[8]),
         critic=dict(class_name="SACCriticModel", hidden_dims=[8]),
         algorithm=dict(class_name="SAC", replay_buffer_size=64),
     )
-    alg = SAC.construct_algorithm(obs, env, cfg, "cpu")
-    assert alg.critic.distributional_critic_ce == ce
-    assert alg.critic.critic1[-1].out_features == (255 if ce else 1)
+    cfg.update(cfg_extra)
+    return SAC.construct_algorithm(obs, env, cfg, "cpu")
+
+
+@pytest.mark.parametrize("loss", ["mse", *CATEGORICAL])
+def test_runner_flag_constructs_requested_head(monkeypatch, loss):
+    alg = build_runner(monkeypatch, critic=dict(class_name="SACCriticModel", hidden_dims=[8],
+                                                distributional_loss=loss))
+    assert alg.critic.distributional_loss == loss
+    assert alg.critic.distributional_critic_ce == (loss != "mse")
+    assert alg.critic.critic1[-1].out_features == (1 if loss == "mse" else 255)
+
+
+def test_deprecated_boolean_still_selects_two_hot(monkeypatch):
+    alg = build_runner(monkeypatch, distributional_critic_ce=True)
+    assert alg.critic.distributional_loss == "two_hot"
+    with pytest.raises(ValueError):
+        build_runner(monkeypatch, distributional_critic_ce=True,
+                     critic=dict(class_name="SACCriticModel", hidden_dims=[8], distributional_loss="hl_gauss"))
 
 
 @pytest.mark.parametrize("kwargs", [
     {"distributional_num_bins": 2}, {"distributional_num_bins": 254},
     {"distributional_symlog_limit": 0}, {"distributional_symlog_limit": float("nan")},
     {"distributional_symlog_limit": 90},
+    {"loss": "hl_gauss", "hl_gauss_sigma_ratio": 0}, {"loss": "hl_gauss", "hl_gauss_sigma_ratio": -1},
+    {"loss": "hl_gauss", "hl_gauss_sigma_ratio": float("inf")}, {"loss": "hl_gaus"},
 ])
 def test_invalid_support_rejected(kwargs):
     with pytest.raises(ValueError):
@@ -357,6 +463,6 @@ def test_stats_are_diagnostic_only_and_reach_the_loss_dict(device):
     losses = SAC(actor, critic, replay, device=device, policy_frequency=1).update()
     assert all(name in losses for name in DISTRIBUTION_STAT_NAMES)
     assert all(torch.isfinite(torch.tensor(losses[name])) for name in DISTRIBUTION_STAT_NAMES)
-    _, actor2, scalar_critic = models(device, ce=False)
+    _, actor2, scalar_critic = models(device, loss="mse")
     scalar_losses = SAC(actor2, scalar_critic, replay, device=device, policy_frequency=1).update()
     assert not any(name in scalar_losses for name in DISTRIBUTION_STAT_NAMES)
