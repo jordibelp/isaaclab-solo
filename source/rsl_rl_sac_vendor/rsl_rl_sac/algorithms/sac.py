@@ -189,13 +189,15 @@ class SAC:
         """Process a single environment step and store transition in replay buffer."""
         if "time_outs" in extras and "time_outs_obs" in extras:
             time_outs = extras["time_outs"].int().to(self.device)
-            time_outs_obs = extras.get("time_outs_obs", None)
-            true_next_obs = {}
-            mask = time_outs.squeeze(-1).bool()
-
-            for key in time_outs_obs.keys():
-                true_next_obs[key] = torch.where(mask[:, None], time_outs_obs[key], next_obs[key])
-            true_next_obs = TensorDict(true_next_obs, batch_size=next_obs.batch_size)
+            time_outs_obs = extras["time_outs_obs"]
+            # reshape, not squeeze: the wrapper publishes (num_envs,), which squeeze(-1)
+            # collapses to a scalar for a single environment. Leave time_outs itself alone,
+            # so transition.bootstrap keeps the shape the other branch produces.
+            mask = time_outs.reshape(-1, 1).bool()
+            true_next_obs = TensorDict(
+                {key: torch.where(mask, value, next_obs[key]) for key, value in time_outs_obs.items()},
+                batch_size=next_obs.batch_size,
+            )
         else:
             time_outs = torch.zeros_like(dones, device=self.device)
             true_next_obs = next_obs

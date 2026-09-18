@@ -204,6 +204,58 @@ def test_invalid_support_rejected(kwargs):
         models(**kwargs)
 
 
+@pytest.mark.parametrize("envs", [1, 4])
+def test_timeout_stores_the_pre_reset_observation_and_flags_the_bootstrap(envs):
+    """A timeout must keep the state it reached, not the state the auto-reset produced."""
+    obs = TensorDict({"policy": torch.randn(envs, 4)}, batch_size=[envs])
+    groups = {"actor": ["policy"], "critic": ["policy"]}
+    actor = SACActorModel(obs, groups, "actor", 2, hidden_dims=[8])
+    critic = SACCriticModel(obs, groups, "critic", 1, hidden_dims=[8], num_actions=2)
+    stored = {}
+    replay = SimpleNamespace(add_transition=lambda t: stored.update(vars(t).copy()))
+    alg = SAC(actor, critic, replay, device="cpu")
+    alg.transition = SimpleNamespace(rewards=None, next_observations=None, dones=None,
+                                     bootstrap=None, clear=lambda: None)
+
+    pre_reset = TensorDict({"policy": torch.full((envs, 4), 7.0)}, batch_size=[envs])
+    post_reset = TensorDict({"policy": torch.zeros(envs, 4)}, batch_size=[envs])
+    dones = torch.zeros(envs, dtype=torch.long)
+    dones[0] = 1
+    # The wrapper publishes (num_envs,); squeezing that collapsed to a scalar for one env.
+    time_outs = torch.zeros(envs, dtype=torch.bool)
+    time_outs[0] = True
+    alg.process_env_step(
+        post_reset, torch.zeros(envs, 1), dones,
+        {"time_outs": time_outs, "time_outs_obs": pre_reset},
+    )
+
+    kept = stored["next_observations"]["policy"]
+    torch.testing.assert_close(kept[0], torch.full((4,), 7.0))  # timed out: pre-reset state
+    if envs > 1:
+        torch.testing.assert_close(kept[1], torch.zeros(4))  # still running: ordinary next obs
+    # bootstrap must mark the timeout, or update() treats it as a terminal state worth zero.
+    assert stored["bootstrap"].reshape(-1)[0] == 1
+    assert stored["bootstrap"].shape == dones.shape
+
+
+def test_missing_timeout_obs_falls_back_to_terminal_treatment():
+    """Documents the failure mode: no time_outs_obs means every timeout looks terminal."""
+    obs = TensorDict({"policy": torch.randn(2, 4)}, batch_size=[2])
+    groups = {"actor": ["policy"], "critic": ["policy"]}
+    actor = SACActorModel(obs, groups, "actor", 2, hidden_dims=[8])
+    critic = SACCriticModel(obs, groups, "critic", 1, hidden_dims=[8], num_actions=2)
+    stored = {}
+    replay = SimpleNamespace(add_transition=lambda t: stored.update(vars(t).copy()))
+    alg = SAC(actor, critic, replay, device="cpu")
+    alg.transition = SimpleNamespace(rewards=None, next_observations=None, dones=None,
+                                     bootstrap=None, clear=lambda: None)
+
+    dones = torch.tensor([1, 0])
+    alg.process_env_step(obs, torch.zeros(2, 1), dones, {"time_outs": torch.tensor([True, False])})
+    # bootstrap_mask = bootstrap + 1 - done is then zero at the timeout, zeroing its target.
+    assert stored["bootstrap"].sum() == 0
+
+
 def test_namespaced_stats_bypass_the_loss_prefix():
     """CriticDist/* must reach the writer verbatim, while plain loss keys stay under Loss/."""
     from rsl_rl_sac.utils.logger import Logger
