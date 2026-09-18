@@ -64,17 +64,23 @@ def discounted_returns(
     time_out: np.ndarray,
     gamma: float,
     entropy_bonus: np.ndarray | None,
+    bootstrap: dict[str, np.ndarray] | None = None,
 ) -> dict[str, np.ndarray]:
     """Realized return behind each step, walking backwards through the log.
 
-    All arrays are ``(steps, envs)``. An episode that *terminates* has its full return
-    observed. One that times out, or that is still running when the log ends, is missing a
-    ``gamma ** (remaining + 1)``-weighted tail, reported as ``observed`` so partial returns
-    are not mistaken for complete ones.
+    All arrays are ``(steps, envs)``. A *terminated* episode has a true value of zero after
+    its last step. A *truncated* one — a timeout, or an episode still running when the log
+    ends — does not: cutting it at zero would drag the return down toward the episode
+    boundary. Passing ``bootstrap`` closes it with ``V(s')`` the way training does, keeping
+    the return flat across a timeout.
 
     ``entropy_bonus`` is ``alpha * -log_pi`` per step. SAC's Q predicts the *soft* return,
     which adds that bonus for every step after the one being evaluated, so passing it gives
-    the quantity Q was actually trained to match.
+    the quantity Q was actually trained to match. ``bootstrap`` supplies the matching
+    ``plain`` and ``soft`` continuation values.
+
+    ``observed`` reports how much of each return came from real rewards rather than from the
+    critic's own estimate, which is what makes a bootstrapped comparison partly circular.
     """
     steps, envs = reward.shape
     out = {key: np.zeros_like(reward) for key in ("plain", "soft")}
@@ -82,6 +88,7 @@ def discounted_returns(
     terminal = np.zeros((steps, envs), dtype=bool)
     ends = done > 0
     terminates = ends & (time_out <= 0)
+    zero = np.zeros(envs)
 
     # Carried state describes step t+1. It starts empty: nothing is observed past the log.
     carry = {key: np.zeros(envs) for key in ("plain", "soft", "bonus")}
@@ -90,15 +97,19 @@ def discounted_returns(
     carry_valid = np.zeros(envs, dtype=bool)
 
     for t in range(steps - 1, -1, -1):
-        # The tail counts only when this step does not end the episode and t+1 was observed.
+        # The tail continues only when this step does not end the episode and t+1 was logged.
         continues = ~ends[t] & carry_valid
-        out["plain"][t] = reward[t] + gamma * np.where(continues, carry["plain"], 0.0)
-        out["soft"][t] = reward[t] + gamma * np.where(continues, carry["soft"] + carry["bonus"], 0.0)
+        # Everything else is either a true terminal (value zero) or a cut that can bootstrap.
+        cut_short = ~continues & ~(ends[t] & terminates[t])
+        for key in ("plain", "soft"):
+            tail = carry[key] + (carry["bonus"] if key == "soft" else 0.0)
+            closing = zero if bootstrap is None else np.where(cut_short, bootstrap[key][t], 0.0)
+            out[key][t] = reward[t] + gamma * np.where(continues, tail, closing)
         remaining[t] = np.where(continues, carry_remaining + 1, 0)
         terminal[t] = np.where(ends[t], terminates[t], continues & carry_terminal)
 
         carry["plain"], carry["soft"] = out["plain"][t], out["soft"][t]
-        carry["bonus"] = entropy_bonus[t] if entropy_bonus is not None else np.zeros(envs)
+        carry["bonus"] = entropy_bonus[t] if entropy_bonus is not None else zero
         carry_remaining, carry_terminal = remaining[t], terminal[t]
         carry_valid = np.ones(envs, dtype=bool)
 
@@ -111,7 +122,7 @@ def discounted_returns(
 class Run:
     """One ``--q_value_log`` file, reduced to per-step statistics in symlog units."""
 
-    def __init__(self, path: Path, label: str | None, drop_first: int) -> None:
+    def __init__(self, path: Path, label: str | None, drop_first: int, use_bootstrap: bool = True) -> None:
         data = np.load(path)
         if data["value_support"].size == 0:
             raise ValueError(f"{path} has no categorical support; it was logged from a scalar critic.")
@@ -142,12 +153,24 @@ class Run:
         if "log_prob" in data and self.alpha is not None:
             bonus = self.alpha * -data["log_prob"][drop_first:].astype(np.float64)
         self.entropy_bonus = bonus
+
+        # V(s') for closing a truncated episode, as training does, instead of assuming zero.
+        self.bootstrap = None
+        self.bootstrap_available = "bootstrap_q" in data
+        if use_bootstrap and self.bootstrap_available:
+            q_next = data["bootstrap_q"][drop_first:].astype(np.float64)
+            self.bootstrap = {"plain": q_next, "soft": q_next}
+            if "bootstrap_log_prob" in data and self.alpha is not None:
+                # The soft value subtracts the entropy of the action taken at s'.
+                self.bootstrap["soft"] = q_next - self.alpha * data["bootstrap_log_prob"][drop_first:]
+
         self.returns = discounted_returns(
             reward,
             data["done"][drop_first:].astype(np.float64),
             data["time_out"][drop_first:].astype(np.float64),
             self.gamma,
             bonus,
+            self.bootstrap,
         )
 
     def target_return(self) -> tuple[np.ndarray, str]:
@@ -266,11 +289,18 @@ def print_summary(runs: list[Run], min_observed: float) -> None:
             )
         if run.returns is None:
             print(f"[WARN] {run.label}: no gamma in the log, so no estimation error. Re-record it.")
+        elif run.bootstrap is None and not run.bootstrap_available:
+            print(
+                f"[WARN] {run.label}: the log predates bootstrap_q, so truncated episodes close at "
+                "zero and the return sags toward every timeout. Re-record it."
+            )
+        elif run.bootstrap is None:
+            print(f"[NOTE] {run.label}: --no-bootstrap, so truncated episodes close at zero.")
         elif summary.get("valid_fraction", 0.0) == 0.0:
             print(
-                f"[WARN] {run.label}: no step has {min_observed:.0%} of its return observed. "
-                "Episodes are short relative to the 1/(1-gamma) horizon; lower --min-observed "
-                "or record longer episodes."
+                f"[WARN] {run.label}: every step draws more than {1 - min_observed:.0%} of its "
+                "return from the bootstrapped value. Episodes are short relative to the "
+                "1/(1-gamma) horizon; lower --min-observed or record longer episodes."
             )
         elif run.entropy_bonus is None:
             print(
@@ -322,12 +352,13 @@ def add_error_panels(axes, runs, colors, min_observed: float) -> None:
     value_axis.legend(loc="upper left", fontsize=8)
 
     error_axis.set_title(
-        "Estimation error Q - G — faint: return too truncated to trust, dash-dot: mean over used steps"
+        "Estimation error Q - G — faint: mostly bootstrapped, so closer to a TD residual; "
+        "dash-dot: mean over used steps"
     )
     error_axis.set_xlabel("play step")
     error_axis.set_ylabel("Q - G  (reward units)")
     error_axis.axhline(0.0, color="black", linewidth=0.8, alpha=0.6)
-    observed_axis.set_ylabel("fraction of G observed (dotted)")
+    observed_axis.set_ylabel("fraction of G from real rewards (dotted)")
     observed_axis.set_ylim(0, 1.05)
     observed_axis.axhline(min_observed, color="black", linestyle=":", linewidth=0.8, alpha=0.4)
     error_axis.legend(loc="upper left", fontsize=8)
@@ -401,8 +432,13 @@ def main() -> None:
         default=0.9,
         help=(
             "Estimation-error statistics only use steps where at least this fraction of the "
-            "discounted return was actually observed before the episode was cut short."
+            "return comes from real rewards rather than the bootstrapped critic value."
         ),
+    )
+    parser.add_argument(
+        "--no-bootstrap",
+        action="store_true",
+        help="Close truncated episodes at zero instead of V(s'), to see the truncation bias.",
     )
     args = parser.parse_args()
 
@@ -416,7 +452,7 @@ def main() -> None:
         matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    runs = [Run(path, label, args.drop_first) for path, label in zip(args.logs, labels)]
+    runs = [Run(path, label, args.drop_first, not args.no_bootstrap) for path, label in zip(args.logs, labels)]
     print_summary(runs, args.min_observed)
 
     figure = build_figure(runs, args.min_observed)

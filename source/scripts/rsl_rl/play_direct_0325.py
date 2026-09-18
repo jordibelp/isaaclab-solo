@@ -881,6 +881,27 @@ def _checkpoint_model_state_dict(path: str, map_location: str | torch.device = "
     raise ValueError(f"Could not find model state_dict in checkpoint: {path}")
 
 
+def _bootstrap_value(actor, critic, next_obs, extras: dict) -> tuple[torch.Tensor, torch.Tensor]:
+    """Value of the state reached by this step, for bootstrapping truncated episodes.
+
+    Mirrors the SAC training target: the pre-reset observation from ``time_outs_obs``, an
+    action sampled from the policy, and the frozen target critics. Returns the raw
+    ``min(Q1, Q2)`` and ``log_pi`` separately so the caller can decide whether to apply the
+    entropy term. Sampling here advances the RNG, so a ``--q_value_log`` rollout is not
+    bit-identical to one recorded without it.
+    """
+    if "time_outs_obs" in extras and "time_outs" in extras:
+        # time_outs_obs is only refreshed on reset steps, so the mask must select it.
+        mask = extras["time_outs"].int().squeeze(-1).bool()[:, None]
+        next_obs = TensorDict(
+            {key: torch.where(mask, value, next_obs[key]) for key, value in extras["time_outs_obs"].items()},
+            batch_size=next_obs.batch_size,
+        )
+    next_actions, next_log_prob = actor.sample_action_logp(next_obs)
+    q1_target, q2_target = critic.evaluate_all_target_q(next_obs, next_actions)
+    return torch.min(q1_target, q2_target).squeeze(-1), next_log_prob.squeeze(-1)
+
+
 def _load_dagger_adapter_checkpoint(path: str, map_location: str | torch.device = "cpu") -> dict[str, Any] | None:
     checkpoint = torch.load(path, map_location=map_location, weights_only=False)
     if isinstance(checkpoint, dict) and "adapter_state_dict" in checkpoint and "teacher_checkpoint" in checkpoint:
@@ -2322,7 +2343,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         policy = runner.get_inference_policy(device=vec_env.unwrapped.device)
         if args_cli.q_value_log is not None:
             q_critic = runner.alg.critic.to(vec_env.unwrapped.device)
-            q_log = {"q": [], "probs": [], "reward": [], "done": [], "time_out": [], "log_prob": []}
+            q_log = {
+                "q": [], "probs": [], "reward": [], "done": [], "time_out": [], "log_prob": [],
+                "bootstrap_q": [], "bootstrap_log_prob": [],
+            }
             # Needed to rebuild the discounted return Q is meant to predict. Read alpha out of
             # the checkpoint: training tunes it, and SAC.load only restores it together with the
             # optimizer state, which play deliberately skips.
@@ -2447,6 +2471,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 q_heads = (q_critic.critic1(q_input), q_critic.critic2(q_input))
             obs, rewards, dones, extras = vec_env.step(actions)
             if q_critic is not None:
+                bootstrap_q, bootstrap_log_prob = _bootstrap_value(policy, q_critic, obs, extras)
+                q_log["bootstrap_q"].append(bootstrap_q.cpu())
+                q_log["bootstrap_log_prob"].append(bootstrap_log_prob.cpu())
                 q_log["q"].append(torch.cat([q_critic.q_from_output(head) for head in q_heads], dim=-1).cpu())
                 if q_critic.distributional_critic_ce:
                     q_log["probs"].append(torch.stack([head.float().softmax(-1) for head in q_heads], dim=1).cpu())

@@ -16,15 +16,20 @@ from tensordict import TensorDict
 GAMMA = 0.5
 
 
-def returns(rewards, dones, time_outs, bonus=None, gamma=GAMMA):
+def returns(rewards, dones, time_outs, bonus=None, gamma=GAMMA, boot=None):
     """Single-env helper: pass plain lists, get 1-D arrays back."""
     shape = (len(rewards), 1)
+
+    def column(values):
+        return None if values is None else np.array(values, dtype=np.float64).reshape(shape)
+
     out = discounted_returns(
-        np.array(rewards, dtype=np.float64).reshape(shape),
-        np.array(dones, dtype=np.float64).reshape(shape),
-        np.array(time_outs, dtype=np.float64).reshape(shape),
+        column(rewards),
+        column(dones),
+        column(time_outs),
         gamma,
-        None if bonus is None else np.array(bonus, dtype=np.float64).reshape(shape),
+        column(bonus),
+        None if boot is None else {"plain": column(boot), "soft": column(boot)},
     )
     return {key: value.reshape(-1) for key, value in out.items()}
 
@@ -103,6 +108,55 @@ def test_executed_action_logp_scores_the_deterministic_action():
     assert torch.isfinite(mean_log_prob).all()
     # The distribution mode is the most likely action, so it must not score below a sample.
     assert mean_log_prob.mean() > sampled_log_prob.mean()
+
+
+def test_timeout_bootstraps_with_the_next_state_value():
+    boot = [0.0, 0.0, 8.0]
+    out = returns([1.0, 1.0, 1.0], [0, 0, 1], [0, 0, 1], boot=boot)
+    # The cut episode closes on V(s') = 8 instead of 0, so the tail is not thrown away.
+    np.testing.assert_allclose(out["plain"][2], 1.0 + GAMMA * 8.0)
+    np.testing.assert_allclose(out["plain"][1], 1.0 + GAMMA * (1.0 + GAMMA * 8.0))
+    np.testing.assert_allclose(out["plain"][0], 1.0 + GAMMA * out["plain"][1])
+
+
+def test_termination_ignores_the_bootstrap_value():
+    boot = [0.0, 0.0, 99.0]
+    terminated = returns([1.0, 1.0, 1.0], [0, 0, 1], [0, 0, 0], boot=boot)
+    # A real terminal state is worth zero, whatever the critic would have predicted.
+    np.testing.assert_allclose(terminated["plain"], [1.75, 1.5, 1.0])
+    np.testing.assert_allclose(terminated["observed"], [1.0, 1.0, 1.0])
+
+
+def test_bootstrapping_removes_the_decay_toward_a_timeout():
+    """A critic that is exactly right should show no error, even next to the cut."""
+    steps, gamma, reward = 40, 0.9, 1.0
+    value = reward / (1 - gamma)  # The true value of an endless stream of 1.0 rewards.
+    # Q(s,a) = r + gamma * V = V for every step of this stationary problem.
+    out = returns(
+        [reward] * steps, [0] * (steps - 1) + [1], [0] * (steps - 1) + [1],
+        gamma=gamma, boot=[value] * steps,
+    )
+    np.testing.assert_allclose(out["plain"], np.full(steps, value))
+    # Without the bootstrap the same log sags toward the timeout.
+    naive = returns([reward] * steps, [0] * (steps - 1) + [1], [0] * (steps - 1) + [1], gamma=gamma)
+    assert naive["plain"][-1] == pytest.approx(reward)
+    assert naive["plain"][0] < value
+
+
+def test_log_ending_mid_episode_also_bootstraps():
+    out = returns([1.0, 1.0, 1.0], [0, 0, 0], [0, 0, 0], boot=[0.0, 0.0, 4.0])
+    np.testing.assert_allclose(out["plain"][2], 1.0 + GAMMA * 4.0)
+
+
+def test_soft_bootstrap_is_used_for_the_soft_return_only():
+    shape = (2, 1)
+    out = discounted_returns(
+        np.zeros(shape), np.array([[0.0], [1.0]]), np.array([[0.0], [1.0]]), GAMMA,
+        np.full(shape, 0.0),
+        {"plain": np.array([[0.0], [10.0]]), "soft": np.array([[0.0], [6.0]])},
+    )
+    np.testing.assert_allclose(out["plain"][1], [GAMMA * 10.0])
+    np.testing.assert_allclose(out["soft"][1], [GAMMA * 6.0])
 
 
 @pytest.mark.parametrize("gamma", [0.9, 0.99])

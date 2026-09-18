@@ -195,10 +195,19 @@ but wrong error:
 - **Entropy.** Q predicts the *soft* return, which adds `alpha * -log_pi` for
   every step *after* the evaluated action — never for the action itself, which Q
   already conditions on. The summary prints the error with and without this term.
-- **Truncation.** A timed-out episode is missing a `gamma ** (remaining + 1)`
-  tail. Each step reports how much of its return was observed; `--min-observed`
-  (default 0.9) restricts the statistics, and excluded steps are drawn faintly
-  rather than hidden. Terminated episodes are complete and always count.
+- **Truncation.** A timed-out episode has not really ended, so closing it at
+  `V = 0` would drag `G` down toward every timeout. It is instead bootstrapped
+  with `V(s')` exactly as training does: the pre-reset `time_outs_obs`, a sampled
+  next action, and the frozen target critics. A *terminated* episode is worth
+  zero afterwards and ignores the bootstrap. `--no-bootstrap` restores the
+  zero-tail behavior if you want to see that bias.
+
+  Bootstrapping makes `G` complete everywhere, but the steps nearest a timeout
+  draw most of their value from the critic itself, so their "error" approaches a
+  one-step TD residual rather than a comparison against real data. Each step
+  therefore reports the fraction of `G` that came from actual rewards;
+  `--min-observed` (default 0.9) restricts the statistics to steps that are
+  mostly real, and the rest are drawn faintly rather than hidden.
 - **Determinism.** Q is defined under the stochastic policy. A deterministic
   rollout is a different trajectory distribution; `--q_value_log_stochastic`
   removes that mismatch.
@@ -211,6 +220,11 @@ are short relative to `1/(1-gamma)`, not that the critic is bad.
 
 Sign convention: positive mean error is the critic **overestimating** the return
 it will actually collect.
+
+A useful read of the `G` curve: with bootstrapping on, a flat `G` across a
+timeout means `V(s')` agrees with the return that was actually being collected.
+A visible step down at every timeout means it does not, and the size of that
+step is itself the diagnostic.
 
 ## Has this been explored before?
 
@@ -283,7 +297,7 @@ of the large-error-loss hypothesis; CE plus LayerNorm is a useful combined arm.
 
 ## Verification of the spread diagnostics (2026-09-18)
 
-- 93 tests pass across the SAC, local-redundancy, plasticity, and spread suites,
+- 98 tests pass across the SAC, local-redundancy, plasticity, and spread suites,
   using the command below.
 - `CriticDist/*` is checked against closed-form values on CPU and CUDA: a
   one-hot distribution reports zero width and one active atom; a uniform
@@ -300,6 +314,13 @@ of the large-error-loss hypothesis; CE plus LayerNorm is a useful combined arm.
   terminated versus timed-out episodes, a log that ends mid-episode, no leakage
   across an episode boundary, per-env independence, the geometric observed
   fraction, and the entropy bonus starting one step *after* the evaluated action.
+- Bootstrapping is checked to close timeouts on `V(s')`, to be ignored at true
+  terminations, to apply the soft value only to the soft return, and — on a
+  stationary problem where the critic is exactly right — to hold `G` flat
+  through a timeout where the zero-tail version visibly sags.
+- **Not covered by an automated test:** `_bootstrap_value` in the play script
+  needs a running env, so it is verified only by mirroring training's
+  `process_env_step` masking of `time_outs_obs` line for line.
 - `executed_action_logp` is checked to reproduce `sample_action_logp`'s value for
   the same action to 2e-4, and to score the distribution mode above a sample.
 - **Not yet verified:** no long training run or Isaac Sim rollout has been logged
