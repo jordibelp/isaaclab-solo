@@ -189,9 +189,10 @@ class Logger:
                         self.writer.add_scalar("Episode/" + key, value, it)  # type: ignore
                         extras_string += f"""{f"Mean episode {key}:":>{pad}} {value:.4f}\n"""
 
-            # Log losses
+            # Log losses. Keys that already carry a namespace are logged verbatim, matching
+            # the episode-extras convention above, so diagnostics need not sit under Loss/.
             for key, value in loss_dict.items():
-                self.writer.add_scalar(f"Loss/{key}", value, it)
+                self.writer.add_scalar(key if "/" in key else f"Loss/{key}", value, it)
             self.writer.add_scalar("Loss/learning_rate", learning_rate, it)
 
             # Log noise std
@@ -247,7 +248,8 @@ class Logger:
 
             # Print losses
             for key, value in loss_dict.items():
-                log_string += f"""{f"Mean {key} loss:":>{pad}} {value:.4f}\n"""
+                label = f"{key}:" if "/" in key else f"Mean {key} loss:"
+                log_string += f"""{label:>{pad}} {value:.4f}\n"""
 
             # Print rewards and episode length
             if len(self.rewbuffer) > 0:

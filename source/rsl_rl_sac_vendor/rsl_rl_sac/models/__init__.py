@@ -8,12 +8,19 @@
 from .cnn_model import CNNModel
 from .mlp_model import MLPModel
 from .rnn_model import RNNModel
-from .sac_mlp_model import SACActorModel, SACCriticModel
+from .sac_mlp_model import (
+    DISTRIBUTION_STAT_NAMES,
+    SACActorModel,
+    SACCriticModel,
+    symlog_distribution_stats,
+)
 
 __all__ = [
     "CNNModel",
+    "DISTRIBUTION_STAT_NAMES",
     "MLPModel",
     "RNNModel",
     "SACActorModel",
     "SACCriticModel",
+    "symlog_distribution_stats",
 ]

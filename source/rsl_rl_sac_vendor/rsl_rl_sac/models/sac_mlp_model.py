@@ -18,6 +18,55 @@ from rsl_rl_sac.utils import unpad_trajectories
 
 from .mlp_model import MLPModel
 
+# An atom counts as "used" above this probability, matching the threshold the eval plots use.
+_ACTIVE_ATOM_PROB = 0.1
+
+#: Log keys for :meth:`SACCriticModel.distribution_stats`, in the order it stacks them.
+DISTRIBUTION_STAT_NAMES = (
+    "CriticDist/symlog_mean",
+    "CriticDist/symlog_std_within_state",
+    "CriticDist/symlog_std_across_states",
+    "CriticDist/symlog_q05",
+    "CriticDist/symlog_q50",
+    "CriticDist/symlog_q95",
+    "CriticDist/symlog_q05_q95_width",
+    "CriticDist/active_atoms_p10",
+    "CriticDist/effective_atoms",
+    "CriticDist/edge_mass",
+)
+
+
+def symlog_distribution_stats(probs: torch.Tensor, atoms: torch.Tensor) -> dict[str, torch.Tensor]:
+    """Describe where a categorical value distribution sits on its support, in symlog units.
+
+    Training logs and the offline eval plots share this definition so their numbers are
+    comparable. ``probs`` is ``(..., num_atoms)`` and ``atoms`` is the matching symlog grid;
+    every returned tensor has shape ``probs.shape[:-1]``.
+
+    * ``mean``/``std``: probability-weighted center and width of one state-action's distribution.
+    * ``q05``/``q50``/``q95``: atom-resolution quantiles, robust when the mass is two-hot.
+    * ``active_atoms``: atoms above :data:`_ACTIVE_ATOM_PROB`, the "which categories are used" count.
+    * ``effective_atoms``: ``exp(entropy)``, the same question without a probability threshold.
+    * ``edge_mass``: mass on the two outermost atoms, which is where a too-small support shows up.
+    """
+    mean = (probs * atoms).sum(-1)
+    variance = (probs * (atoms - mean.unsqueeze(-1)).square()).sum(-1)
+    levels = probs.new_tensor([0.05, 0.5, 0.95]).expand(*probs.shape[:-1], 3)
+    indices = torch.searchsorted(probs.cumsum(-1).contiguous(), levels.contiguous())
+    quantiles = atoms[indices.clamp(max=atoms.numel() - 1)]
+    entropy = -(probs * probs.clamp_min(torch.finfo(probs.dtype).tiny).log()).sum(-1)
+    return {
+        "mean": mean,
+        "std": variance.sqrt(),
+        "q05": quantiles[..., 0],
+        "q50": quantiles[..., 1],
+        "q95": quantiles[..., 2],
+        "q05_q95_width": quantiles[..., 2] - quantiles[..., 0],
+        "active_atoms": (probs > _ACTIVE_ATOM_PROB).sum(-1).float(),
+        "effective_atoms": entropy.exp(),
+        "edge_mass": probs[..., 0] + probs[..., -1],
+    }
+
 
 class SACActorModel(MLPModel):
     """SAC actor model with Tanh-squashed Gaussian output distribution.
@@ -363,18 +412,57 @@ class SACCriticModel(MLPModel):
         labels.scatter_add_(-1, upper, upper_weight)
         return labels
 
-    def td_losses(
-        self, obs: TensorDict, actions: torch.Tensor, targets: torch.Tensor
+    def critic_outputs(self, obs: TensorDict, actions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Raw twin-critic head outputs: scalar Q values, or categorical logits under CE."""
+        latent = torch.cat([self.get_latent(obs), actions], dim=-1)
+        return self.critic1(latent), self.critic2(latent)
+
+    def losses_from_outputs(
+        self, output1: torch.Tensor, output2: torch.Tensor, targets: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Twin critic losses; the default branch retains the original scalar MSE."""
-        latent = torch.cat([self.get_latent(obs), actions], dim=-1)
-        output1, output2 = self.critic1(latent), self.critic2(latent)
         if not self.distributional_critic_ce:
             return nn.functional.mse_loss(output1, targets), nn.functional.mse_loss(output2, targets)
         labels = self.two_hot(targets)
         loss1 = -(labels * output1.float().log_softmax(-1)).sum(-1).mean()
         loss2 = -(labels * output2.float().log_softmax(-1)).sum(-1).mean()
         return loss1, loss2
+
+    def td_losses(
+        self, obs: TensorDict, actions: torch.Tensor, targets: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Twin critic losses; the default branch retains the original scalar MSE."""
+        return self.losses_from_outputs(*self.critic_outputs(obs, actions), targets)
+
+    def support_symlog(self) -> torch.Tensor:
+        """Support atoms in the symlog units the ``distributional_symlog_limit`` flag sets."""
+        return self.value_support.sign() * self.value_support.abs().log1p()
+
+    @torch.no_grad()
+    def distribution_stats(self, output1: torch.Tensor, output2: torch.Tensor) -> torch.Tensor:
+        """Summarize which atoms the twin-critic mixture occupies, in symlog units.
+
+        The mixture ``(p1 + p2) / 2`` is used, so critic disagreement widens the reported
+        spread exactly as it widens the range of encodable values. These describe the
+        categorical *representation*, not a calibrated return distribution: the critics are
+        trained on scalar Bellman targets, so the width is fit error plus target spread, not
+        an uncertainty estimate.
+        """
+        probs = 0.5 * (output1.float().softmax(-1) + output2.float().softmax(-1))
+        per_sample = symlog_distribution_stats(probs, self.support_symlog())
+        center = per_sample["mean"]
+        return torch.stack([
+            center.mean(),
+            per_sample["std"].mean(),
+            center.std(unbiased=False),
+            per_sample["q05"].mean(),
+            per_sample["q50"].mean(),
+            per_sample["q95"].mean(),
+            per_sample["q05_q95_width"].mean(),
+            per_sample["active_atoms"].mean(),
+            per_sample["effective_atoms"].mean(),
+            per_sample["edge_mass"].mean(),
+        ])
 
     def evaluate_all_q(self, obs: TensorDict, actions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute Q1 and Q2 for the given observations and actions.

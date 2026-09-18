@@ -127,6 +127,62 @@ plasticity metrics still operate on the hidden layers; local-redundancy probes
 decode scalar Q, rather than silently measuring 255 logits. Even so, head
 parameterization changes those probes, so compare behavioral adaptation too.
 
+## How much of the support is actually used?
+
+With CE enabled, every SAC update also logs `CriticDist/*` from the mini-batch it
+just trained on. The twin critics are mixed as `(p1 + p2) / 2` first, so critic
+disagreement widens the reported spread exactly as it widens the range of values
+the pair can encode.
+
+Everything is reported in **symlog units** — the `x` in `Q = sign(x)(exp|x| - 1)` —
+so the numbers are directly comparable to `agent.critic.distributional_symlog_limit`.
+
+| Key | Meaning |
+| --- | --- |
+| `symlog_mean` | Batch-mean distribution center. |
+| `symlog_std_within_state` | Typical width of *one* state-action's distribution. |
+| `symlog_std_across_states` | How much the center moves *between* states in the batch. |
+| `symlog_q05` / `q50` / `q95` | Atom-resolution quantiles; robust when the mass is near two-hot. |
+| `symlog_q05_q95_width` | `q95 - q05`, the occupied range. |
+| `active_atoms_p10` | Atoms above probability 0.1 — "how many categories are used". |
+| `effective_atoms` | `exp(entropy)`, the same question without a threshold. |
+| `edge_mass` | Mass on the two outermost atoms. |
+
+The two std keys answer different questions: plotting `symlog_mean` shaded with
+`symlog_std_across_states` shows the range of Q across the state distribution,
+while `symlog_std_within_state` shows how sharp each individual prediction is. A
+well-fit critic on a deterministic-return task should drive the second toward the
+atom spacing while the first stays wide.
+
+Read `edge_mass` together with `critic_target_clipped_fraction`: clipping says
+targets fell outside the support, `edge_mass` says the *prediction* is piling up
+against the boundary. Either one means the limit is too small.
+
+These describe the categorical **representation**. The critics are trained on
+scalar Bellman targets, so a wide distribution is fit error plus target spread —
+not a calibrated estimate of return uncertainty.
+
+### Same statistics at inference
+
+`play_direct_0325.py --q_value_log <file>.npz` records per-step twin-critic Q,
+the categorical probabilities, and the support. Two optional flags bound the
+collection:
+
+```text
+--q_value_log_episodes 3     # stop after 3 episode endings instead of the full --duration_s
+--q_value_log_stochastic     # act with the learned std instead of the deterministic mean
+```
+
+`q_spread_plots.py` turns one or more of those files into the support-occupancy
+histogram, a per-step center with std and q05–q95 bands, and a histogram of
+per-state widths. It reuses `symlog_distribution_stats`, the same function behind
+the `CriticDist/*` scalars, so training curves and eval plots are comparable.
+Runs with different limits can be overlaid because the axis is symlog:
+
+```bash
+./isaaclab.sh -p source/scripts/rsl_rl/q_spread_plots.py a.npz b.npz --labels "limit 5.0" "limit 4.0" --out spread.png --no-show
+```
+
 ## Has this been explored before?
 
 - **Direct SAC + categorical critics in locomotion:**
@@ -195,6 +251,24 @@ of the large-error-loss hypothesis; CE plus LayerNorm is a useful combined arm.
   dictionaries on both CPU and CUDA.
 - These checks establish implementation/numerical behavior, **not a demonstrated
   cure for long-run plasticity loss or an improvement in task performance**.
+
+## Verification of the spread diagnostics (2026-09-18)
+
+- 83 tests pass across the SAC, local-redundancy, and plasticity suites, using
+  the command below.
+- `CriticDist/*` is checked against closed-form values on CPU and CUDA: a
+  one-hot distribution reports zero width and one active atom; a uniform
+  distribution reports `effective_atoms == num_bins` and `edge_mass == 2/bins`;
+  and a case where the twin critics peak on different atoms confirms that
+  within-state and across-state spread are separated correctly.
+- The keys are confirmed to reach `alg.update()`'s output with CE on, to be
+  absent with CE off, to carry no gradient, and to bypass the `Loss/` prefix in
+  the logger.
+- `q_spread_plots.py` was run end-to-end on `.npz` files written through the real
+  critic and the real save call, for two different `distributional_symlog_limit`
+  values overlaid in one figure.
+- **Not yet verified:** no long training run or Isaac Sim rollout has been logged
+  with these metrics, so their behavior on a converged policy is unmeasured.
 
 Run the numerical suite from the repository root:
 

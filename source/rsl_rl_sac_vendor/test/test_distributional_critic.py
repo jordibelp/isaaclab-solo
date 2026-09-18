@@ -13,7 +13,7 @@ import torch
 from tensordict import TensorDict
 
 from rsl_rl_sac.algorithms import SAC
-from rsl_rl_sac.models import SACActorModel, SACCriticModel
+from rsl_rl_sac.models import DISTRIBUTION_STAT_NAMES, SACActorModel, SACCriticModel
 
 
 @pytest.fixture(
@@ -149,14 +149,14 @@ def test_complete_sac_update_bootstrap_and_checkpoint(device, ce):
     torch.random.set_rng_state(rng)
     if cuda_rng is not None:
         torch.cuda.set_rng_state(cuda_rng)
-    original_loss = critic.td_losses
+    original_loss = critic.losses_from_outputs
     seen = []
 
-    def capture(o, a, y):
+    def capture(output1, output2, y):
         seen.append(y.clone())
-        return original_loss(o, a, y)
+        return original_loss(output1, output2, y)
 
-    critic.td_losses = capture
+    critic.losses_from_outputs = capture
     before = [p.clone() for p in actor.parameters()]
     losses = alg.update()
     torch.testing.assert_close(seen[0], expected)
@@ -202,3 +202,109 @@ def test_runner_flag_constructs_requested_head(monkeypatch, ce):
 def test_invalid_support_rejected(kwargs):
     with pytest.raises(ValueError):
         models(**kwargs)
+
+
+def test_namespaced_stats_bypass_the_loss_prefix():
+    """CriticDist/* must reach the writer verbatim, while plain loss keys stay under Loss/."""
+    from rsl_rl_sac.utils.logger import Logger
+
+    tags = []
+    logger = Logger.__new__(Logger)
+    logger.writer = SimpleNamespace(add_scalar=lambda tag, value, step, **kw: tags.append(tag))
+    logger.cfg = {"num_steps_per_env": 2, "algorithm": {"rnd_cfg": None}}
+    logger.log_dir, logger.logger_type = None, "tensorboard"
+    logger.num_envs, logger.gpu_world_size = 8, 1
+    logger.tot_timesteps, logger.tot_time = 0, 1.0
+    logger.ep_extras, logger.rewbuffer, logger.lenbuffer = [], [], []
+    logger.log(
+        it=1, start_it=0, total_it=2, collect_time=0.1, learn_time=0.1,
+        loss_dict={"critic1": 0.5, DISTRIBUTION_STAT_NAMES[0]: -0.25},
+        learning_rate=1e-3, action_std=torch.zeros(2), rnd_weight=None,
+    )
+    assert "Loss/critic1" in tags
+    assert DISTRIBUTION_STAT_NAMES[0] in tags
+    assert f"Loss/{DISTRIBUTION_STAT_NAMES[0]}" not in tags
+
+
+def test_support_symlog_recovers_the_configured_grid(device):
+    _, _, critic = models(device, distributional_num_bins=51, distributional_symlog_limit=5.0)
+    expected = torch.linspace(-5.0, 5.0, 51, device=device)
+    torch.testing.assert_close(critic.support_symlog(), expected, atol=2e-6, rtol=0)
+
+
+def stats(critic, probs):
+    """Run distribution_stats on an exact probability vector, for both critics."""
+    logits = probs.clamp_min(torch.finfo(probs.dtype).tiny).log()
+    return dict(zip(DISTRIBUTION_STAT_NAMES, critic.distribution_stats(logits, logits).tolist()))
+
+
+def test_stats_on_a_single_atom_report_zero_spread(device):
+    _, _, critic = models(device, distributional_num_bins=51, distributional_symlog_limit=5.0)
+    atoms = critic.support_symlog()
+    probs = torch.zeros(4, 51, device=device)
+    probs[:, 40] = 1.0
+    reported = stats(critic, probs)
+    assert reported["CriticDist/active_atoms_p10"] == 1
+    assert reported["CriticDist/effective_atoms"] == pytest.approx(1.0, abs=1e-5)
+    assert reported["CriticDist/symlog_std_within_state"] == pytest.approx(0.0, abs=1e-5)
+    assert reported["CriticDist/symlog_std_across_states"] == pytest.approx(0.0, abs=1e-6)
+    assert reported["CriticDist/symlog_q05_q95_width"] == pytest.approx(0.0, abs=1e-6)
+    for key in ("symlog_mean", "symlog_q05", "symlog_q50", "symlog_q95"):
+        assert reported[f"CriticDist/{key}"] == pytest.approx(atoms[40].item(), abs=1e-5)
+    assert reported["CriticDist/edge_mass"] == pytest.approx(0.0, abs=1e-30)
+
+
+def test_stats_on_a_uniform_distribution_span_the_support(device):
+    _, _, critic = models(device, distributional_num_bins=51, distributional_symlog_limit=5.0)
+    reported = stats(critic, torch.full((4, 51), 1 / 51, device=device))
+    assert reported["CriticDist/active_atoms_p10"] == 0  # 1/51 < 0.1: no single atom dominates
+    assert reported["CriticDist/effective_atoms"] == pytest.approx(51.0, rel=1e-4)
+    assert reported["CriticDist/edge_mass"] == pytest.approx(2 / 51, rel=1e-5)
+    assert reported["CriticDist/symlog_mean"] == pytest.approx(0.0, abs=1e-5)
+    # Uniform on [-5, 5] discretized to 51 atoms: the 5%/95% atoms sit one step inside +/-4.5.
+    assert reported["CriticDist/symlog_q05"] == pytest.approx(-4.6, abs=0.11)
+    assert reported["CriticDist/symlog_q95"] == pytest.approx(4.6, abs=0.11)
+
+
+def test_stats_mix_the_twin_critics_and_separate_the_two_spreads(device):
+    _, _, critic = models(device, distributional_num_bins=51, distributional_symlog_limit=5.0)
+    atoms = critic.support_symlog()
+    tiny = torch.finfo(torch.float32).tiny
+    # Critic 1 and critic 2 each peak on a different atom, for two different states.
+    logits1 = torch.full((2, 51), tiny, device=device).log()
+    logits2 = logits1.clone()
+    logits1[0, 20], logits2[0, 30] = 0.0, 0.0
+    logits1[1, 24], logits2[1, 26] = 0.0, 0.0
+    reported = dict(zip(DISTRIBUTION_STAT_NAMES, critic.distribution_stats(logits1, logits2).tolist()))
+    assert reported["CriticDist/active_atoms_p10"] == 2  # the mixture puts 0.5 on each peak
+    centers = torch.tensor([(atoms[20] + atoms[30]) / 2, (atoms[24] + atoms[26]) / 2])
+    widths = torch.tensor([(atoms[30] - atoms[20]) / 2, (atoms[26] - atoms[24]) / 2])
+    # Disagreement inside one state and variation across states are reported separately.
+    assert reported["CriticDist/symlog_std_within_state"] == pytest.approx(widths.mean().item(), abs=1e-5)
+    assert reported["CriticDist/symlog_std_across_states"] == pytest.approx(
+        centers.std(unbiased=False).item(), abs=1e-5
+    )
+    assert reported["CriticDist/symlog_mean"] == pytest.approx(centers.mean().item(), abs=1e-5)
+
+
+def test_stats_are_diagnostic_only_and_reach_the_loss_dict(device):
+    obs, actor, critic = models(device)
+    actions = torch.randn(8, 2, device=device, requires_grad=True)
+    output1, output2 = critic.critic_outputs(obs, actions)
+    reported = critic.distribution_stats(output1, output2)
+    assert not reported.requires_grad
+    assert torch.isfinite(reported).all()
+    # The zero-initialized head is exactly symmetric: mean 0, and every atom equally used.
+    assert reported[DISTRIBUTION_STAT_NAMES.index("CriticDist/symlog_mean")].item() == pytest.approx(0.0, abs=1e-5)
+
+    replay = SimpleNamespace(mini_batch_generator=lambda **kw: iter([(
+        obs, actions.detach(), torch.zeros(8, 1, device=device), obs,
+        torch.zeros(8, 1, device=device), torch.zeros(8, 1, device=device),
+        torch.ones(8, 1, device=device),
+    )]))
+    losses = SAC(actor, critic, replay, device=device, policy_frequency=1).update()
+    assert all(name in losses for name in DISTRIBUTION_STAT_NAMES)
+    assert all(torch.isfinite(torch.tensor(losses[name])) for name in DISTRIBUTION_STAT_NAMES)
+    _, actor2, scalar_critic = models(device, ce=False)
+    scalar_losses = SAC(actor2, scalar_critic, replay, device=device, policy_frequency=1).update()
+    assert not any(name in scalar_losses for name in DISTRIBUTION_STAT_NAMES)

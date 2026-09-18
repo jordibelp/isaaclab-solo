@@ -374,6 +374,18 @@ parser.add_argument(
     help="SAC only: save per-step twin-critic Q(s, a), rewards, and categorical probabilities (CE critics) to this .npz.",
 )
 parser.add_argument(
+    "--q_value_log_episodes",
+    type=int,
+    default=None,
+    help="With --q_value_log: stop after this many episode endings instead of running the full --duration_s.",
+)
+parser.add_argument(
+    "--q_value_log_stochastic",
+    action="store_true",
+    default=False,
+    help="With --q_value_log: sample actions from the policy instead of using its deterministic mean.",
+)
+parser.add_argument(
     "--keep_training_stochasticity",
     action="store_true",
     default=False,
@@ -2318,6 +2330,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
     if args_cli.q_value_log is not None and q_critic is None:
         raise ValueError("--q_value_log requires a SAC/OffPolicyRunner checkpoint.")
+    if args_cli.q_value_log is None and (args_cli.q_value_log_episodes or args_cli.q_value_log_stochastic):
+        raise ValueError("--q_value_log_episodes and --q_value_log_stochastic require --q_value_log.")
+    q_target_episodes = args_cli.q_value_log_episodes
+    q_episodes_seen = 0
+    # Sampling uses the learned per-state std, so the logged Q covers the actions the
+    # stochastic policy would actually take rather than only the deterministic mean.
+    q_sample_policy = args_cli.q_value_log_stochastic
+    if q_sample_policy:
+        print("[INFO] Sampling actions from the SAC policy distribution for Q logging.", flush=True)
 
     run = None
     if args_cli.wandb:
@@ -2406,7 +2427,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             helper_height_plane.update()
 
         with torch.inference_mode():
-            actions = policy(obs)
+            actions = policy(obs, stochastic_output=True) if q_sample_policy else policy(obs)
             if q_critic is not None:
                 q_input = torch.cat([q_critic.get_latent(obs), actions], dim=-1)
                 q_heads = (q_critic.critic1(q_input), q_critic.critic2(q_input))
@@ -2418,6 +2439,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 q_log["reward"].append(rewards.cpu())
                 q_log["done"].append(dones.cpu())
                 q_log["time_out"].append(extras["time_outs"].cpu())
+                q_episodes_seen += int(torch.count_nonzero(dones).item())
             if TRACKING_COMMANDS:
                 tracking_resets += int(torch.count_nonzero(dones).item())
             try:
@@ -2539,6 +2561,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         sleep_time = dt - (time.time() - loop_t0)
         if args_cli.real_time and sleep_time > 0:
             time.sleep(sleep_time)
+
+        if q_target_episodes is not None and q_episodes_seen >= q_target_episodes:
+            print(
+                f"[INFO] Collected {q_episodes_seen} episode ending(s) in {timestep + 1} steps; "
+                "stopping for --q_value_log_episodes.",
+                flush=True,
+            )
+            break
 
     final_ratio = statistics.median(ratio_over_time)
     median_track = statistics.median(track_over_time)

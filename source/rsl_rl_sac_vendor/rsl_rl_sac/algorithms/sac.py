@@ -12,7 +12,7 @@ from tensordict import TensorDict
 
 from rsl_rl_sac.env import VecEnv
 from rsl_rl_sac.extensions import RandomNetworkDistillation, resolve_rnd_config, resolve_symmetry_config
-from rsl_rl_sac.models import SACActorModel, SACCriticModel
+from rsl_rl_sac.models import DISTRIBUTION_STAT_NAMES, SACActorModel, SACCriticModel
 from rsl_rl_sac.storage import ReplayBuffer
 from rsl_rl_sac.utils import resolve_callable, resolve_obs_groups, resolve_optimizer
 
@@ -229,7 +229,7 @@ class SAC:
         mean_alpha_loss = 0.0
         mean_rnd_loss = 0.0 if self.rnd else None
         mean_symmetry_loss = 0.0 if self.symmetry else None
-        mean_target_clipped_fraction = 0.0
+        summed_dist_stats = None
 
         for batch in self.replay_buffer.mini_batch_generator(
             num_mini_batch=self.num_mini_batches,
@@ -288,11 +288,17 @@ class SAC:
                 n_step_discount = torch.pow(self.gamma, effective_n_steps.to(dtype=q_target_next.dtype))
                 target_q = rewards_batch + n_step_discount * bootstrap_mask * q_target_next
 
-            critic1_loss, critic2_loss = self.critic.td_losses(obs_batch, actions_batch, target_q)
+            output1, output2 = self.critic.critic_outputs(obs_batch, actions_batch)
+            critic1_loss, critic2_loss = self.critic.losses_from_outputs(output1, output2, target_q)
             if self.critic.distributional_critic_ce:
                 support = self.critic.value_support
                 clipped = (target_q < support[0]) | (target_q > support[-1])
-                mean_target_clipped_fraction += clipped.float().mean().item()
+                # Accumulate on device; one host sync per update() instead of one per mini-batch.
+                batch_stats = torch.cat((
+                    self.critic.distribution_stats(output1, output2),
+                    clipped.float().mean().reshape(1),
+                ))
+                summed_dist_stats = batch_stats if summed_dist_stats is None else summed_dist_stats + batch_stats
 
             total_critic_loss = 0.5 * (critic1_loss + critic2_loss)
             self.critic_optimizer.zero_grad()
@@ -442,8 +448,9 @@ class SAC:
             loss_dict["rnd"] = mean_rnd_loss
         if self.symmetry:
             loss_dict["symmetry"] = mean_symmetry_loss
-        if self.critic.distributional_critic_ce:
-            loss_dict["critic_target_clipped_fraction"] = mean_target_clipped_fraction / num_updates
+        if summed_dist_stats is not None:
+            names = (*DISTRIBUTION_STAT_NAMES, "critic_target_clipped_fraction")
+            loss_dict.update(zip(names, (summed_dist_stats / num_updates).tolist()))
 
         return loss_dict
 
