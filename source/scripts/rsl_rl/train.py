@@ -149,6 +149,16 @@ parser.add_argument(
 )
 parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy training iterations.")
 parser.add_argument(
+    "--keep-last-checkpoints",
+    type=int,
+    default=1,
+    help=(
+        "Number of newest periodic model_<iteration>.pt checkpoints to retain; older ones are pruned on every"
+        " save, so a run killed before --max_iterations still leaves a tidy directory. The per-curriculum-stage"
+        " best_model*.pt checkpoints are never pruned. Pass 0 or less to keep every periodic checkpoint."
+    ),
+)
+parser.add_argument(
     "--run-name",
     type=str,
     default=None,
@@ -719,6 +729,143 @@ def _curriculum_checkpoint_stage(curriculum_state: dict) -> tuple[tuple[int | No
     else:
         filename = f"best_model_curriculum_idx_{global_idx}_two_feet_phase_{two_feet_phase}.pt"
     return (global_idx, two_feet_phase), filename
+
+
+_PERIODIC_CHECKPOINT_PATTERN = re.compile(r"model_(\d+)\.pt")
+
+
+def _save_best_model_checkpoints(
+    runner, log_dir: str, curriculum_state: dict | None, curriculum_model_filename: str | None,
+    mean_reward: float, iteration: int | None, resume_path: str | None,
+) -> str | None:
+    """Write ``best_model.pt`` plus, when a curriculum is active, the per-stage best checkpoint."""
+
+    logger = getattr(runner, "logger", None)
+    best_infos = {
+        "best_model_metric": "Train/mean_reward",
+        "best_model_value": mean_reward,
+        "best_model_iteration": iteration,
+        "best_model_total_timesteps": getattr(runner, "tot_timesteps", None) or getattr(logger, "tot_timesteps", None),
+        "best_model_total_time": getattr(runner, "tot_time", None) or getattr(logger, "tot_time", None),
+        "source_checkpoint": resume_path,
+    }
+    curriculum_model_path = None
+    if curriculum_state is not None:
+        best_infos.update(
+            {
+                "best_model_curriculum_idx": curriculum_state["global_idx"],
+                "best_model_two_feet_phase": curriculum_state["two_feet_phase"],
+                "curriculum_global_idx": curriculum_state["global_idx"],
+                "curriculum_max_velx_range_idx": curriculum_state["max_velx_range_idx"],
+                "curriculum_base_push_force_idx": curriculum_state["base_push_force_idx"],
+                "curriculum_command_lin_vel_x_abs": curriculum_state["command_lin_vel_x_abs"],
+                "curriculum_base_push_force_xy_abs": curriculum_state["base_push_force_xy_abs"],
+            }
+        )
+        curriculum_model_path = os.path.join(log_dir, curriculum_model_filename)
+        runner.save(curriculum_model_path, infos=best_infos)
+    runner.save(os.path.join(log_dir, "best_model.pt"), infos=best_infos)
+    return curriculum_model_path
+
+
+def _patch_runner_save_with_checkpoint_retention(runner, keep_last: int) -> None:
+    """Prune superseded periodic checkpoints on every save rather than only at shutdown.
+
+    Runs are routinely killed before ``max_iterations``, so retention has to happen while
+    training progresses. Only ``model_<iteration>.pt`` files are pruned; the per-curriculum-stage
+    ``best_model*.pt`` checkpoints this script writes are never touched.
+    """
+
+    original_save = runner.save
+
+    def _save_with_retention(path: str, infos: dict | None = None) -> None:
+        original_save(path, infos=infos)
+        if _PERIODIC_CHECKPOINT_PATTERN.fullmatch(os.path.basename(path)) is None:
+            return
+        directory = os.path.dirname(path)
+        checkpoints = []
+        for name in os.listdir(directory):
+            match = _PERIODIC_CHECKPOINT_PATTERN.fullmatch(name)
+            if match is not None:
+                checkpoints.append((int(match.group(1)), os.path.join(directory, name)))
+        removed = 0
+        for _, stale in sorted(checkpoints, reverse=True)[keep_last:]:
+            try:
+                os.remove(stale)
+            except OSError as error:
+                print(f"[WARN]: Could not prune checkpoint {stale}: {error}", flush=True)
+            else:
+                removed += 1
+        if removed:
+            print(
+                f"[INFO]: Checkpoint retention pruned {removed} superseded checkpoint(s); "
+                f"the newest {keep_last} plus every best_model*.pt remain.",
+                flush=True,
+            )
+
+    runner.save = _save_with_retention
+
+
+def _install_sac_best_model_hook(runner, log_dir: str, resume_path: str | None, initial_best: float) -> None:
+    """Track the best mean reward per curriculum stage for the SAC runner.
+
+    ``OffPolicyRunner`` logs through ``runner.logger.log`` and never calls ``runner.log``, so the
+    PPO best-model callback installed on ``runner.log`` never fires for SAC. Without this hook the
+    only SAC checkpoints on disk are the periodic ones.
+    """
+
+    original_log = runner.logger.log
+    best_overall = initial_best
+    best_by_stage: dict[tuple[int | None, int | None], float] = {}
+    last_stage: tuple[int | None, int | None] | None = None
+
+    def _log_with_best_model(*log_args, **log_kwargs):
+        nonlocal best_overall, last_stage
+        original_log(*log_args, **log_kwargs)
+
+        logger = runner.logger
+        if logger.log_dir is None or logger.writer is None or not logger.rewbuffer:
+            return
+        iteration = log_kwargs["it"] if "it" in log_kwargs else (log_args[0] if log_args else None)
+        mean_reward = float(statistics.mean(logger.rewbuffer))
+
+        curriculum_state = _get_curriculum_state_from_runner(runner)
+        stage, stage_filename = None, None
+        if curriculum_state is not None:
+            stage, stage_filename = _curriculum_checkpoint_stage(curriculum_state)
+
+        if stage is None:
+            previous_best = best_overall
+        else:
+            if last_stage is not None and stage != last_stage:
+                print(
+                    f"[INFO]: Curriculum advanced {last_stage} -> {stage}; "
+                    "resetting best-model tracking for the new stage.",
+                    flush=True,
+                )
+            last_stage = stage
+            previous_best = best_by_stage.get(stage, float("-inf"))
+
+        if mean_reward <= previous_best:
+            return
+        if stage is None:
+            best_overall = mean_reward
+        else:
+            best_by_stage[stage] = mean_reward
+
+        curriculum_model_path = _save_best_model_checkpoints(
+            runner, log_dir, curriculum_state, stage_filename, mean_reward, iteration, resume_path
+        )
+        destination = "best_model.pt" if curriculum_model_path is None else (
+            f"best_model.pt and {os.path.basename(curriculum_model_path)}"
+        )
+        print(
+            f"[INFO]: Saved new best model to {destination} "
+            f"(iteration={iteration}, Train/mean_reward={mean_reward:.4f})",
+            flush=True,
+        )
+
+    runner.logger.log = _log_with_best_model
 
 
 def _patch_runner_save_with_cbp(runner, cbp_manager) -> None:
@@ -2993,33 +3140,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
         if curriculum_stage is None:
             best_mean_reward = mean_reward
-            curriculum_model_path = None
         else:
             best_mean_reward_by_curriculum_stage[curriculum_stage] = mean_reward
-            curriculum_model_path = os.path.join(log_dir, curriculum_model_filename)
 
-        best_infos = {
-            "best_model_metric": "Train/mean_reward",
-            "best_model_value": mean_reward,
-            "best_model_iteration": locs.get("it"),
-            "best_model_total_timesteps": getattr(runner, "tot_timesteps", None),
-            "best_model_total_time": getattr(runner, "tot_time", None),
-            "source_checkpoint": resume_path,
-        }
-        if curriculum_state is not None:
-            best_infos.update(
-                {
-                    "best_model_curriculum_idx": curriculum_state["global_idx"],
-                    "best_model_two_feet_phase": curriculum_state["two_feet_phase"],
-                    "curriculum_global_idx": curriculum_state["global_idx"],
-                    "curriculum_max_velx_range_idx": curriculum_state["max_velx_range_idx"],
-                    "curriculum_base_push_force_idx": curriculum_state["base_push_force_idx"],
-                    "curriculum_command_lin_vel_x_abs": curriculum_state["command_lin_vel_x_abs"],
-                    "curriculum_base_push_force_xy_abs": curriculum_state["base_push_force_xy_abs"],
-                }
-            )
-            runner.save(curriculum_model_path, infos=best_infos)
-        runner.save(best_model_path, infos=best_infos)
+        curriculum_model_path = _save_best_model_checkpoints(
+            runner, log_dir, curriculum_state, curriculum_model_filename, mean_reward, locs.get("it"), resume_path
+        )
 
         destination = best_model_path if curriculum_model_path is None else f"{best_model_path} and {curriculum_model_path}"
         print(
@@ -3177,6 +3303,25 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 f"within-episode friction resample={bool(getattr(env_cfg, 'within_episode_fric_resample', False))}.",
                 flush=True,
             )
+
+    # The SAC runner never calls runner.log, so its best-model tracking needs its own hook, and it
+    # has to be installed before retention starts pruning the periodic checkpoints.
+    if isinstance(runner, OffPolicyRunner):
+        _install_sac_best_model_hook(runner, log_dir, resume_path, best_mean_reward)
+        print(
+            "[INFO]: SAC best-model tracking enabled: best_model.pt and one best_model_*.pt per curriculum "
+            "stage are written from Train/mean_reward.",
+            flush=True,
+        )
+
+    # Patch retention last so it wraps every other runner.save patch.
+    if int(args_cli.keep_last_checkpoints) > 0:
+        _patch_runner_save_with_checkpoint_retention(runner, int(args_cli.keep_last_checkpoints))
+        print(
+            f"[INFO]: Checkpoint retention enabled: keeping the newest {int(args_cli.keep_last_checkpoints)} "
+            "periodic checkpoint(s) plus every per-curriculum-stage best_model*.pt, pruning on each save.",
+            flush=True,
+        )
 
     num_learning_iterations = int(agent_cfg.max_iterations)
     if args_cli.plasticity_loss_exp and should_resume:
