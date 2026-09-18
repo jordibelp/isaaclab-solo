@@ -1391,6 +1391,17 @@ class Solo12Env(DirectRLEnv):
 
         reset_env_ids = self.reset_buf.nonzero(as_tuple=False).squeeze(-1)
         if len(reset_env_ids) > 0:
+            # Kept in sync with DirectRLEnv.step: off-policy algorithms must bootstrap a
+            # timeout from the observation actually reached, not the one the reset below
+            # produces. Without this, SAC sees time_outs_obs missing, falls back to
+            # treating every timeout as a true terminal state, and stores the post-reset
+            # observation as the transition's next state.
+            time_outs_obs = self._get_observations()
+            if self.cfg.observation_noise_model:
+                time_outs_obs["policy"] = self._observation_noise_model(time_outs_obs["policy"])
+            self.extras["time_outs_obs"] = {
+                key: value.detach().clone() for key, value in time_outs_obs.items()
+            }
             self._reset_idx(reset_env_ids)
             if self.sim.has_rtx_sensors() and self.cfg.num_rerenders_on_reset > 0:
                 for _ in range(self.cfg.num_rerenders_on_reset):
