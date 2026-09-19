@@ -40,6 +40,7 @@ for _path in (
 import solo12_symmetry
 from rsl_rl_sac.algorithms import SAC
 from rsl_rl_sac.runners import OffPolicyRunner
+from rsl_rl_sac.storage import MixedReplayBuffer, ReplayBuffer
 
 
 def reproducible_command(argv=None):
@@ -70,14 +71,65 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--rollout-steps", type=int, default=24)
     p.add_argument("--save-interval", type=int, default=100)
     p.add_argument("--log-interval", type=int, default=1)
-    p.add_argument("--start-training", type=int, default=1)
+    p.add_argument(
+        "--start-training",
+        type=int,
+        default=1,
+        help=(
+            "Iterations of pure data collection with the loaded policy before the first update."
+            " This is the warm start of arXiv:2602.20220; one iteration already collects"
+            " num_envs * rollout_steps transitions."
+        ),
+    )
     p.add_argument("--replay-buffer-size", type=int, default=int(5.0e6))
     p.add_argument("--updates-per-iteration", type=int, default=200)
     p.add_argument("--batch-size", type=int, default=8192)
     p.add_argument("--n-steps", type=int, default=5)
     p.add_argument("--gamma", type=float, default=0.97)
     p.add_argument("--tau", type=float, default=0.003)
-    p.add_argument("--actor-learning-rate", type=float, default=2.0e-4)
+    p.add_argument(
+        "--offline-replay-buffer",
+        default=None,
+        help=(
+            "replay_buffer.pt written by a pretraining run. Its transitions are retained and"
+            " mixed into every mini-batch to stabilize early fine-tuning (arXiv:2602.20220)."
+        ),
+    )
+    p.add_argument(
+        "--offline-fraction",
+        type=float,
+        default=None,
+        help="Share of each mini-batch taken from the retained data at the start. Default 0.5.",
+    )
+    p.add_argument(
+        "--offline-fraction-final",
+        type=float,
+        default=None,
+        help="Share reached at the end of the anneal. Default 0.0, so training ends on MJX data only.",
+    )
+    p.add_argument(
+        "--offline-anneal-iterations",
+        type=int,
+        default=None,
+        help="Iterations over which the offline share is annealed. Default: half of --max-iterations.",
+    )
+    p.add_argument(
+        "--save-replay-buffer",
+        action="store_true",
+        help="Snapshot the MJX replay buffer so a later run can retain it in turn.",
+    )
+    p.add_argument("--save-replay-buffer-every", type=int, default=500)
+    p.add_argument(
+        "--actor-update-every",
+        type=int,
+        default=20,
+        help=(
+            "Critic updates per actor update (M in arXiv:2602.20220). The paper shows that"
+            " updating the actor every critic step destabilizes transfer on every platform"
+            " it tested; 20 is its recommendation. Use 1 for synchronous updates."
+        ),
+    )
+    p.add_argument("--actor-learning-rate", type=float, default=1.0e-5)
     p.add_argument("--critic-learning-rate", type=float, default=2.0e-4)
     p.add_argument("--alpha-learning-rate", type=float, default=2.0e-5)
     p.add_argument("--initial-alpha", type=float, default=0.001)
@@ -210,6 +262,47 @@ def _apply_environment_action_scaling(actor, env) -> None:
         actor.log_action_range.copy_(torch.log(actor.action_range).sum())
 
 
+def _validate_offline_arguments(args) -> None:
+    """Reject a mixing schedule that has no retained data to apply it to."""
+    mixing_args = (args.offline_fraction, args.offline_fraction_final, args.offline_anneal_iterations)
+    if args.offline_replay_buffer is None and any(value is not None for value in mixing_args):
+        raise ValueError(
+            "--offline-fraction, --offline-fraction-final and --offline-anneal-iterations only take"
+            " effect together with --offline-replay-buffer."
+        )
+
+
+def _install_retained_replay(runner, args) -> None:
+    """Load pretraining transitions and mix them into every mini-batch.
+
+    This is the retained-replay step of arXiv:2602.20220. The recorded transitions anchor the
+    critic while the policy meets MJX dynamics, and their share is annealed to
+    ``--offline-fraction-final`` so the final policy is fitted on MJX data.
+    """
+    path = str(Path(args.offline_replay_buffer).expanduser().resolve())
+    offline = ReplayBuffer.load_snapshot(path, args.device, n_steps=args.n_steps, gamma=args.gamma)
+
+    initial = 0.5 if args.offline_fraction is None else args.offline_fraction
+    final = 0.0 if args.offline_fraction_final is None else args.offline_fraction_final
+    anneal = (
+        max(args.max_iterations // 2, 1)
+        if args.offline_anneal_iterations is None
+        else args.offline_anneal_iterations
+    )
+
+    runner.alg.replay_buffer = MixedReplayBuffer(
+        runner.alg.replay_buffer,
+        offline,
+        initial_offline_fraction=initial,
+        final_offline_fraction=final,
+        anneal_iterations=anneal,
+    )
+    print(
+        f"[INFO] Retained replay: {offline.num_envs * offline.num_transitions:,} transitions from {path}; "
+        f"offline share {initial:g} -> {final:g} over {anneal} iterations."
+    )
+
+
 def _runner_config(args) -> dict:
     algorithm = {
         "class_name": "SAC",
@@ -228,7 +321,7 @@ def _runner_config(args) -> dict:
         "auto_alpha": True,
         "target_entropy_scale": args.target_entropy_scale,
         "max_grad_norm": 1.0,
-        "policy_frequency": 1,
+        "policy_frequency": args.actor_update_every,
         "n_steps": args.n_steps,
         "rnd_cfg": None,
         "symmetry_cfg": None,
@@ -249,6 +342,8 @@ def _runner_config(args) -> dict:
         "save_interval": args.save_interval,
         "log_interval": args.log_interval,
         "start_training": args.start_training,
+        "save_replay_buffer": args.save_replay_buffer,
+        "save_replay_buffer_every": args.save_replay_buffer_every,
         "experiment_name": "solo12_mujoco_sac",
         "run_name": args.run_name,
         "logger": "tensorboard" if args.no_wandb else "wandb",
@@ -289,6 +384,7 @@ def main() -> None:
         raise ValueError("MJX SAC currently supports zero external pushes only.")
     if env_cfg["include_events_randomization"]:
         raise ValueError("MJX startup property randomization is not implemented.")
+    _validate_offline_arguments(args)
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
@@ -333,6 +429,8 @@ def main() -> None:
             )
         _apply_environment_action_scaling(runner.alg.actor, env)
         print(f"[INFO] Loaded SAC checkpoint: {checkpoint} (exact resume={args.resume})")
+    if args.offline_replay_buffer:
+        _install_retained_replay(runner, args)
     runner.learn(num_learning_iterations=args.max_iterations, init_at_random_ep_len=True)
     env.close()
 

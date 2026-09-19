@@ -348,3 +348,18 @@ class RslRlOffPolicyRunnerCfg(RslRlBaseRunnerCfg):
     algorithm: RslRlSacAlgorithmCfg = MISSING
     log_interval: int = 1
     start_training: int = 1
+    """Iterations of pure data collection before the first gradient update."""
+
+    save_replay_buffer: bool = False
+    """Whether to snapshot the replay buffer to ``<log_dir>/replay_buffer.pt`` during training.
+
+    Enable this when the run is meant to seed a later sim-to-online fine-tuning run, which
+    reuses the pretraining transitions as retained replay (arXiv:2602.20220).
+    """
+
+    save_replay_buffer_every: int = 500
+    """Iterations between replay-buffer snapshots.
+
+    The same file is overwritten each time, so a run that is stopped before ``max_iterations``
+    still leaves usable replay data behind without keeping one copy per snapshot.
+    """

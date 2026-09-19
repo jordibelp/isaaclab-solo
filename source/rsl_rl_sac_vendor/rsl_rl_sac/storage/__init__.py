@@ -7,5 +7,6 @@
 
 from .rollout_storage import RolloutStorage
 from .replay_buffer import ReplayBuffer
+from .mixed_replay_buffer import MixedReplayBuffer
 
-__all__ = ["RolloutStorage", "ReplayBuffer"]
+__all__ = ["RolloutStorage", "ReplayBuffer", "MixedReplayBuffer"]

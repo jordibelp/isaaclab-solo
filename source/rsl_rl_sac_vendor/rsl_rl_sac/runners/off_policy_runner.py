@@ -12,6 +12,7 @@ import torch
 from rsl_rl_sac.algorithms import SAC
 from rsl_rl_sac.env import VecEnv
 from rsl_rl_sac.models import SACActorModel
+from rsl_rl_sac.storage import MixedReplayBuffer
 from rsl_rl_sac.utils import resolve_callable
 from rsl_rl_sac.utils.logger import Logger
 
@@ -54,6 +55,15 @@ class OffPolicyRunner:
         self.start_training = self.cfg.get("start_training", 0)
         self.log_interval = self.cfg.get("log_interval", 20)
 
+        # Replay-buffer snapshots. A single file is overwritten in place so long runs do not
+        # accumulate multi-gigabyte copies.
+        self.save_replay_buffer = bool(self.cfg.get("save_replay_buffer", False))
+        self.save_replay_buffer_every = int(self.cfg.get("save_replay_buffer_every", 500))
+        if self.save_replay_buffer and self.save_replay_buffer_every < 1:
+            raise ValueError(
+                f"save_replay_buffer_every must be at least 1, got {self.save_replay_buffer_every}."
+            )
+
     def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False) -> None:
         """Run the training loop."""
         # Randomize initial episode lengths (for exploration)
@@ -81,6 +91,8 @@ class OffPolicyRunner:
         log_window_learn_time = 0.0
         log_window_iters = 0
 
+        mixed_buffer = self.alg.replay_buffer if isinstance(self.alg.replay_buffer, MixedReplayBuffer) else None
+
         for it in range(start_iter, tot_iter):
             start = time.time()
             # Rollout
@@ -101,10 +113,17 @@ class OffPolicyRunner:
                 collection_time = stop - start
                 start = stop
 
+            # Advance the offline/online mixture before the update that consumes it.
+            if mixed_buffer is not None:
+                mixed_buffer.set_iteration(it - start_iter)
+
             if it >= self.start_training:
                 loss_dict = self.alg.update()
             else:
                 loss_dict = {}
+
+            if mixed_buffer is not None:
+                loss_dict["Replay/offline_fraction"] = mixed_buffer.offline_fraction
 
             stop = time.time()
             learn_time = stop - start
@@ -145,10 +164,30 @@ class OffPolicyRunner:
             if self.logger.writer is not None and it % self.cfg["save_interval"] == 0 and it != 0:
                 self.save(os.path.join(self.logger.log_dir, f"model_{it}.pt"))  # type: ignore
 
+            # Save replay data
+            if self._should_save_replay_buffer(it, tot_iter):
+                self._save_replay_buffer_snapshot()
+
         # Save the final model after training and stop the logging writer
         if self.logger.writer is not None:
             self.save(os.path.join(self.logger.log_dir, f"model_{self.current_learning_iteration}.pt"))  # type: ignore
             self.logger.stop_logging_writer()
+
+    def _should_save_replay_buffer(self, it: int, tot_iter: int) -> bool:
+        """True on a snapshot iteration and on the last one, so a finished run is never stale."""
+        if not self.save_replay_buffer or self.logger.log_dir is None or self.gpu_global_rank != 0:
+            return False
+        return (it + 1) % self.save_replay_buffer_every == 0 or it == tot_iter - 1
+
+    def _save_replay_buffer_snapshot(self) -> None:
+        """Overwrite the run's single replay-buffer snapshot next to its checkpoints."""
+        path = os.path.join(self.logger.log_dir, "replay_buffer.pt")  # type: ignore
+        info = self.alg.replay_buffer.save_snapshot(path)
+        print(
+            f"[INFO] Saved replay buffer: {info['transitions']:,} transitions, "
+            f"{info['bytes'] / 1e9:.2f} GB -> {path}",
+            flush=True,
+        )
 
     def save(self, path: str, infos: dict | None = None) -> None:
         """Save the models and training state to a given path."""

@@ -1,9 +1,13 @@
+import os
 import torch
 import warnings
 from tensordict import TensorDict
 
 class ReplayBuffer:
     """Fixed-size buffer to store experience tuples."""
+
+    SNAPSHOT_VERSION = 1
+    """Format version written by :meth:`save_snapshot` and required by :meth:`load_snapshot`."""
 
     class Transition:
         """Storage for a single state transition"""
@@ -169,6 +173,109 @@ class ReplayBuffer:
         # update counters for circular buffer
         self.num_transitions = min(self.buffer_size, self.num_transitions + num_inputs)
         self.step = (self.step + num_inputs) % self.buffer_size
+
+    def _chronological(self, field):
+        """Return the valid part of a buffer field with the oldest transition at index 0.
+
+        The buffer is circular along time, so the raw tensors are only in order while the
+        buffer has not wrapped yet. Unrolling here means a snapshot can be reloaded into a
+        different ``num_envs``/``buffer_size`` layout without tracking the write pointer.
+        """
+        if self.num_transitions < self.buffer_size:
+            return field[:, : self.num_transitions]
+        return torch.roll(field, shifts=-self.step, dims=1)
+
+    def save_snapshot(self, path) -> dict:
+        """Write the stored transitions to ``path`` and return metadata about the write.
+
+        Observations are stored exactly as the environment produced them, before the model
+        normalizers run, so a snapshot stays valid when the normalizer keeps adapting during
+        fine-tuning. ``n_steps`` and ``gamma`` are recorded for reference only: both are
+        applied when a mini-batch is drawn, never when a transition is stored.
+
+        The write goes to a temporary file first and is then renamed, so a job killed mid-save
+        leaves the previous snapshot intact.
+        """
+        if self.num_transitions == 0:
+            raise ValueError("Refusing to save an empty replay-buffer snapshot.")
+
+        payload = {
+            "version": self.SNAPSHOT_VERSION,
+            "num_envs": self.num_envs,
+            "num_transitions_per_env": int(self.num_transitions),
+            "n_steps": self.n_steps,
+            "gamma": self.gamma,
+            "observations": {key: self._chronological(value).cpu() for key, value in self.observations.items()},
+            "next_observations": {
+                key: self._chronological(value).cpu() for key, value in self.next_observations.items()
+            },
+            "actions": self._chronological(self.actions).cpu(),
+            "rewards": self._chronological(self.rewards).cpu(),
+            "dones": self._chronological(self.dones).cpu(),
+            "bootstrap": self._chronological(self.bootstrap).cpu(),
+        }
+
+        path = os.fspath(path)
+        tmp_path = f"{path}.tmp"
+        torch.save(payload, tmp_path)
+        os.replace(tmp_path, path)
+        return {
+            "path": path,
+            "transitions": self.num_envs * int(self.num_transitions),
+            "bytes": os.path.getsize(path),
+        }
+
+    @classmethod
+    def load_snapshot(cls, path, device, n_steps=1, gamma=0.99) -> "ReplayBuffer":
+        """Rebuild a buffer from a :meth:`save_snapshot` file.
+
+        ``n_steps`` and ``gamma`` come from the run that is about to use the data, not from the
+        run that recorded it, because both only affect how a mini-batch is aggregated.
+
+        The returned buffer is sized to exactly the snapshot contents, so writing new
+        transitions into it would overwrite the oldest recorded ones. Use it read-only.
+        """
+        payload = torch.load(os.fspath(path), map_location="cpu", weights_only=True)
+        version = payload.get("version")
+        if version != cls.SNAPSHOT_VERSION:
+            raise ValueError(
+                f"Replay-buffer snapshot at {path} has version {version!r}, expected {cls.SNAPSHOT_VERSION}."
+            )
+        if list(payload["observations"].keys()) != list(payload["next_observations"].keys()):
+            raise ValueError(f"Replay-buffer snapshot at {path} has mismatched observation group keys.")
+
+        num_envs = int(payload["num_envs"])
+        time_len = int(payload["num_transitions_per_env"])
+        if num_envs < 1 or time_len < 1:
+            raise ValueError(f"Replay-buffer snapshot at {path} is empty.")
+
+        actions = payload["actions"]
+        obs_sample = TensorDict(
+            {key: value[:, 0] for key, value in payload["observations"].items()},
+            batch_size=[num_envs],
+        )
+        buffer = cls(
+            num_envs,
+            time_len,
+            obs_sample,
+            tuple(actions.shape[2:]),
+            device,
+            buffer_size=num_envs * time_len,
+            n_steps=n_steps,
+            gamma=gamma,
+        )
+        for key, value in payload["observations"].items():
+            buffer.observations[key].copy_(value)
+        for key, value in payload["next_observations"].items():
+            buffer.next_observations[key].copy_(value)
+        buffer.actions.copy_(actions)
+        buffer.rewards.copy_(payload["rewards"])
+        buffer.dones.copy_(payload["dones"])
+        buffer.bootstrap.copy_(payload["bootstrap"])
+        # The snapshot is already chronological, so the write pointer sits at the oldest entry.
+        buffer.step = 0
+        buffer.num_transitions = time_len
+        return buffer
 
     def mini_batch_generator(self, num_mini_batch, mini_batch_size, num_epochs=1):
         """Yield transition mini-batches (no sequence axis)."""

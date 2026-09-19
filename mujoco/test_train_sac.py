@@ -4,8 +4,10 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from tensordict import TensorDict
 
 import train_sac
+from rsl_rl_sac.storage import MixedReplayBuffer, ReplayBuffer
 from rsl_rl_sac.utils.logger import Logger
 from rsl_rl_sac.utils import wandb_utils
 
@@ -103,6 +105,91 @@ def test_mjx_action_scaling_uses_environment_bounds():
     upper, lower = train_sac._mjx_action_scaling(env, "cpu")
     assert upper.tolist() == [2.0, 3.0]
     assert lower.tolist() == [4.0, 5.0]
+
+
+def test_fine_tuning_defaults_follow_the_sim_to_online_recipe():
+    """arXiv:2602.20220 needs delayed actor updates and a conservative actor learning rate."""
+    args = train_sac.build_parser().parse_args(["--no-wandb"])
+    cfg = train_sac._runner_config(args)
+
+    assert cfg["algorithm"]["policy_frequency"] == 20
+    assert cfg["algorithm"]["actor_learning_rate"] == pytest.approx(1.0e-5)
+    assert cfg["algorithm"]["critic_learning_rate"] == pytest.approx(2.0e-4)
+    assert cfg["save_replay_buffer"] is False
+    assert cfg["save_replay_buffer_every"] == 500
+
+
+def test_synchronous_actor_updates_remain_available():
+    args = train_sac.build_parser().parse_args(["--no-wandb", "--actor-update-every=1"])
+    assert train_sac._runner_config(args)["algorithm"]["policy_frequency"] == 1
+
+
+def test_mixing_options_require_retained_data():
+    args = train_sac.build_parser().parse_args(["--no-wandb", "--offline-fraction=0.3"])
+
+    with pytest.raises(ValueError, match="--offline-replay-buffer"):
+        train_sac._validate_offline_arguments(args)
+
+
+def test_no_mixing_options_needs_no_retained_data():
+    args = train_sac.build_parser().parse_args(["--no-wandb"])
+    assert train_sac._validate_offline_arguments(args) is None
+
+
+def write_snapshot(path, num_envs=2, obs_dim=4, action_dim=12):
+    """Record a small pretraining snapshot the way an Isaac run would."""
+    obs = TensorDict({"policy": torch.zeros(num_envs, obs_dim)}, batch_size=[num_envs])
+    buffer = ReplayBuffer(num_envs, 1, obs, (action_dim,), "cpu", buffer_size=num_envs * 4)
+    for step in range(4):
+        transition = ReplayBuffer.Transition()
+        transition.observations = TensorDict(
+            {"policy": torch.full((num_envs, obs_dim), float(step))}, batch_size=[num_envs]
+        )
+        transition.next_observations = transition.observations.clone()
+        transition.actions = torch.zeros(num_envs, action_dim)
+        transition.rewards = torch.zeros(num_envs)
+        transition.dones = torch.zeros(num_envs)
+        transition.bootstrap = torch.zeros(num_envs)
+        buffer.add_transition(transition)
+    buffer.save_snapshot(path)
+    return obs
+
+
+def test_retained_replay_is_installed_with_the_resolved_schedule(tmp_path):
+    snapshot = tmp_path / "replay_buffer.pt"
+    obs = write_snapshot(snapshot)
+    online = ReplayBuffer(2, 1, obs, (12,), "cpu", buffer_size=64)
+    runner = SimpleNamespace(alg=SimpleNamespace(replay_buffer=online))
+    args = train_sac.build_parser().parse_args(
+        ["--no-wandb", f"--offline-replay-buffer={snapshot}", "--device=cpu", "--max-iterations=400"]
+    )
+
+    train_sac._install_retained_replay(runner, args)
+
+    mixture = runner.alg.replay_buffer
+    assert isinstance(mixture, MixedReplayBuffer)
+    assert mixture.online is online
+    assert mixture.initial_offline_fraction == pytest.approx(0.5)
+    assert mixture.final_offline_fraction == pytest.approx(0.0)
+    assert mixture.anneal_iterations == 200
+    # The snapshot's own n_steps/gamma are informational; the current run decides both.
+    assert mixture.offline.n_steps == args.n_steps
+    assert mixture.offline.gamma == pytest.approx(args.gamma)
+
+
+def test_retained_replay_rejects_a_snapshot_from_another_observation_layout(tmp_path):
+    snapshot = tmp_path / "replay_buffer.pt"
+    write_snapshot(snapshot, obs_dim=4)
+    wider = TensorDict({"policy": torch.zeros(2, 5)}, batch_size=[2])
+    runner = SimpleNamespace(
+        alg=SimpleNamespace(replay_buffer=ReplayBuffer(2, 1, wider, (12,), "cpu", buffer_size=64))
+    )
+    args = train_sac.build_parser().parse_args(
+        ["--no-wandb", f"--offline-replay-buffer={snapshot}", "--device=cpu"]
+    )
+
+    with pytest.raises(ValueError, match="observation layout"):
+        train_sac._install_retained_replay(runner, args)
 
 
 def test_checkpoint_action_scaling_is_replaced_by_target_environment():
