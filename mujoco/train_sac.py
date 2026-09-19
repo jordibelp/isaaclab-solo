@@ -39,8 +39,10 @@ for _path in (
 
 import solo12_symmetry
 from rsl_rl_sac.algorithms import SAC
+from rsl_rl_sac.modules import LAYER_CHOICES, apply_lora, merged_state_dict
 from rsl_rl_sac.runners import OffPolicyRunner
 from rsl_rl_sac.storage import MixedReplayBuffer, ReplayBuffer
+from rsl_rl_sac.utils import resolve_optimizer
 
 
 def reproducible_command(argv=None):
@@ -113,6 +115,22 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Iterations over which the offline share is annealed. Default: half of --max-iterations.",
     )
+    p.add_argument(
+        "--rank",
+        type=int,
+        default=0,
+        help=(
+            "LoRA rank for the actor. 0 fine-tunes every actor weight; a positive rank freezes"
+            " the pretrained weights and trains only a low-rank correction."
+        ),
+    )
+    p.add_argument(
+        "--lora-alpha",
+        type=float,
+        default=None,
+        help="Adapter gain; the applied scale is alpha/rank. Defaults to --rank, so the scale is 1.",
+    )
+    p.add_argument("--lora-layers", choices=LAYER_CHOICES, default="all")
     p.add_argument(
         "--save-replay-buffer",
         action="store_true",
@@ -262,6 +280,58 @@ def _apply_environment_action_scaling(actor, env) -> None:
         actor.log_action_range.copy_(torch.log(actor.action_range).sum())
 
 
+def _apply_actor_lora(runner, args) -> None:
+    """Restrict actor fine-tuning to a low-rank correction on frozen pretrained weights.
+
+    Only the actor is adapted. In SAC the critic is the learning signal, and arXiv:2602.20220
+    shows the transfer failure comes from a critic that has *not* adapted to the new dynamics
+    yet, so constraining the critic would work against the fine-tuning rather than protect it.
+
+    Checkpoints are written with the adapter folded back into the dense weights, so the files
+    stay loadable by the inference scripts and by later runs that know nothing about adapters.
+    """
+    alpha = float(args.rank) if args.lora_alpha is None else args.lora_alpha
+    adapted = apply_lora(runner.alg.actor, args.rank, alpha, args.lora_layers)
+
+    algorithm = runner.alg
+    algorithm.actor_parameters = [p for p in algorithm.actor.parameters() if p.requires_grad]
+    algorithm.actor_optimizer = resolve_optimizer("adam")(
+        algorithm.actor_parameters, lr=args.actor_learning_rate
+    )
+
+    original_save = algorithm.save
+
+    def save_with_merged_actor() -> dict:
+        payload = original_save()
+        payload["actor_state_dict"] = merged_state_dict(algorithm.actor)
+        payload["mujoco_lora"] = {"rank": args.rank, "alpha": alpha, "layers": args.lora_layers}
+        return payload
+
+    algorithm.save = save_with_merged_actor
+
+    trainable = sum(p.numel() for p in algorithm.actor_parameters)
+    total = sum(p.numel() for p in algorithm.actor.parameters())
+    print(
+        f"[INFO] Actor LoRA: rank={args.rank} alpha={alpha:g} layers={args.lora_layers} "
+        f"({adapted} adapted); {trainable:,} trainable of {total:,} actor parameters. "
+        "Checkpoints store the merged actor."
+    )
+
+
+def _validate_lora_arguments(args) -> None:
+    """Reject LoRA settings that cannot mean what they say."""
+    if args.rank < 0:
+        raise ValueError(f"--rank must be non-negative, got {args.rank}.")
+    if args.rank == 0 and args.lora_alpha is not None:
+        raise ValueError("--lora-alpha only takes effect together with a positive --rank.")
+    if args.rank > 0 and args.resume:
+        raise ValueError(
+            "--resume restores optimizer state for the parameters that were saved, but a LoRA run"
+            " saves a merged actor with no adapters. Start a new LoRA run from that merged"
+            " checkpoint with --checkpoint instead."
+        )
+
+
 def _validate_offline_arguments(args) -> None:
     """Reject a mixing schedule that has no retained data to apply it to."""
     mixing_args = (args.offline_fraction, args.offline_fraction_final, args.offline_anneal_iterations)
@@ -385,6 +455,7 @@ def main() -> None:
     if env_cfg["include_events_randomization"]:
         raise ValueError("MJX startup property randomization is not implemented.")
     _validate_offline_arguments(args)
+    _validate_lora_arguments(args)
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
@@ -429,6 +500,8 @@ def main() -> None:
             )
         _apply_environment_action_scaling(runner.alg.actor, env)
         print(f"[INFO] Loaded SAC checkpoint: {checkpoint} (exact resume={args.resume})")
+    if args.rank > 0:
+        _apply_actor_lora(runner, args)
     if args.offline_replay_buffer:
         _install_retained_replay(runner, args)
     runner.learn(num_learning_iterations=args.max_iterations, init_at_random_ep_len=True)

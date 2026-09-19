@@ -145,6 +145,33 @@ loaded policy before the first gradient update. One iteration already collects
 `--num_envs=256`. The paper prefills with about 5000. Use this when no pretraining
 snapshot is available; it approximates retained replay but works less well.
 
+### Low-rank fine-tuning (optional)
+
+`--rank` freezes the pretrained actor weights and trains only a low-rank
+correction on top, the same idea as the PPO path in `mujoco/train_lora.py`:
+
+```bash
+--rank=64 --lora-alpha=64 --lora-layers=all
+```
+
+`--rank=0` (the default) fine-tunes every actor weight. `--lora-alpha` defaults
+to `--rank`, which makes the applied scale `alpha/rank` equal to 1.
+`--lora-layers` takes the same modes as the PPO script: `all`, `input`,
+`output`, `input_and_output`. The adapter starts at exactly zero, so training
+begins from the pretrained policy rather than near it.
+
+Only the actor is adapted. In SAC the critic is the learning signal, and
+arXiv:2602.20220 traces the transfer failure to a critic that has *not* yet
+adapted to the new dynamics. Constraining the critic would work against the
+fine-tuning instead of protecting it.
+
+Checkpoints from a LoRA run store the actor with the adapter folded back into
+the dense weights, plus a `mujoco_lora` entry recording the settings. The files
+are therefore ordinary SAC checkpoints: the play and evaluation scripts load
+them unchanged, and a later run can fine-tune from them again. Because the saved
+actor has no adapters, `--resume` is rejected together with `--rank`; start a new
+LoRA run from the merged checkpoint with `--checkpoint` instead.
+
 ### Chaining runs
 
 Add `--save-replay-buffer` to record the MJX transitions too. A later run can then

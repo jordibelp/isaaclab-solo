@@ -1,4 +1,5 @@
 from collections import deque
+import math
 import shlex
 from types import SimpleNamespace
 
@@ -7,6 +8,9 @@ import torch
 from tensordict import TensorDict
 
 import train_sac
+from rsl_rl_sac.algorithms import SAC
+from rsl_rl_sac.models import SACActorModel, SACCriticModel
+from rsl_rl_sac.modules import LoRALinear
 from rsl_rl_sac.storage import MixedReplayBuffer, ReplayBuffer
 from rsl_rl_sac.utils.logger import Logger
 from rsl_rl_sac.utils import wandb_utils
@@ -190,6 +194,105 @@ def test_retained_replay_rejects_a_snapshot_from_another_observation_layout(tmp_
 
     with pytest.raises(ValueError, match="observation layout"):
         train_sac._install_retained_replay(runner, args)
+
+
+LORA_OBS_DIM = 6
+LORA_ACTION_DIM = 3
+
+
+def build_lora_runner(rank=4, extra_args=()):
+    """A SAC algorithm on a fixed one-batch replay, wrapped the way ``main`` wraps it."""
+    torch.manual_seed(0)
+    obs = TensorDict({"policy": torch.randn(8, LORA_OBS_DIM)}, batch_size=[8])
+    groups = {"actor": ["policy"], "critic": ["policy"]}
+    actor = SACActorModel(obs, groups, "actor", LORA_ACTION_DIM, hidden_dims=[16, 8])
+    critic = SACCriticModel(obs, groups, "critic", 1, hidden_dims=[16, 8], num_actions=LORA_ACTION_DIM)
+    batch = (
+        obs,
+        torch.randn(8, LORA_ACTION_DIM),
+        torch.randn(8, 1),
+        obs,
+        torch.zeros(8, 1),
+        torch.zeros(8, 1),
+        torch.ones(8, 1, dtype=torch.long),
+    )
+    replay = SimpleNamespace(mini_batch_generator=lambda **kwargs: iter([batch]))
+    algorithm = SAC(actor, critic, replay, device="cpu", policy_frequency=1)
+    runner = SimpleNamespace(alg=algorithm)
+    args = train_sac.build_parser().parse_args(
+        ["--no-wandb", f"--rank={rank}", "--device=cpu", *extra_args]
+    )
+    return runner, args
+
+
+def base_weights(actor):
+    return {name: p.clone() for name, p in actor.named_parameters() if "lora_" not in name}
+
+
+def test_lora_run_trains_only_the_adapter():
+    runner, args = build_lora_runner()
+    train_sac._apply_actor_lora(runner, args)
+    actor = runner.alg.actor
+    frozen_before = base_weights(actor)
+
+    losses = runner.alg.update()
+
+    assert sum(isinstance(m, LoRALinear) for m in actor.modules()) == 3
+    assert all(math.isfinite(value) for value in losses.values())
+    for name, original in frozen_before.items():
+        torch.testing.assert_close(dict(actor.named_parameters())[name], original)
+    assert any(
+        not torch.equal(p, torch.zeros_like(p)) for n, p in actor.named_parameters() if "lora_b" in n
+    )
+
+
+def test_lora_optimizer_covers_only_trainable_parameters():
+    runner, args = build_lora_runner()
+
+    train_sac._apply_actor_lora(runner, args)
+
+    optimized = {id(p) for group in runner.alg.actor_optimizer.param_groups for p in group["params"]}
+    trainable = {id(p) for p in runner.alg.actor.parameters() if p.requires_grad}
+    assert optimized == trainable
+    assert runner.alg.actor_optimizer.param_groups[0]["lr"] == pytest.approx(args.actor_learning_rate)
+
+
+def test_lora_checkpoint_is_a_plain_sac_checkpoint():
+    """The saved actor must load into a model that knows nothing about adapters."""
+    runner, args = build_lora_runner()
+    train_sac._apply_actor_lora(runner, args)
+    runner.alg.update()
+    obs = TensorDict({"policy": torch.randn(4, LORA_OBS_DIM)}, batch_size=[4])
+    trained = runner.alg.actor(obs)
+
+    payload = runner.alg.save()
+
+    groups = {"actor": ["policy"], "critic": ["policy"]}
+    restored = SACActorModel(obs, groups, "actor", LORA_ACTION_DIM, hidden_dims=[16, 8])
+    restored.load_state_dict(payload["actor_state_dict"], strict=True)
+    torch.testing.assert_close(restored(obs), trained, atol=1e-6, rtol=1e-5)
+    assert payload["mujoco_lora"] == {"rank": 4, "alpha": 4.0, "layers": "all"}
+
+
+def test_lora_is_off_by_default():
+    args = train_sac.build_parser().parse_args(["--no-wandb"])
+    assert args.rank == 0
+    assert train_sac._validate_lora_arguments(args) is None
+
+
+@pytest.mark.parametrize(
+    "arguments,message",
+    [
+        (["--rank=-1"], "non-negative"),
+        (["--lora-alpha=2.0"], "positive --rank"),
+        (["--rank=4", "--resume"], "merged actor"),
+    ],
+)
+def test_invalid_lora_arguments_are_rejected(arguments, message):
+    args = train_sac.build_parser().parse_args(["--no-wandb", *arguments])
+
+    with pytest.raises(ValueError, match=message):
+        train_sac._validate_lora_arguments(args)
 
 
 def test_checkpoint_action_scaling_is_replaced_by_target_environment():
