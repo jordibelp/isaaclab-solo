@@ -123,6 +123,46 @@ def test_env_override_consumption():
     assert ignored == ["env.tricky_terrain=False", "--disable_training_gain_sync"]
 
 
+def test_physical_joint_limit_overrides_reach_mujoco():
+    overrides, ignored = sim2sim.consume_env_overrides([
+        "env.joint_physical_limit_hip=[-70,70]",
+        "env.joint_physical_limit_calf=[-179,179]",
+        "env.use_asymmetric_thigh_limits=True",
+        "env.joint_physical_limit_front_thigh=[-145,55]",
+        "env.joint_physical_limit_rear_thigh=[-55,145]",
+    ])
+    assert ignored == []
+    env = make_env(env_overrides=overrides)
+    joint_ids = env.model.actuator_trnid[env.actuator_ids, 0]
+    expected = [[-70, 70], [-145, 55], [-179, 179]] * 2
+    expected += [[-70, 70], [-55, 145], [-179, 179]] * 2
+    np.testing.assert_allclose(env.model.jnt_range[joint_ids], np.deg2rad(expected))
+    assert env.model.jnt_limited[joint_ids].all()
+    env.reset()
+    np.testing.assert_allclose(env.model.jnt_range[joint_ids], np.deg2rad(expected))
+
+
+def test_symmetric_thigh_override_leaves_other_xml_limits_unchanged():
+    baseline = make_env()
+    overrides, ignored = sim2sim.consume_env_overrides([
+        "env.use_asymmetric_thigh_limits=False",
+        "env.joint_physical_limit_thigh=[-90,90]",
+        "env.joint_physical_limit_front_thigh=[-145,55]",
+    ])
+    assert ignored == []
+    env = make_env(env_overrides=overrides)
+    expected = baseline.model.jnt_range.copy()
+    thigh_ids = env.model.actuator_trnid[env.actuator_ids[1::3], 0]
+    expected[thigh_ids] = np.deg2rad([-90, 90])
+    np.testing.assert_allclose(env.model.jnt_range, expected)
+
+
+@pytest.mark.parametrize("value", ["[70,-70]", "[0,0]", "[0]", "['nan',70]", "bad"])
+def test_invalid_physical_joint_limits_are_rejected(value):
+    with pytest.raises(ValueError, match="joint_physical_limit_hip"):
+        sim2sim.consume_env_overrides([f"env.joint_physical_limit_hip={value}"])
+
+
 def test_track_cmds_is_optional():
     args, unknown = sim2sim.build_parser().parse_known_args(["--checkpoint", "x"])
     assert args.track_cmds is None and args.kp is None and args.kd is None

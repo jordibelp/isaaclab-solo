@@ -98,16 +98,33 @@ _ENV_RANGE_KEYS = {
     "env.command_lin_vel_y_range": 1,
     "env.command_ang_vel_z_range": 2,
 }
+_ENV_JOINT_LIMIT_KEYS = {
+    f"env.joint_physical_limit_{name}" for name in ("hip", "thigh", "calf", "front_thigh", "rear_thigh")
+}
 
 
 def consume_env_overrides(unknown: list[str]) -> tuple[dict, list[str]]:
-    """Pull the env.* overrides MuJoCo understands (kp/kd/command ranges) out of the Isaac CLI tail."""
+    """Pull gains, command ranges, and physical joint limits out of the Isaac CLI tail."""
     import ast
 
     overrides: dict = {}
     ignored: list[str] = []
     for token in unknown:
         key, _, raw = token.partition("=")
+        if key in _ENV_JOINT_LIMIT_KEYS:
+            try:
+                low, high = map(float, ast.literal_eval(raw))
+                if not (math.isfinite(low) and math.isfinite(high) and low < high):
+                    raise ValueError
+            except (TypeError, ValueError, SyntaxError) as exc:
+                raise ValueError(f"{key} requires finite [lower, upper] degrees with lower < upper.") from exc
+            overrides[key.removeprefix("env.")] = (low, high)
+            continue
+        if key == "env.use_asymmetric_thigh_limits":
+            if raw.lower() not in ("true", "false"):
+                raise ValueError(f"{key} requires True or False.")
+            overrides[key.removeprefix("env.")] = raw.lower() == "true"
+            continue
         try:
             if key in ("env.kp", "env.kd"):
                 overrides[key.removeprefix("env.")] = float(raw)
@@ -122,6 +139,8 @@ def consume_env_overrides(unknown: list[str]) -> tuple[dict, list[str]]:
 
 
 class Policy(torch.nn.Module):
+    """Actor-only inference; SAC critic type, bins, and symlog support do not affect loading."""
+
     def __init__(self, checkpoint: Path):
         super().__init__()
         payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
@@ -183,12 +202,24 @@ def quat_rotation(q_wxyz: np.ndarray) -> np.ndarray:
 
 class Solo12Mujoco:
     def __init__(self, model_path: Path, kp: float = DEFAULT_KP, kd: float = DEFAULT_KD,
-                 spawn_z: float = 0.35):
+                 spawn_z: float = 0.35, env_overrides: dict | None = None):
         self.model = mujoco.MjModel.from_xml_path(str(model_path))
         self.data = mujoco.MjData(self.model)
         self.joint_qpos = np.array([self.model.jnt_qposadr[mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, n)] for n in JOINT_NAMES])
         self.joint_dof = np.array([self.model.jnt_dofadr[mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, n)] for n in JOINT_NAMES])
         self.actuator_ids = np.array([mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, n) for n in JOINT_NAMES])
+        # Keep legacy XML limits unless explicitly overridden. SAC's saved action
+        # scaling already encodes the training soft limits; do not rescale the actor.
+        overrides = env_overrides or {}
+        for name, actuator_id in zip(JOINT_NAMES, self.actuator_ids):
+            joint_type = name.split("_")[1]
+            if joint_type == "thigh" and overrides.get("use_asymmetric_thigh_limits", False):
+                joint_type = "front_thigh" if name.startswith(("FL_", "FR_")) else "rear_thigh"
+            limits = overrides.get(f"joint_physical_limit_{joint_type}")
+            if limits is not None:
+                joint_id = self.model.actuator_trnid[actuator_id, 0]
+                self.model.jnt_range[joint_id] = np.deg2rad(limits)
+                self.model.jnt_limited[joint_id] = True
         self.base_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "base")
         self.ground_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "ground")
         self.base_geom_ids = {
@@ -716,8 +747,9 @@ def main() -> None:
 
     checkpoint = Path(args.checkpoint).expanduser().resolve()
     policy = Policy(checkpoint)
+    print(f"[INFO] Loaded {policy.checkpoint_format.upper()} actor for deterministic inference (critic not used).")
     model_path = Path(__file__).with_name("solo12.xml").resolve()
-    sim = Solo12Mujoco(model_path, kp=kp, kd=kd, spawn_z=args.spawn_z)
+    sim = Solo12Mujoco(model_path, kp=kp, kd=kd, spawn_z=args.spawn_z, env_overrides=env_overrides)
     print(f"[INFO] MuJoCo {mujoco.__version__}; model mass={sim.model.body_mass.sum():.6f} kg")
     print(f"[INFO] PD gains kp={sim.kp:g} kd={sim.kd:g} "
           f"(Isaac play w/ --disable_training_gain_sync: {DEFAULT_KP:g}/{DEFAULT_KD:g}; "
