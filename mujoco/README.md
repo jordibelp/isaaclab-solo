@@ -235,6 +235,72 @@ MJX 3.3 does not implement cylinder-box collision. The training backend therefor
 cylindrical foot/ground contacts but filters only foot-cylinder versus self-box candidate pairs;
 all other authored collisions remain active. Ordinary MuJoCo evaluation keeps the full model.
 
+## Episodic SAC fine-tuning with MJX
+
+`train_sac.py` now defaults to the single-robot collection schedule discussed in
+[What Matters for Simulation-to-Online Reinforcement Learning on Real Robots](https://arxiv.org/html/2602.20220#S3.SS1).
+Collect one episode, pause collection, and run the gradient updates before the next episode.
+MJX still runs as fast as it can; this emulates the data budget of one robot, not real-time pacing.
+Isaac training and `train_lora.py` keep their existing schedules.
+
+| Setting | Default | Configuration |
+|---|---|---|
+| Environments | 1 | `--num-envs` |
+| Maximum episode length | 1000 control steps (20 s at 50 Hz) | `env.episode_length_s=20` |
+| Critic update-to-data ratio (UTD) | 1.25 | `--utd` |
+| Replay samples per mini-batch | 512 | `--batch-size` |
+| New transitions before weight updates | 5000 | `--num-transitions-before-weight-updates` |
+| Actor update interval | Every 20 critic updates | `--actor-update-every` |
+| Online replay capacity | 500000 transitions | `--replay-buffer-size` |
+
+The authors' [Go1 online config](https://github.com/yardenas/safe-learning/blob/ffee61c6bc95555591c2ccfe67676e668784d540/ss2r/configs/experiment/go1_online.yaml)
+uses 1000-step episodes and 1250 updates. It inherits batch size 512 from
+[go1_joystick.yaml](https://github.com/yardenas/safe-learning/blob/ffee61c6bc95555591c2ccfe67676e668784d540/ss2r/configs/experiment/go1_joystick.yaml).
+Its retained-replay example sets `min_replay_size=1000`; our 5000-transition warm-up is Jordi's
+requested default, not an exact copy of that setting. Other existing SAC hyperparameters remain unchanged.
+
+### Episode and warm-up semantics
+
+- With full-length episodes, episodes 1–4 collect only. After episode 5 reaches 5000 new
+  transitions, run 1250 critic updates. After episode 6, run another 1250. Do not run a
+  catch-up burst for the earlier warm-up episodes.
+- A fall ends the episode early. Updates still run only after that termination. For example,
+  a 200-step episode gets 250 updates once warm-up is complete. Fractional updates carry
+  forward, so short episodes do not silently change the requested UTD.
+- Warm-up counts actual new transitions, even when replay wraps. Offline transitions do not
+  count. Early falls may therefore require more than five episodes to reach 5000.
+- `--max-iterations=1000` means 1000 episodes, including warm-up, not 1000 optimizer updates.
+- `--num_transitions_before_weight_updates` and `--transitions-before-updates` are aliases.
+  Replace the old `--start-training=1` with `--num-transitions-before-weight-updates=5000`.
+  The old flag is still accepted, but explicitly converts full rollout lengths to a transition
+  threshold: `--start-training=1` gives 1000, not 5000, with the new default episode length.
+- An optimizer resume still starts with empty online replay, so it repeats warm-up using
+  fresh transitions. The saved iteration number does not bypass warm-up.
+- Batch size counts samples drawn from replay. Left/right symmetry augmentation adds mirrored
+  samples afterward; it does not change UTD or the number of collected transitions.
+
+### Retained replay and usage
+
+```bash
+./isaaclab.sh -p mujoco/train_sac.py --task=solo12-two-feet --checkpoint=/absolute/path/to/model.pt --offline-replay-buffer=/absolute/path/to/replay_buffer.pt --offline-fraction=0.5 --offline-fraction-final=0.0 --num-envs=1 --max-iterations=1000 --utd=1.25 --batch-size=512 --num-transitions-before-weight-updates=5000 --actor-update-every=20 --symmetry-mode=augmentation --headless env.episode_length_s=20 env.curriculum_two_feet=False env.initial_position=safe env.tricky_terrain=False env.include_events_randomization=False 'env.forces_applied_to_base_curriculum=[0.0]' 'env.base_push_force_z_range=[0.0,0.0]'
+```
+
+The offline share starts at 0.5 at the **first gradient phase**, not at the first warm-up
+episode. `--offline-anneal-iterations` counts episodes/rollouts that actually perform updates.
+Its default remains half of `--max-iterations`; set it explicitly for a faster anneal.
+The online replay and retained offline replay stay separate.
+
+To use a fixed update count instead of UTD, pass `--updates-per-iteration=1250` and omit
+`--utd`. This fixed count also applies after short episodes. To explicitly return to short
+parallel rollouts, use e.g. `--num-envs=256 --rollout-steps=24 --updates-per-iteration=200`.
+That mode can update mid-episode and prints a warning. Parallel runs require this explicit
+choice because asynchronously ending episodes cannot provide one shared episode boundary.
+
+The resolved schedule is printed at startup and saved in `run_config.json` under
+`agent.update_schedule`. TensorBoard/W&B schedule metrics report actual collected transitions,
+cumulative online transitions, updates per iteration, completed update phases, and warm-up state.
+Full, LoRA, and frozen actor/critic choices remain available independently.
+
 ## Dependency
 
 Tested in `env_isaaclab` with MuJoCo 3.3.7 and Python 3.11. Install with:

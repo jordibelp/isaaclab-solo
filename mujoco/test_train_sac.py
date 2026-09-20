@@ -83,9 +83,15 @@ def test_sac_logger_counts_individual_environment_steps(tmp_path):
     ]
 
 
+def runner_config(args, episode_length_s=20.0):
+    """Resolve the derived update schedule the way main() does, then build the config."""
+    schedule = train_sac._episodic_schedule(args, {"episode_length_s": episode_length_s})
+    return train_sac._runner_config(args, schedule)
+
+
 def test_runner_config_uses_paper_sac_defaults():
     args = train_sac.build_parser().parse_args(["--no-wandb"])
-    cfg = train_sac._runner_config(args)
+    cfg = runner_config(args)
 
     assert cfg["class_name"] == "OffPolicyRunner"
     assert cfg["actor"]["init_noise_std"] == pytest.approx(0.15)
@@ -97,7 +103,7 @@ def test_runner_config_uses_paper_sac_defaults():
 
 def test_no_symmetry_removes_symmetry_configuration():
     args = train_sac.build_parser().parse_args(["--no-wandb", "--symmetry-mode=none"])
-    assert train_sac._runner_config(args)["algorithm"]["symmetry_cfg"] is None
+    assert runner_config(args)["algorithm"]["symmetry_cfg"] is None
 
 
 def test_mjx_action_scaling_uses_environment_bounds():
@@ -115,7 +121,7 @@ def test_mjx_action_scaling_uses_environment_bounds():
 def test_fine_tuning_defaults_follow_the_sim_to_online_recipe():
     """arXiv:2602.20220 needs delayed actor updates and a conservative actor learning rate."""
     args = train_sac.build_parser().parse_args(["--no-wandb"])
-    cfg = train_sac._runner_config(args)
+    cfg = runner_config(args)
 
     assert cfg["algorithm"]["policy_frequency"] == 20
     assert cfg["algorithm"]["actor_learning_rate"] == pytest.approx(1.0e-5)
@@ -126,7 +132,94 @@ def test_fine_tuning_defaults_follow_the_sim_to_online_recipe():
 
 def test_synchronous_actor_updates_remain_available():
     args = train_sac.build_parser().parse_args(["--no-wandb", "--actor-update-every=1"])
-    assert train_sac._runner_config(args)["algorithm"]["policy_frequency"] == 1
+    assert runner_config(args)["algorithm"]["policy_frequency"] == 1
+
+
+def test_defaults_reproduce_the_paper_go1_episodic_schedule():
+    """arXiv:2602.20220 runs one robot, updates once per episode, and uses K=1250 at UTD 1.25.
+
+    Our MJX episode is 20 s at 50 Hz, so an episode is the same 1000 steps as their Go1.
+    """
+    args = train_sac.build_parser().parse_args(["--no-wandb"])
+    cfg = runner_config(args)
+
+    assert args.num_envs == 1
+    assert cfg["num_steps_per_env"] == 1000
+    assert cfg["algorithm"]["num_mini_batches"] == 1250
+    assert cfg["algorithm"]["mini_batch_size"] == 512
+    assert cfg["update_schedule"]["utd"] == pytest.approx(1.25)
+    # Requested warm start: 5000 new transitions, or five full-length episodes.
+    assert cfg["update_schedule"]["transitions_before_updates"] == 5000
+
+
+def test_update_budget_follows_the_episode_length():
+    """The schedule is derived, so a shorter episode keeps the ratio instead of the count."""
+    args = train_sac.build_parser().parse_args(["--no-wandb"])
+    cfg = runner_config(args, episode_length_s=10.0)
+
+    assert cfg["num_steps_per_env"] == 500
+    assert cfg["algorithm"]["num_mini_batches"] == 625
+    assert cfg["update_schedule"]["transitions_before_updates"] == 5000
+
+
+@pytest.mark.parametrize(
+    "flags, updates",
+    [(["--utd=5"], 5000), (["--updates-per-iteration=200"], 200)],
+)
+def test_update_budget_is_settable_as_a_ratio_or_a_count(flags, updates):
+    args = train_sac.build_parser().parse_args(["--no-wandb", *flags])
+    assert runner_config(args)["algorithm"]["num_mini_batches"] == updates
+
+
+def test_utd_and_update_count_cannot_both_be_set():
+    args = train_sac.build_parser().parse_args(["--no-wandb", "--utd=2", "--updates-per-iteration=10"])
+    with pytest.raises(ValueError, match="only one"):
+        runner_config(args)
+
+
+def test_parallel_runs_require_explicit_fixed_rollout_mode():
+    args = train_sac.build_parser().parse_args(["--num_envs=256"])
+    with pytest.raises(ValueError, match="requires --num-envs=1"):
+        runner_config(args)
+    args = train_sac.build_parser().parse_args(
+        ["--num_envs=256", "--rollout-steps=24", "--updates-per-iteration=200"]
+    )
+    cfg = runner_config(args)
+    assert cfg["num_steps_per_env"] == 24
+    assert cfg["algorithm"]["num_mini_batches"] == 200
+    assert cfg["update_schedule"]["mode"] == "rollout"
+
+
+@pytest.mark.parametrize("flag", [
+    "--num-transitions-before-weight-updates", "--num_transitions_before_weight_updates",
+    "--transitions-before-updates",
+])
+def test_transition_warmup_aliases(flag):
+    args = train_sac.build_parser().parse_args([f"{flag}=4321"])
+    assert runner_config(args)["update_schedule"]["transitions_before_updates"] == 4321
+
+
+def test_legacy_warmup_is_explicitly_converted_to_transitions():
+    args = train_sac.build_parser().parse_args(["--start-training=1"])
+    assert runner_config(args)["update_schedule"]["transitions_before_updates"] == 1000
+    with pytest.raises(SystemExit):
+        train_sac.build_parser().parse_args(["--start-training=1", "--transitions-before-updates=5000"])
+
+
+@pytest.mark.parametrize("flag", [
+    "--utd=0", "--utd=-1", "--utd=nan", "--utd=inf", "--num-envs=0", "--batch-size=0",
+    "--rollout-steps=0", "--n-steps=0", "--actor-update-every=0", "--transitions-before-updates=-1",
+    "--updates-per-iteration=0", "--replay-buffer-size=4", "--start-training=-1",
+])
+def test_invalid_update_schedule_fails_before_simulator_start(flag):
+    args = train_sac.build_parser().parse_args([flag])
+    with pytest.raises(ValueError):
+        runner_config(args)
+
+
+def test_subunit_update_budget_is_allowed_and_carried_by_runner():
+    args = train_sac.build_parser().parse_args(["--utd=0.0001"])
+    assert runner_config(args)["update_schedule"]["utd"] == pytest.approx(0.0001)
 
 
 def test_mixing_options_require_retained_data():
@@ -455,7 +548,7 @@ def test_resolved_overrides_are_recorded_in_runner_config():
     args = train_sac.build_parser().parse_args([
         "--rank=1", "--actor-rank=4", "--lora-alpha=2", "--critic-lora-alpha=3", "--critic-lora-layers=output",
     ])
-    config = train_sac._runner_config(args)["finetuning"]
+    config = runner_config(args)["finetuning"]
     assert config == {
         "actor": {"mode": "lora", "rank": 4, "alpha": 2.0, "layers": "all"},
         "critic": {"mode": "lora", "rank": 1, "alpha": 3.0, "layers": "output"},
@@ -485,7 +578,7 @@ def test_checkpoint_architecture_and_loss_survive_transfer(tmp_path, critic_loss
     if sidecar == "none" and critic_loss == "hl_gauss":
         flags.append("--critic-loss=hl_gauss")
     args = train_sac.build_parser().parse_args(flags)
-    config = train_sac._runner_config(args)
+    config = runner_config(args)
     train_sac._configure_checkpoint_models(config, args)
     assert config["critic"]["distributional_loss"] == critic_loss
     config["actor"].pop("class_name")

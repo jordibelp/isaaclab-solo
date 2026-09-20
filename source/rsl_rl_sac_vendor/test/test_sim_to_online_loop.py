@@ -11,6 +11,7 @@ that the runner wires them together, which is where the parts are actually used.
 """
 
 import torch
+import pytest
 from tensordict import TensorDict
 
 from rsl_rl_sac.algorithms import SAC
@@ -146,3 +147,132 @@ def test_snapshots_are_not_written_unless_asked(tmp_path, monkeypatch):
     build_runner(monkeypatch, log_dir).learn(num_learning_iterations=2)
 
     assert not (log_dir / "replay_buffer.pt").exists()
+
+
+def episode_schedule(warmup=5000, utd=1.25, mode="episode", fixed_updates=None):
+    return dict(mode=mode, transitions_before_updates=warmup, utd=utd, fixed_updates=fixed_updates)
+
+
+def record_updates(runner, monkeypatch):
+    """Record real SAC optimizer work and exactly where it runs in the environment."""
+    updates = []
+    original = runner.alg.update
+
+    def update():
+        before = runner.alg.update_step
+        result = original()
+        updates.append((runner.env.step_count, runner.alg.update_step - before))
+        return result
+
+    monkeypatch.setattr(runner.alg, "update", update)
+    return updates
+
+
+def test_go1_schedule_updates_after_fifth_episode_without_backfilling(tmp_path, monkeypatch):
+    runner = build_runner(
+        monkeypatch, tmp_path, env=StubEnv(num_envs=1, episode_length=1000),
+        num_steps_per_env=1000, update_schedule=episode_schedule(),
+    )
+    # Keep the replay small: warm-up counts collected transitions, not current buffer size.
+    updates = record_updates(runner, monkeypatch)
+    runner.learn(6)
+    assert updates == [(5000, 1250), (6000, 1250)]
+
+
+class EarlyTerminationEnv(StubEnv):
+    def step(self, actions):
+        obs, reward, _, extras = super().step(actions)
+        done = torch.tensor([self.step_count in (3, 10, 14, 18)])
+        extras["time_outs"] = torch.zeros_like(done)
+        return obs, reward, done, extras
+
+
+@pytest.mark.parametrize("start_iteration", [0, 3700])
+def test_early_terminations_preserve_boundaries_utd_warmup_and_logging(tmp_path, monkeypatch, start_iteration):
+    runner = build_runner(
+        monkeypatch, tmp_path, env=EarlyTerminationEnv(num_envs=1, episode_length=1000),
+        num_steps_per_env=1000, update_schedule=episode_schedule(warmup=8),
+    )
+    runner.current_learning_iteration = start_iteration
+    updates = record_updates(runner, monkeypatch)
+    counts = []
+    monkeypatch.setattr(runner.logger, "log", lambda **kw: counts.append(kw["collection_size_override"]))
+    runner.learn(4)
+    assert updates == [(10, 8), (14, 5), (18, 5)]
+    assert counts == [3, 7, 4, 4]
+
+
+def test_small_utd_carries_fractional_updates(tmp_path, monkeypatch):
+    runner = build_runner(
+        monkeypatch, tmp_path, env=StubEnv(num_envs=1, episode_length=2),
+        num_steps_per_env=2, update_schedule=episode_schedule(warmup=0, utd=0.125),
+    )
+    updates = record_updates(runner, monkeypatch)
+    runner.learn(8)
+    assert updates == [(8, 1), (16, 1)]
+
+
+def test_legacy_parallel_runner_keeps_iteration_warmup_and_fixed_budget(tmp_path, monkeypatch):
+    runner = build_runner(monkeypatch, tmp_path, start_training=2)
+    updates = record_updates(runner, monkeypatch)
+    runner.learn(4)
+    assert updates == [(6, 2), (8, 2)]
+
+
+def test_retained_replay_annealing_starts_with_first_gradient_phase(tmp_path, monkeypatch):
+    pretrain_dir = tmp_path / "pretrain"
+    pretrain_dir.mkdir()
+    pretrainer = build_runner(monkeypatch, pretrain_dir, save_replay_buffer=True)
+    pretrainer.learn(2)
+    finetune_dir = tmp_path / "finetune"
+    finetune_dir.mkdir()
+    runner = build_runner(
+        monkeypatch, finetune_dir, env=StubEnv(num_envs=1, episode_length=2),
+        num_steps_per_env=2, update_schedule=episode_schedule(warmup=6, utd=1),
+    )
+    offline = ReplayBuffer.load_snapshot(pretrain_dir / "replay_buffer.pt", "cpu")
+    runner.alg.replay_buffer = MixedReplayBuffer(runner.alg.replay_buffer, offline, anneal_iterations=2)
+    fractions = []
+    original = runner.alg.update
+
+    def update():
+        fractions.append((runner.env.step_count, runner.alg.replay_buffer.offline_fraction))
+        return original()
+
+    monkeypatch.setattr(runner.alg, "update", update)
+    runner.learn(5)
+    assert fractions == [(6, 0.5), (8, 0.25), (10, 0.0)]
+
+
+def test_short_episodes_wait_for_a_valid_n_step_window(tmp_path, monkeypatch):
+    runner = build_runner(
+        monkeypatch, tmp_path, env=StubEnv(num_envs=1, episode_length=1),
+        num_steps_per_env=1, update_schedule=episode_schedule(warmup=0, utd=1),
+    )
+    runner.alg.replay_buffer.n_steps = 5
+    updates = record_updates(runner, monkeypatch)
+    runner.learn(6)
+    assert updates == [(5, 5), (6, 1)]
+
+
+def test_explicit_fixed_rollouts_count_all_parallel_transitions(tmp_path, monkeypatch):
+    runner = build_runner(
+        monkeypatch, tmp_path, env=StubEnv(num_envs=4, episode_length=3),
+        num_steps_per_env=2, update_schedule=episode_schedule(warmup=10, mode="rollout"),
+    )
+    updates = record_updates(runner, monkeypatch)
+    runner.learn(3)
+    assert updates == [(4, 10), (6, 10)]
+
+
+def test_fixed_update_budget_and_sparse_logging_with_early_terminations(tmp_path, monkeypatch):
+    runner = build_runner(
+        monkeypatch, tmp_path, env=EarlyTerminationEnv(num_envs=1, episode_length=1000),
+        num_steps_per_env=1000, log_interval=3, update_schedule=episode_schedule(warmup=0, fixed_updates=2),
+    )
+    updates = record_updates(runner, monkeypatch)
+    counts = []
+    monkeypatch.setattr(runner.logger, "log", lambda **kw: counts.append(kw["collection_size_override"]))
+    runner.learn(4)
+    assert updates == [(3, 2), (10, 2), (14, 2), (18, 2)]
+    assert counts == [3, 15]

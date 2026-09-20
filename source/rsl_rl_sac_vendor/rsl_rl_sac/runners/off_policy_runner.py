@@ -54,6 +54,13 @@ class OffPolicyRunner:
         self.current_learning_iteration = 0
         self.start_training = self.cfg.get("start_training", 0)
         self.log_interval = self.cfg.get("log_interval", 20)
+        # Opt-in for single-robot fine-tuning; Isaac's fixed-rollout loop is unchanged.
+        self.update_schedule = self.cfg.get("update_schedule")
+        if self.update_schedule is not None:
+            if self.is_distributed or self.alg.num_learning_epochs != 1:
+                raise ValueError("Transition-based updates require one process and one learning epoch.")
+            if self.update_schedule["mode"] == "episode" and self.env.num_envs != 1:
+                raise ValueError("Episode-boundary updates require one environment.")
 
         # Replay-buffer snapshots. A single file is overwritten in place so long runs do not
         # accumulate multi-gigabyte copies.
@@ -89,12 +96,20 @@ class OffPolicyRunner:
 
         log_window_collect_time = 0.0
         log_window_learn_time = 0.0
-        log_window_iters = 0
+        log_window_transitions = 0
 
         mixed_buffer = self.alg.replay_buffer if isinstance(self.alg.replay_buffer, MixedReplayBuffer) else None
+        online_buffer = mixed_buffer.online if mixed_buffer is not None else self.alg.replay_buffer
+        schedule = self.update_schedule
+        episodic = schedule is not None and schedule["mode"] == "episode"
+        # Replay is not restored by load(), so even optimizer resumes need fresh warm-up.
+        online_transitions = 0
+        update_credit = 0.0
+        update_iterations = 0
 
         for it in range(start_iter, tot_iter):
             start = time.time()
+            collected_transitions = 0
             # Rollout
             with torch.inference_mode():
                 for _ in range(self.cfg["num_steps_per_env"]):
@@ -108,19 +123,52 @@ class OffPolicyRunner:
                     )
                     self.logger.process_env_step(rewards, dones, extras, intrinsic_rewards)
                     obs = next_obs
+                    collected_transitions += self.env.num_envs * self.gpu_world_size
+                    if episodic and bool(dones.item()):
+                        break
+
+                if episodic and not bool(dones.item()):
+                    raise RuntimeError("Episode collection reached its step limit without an environment done signal.")
 
                 stop = time.time()
                 collection_time = stop - start
                 start = stop
 
-            # Advance the offline/online mixture before the update that consumes it.
-            if mixed_buffer is not None:
-                mixed_buffer.set_iteration(it - start_iter)
-
-            if it >= self.start_training:
-                loss_dict = self.alg.update()
+            online_transitions += collected_transitions
+            if schedule is None:
+                # Preserve the original pretraining schedule and mixture semantics.
+                if mixed_buffer is not None:
+                    mixed_buffer.set_iteration(it - start_iter)
+                loss_dict = self.alg.update() if it >= self.start_training else {}
             else:
+                updates = 0
+                warmup_done = online_transitions >= schedule["transitions_before_updates"]
+                if warmup_done:
+                    if schedule["fixed_updates"] is None:
+                        update_credit += schedule["utd"] * collected_transitions
+                        updates = int(update_credit + 1e-9)
+                    else:
+                        updates = schedule["fixed_updates"]
+                # Short terminated episodes may not yet provide even one n-step window.
+                if online_buffer.num_transitions < online_buffer.n_steps:
+                    updates = 0
                 loss_dict = {}
+                if updates:
+                    self.alg.num_mini_batches = updates
+                    if mixed_buffer is not None:
+                        # Warm-up must not consume the retained-data annealing schedule.
+                        mixed_buffer.set_iteration(update_iterations)
+                    loss_dict = self.alg.update()
+                    update_iterations += 1
+                    if schedule["fixed_updates"] is None:
+                        update_credit -= updates
+                loss_dict.update({
+                    "Schedule/collected_transitions": collected_transitions,
+                    "Schedule/online_transitions": online_transitions,
+                    "Schedule/gradient_updates": updates,
+                    "Schedule/update_phases": update_iterations,
+                    "Schedule/warmup": int(not warmup_done),
+                })
 
             if mixed_buffer is not None:
                 loss_dict["Replay/offline_fraction"] = mixed_buffer.offline_fraction
@@ -138,14 +186,11 @@ class OffPolicyRunner:
             # Accumulate timing across iterations when logging sparsely
             log_window_collect_time += collection_time
             log_window_learn_time += learn_time
-            log_window_iters += 1
+            log_window_transitions += collected_transitions
 
             # Log information
             should_log = (it % self.log_interval == 0) or (it == tot_iter - 1)
             if should_log:
-                window_collection_size = (
-                    self.cfg["num_steps_per_env"] * self.env.num_envs * self.gpu_world_size * log_window_iters
-                )
                 self.logger.log(
                     it=it,
                     start_it=start_iter,
@@ -157,11 +202,11 @@ class OffPolicyRunner:
                     action_std=self.alg.get_policy().output_std,
                     rnd_weight=self.alg.rnd.weight if self.alg.rnd else None,
                     alpha=getattr(self.alg, "alpha", None),
-                    collection_size_override=window_collection_size,
+                    collection_size_override=log_window_transitions,
                 )
                 log_window_collect_time = 0.0
                 log_window_learn_time = 0.0
-                log_window_iters = 0
+                log_window_transitions = 0
 
             # Save model
             if self.logger.writer is not None and it % self.cfg["save_interval"] == 0 and it != 0:

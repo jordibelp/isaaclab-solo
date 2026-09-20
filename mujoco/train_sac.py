@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Parallel MJX SAC fine-tuning for Solo12 (arXiv:2605.24975).
+"""Episodic MJX SAC fine-tuning for Solo12 (arXiv:2602.20220).
 
 This uses the same RSL-RL-SAC actor, critic, replay buffer, checkpoints, symmetry
 augmentation, timeout handling, and n-step targets as Isaac training. MJX only
@@ -69,24 +69,59 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--checkpoint", default=None, help="RSL-RL-SAC checkpoint to fine-tune/resume from.")
     p.add_argument("--resume", action="store_true", help="Restore optimizers and iteration as well as networks.")
     p.add_argument("--run-name", default="[mujoco] Solo12 SAC")
-    p.add_argument("--num_envs", "--num-envs", type=int, default=256)
-    p.add_argument("--max-iterations", type=int, default=1500)
-    p.add_argument("--rollout-steps", type=int, default=24)
-    p.add_argument("--save-interval", type=int, default=100)
-    p.add_argument("--log-interval", type=int, default=1)
+    p.add_argument("--num_envs", "--num-envs", type=int, default=1)
     p.add_argument(
-        "--start-training",
+        "--max-iterations", type=int, default=1500,
+        help="Episodes, including warm-up (rollouts in explicit fixed-rollout mode).",
+    )
+    p.add_argument(
+        "--rollout-steps",
         type=int,
-        default=1,
+        default=None,
         help=(
-            "Iterations of pure data collection with the loaded policy before the first update."
-            " This is the warm start of arXiv:2602.20220; one iteration already collects"
-            " num_envs * rollout_steps transitions."
+            "Opt into fixed-rollout mode: collect this many steps before updating, even"
+            " across episode ends. By default, collect one episode (up to 1000 steps,"
+            " set with env.episode_length_s at 50 Hz), stopping on early termination."
         ),
     )
-    p.add_argument("--replay-buffer-size", type=int, default=int(5.0e6))
-    p.add_argument("--updates-per-iteration", type=int, default=200)
-    p.add_argument("--batch-size", type=int, default=8192)
+    p.add_argument("--save-interval", type=int, default=100)
+    p.add_argument("--log-interval", type=int, default=1)
+    warmup = p.add_mutually_exclusive_group()
+    warmup.add_argument(
+        "--num-transitions-before-weight-updates",
+        "--num_transitions_before_weight_updates",
+        "--transitions-before-updates",
+        dest="transitions_before_updates",
+        type=int,
+        default=5000,
+        help=(
+            "Transitions collected with the loaded policy before the first gradient update."
+            " Default 5000 (five full episodes). Updates start at the first episode boundary"
+            " at or beyond this count; retained offline data does not count."
+        ),
+    )
+    warmup.add_argument(
+        "--start-training", type=int, default=None,
+        help="Deprecated: warm-up in full rollout lengths. Prefer --num-transitions-before-weight-updates.",
+    )
+    p.add_argument("--replay-buffer-size", type=int, default=500_000)
+    p.add_argument(
+        "--updates-per-iteration",
+        type=int,
+        default=None,
+        help="Fixed gradient updates per episode/rollout (K), instead of --utd.",
+    )
+    p.add_argument(
+        "--utd",
+        type=float,
+        default=None,
+        help=(
+            "Critic update-to-data ratio (eta = K / transitions per iteration). Default 1.25,"
+            " which is 1250 updates on the 1000-step Solo12 episode and matches the Go1"
+            " setting of arXiv:2602.20220."
+        ),
+    )
+    p.add_argument("--batch-size", type=int, default=512)
     p.add_argument("--n-steps", type=int, default=5)
     p.add_argument("--gamma", type=float, default=0.97)
     p.add_argument("--tau", type=float, default=0.003)
@@ -114,7 +149,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--offline-anneal-iterations",
         type=int,
         default=None,
-        help="Iterations over which the offline share is annealed. Default: half of --max-iterations.",
+        help=(
+            "Update-bearing episodes/rollouts over which the offline share is annealed,"
+            " excluding warm-up. Default: half of --max-iterations."
+        ),
     )
     p.add_argument(
         "--rank",
@@ -382,6 +420,73 @@ def _finetuning_config(args) -> dict:
     return settings
 
 
+def _episodic_schedule(args, env_cfg: dict) -> dict:
+    """Resolve a single-robot episode schedule or an explicit fixed-rollout ablation."""
+    if args.utd is not None and args.updates_per_iteration is not None:
+        raise ValueError("--utd and --updates-per-iteration set the same quantity; pass only one.")
+    for name in (
+        "num_envs", "batch_size", "n_steps", "actor_update_every", "max_iterations", "save_interval", "log_interval"
+    ):
+        if getattr(args, name) < 1:
+            raise ValueError(f"--{name.replace('_', '-')} must be at least 1.")
+    duration = float(env_cfg["episode_length_s"])
+    if not math.isfinite(duration) or duration < mjx_env.STEP_DT:
+        raise ValueError("env.episode_length_s must be finite and at least one control step (0.02 s).")
+    episode_steps = round(duration / mjx_env.STEP_DT)
+    mode = "episode" if args.rollout_steps is None else "rollout"
+    if mode == "episode" and args.num_envs != 1:
+        raise ValueError("Episode-boundary training requires --num-envs=1; use --rollout-steps for parallel runs.")
+    rollout_steps = episode_steps if mode == "episode" else args.rollout_steps
+    if rollout_steps < 1:
+        raise ValueError("--rollout-steps must be at least 1.")
+    if args.replay_buffer_size // args.num_envs < args.n_steps:
+        raise ValueError("--replay-buffer-size must hold at least --n-steps per environment.")
+    transitions = args.num_envs * rollout_steps
+    utd = 1.25 if args.utd is None else args.utd
+    if not math.isfinite(utd) or utd <= 0:
+        raise ValueError("--utd must be finite and positive.")
+    if args.updates_per_iteration is not None and args.updates_per_iteration < 1:
+        raise ValueError("--updates-per-iteration must be at least 1.")
+    warmup = args.transitions_before_updates
+    if args.start_training is not None:
+        if args.start_training < 0:
+            raise ValueError("--start-training must be non-negative.")
+        warmup = args.start_training * transitions
+    if warmup < 0:
+        raise ValueError("--num-transitions-before-weight-updates must be non-negative.")
+    updates = args.updates_per_iteration
+    return {
+        "mode": mode,
+        "rollout_steps": rollout_steps,
+        "episode_steps": episode_steps,
+        "updates_per_iteration": updates if updates is not None else math.floor(utd * transitions),
+        "fixed_updates": updates,
+        "utd": utd if updates is None else updates / transitions,
+        "transitions_before_updates": warmup,
+        "transitions_per_iteration": transitions,
+    }
+
+
+def _report_schedule(schedule: dict, args) -> None:
+    """Print the resolved schedule, including the boundary and warm-up semantics."""
+    print(
+        f"[INFO] Update schedule ({schedule['mode']}): {args.num_envs} env(s),"
+        f" up to {schedule['rollout_steps']} steps, then {schedule['updates_per_iteration']:,}"
+        f" updates per full collection (UTD {schedule['utd']:g}, batch {args.batch_size},"
+        f" actor every {args.actor_update_every} critic updates)."
+    )
+    print(
+        f"[INFO] Warm start: first update at a collection boundary with at least"
+        f" {schedule['transitions_before_updates']:,} new transitions; no warm-up update backlog."
+    )
+    if args.start_training is not None:
+        print("[WARN] --start-training is deprecated; use --num-transitions-before-weight-updates.")
+    if schedule["mode"] == "rollout":
+        print("[WARN] Explicit fixed-rollout mode: updates need not align with episode ends.")
+    elif schedule["fixed_updates"] is None:
+        print("[INFO] Early terminations shorten collection and scale the update budget; fractional updates carry forward.")
+
+
 def _validate_offline_arguments(args) -> None:
     """Reject a mixing schedule that has no retained data to apply it to."""
     mixing_args = (args.offline_fraction, args.offline_fraction_final, args.offline_anneal_iterations)
@@ -423,12 +528,12 @@ def _install_retained_replay(runner, args) -> None:
     )
 
 
-def _runner_config(args) -> dict:
+def _runner_config(args, schedule: dict) -> dict:
     algorithm = {
         "class_name": "SAC",
         "replay_buffer_size": args.replay_buffer_size,
         "num_learning_epochs": 1,
-        "num_mini_batches": args.updates_per_iteration,
+        "num_mini_batches": schedule["updates_per_iteration"],
         "mini_batch_size": args.batch_size,
         "actor_learning_rate": args.actor_learning_rate,
         "critic_learning_rate": args.critic_learning_rate,
@@ -458,11 +563,11 @@ def _runner_config(args) -> dict:
         "finetuning": _finetuning_config(args),
         "seed": args.seed,
         "device": args.device,
-        "num_steps_per_env": args.rollout_steps,
+        "num_steps_per_env": schedule["rollout_steps"],
         "max_iterations": args.max_iterations,
         "save_interval": args.save_interval,
         "log_interval": args.log_interval,
-        "start_training": args.start_training,
+        "update_schedule": schedule,
         "save_replay_buffer": args.save_replay_buffer,
         "save_replay_buffer_every": args.save_replay_buffer_every,
         "experiment_name": "solo12_mujoco_sac",
@@ -562,10 +667,12 @@ def main() -> None:
         raise ValueError("MJX startup property randomization is not implemented.")
     _validate_offline_arguments(args)
     _finetuning_config(args)
+    schedule = _episodic_schedule(args, env_cfg)
+    _report_schedule(schedule, args)
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
-    cfg = _runner_config(args)
+    cfg = _runner_config(args, schedule)
     _configure_checkpoint_models(cfg, args)
     command = reproducible_command()
     cfg["command"] = command
@@ -613,7 +720,8 @@ def main() -> None:
         _apply_finetuning(runner, args)
     if args.offline_replay_buffer:
         _install_retained_replay(runner, args)
-    runner.learn(num_learning_iterations=args.max_iterations, init_at_random_ep_len=True)
+    # Episodic collection starts at reset and stops on the actual done signal.
+    runner.learn(num_learning_iterations=args.max_iterations, init_at_random_ep_len=False)
     env.close()
 
 
