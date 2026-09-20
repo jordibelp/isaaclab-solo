@@ -45,6 +45,24 @@ def test_sac_wandb_writer_exposes_command_at_top_level(tmp_path, monkeypatch):
     assert captured["config"]["command"] == "./isaaclab.sh -p mujoco/train_sac.py --headless"
 
 
+def test_sac_wandb_writer_stores_every_environment_config_flavour(monkeypatch):
+    stored = {}
+    monkeypatch.setattr(wandb_utils.wandb, "config", SimpleNamespace(update=stored.update))
+
+    # The MJX adapter exposes a plain namespace; the Isaac environments expose to_dict().
+    mjx_cfg = SimpleNamespace(is_finite_horizon=False, episode_length_s=20.0, action_scale=0.3)
+    wandb_utils.WandbSummaryWriter.store_config(None, mjx_cfg, {"max_iterations": 1})
+    assert stored["env_cfg"] == {"is_finite_horizon": False, "episode_length_s": 20.0, "action_scale": 0.3}
+    assert stored["train_cfg"] == {"max_iterations": 1}
+
+    isaac_cfg = SimpleNamespace(to_dict=lambda: {"episode_length_s": 10.0})
+    wandb_utils.WandbSummaryWriter.store_config(None, isaac_cfg, {})
+    assert stored["env_cfg"] == {"episode_length_s": 10.0}
+
+    wandb_utils.WandbSummaryWriter.store_config(None, {"kp": 9.0}, {})
+    assert stored["env_cfg"] == {"kp": 9.0}
+
+
 def test_sac_logger_counts_individual_environment_steps(tmp_path):
     scalars = []
     logger = Logger.__new__(Logger)

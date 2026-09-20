@@ -7,13 +7,24 @@ from __future__ import annotations
 
 import os
 import pathlib
-from dataclasses import asdict
+from dataclasses import asdict, is_dataclass
 from torch.utils.tensorboard import SummaryWriter
 
 try:
     import wandb
 except ModuleNotFoundError:
     raise ModuleNotFoundError("wandb package is required to log to Weights and Biases.") from None
+
+
+def config_as_dict(cfg: dict | object) -> dict:
+    """Return a loggable dict for Isaac configs, dataclasses, plain namespaces, or dicts."""
+    if isinstance(cfg, dict):
+        return cfg
+    if hasattr(cfg, "to_dict"):
+        return cfg.to_dict()
+    if is_dataclass(cfg):
+        return asdict(cfg)
+    return vars(cfg)
 
 
 class WandbSummaryWriter(SummaryWriter):
@@ -55,10 +66,7 @@ class WandbSummaryWriter(SummaryWriter):
 
     def store_config(self, env_cfg: dict | object, train_cfg: dict) -> None:
         wandb.config.update({"train_cfg": train_cfg})
-        try:
-            wandb.config.update({"env_cfg": env_cfg.to_dict()})  # type: ignore
-        except Exception:
-            wandb.config.update({"env_cfg": asdict(env_cfg)})  # type: ignore
+        wandb.config.update({"env_cfg": config_as_dict(env_cfg)})
 
     def add_scalar(
         self,
