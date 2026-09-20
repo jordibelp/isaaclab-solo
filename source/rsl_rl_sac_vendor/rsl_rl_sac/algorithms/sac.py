@@ -203,8 +203,10 @@ class SAC:
             true_next_obs = next_obs
 
         # Update normalizers
-        self.actor.update_normalization(true_next_obs)
-        self.critic.update_normalization(true_next_obs)
+        if self.actor_parameters:
+            self.actor.update_normalization(true_next_obs)
+        if self.critic_parameters:
+            self.critic.update_normalization(true_next_obs)
         if self.rnd:
             self.rnd.update_normalization(true_next_obs)
 
@@ -303,14 +305,15 @@ class SAC:
                 summed_dist_stats = batch_stats if summed_dist_stats is None else summed_dist_stats + batch_stats
 
             total_critic_loss = 0.5 * (critic1_loss + critic2_loss)
-            self.critic_optimizer.zero_grad()
-            total_critic_loss.backward()
+            if self.critic_optimizer is not None:
+                self.critic_optimizer.zero_grad()
+                total_critic_loss.backward()
 
-            if self.is_multi_gpu:
-                self.reduce_parameters(self.critic_parameters)
+                if self.is_multi_gpu:
+                    self.reduce_parameters(self.critic_parameters)
 
-            torch.nn.utils.clip_grad_norm_(self.critic_parameters, self.max_grad_norm)
-            self.critic_optimizer.step()
+                torch.nn.utils.clip_grad_norm_(self.critic_parameters, self.max_grad_norm)
+                self.critic_optimizer.step()
 
             ###########################################################################
             # Sample new actions for actor and alpha update
@@ -318,7 +321,7 @@ class SAC:
 
             ###########################################################################
             # 2) Alpha update
-            if self.auto_alpha:
+            if self.auto_alpha and self.actor_parameters:
                 alpha_loss = -(self.log_alpha * (log_prob + self.target_entropy).detach()).mean()
                 self.alpha_optimizer.zero_grad()
                 alpha_loss.backward()
@@ -337,7 +340,7 @@ class SAC:
 
             ###########################################################################
             # 3) Actor update
-            if self.update_step % self.policy_frequency == 0:
+            if self.actor_optimizer is not None and self.update_step % self.policy_frequency == 0:
                 # Freeze critic parameters for actor update
                 for p in self.critic_parameters:
                     p.requires_grad_(False)
@@ -400,7 +403,8 @@ class SAC:
             ###########################################################################
             # 4) Soft update target networks
             with torch.no_grad():
-                self.critic.soft_update_target_networks(self.tau)
+                if self.critic_parameters:
+                    self.critic.soft_update_target_networks(self.tau)
 
             # RND loss
             if self.rnd:
@@ -458,8 +462,8 @@ class SAC:
 
     def train_mode(self) -> None:
         """Set actor, critic, and RND to training mode."""
-        self.actor.train()
-        self.critic.train()
+        self.actor.train(bool(self.actor_parameters))
+        self.critic.train(bool(self.critic_parameters))
         if self.rnd:
             self.rnd.train()
 
@@ -479,8 +483,8 @@ class SAC:
         saved_dict = {
             "actor_state_dict": self.actor.state_dict(),
             "critic_state_dict": self.critic.state_dict(),
-            "actor_optimizer_state_dict": self.actor_optimizer.state_dict(),
-            "critic_optimizer_state_dict": self.critic_optimizer.state_dict(),
+            "actor_optimizer_state_dict": self.actor_optimizer.state_dict() if self.actor_optimizer else None,
+            "critic_optimizer_state_dict": self.critic_optimizer.state_dict() if self.critic_optimizer else None,
             "log_alpha": self.log_alpha.detach().cpu() if self.auto_alpha else None,
             "alpha": self.alpha if not self.auto_alpha else None,
         }
@@ -512,13 +516,26 @@ class SAC:
                 "rnd": True,
             }
 
+        if load_cfg.get("optimizer"):
+            if "mujoco_lora" in loaded_dict:
+                raise ValueError("Cannot resume LoRA optimizers from merged networks; use --checkpoint without --resume.")
+            for name in ("actor", "critic"):
+                optimizer = getattr(self, f"{name}_optimizer")
+                state = loaded_dict[f"{name}_optimizer_state_dict"]
+                if (optimizer is None) != (state is None):
+                    raise ValueError(
+                        f"Cannot resume with a different {name} freeze mode; use --checkpoint without --resume."
+                    )
+
         if load_cfg.get("actor"):
             self.actor.load_state_dict(loaded_dict["actor_state_dict"], strict=strict)
         if load_cfg.get("critic"):
             self.critic.load_state_dict(loaded_dict["critic_state_dict"], strict=strict)
         if load_cfg.get("optimizer"):
-            self.actor_optimizer.load_state_dict(loaded_dict["actor_optimizer_state_dict"])
-            self.critic_optimizer.load_state_dict(loaded_dict["critic_optimizer_state_dict"])
+            if self.actor_optimizer is not None:
+                self.actor_optimizer.load_state_dict(loaded_dict["actor_optimizer_state_dict"])
+            if self.critic_optimizer is not None:
+                self.critic_optimizer.load_state_dict(loaded_dict["critic_optimizer_state_dict"])
             if self.auto_alpha and "alpha_optimizer_state_dict" in loaded_dict:
                 self.alpha_optimizer.load_state_dict(loaded_dict["alpha_optimizer_state_dict"])
             if loaded_dict.get("log_alpha") is not None:

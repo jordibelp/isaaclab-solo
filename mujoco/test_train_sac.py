@@ -1,4 +1,5 @@
 from collections import deque
+import json
 import math
 import shlex
 from types import SimpleNamespace
@@ -10,7 +11,7 @@ from tensordict import TensorDict
 import train_sac
 from rsl_rl_sac.algorithms import SAC
 from rsl_rl_sac.models import SACActorModel, SACCriticModel
-from rsl_rl_sac.modules import LoRALinear
+from rsl_rl_sac.modules import LoRALinear, merged_state_dict
 from rsl_rl_sac.storage import MixedReplayBuffer, ReplayBuffer
 from rsl_rl_sac.utils.logger import Logger
 from rsl_rl_sac.utils import wandb_utils
@@ -200,13 +201,14 @@ LORA_OBS_DIM = 6
 LORA_ACTION_DIM = 3
 
 
-def build_lora_runner(rank=4, extra_args=()):
+def build_lora_runner(rank=4, extra_args=(), critic_loss="mse"):
     """A SAC algorithm on a fixed one-batch replay, wrapped the way ``main`` wraps it."""
     torch.manual_seed(0)
     obs = TensorDict({"policy": torch.randn(8, LORA_OBS_DIM)}, batch_size=[8])
     groups = {"actor": ["policy"], "critic": ["policy"]}
-    actor = SACActorModel(obs, groups, "actor", LORA_ACTION_DIM, hidden_dims=[16, 8])
-    critic = SACCriticModel(obs, groups, "critic", 1, hidden_dims=[16, 8], num_actions=LORA_ACTION_DIM)
+    actor = SACActorModel(obs, groups, "actor", LORA_ACTION_DIM, hidden_dims=[16, 8], obs_normalization=True)
+    critic = SACCriticModel(obs, groups, "critic", 1, hidden_dims=[16, 8], num_actions=LORA_ACTION_DIM,
+                            obs_normalization=True, distributional_loss=critic_loss, distributional_num_bins=11)
     batch = (
         obs,
         torch.randn(8, LORA_ACTION_DIM),
@@ -216,7 +218,7 @@ def build_lora_runner(rank=4, extra_args=()):
         torch.zeros(8, 1),
         torch.ones(8, 1, dtype=torch.long),
     )
-    replay = SimpleNamespace(mini_batch_generator=lambda **kwargs: iter([batch]))
+    replay = SimpleNamespace(mini_batch_generator=lambda **kwargs: iter([batch]), add_transition=lambda transition: None)
     algorithm = SAC(actor, critic, replay, device="cpu", policy_frequency=1)
     runner = SimpleNamespace(alg=algorithm)
     args = train_sac.build_parser().parse_args(
@@ -231,7 +233,7 @@ def base_weights(actor):
 
 def test_lora_run_trains_only_the_adapter():
     runner, args = build_lora_runner()
-    train_sac._apply_actor_lora(runner, args)
+    train_sac._apply_finetuning(runner, args)
     actor = runner.alg.actor
     frozen_before = base_weights(actor)
 
@@ -249,7 +251,7 @@ def test_lora_run_trains_only_the_adapter():
 def test_lora_optimizer_covers_only_trainable_parameters():
     runner, args = build_lora_runner()
 
-    train_sac._apply_actor_lora(runner, args)
+    train_sac._apply_finetuning(runner, args)
 
     optimized = {id(p) for group in runner.alg.actor_optimizer.param_groups for p in group["params"]}
     trainable = {id(p) for p in runner.alg.actor.parameters() if p.requires_grad}
@@ -260,7 +262,7 @@ def test_lora_optimizer_covers_only_trainable_parameters():
 def test_lora_checkpoint_is_a_plain_sac_checkpoint():
     """The saved actor must load into a model that knows nothing about adapters."""
     runner, args = build_lora_runner()
-    train_sac._apply_actor_lora(runner, args)
+    train_sac._apply_finetuning(runner, args)
     runner.alg.update()
     obs = TensorDict({"policy": torch.randn(4, LORA_OBS_DIM)}, batch_size=[4])
     trained = runner.alg.actor(obs)
@@ -268,31 +270,31 @@ def test_lora_checkpoint_is_a_plain_sac_checkpoint():
     payload = runner.alg.save()
 
     groups = {"actor": ["policy"], "critic": ["policy"]}
-    restored = SACActorModel(obs, groups, "actor", LORA_ACTION_DIM, hidden_dims=[16, 8])
+    restored = SACActorModel(obs, groups, "actor", LORA_ACTION_DIM, hidden_dims=[16, 8], obs_normalization=True)
     restored.load_state_dict(payload["actor_state_dict"], strict=True)
     torch.testing.assert_close(restored(obs), trained, atol=1e-6, rtol=1e-5)
-    assert payload["mujoco_lora"] == {"rank": 4, "alpha": 4.0, "layers": "all"}
+    assert payload["mujoco_lora"] == train_sac._finetuning_config(args)
 
 
 def test_lora_is_off_by_default():
     args = train_sac.build_parser().parse_args(["--no-wandb"])
     assert args.rank == 0
-    assert train_sac._validate_lora_arguments(args) is None
+    assert all(c["mode"] == "full" for c in train_sac._finetuning_config(args).values())
 
 
 @pytest.mark.parametrize(
     "arguments,message",
     [
         (["--rank=-1"], "non-negative"),
-        (["--lora-alpha=2.0"], "positive --rank"),
-        (["--rank=4", "--resume"], "merged actor"),
+        (["--lora-alpha=2.0"], "positive rank"),
+        (["--rank=4", "--resume"], "merged networks"),
     ],
 )
 def test_invalid_lora_arguments_are_rejected(arguments, message):
     args = train_sac.build_parser().parse_args(["--no-wandb", *arguments])
 
     with pytest.raises(ValueError, match=message):
-        train_sac._validate_lora_arguments(args)
+        train_sac._finetuning_config(args)
 
 
 def test_checkpoint_action_scaling_is_replaced_by_target_environment():
@@ -313,3 +315,196 @@ def test_checkpoint_action_scaling_is_replaced_by_target_environment():
     assert actor.action_bias.tolist() == [-2.0, -2.0]
     assert actor.action_range.tolist() == [4.0, 6.0]
     assert actor.log_action_range.item() == pytest.approx(__import__("math").log(24.0))
+
+
+@pytest.mark.parametrize("actor_mode", ["full", "lora", "frozen"])
+@pytest.mark.parametrize("critic_mode", ["full", "lora", "frozen"])
+@pytest.mark.parametrize("critic_loss", ["mse", "two_hot", "hl_gauss"])
+def test_all_tuning_combinations_update_only_requested_state(actor_mode, critic_mode, critic_loss):
+    arguments = []
+    for name, mode in (("actor", actor_mode), ("critic", critic_mode)):
+        arguments.append(f"--{name}-rank={2 if mode == 'lora' else 0}")
+        if mode == "frozen":
+            arguments.append(f"--freeze-{name}")
+    runner, args = build_lora_runner(rank=0, extra_args=arguments, critic_loss=critic_loss)
+    alg = runner.alg
+    train_sac._apply_finetuning(runner, args)
+    before = {name: {k: v.clone() for k, v in getattr(alg, name).state_dict().items()}
+              for name in ("actor", "critic")}
+    alpha_before = alg.log_alpha.clone()
+    alg.train_mode()
+    obs = TensorDict({"policy": torch.randn(8, LORA_OBS_DIM) + 3}, batch_size=[8])
+    alg.act(obs)
+    alg.process_env_step(obs, torch.ones(8), torch.zeros(8), {})
+    for _ in range(3):
+        losses = alg.update()
+        assert all(math.isfinite(value) for value in losses.values())
+
+    for name, mode in (("actor", actor_mode), ("critic", critic_mode)):
+        model = getattr(alg, name)
+        after = model.state_dict()
+        changed = {k for k, v in after.items() if not torch.equal(v, before[name][k])}
+        if mode == "frozen":
+            assert not changed
+            assert all(not p.requires_grad and p.grad is None for p in model.parameters())
+            assert getattr(alg, f"{name}_optimizer") is None
+        else:
+            assert any("weight" in k or "lora_b" in k for k in changed)
+            assert "obs_normalizer.count" in changed
+            optimizer = getattr(alg, f"{name}_optimizer")
+            assert {id(p) for g in optimizer.param_groups for p in g["params"]} == {
+                id(p) for p in model.parameters() if p.requires_grad
+            }
+            if mode == "lora":
+                assert all("lora_" in k or "obs_normalizer" in k or "_target" in k for k in changed)
+                for prefix in (("mlp",) if name == "actor" else ("critic1", "critic2")):
+                    assert any(k.startswith(prefix) and "lora_b" in k for k in changed)
+    if actor_mode == "frozen":
+        assert torch.equal(alg.log_alpha, alpha_before)
+    assert all(not p.requires_grad for p in alg.critic.critic1_target.parameters())
+    assert all(not p.requires_grad for p in alg.critic.critic2_target.parameters())
+
+
+def test_frozen_critic_still_provides_action_gradients():
+    runner, args = build_lora_runner(rank=1, extra_args=["--freeze-critic"])
+    train_sac._apply_finetuning(runner, args)
+    obs = TensorDict({"policy": torch.randn(8, LORA_OBS_DIM)}, batch_size=[8])
+    actions = runner.alg.actor(obs)
+    q1, q2 = runner.alg.critic.evaluate_all_q(obs, actions)
+    (-torch.min(q1, q2).mean()).backward()
+    assert any(p.grad is not None and p.grad.abs().sum() > 0
+               for n, p in runner.alg.actor.named_parameters() if "lora_b" in n)
+    assert all(p.grad is None for p in runner.alg.critic.parameters())
+
+
+@pytest.mark.parametrize("layers,count", [("all", 3), ("input", 1), ("output", 1), ("input_and_output", 2)])
+def test_critic_adapts_each_twin_independently_and_leaves_targets_dense(layers, count):
+    runner, args = build_lora_runner(rank=1, extra_args=["--actor-rank=3", f"--critic-lora-layers={layers}"])
+    before = {k: v.clone() for k, v in runner.alg.critic.state_dict().items()}
+    train_sac._apply_finetuning(runner, args)
+    for network in (runner.alg.critic.critic1, runner.alg.critic.critic2):
+        adapters = [m for m in network.modules() if isinstance(m, LoRALinear)]
+        assert len(adapters) == count
+        assert all(m.lora_a.shape[0] == 1 and m.scale == 1 for m in adapters)
+    assert all(m.lora_a.shape[0] == 3 and m.scale == 1
+               for m in runner.alg.actor.modules() if isinstance(m, LoRALinear))
+    assert not any(isinstance(m, LoRALinear) for m in runner.alg.critic.critic1_target.modules())
+    for k, v in merged_state_dict(runner.alg.critic).items():
+        assert torch.equal(v, before[k])
+
+
+@pytest.mark.parametrize("critic_loss", ["mse", "two_hot", "hl_gauss"])
+def test_lora_critic_targets_average_merged_weights_and_checkpoint_reloads(critic_loss):
+    runner, args = build_lora_runner(rank=1, critic_loss=critic_loss)
+    train_sac._apply_finetuning(runner, args)
+    critic = runner.alg.critic
+    for _ in range(2):
+        before = {k: v.clone() for k, v in critic.state_dict().items() if "_target" in k}
+        runner.alg.update()
+        merged = merged_state_dict(critic)
+        for k, old in before.items():
+            online = merged[k.replace("_target", "")]
+            torch.testing.assert_close(merged[k], runner.alg.tau * online + (1-runner.alg.tau) * old)
+    payload = runner.alg.save()
+    assert not any("lora_" in k or ".base." in k for k in payload["critic_state_dict"])
+    restored, _ = build_lora_runner(rank=0, critic_loss=critic_loss)
+    restored.alg.load(payload, {"actor": True, "critic": True, "optimizer": False}, strict=True)
+    obs = TensorDict({"policy": torch.randn(8, LORA_OBS_DIM)}, batch_size=[8])
+    actions = torch.randn(8, LORA_ACTION_DIM)
+    for method in ("evaluate_all_q", "evaluate_all_target_q"):
+        for expected, actual in zip(getattr(critic, method)(obs, actions), getattr(restored.alg.critic, method)(obs, actions)):
+            torch.testing.assert_close(actual, expected, atol=1e-6, rtol=1e-5)
+    with pytest.raises(ValueError, match="merged networks"):
+        restored.alg.load(payload, None, strict=True)
+
+
+@pytest.mark.parametrize("flags", [[], ["--freeze-critic"], ["--freeze-actor"], ["--freeze-actor", "--freeze-critic"]])
+def test_dense_and_frozen_optimizer_resume(flags):
+    runner, args = build_lora_runner(rank=0, extra_args=flags)
+    train_sac._apply_finetuning(runner, args)
+    runner.alg.update()
+    payload = runner.alg.save()
+    restored, args = build_lora_runner(rank=0, extra_args=[*flags, "--resume"])
+    train_sac._apply_finetuning(restored, args)
+    assert restored.alg.load(payload, None, strict=True)
+    for name in ("actor", "critic"):
+        opt = getattr(restored.alg, f"{name}_optimizer")
+        if opt is not None:
+            assert opt.state_dict()["state"].keys() == payload[f"{name}_optimizer_state_dict"]["state"].keys()
+    restored.alg.update()
+    if flags:
+        incompatible, _ = build_lora_runner(rank=0)
+        with pytest.raises(ValueError, match="freeze mode"):
+            incompatible.alg.load(payload, None, strict=True)
+
+
+@pytest.mark.parametrize("flags", [
+    ["--critic-rank=-1"], ["--actor-rank=-1"],
+    ["--freeze-critic", "--critic-rank=1"], ["--freeze-actor", "--actor-rank=1"],
+    ["--critic-lora-alpha=2"], ["--actor-lora-layers=input"],
+    ["--rank=1", "--lora-alpha=nan"], ["--rank=1", "--critic-lora-alpha=0"],
+    ["--critic-rank=1", "--resume"], ["--actor-rank=1", "--resume"],
+])
+def test_invalid_per_network_options_fail_early(flags):
+    args = train_sac.build_parser().parse_args(flags)
+    with pytest.raises(ValueError):
+        train_sac._finetuning_config(args)
+
+
+def test_resolved_overrides_are_recorded_in_runner_config():
+    args = train_sac.build_parser().parse_args([
+        "--rank=1", "--actor-rank=4", "--lora-alpha=2", "--critic-lora-alpha=3", "--critic-lora-layers=output",
+    ])
+    config = train_sac._runner_config(args)["finetuning"]
+    assert config == {
+        "actor": {"mode": "lora", "rank": 4, "alpha": 2.0, "layers": "all"},
+        "critic": {"mode": "lora", "rank": 1, "alpha": 3.0, "layers": "output"},
+    }
+
+
+@pytest.mark.parametrize("critic_loss", ["mse", "two_hot", "hl_gauss"])
+@pytest.mark.parametrize("sidecar", ["json", "yaml", "none"])
+def test_checkpoint_architecture_and_loss_survive_transfer(tmp_path, critic_loss, sidecar):
+    obs = TensorDict({"policy": torch.randn(8, LORA_OBS_DIM)}, batch_size=[8])
+    groups = {"actor": ["policy"], "critic": ["policy"]}
+    actor = SACActorModel(obs, groups, "actor", LORA_ACTION_DIM, hidden_dims=[32, 16], activation="swish",
+                          obs_normalization=True, state_dependent_std=False)
+    critic = SACCriticModel(obs, groups, "critic", 1, num_actions=LORA_ACTION_DIM, hidden_dims=[24, 12],
+                           activation="swish", layer_norm=True, distributional_loss=critic_loss,
+                           distributional_num_bins=19, distributional_symlog_limit=5)
+    checkpoint = tmp_path / "model.pt"
+    torch.save({"actor_state_dict": actor.state_dict(), "critic_state_dict": critic.state_dict()}, checkpoint)
+    saved_cfg = {"actor": {"activation": "swish"}, "critic": {"activation": "swish", "distributional_loss": critic_loss}}
+    if sidecar == "json":
+        (tmp_path / "run_config.json").write_text(json.dumps({"agent": saved_cfg}))
+    elif sidecar == "yaml":
+        import yaml
+        (tmp_path / "params").mkdir()
+        (tmp_path / "params" / "agent.yaml").write_text(yaml.safe_dump(saved_cfg))
+    flags = [f"--checkpoint={checkpoint}"]
+    if sidecar == "none" and critic_loss == "hl_gauss":
+        flags.append("--critic-loss=hl_gauss")
+    args = train_sac.build_parser().parse_args(flags)
+    config = train_sac._runner_config(args)
+    train_sac._configure_checkpoint_models(config, args)
+    assert config["critic"]["distributional_loss"] == critic_loss
+    config["actor"].pop("class_name")
+    config["critic"].pop("class_name")
+    restored_actor = SACActorModel(obs, groups, "actor", LORA_ACTION_DIM, **config["actor"])
+    restored_critic = SACCriticModel(obs, groups, "critic", 1, num_actions=LORA_ACTION_DIM, **config["critic"])
+    restored_actor.load_state_dict(actor.state_dict(), strict=True)
+    restored_critic.load_state_dict(critic.state_dict(), strict=True)
+    torch.testing.assert_close(restored_actor(obs), actor(obs), rtol=0, atol=0)
+    actions = actor(obs)
+    torch.testing.assert_close(restored_critic(obs, actions=actions), critic(obs, actions=actions), rtol=0, atol=0)
+
+
+def test_freezing_preserves_checkpoint_target_lag():
+    runner, args = build_lora_runner(rank=1, extra_args=["--freeze-critic"])
+    with torch.no_grad():
+        next(runner.alg.critic.critic1_target.parameters()).add_(0.5)
+    before = {k: v.clone() for k, v in runner.alg.critic.state_dict().items()}
+    train_sac._apply_finetuning(runner, args)
+    runner.alg.update()
+    for k, v in runner.alg.critic.state_dict().items():
+        assert torch.equal(v, before[k])

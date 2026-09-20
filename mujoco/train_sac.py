@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import shlex
 import sys
@@ -120,17 +121,28 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=0,
         help=(
-            "LoRA rank for the actor. 0 fine-tunes every actor weight; a positive rank freezes"
-            " the pretrained weights and trains only a low-rank correction."
+            "Shared actor/critic LoRA rank. 0 (default) trains all weights; positive ranks"
+            " train only adapters. Override with --actor-rank or --critic-rank."
         ),
     )
     p.add_argument(
         "--lora-alpha",
         type=float,
         default=None,
-        help="Adapter gain; the applied scale is alpha/rank. Defaults to --rank, so the scale is 1.",
+        help="Shared adapter gain. Defaults to each network's own rank (scale alpha/rank = 1).",
     )
     p.add_argument("--lora-layers", choices=LAYER_CHOICES, default="all")
+    for network in ("actor", "critic"):
+        p.add_argument(
+            f"--{network}-rank", type=int, default=None,
+            help=f"Override --rank for the {network}: 0 = full tuning, positive = LoRA.",
+        )
+        p.add_argument(
+            f"--freeze-{network}", action="store_true",
+            help=f"Freeze the {network}, including its normalizer; overrides shared --rank.",
+        )
+        p.add_argument(f"--{network}-lora-alpha", type=float, default=None)
+        p.add_argument(f"--{network}-lora-layers", choices=LAYER_CHOICES, default=None)
     p.add_argument(
         "--save-replay-buffer",
         action="store_true",
@@ -153,6 +165,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--initial-alpha", type=float, default=0.001)
     p.add_argument("--target-entropy-scale", type=float, default=0.167)
     p.add_argument("--initial-std", type=float, default=0.15)
+    p.add_argument("--actor-activation", default=None, help="Override checkpoint-sidecar activation (fallback: swish).")
+    p.add_argument(
+        "--critic-activation", default=None, help="Override checkpoint-sidecar activation (fallback: swish)."
+    )
+    p.add_argument(
+        "--critic-loss", choices=("mse", "two_hot", "hl_gauss"), default=None,
+        help="Override critic label loss; detached categorical checkpoints default to two_hot.",
+    )
+    p.add_argument("--hl-gauss-sigma-ratio", type=float, default=None)
     p.add_argument("--symmetry-mode", choices=("none", "augmentation", "loss", "both"), default="augmentation")
     p.add_argument("--symmetry-loss-coeff", type=float, default=0.1)
     p.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
@@ -280,56 +301,85 @@ def _apply_environment_action_scaling(actor, env) -> None:
         actor.log_action_range.copy_(torch.log(actor.action_range).sum())
 
 
-def _apply_actor_lora(runner, args) -> None:
-    """Restrict actor fine-tuning to a low-rank correction on frozen pretrained weights.
-
-    Only the actor is adapted. In SAC the critic is the learning signal, and arXiv:2602.20220
-    shows the transfer failure comes from a critic that has *not* adapted to the new dynamics
-    yet, so constraining the critic would work against the fine-tuning rather than protect it.
-
-    Checkpoints are written with the adapter folded back into the dense weights, so the files
-    stay loadable by the inference scripts and by later runs that know nothing about adapters.
-    """
-    alpha = float(args.rank) if args.lora_alpha is None else args.lora_alpha
-    adapted = apply_lora(runner.alg.actor, args.rank, alpha, args.lora_layers)
-
+def _apply_finetuning(runner, args) -> None:
+    """Configure each network after transfer (or before dense optimizer resume)."""
+    settings = _finetuning_config(args)
     algorithm = runner.alg
-    algorithm.actor_parameters = [p for p in algorithm.actor.parameters() if p.requires_grad]
-    algorithm.actor_optimizer = resolve_optimizer("adam")(
-        algorithm.actor_parameters, lr=args.actor_learning_rate
-    )
+    for name, config in settings.items():
+        model = getattr(algorithm, name)
+        adapted = 0
+        if config["mode"] == "frozen":
+            model.requires_grad_(False)
+            model.eval()
+        elif config["mode"] == "lora":
+            # Apply the layer selection independently to each online Q-network.
+            # Targets stay dense, frozen, and retain the loaded checkpoint's lag.
+            networks = (model,) if name == "actor" else (model.critic1, model.critic2)
+            for network in networks:
+                adapted += apply_lora(network, config["rank"], config["alpha"], config["layers"])
+        parameters = [p for p in model.parameters() if p.requires_grad]
+        optimizer = (
+            resolve_optimizer("adam")(parameters, lr=getattr(args, f"{name}_learning_rate"))
+            if parameters else None
+        )
+        setattr(algorithm, f"{name}_parameters", parameters)
+        setattr(algorithm, f"{name}_optimizer", optimizer)
+        trainable = sum(p.numel() for p in parameters)
+        print(
+            f"[INFO] {name.capitalize()} tuning: {config}; {adapted} adapted layers; "
+            f"{trainable:,} trainable parameters (critic targets always excluded)."
+        )
 
     original_save = algorithm.save
 
-    def save_with_merged_actor() -> dict:
+    def save_with_merged_networks() -> dict:
         payload = original_save()
         payload["actor_state_dict"] = merged_state_dict(algorithm.actor)
-        payload["mujoco_lora"] = {"rank": args.rank, "alpha": alpha, "layers": args.lora_layers}
+        payload["critic_state_dict"] = merged_state_dict(algorithm.critic)
+        payload["mujoco_finetuning"] = settings
+        if any(config["mode"] == "lora" for config in settings.values()):
+            payload["mujoco_lora"] = settings
         return payload
 
-    algorithm.save = save_with_merged_actor
-
-    trainable = sum(p.numel() for p in algorithm.actor_parameters)
-    total = sum(p.numel() for p in algorithm.actor.parameters())
-    print(
-        f"[INFO] Actor LoRA: rank={args.rank} alpha={alpha:g} layers={args.lora_layers} "
-        f"({adapted} adapted); {trainable:,} trainable of {total:,} actor parameters. "
-        "Checkpoints store the merged actor."
-    )
+    algorithm.save = save_with_merged_networks
 
 
-def _validate_lora_arguments(args) -> None:
-    """Reject LoRA settings that cannot mean what they say."""
+def _finetuning_config(args) -> dict:
+    """Resolve shared defaults, per-network overrides, and explicit freeze flags."""
     if args.rank < 0:
         raise ValueError(f"--rank must be non-negative, got {args.rank}.")
-    if args.rank == 0 and args.lora_alpha is not None:
-        raise ValueError("--lora-alpha only takes effect together with a positive --rank.")
-    if args.rank > 0 and args.resume:
+    settings = {}
+    for name in ("actor", "critic"):
+        override = getattr(args, f"{name}_rank")
+        rank = args.rank if override is None else override
+        frozen = getattr(args, f"freeze_{name}")
+        alpha = getattr(args, f"{name}_lora_alpha")
+        layers = getattr(args, f"{name}_lora_layers")
+        if rank < 0:
+            raise ValueError(f"--{name}-rank must be non-negative.")
+        if frozen and override not in (None, 0):
+            raise ValueError(f"--freeze-{name} conflicts with a positive --{name}-rank.")
+        mode = "frozen" if frozen else ("lora" if rank > 0 else "full")
+        if mode != "lora" and (alpha is not None or layers is not None):
+            raise ValueError(f"--{name}-lora-* requires a positive rank on an unfrozen {name}.")
+        alpha = args.lora_alpha if alpha is None else alpha
+        alpha = float(rank) if alpha is None else alpha
+        if mode == "lora" and (not math.isfinite(alpha) or alpha <= 0):
+            raise ValueError(f"{name} LoRA alpha must be finite and positive.")
+        settings[name] = {
+            "mode": mode, "rank": rank if mode == "lora" else 0,
+            "alpha": alpha if mode == "lora" else None,
+            "layers": (layers or args.lora_layers) if mode == "lora" else None,
+        }
+    has_lora = any(config["mode"] == "lora" for config in settings.values())
+    if not has_lora and (args.lora_alpha is not None or args.lora_layers != "all"):
+        raise ValueError("Shared --lora-* settings require a positive rank on an unfrozen network.")
+    if has_lora and args.resume:
         raise ValueError(
-            "--resume restores optimizer state for the parameters that were saved, but a LoRA run"
-            " saves a merged actor with no adapters. Start a new LoRA run from that merged"
-            " checkpoint with --checkpoint instead."
+            "--resume cannot restore LoRA optimizers from merged networks. "
+            "Start a new run with --checkpoint instead."
         )
+    return settings
 
 
 def _validate_offline_arguments(args) -> None:
@@ -405,6 +455,7 @@ def _runner_config(args) -> dict:
         }
     return {
         "class_name": "OffPolicyRunner",
+        "finetuning": _finetuning_config(args),
         "seed": args.seed,
         "device": args.device,
         "num_steps_per_env": args.rollout_steps,
@@ -441,6 +492,61 @@ def _runner_config(args) -> dict:
     }
 
 
+def _configure_checkpoint_models(cfg, args) -> None:
+    """Match checkpoint tensor shapes and recover non-tensor settings from its sidecar."""
+    if args.checkpoint:
+        path = Path(args.checkpoint).expanduser().resolve()
+        payload = torch.load(path, map_location="cpu", weights_only=False)
+        saved_cfg = {}
+        if (path.parent / "run_config.json").is_file():
+            saved_cfg = json.loads((path.parent / "run_config.json").read_text())["agent"]
+        elif (path.parent / "params" / "agent.yaml").is_file():
+            import yaml
+
+            saved_cfg = yaml.safe_load((path.parent / "params" / "agent.yaml").read_text())
+        else:
+            print(
+                "[INFO] No checkpoint config sidecar: assuming swish activations and two_hot "
+                "labels for categorical critics. Override --actor-activation, --critic-activation, "
+                "or --critic-loss if needed."
+            )
+        for name, prefix in (("actor", "mlp."), ("critic", "critic1.")):
+            state = payload[f"{name}_state_dict"]
+            weights = sorted(
+                ((int(k.split(".")[1]), v) for k, v in state.items()
+                 if k.startswith(prefix) and k.endswith(".weight")),
+                key=lambda item: item[0],
+            )
+            linear = [v for _, v in weights if v.ndim == 2]
+            cfg[name].update(
+                hidden_dims=[v.shape[0] for v in linear[:-1]],
+                layer_norm=any(v.ndim == 1 for _, v in weights),
+                obs_normalization=any(k.startswith("obs_normalizer.") for k in state),
+            )
+            # Shapes cannot reveal activation functions or the categorical label scheme.
+            for key in ("activation", "log_std_min", "log_std_max", "distributional_loss", "hl_gauss_sigma_ratio"):
+                if key in saved_cfg.get(name, {}):
+                    cfg[name][key] = saved_cfg[name][key]
+        cfg["actor"]["state_dependent_std"] = "log_std" not in payload["actor_state_dict"]
+        support = payload["critic_state_dict"].get("value_support")
+        if support is not None:
+            if cfg["critic"].get("distributional_loss", "mse") == "mse":
+                cfg["critic"]["distributional_loss"] = "two_hot"
+            cfg["critic"]["distributional_num_bins"] = support.numel()
+            cfg["critic"]["distributional_symlog_limit"] = support[-1].log1p().item()
+        else:
+            cfg["critic"]["distributional_loss"] = "mse"
+        if args.critic_loss is not None and (args.critic_loss == "mse") != (support is None):
+            raise ValueError("--critic-loss must match the checkpoint's scalar/categorical head type.")
+    for name in ("actor", "critic"):
+        if getattr(args, f"{name}_activation") is not None:
+            cfg[name]["activation"] = getattr(args, f"{name}_activation")
+    if args.critic_loss is not None:
+        cfg["critic"]["distributional_loss"] = args.critic_loss
+    if args.hl_gauss_sigma_ratio is not None:
+        cfg["critic"]["hl_gauss_sigma_ratio"] = args.hl_gauss_sigma_ratio
+
+
 def main() -> None:
     args, unknown = build_parser().parse_known_args()
     if args.task != "solo12-two-feet":
@@ -455,11 +561,12 @@ def main() -> None:
     if env_cfg["include_events_randomization"]:
         raise ValueError("MJX startup property randomization is not implemented.")
     _validate_offline_arguments(args)
-    _validate_lora_arguments(args)
+    _finetuning_config(args)
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     cfg = _runner_config(args)
+    _configure_checkpoint_models(cfg, args)
     command = reproducible_command()
     cfg["command"] = command
 
@@ -487,6 +594,8 @@ def main() -> None:
     )
 
     runner = OffPolicyRunner(env, cfg, log_dir=str(log_dir), device=args.device)
+    if args.resume:
+        _apply_finetuning(runner, args)
     if args.checkpoint:
         checkpoint = str(Path(args.checkpoint).expanduser().resolve())
         if args.resume:
@@ -500,8 +609,8 @@ def main() -> None:
             )
         _apply_environment_action_scaling(runner.alg.actor, env)
         print(f"[INFO] Loaded SAC checkpoint: {checkpoint} (exact resume={args.resume})")
-    if args.rank > 0:
-        _apply_actor_lora(runner, args)
+    if not args.resume:
+        _apply_finetuning(runner, args)
     if args.offline_replay_buffer:
         _install_retained_replay(runner, args)
     runner.learn(num_learning_iterations=args.max_iterations, init_at_random_ep_len=True)

@@ -13,7 +13,7 @@ import torch.nn as nn
 from tensordict import TensorDict
 from torch.distributions import Normal
 
-from rsl_rl_sac.modules import MLP, EmpiricalNormalization, HiddenState
+from rsl_rl_sac.modules import MLP, EmpiricalNormalization, HiddenState, LoRALinear, merged_state_dict
 from rsl_rl_sac.utils import unpad_trajectories
 
 from .mlp_model import MLPModel
@@ -589,8 +589,8 @@ class SACCriticModel(MLPModel):
 
     def init_target_networks(self) -> None:
         """Initialize the target networks with the current critic network parameters."""
-        self.critic1_target.load_state_dict(self.critic1.state_dict())
-        self.critic2_target.load_state_dict(self.critic2.state_dict())
+        self.critic1_target.load_state_dict(merged_state_dict(self.critic1))
+        self.critic2_target.load_state_dict(merged_state_dict(self.critic2))
 
     def soft_update_target_networks(self, tau: float) -> None:
         """Soft-update the target networks using Polyak averaging.
@@ -600,10 +600,16 @@ class SACCriticModel(MLPModel):
         Args:
             tau: Interpolation parameter for soft updates.
         """
-        for target_param, param in zip(self.critic1_target.parameters(), self.critic1.parameters()):
-            target_param.data.copy_(tau * param.data + (1.0 - tau) * target_param.data)
-        for target_param, param in zip(self.critic2_target.parameters(), self.critic2.parameters()):
-            target_param.data.copy_(tau * param.data + (1.0 - tau) * target_param.data)
+        # Targets remain dense. Average the effective W + scale * B @ A, not A/B
+        # separately: the product of averaged factors is not the averaged weight.
+        for online, target in ((self.critic1, self.critic1_target), (self.critic2, self.critic2_target)):
+            if any(isinstance(layer, LoRALinear) for layer in online.modules()):
+                parameters = merged_state_dict(online)
+            else:
+                parameters = dict(online.named_parameters())
+            for name, target_param in target.named_parameters():
+                param = parameters[name]
+                target_param.data.copy_(tau * param.data + (1.0 - tau) * target_param.data)
 
 
 ##############################################

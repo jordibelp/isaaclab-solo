@@ -120,6 +120,22 @@ data only.
 matching the paper. `--offline-anneal-iterations` defaults to half of
 `--max-iterations`. The current share is logged as `Replay/offline_fraction`.
 
+Both halves are drawn at exactly their requested size, with replacement, so the
+batch always has the composition you asked for. Early in a run the online buffer
+may hold fewer distinct transitions than its half of the batch, in which case
+some of them repeat. Watch `Replay/online_valid_transitions` for that: it counts
+the distinct online transitions the last batch could draw from. If it stays far
+below `--batch-size`, the online half carries much less information than its size
+suggests, and you want either more environments or a smaller batch.
+
+This matters most at small `--num_envs`. With one environment and the default
+24-step rollouts, the first update has 48 stored transitions and only 44 usable
+start points, because `--n-steps=5` needs a five-step window that fits inside the
+data. Reaching 4096 distinct online samples then takes about 170 iterations. In
+that regime, lower `--batch-size` and `--updates-per-iteration`, and raise
+`--start-training` so the warm start collects a few thousand transitions before
+the first update.
+
 The paper writes this mixture with `alpha` as the *online* share, annealed up to
 1. The flags here name the offline share instead, so `--offline-fraction=0.5`
 annealed to `0.0` is the same schedule as the paper's `alpha=0.5 -> 1`.
@@ -145,32 +161,96 @@ loaded policy before the first gradient update. One iteration already collects
 `--num_envs=256`. The paper prefills with about 5000. Use this when no pretraining
 snapshot is available; it approximates retained replay but works less well.
 
-### Low-rank fine-tuning (optional)
+### Actor/critic fine-tuning ablations
 
-`--rank` freezes the pretrained actor weights and trains only a low-rank
-correction on top, the same idea as the PPO path in `mujoco/train_lora.py`:
+Both networks use **full fine-tuning by default**. Choose each network independently:
+
+| Experiment | Flags to append |
+| --- | --- |
+| Full actor + full critic (default) | `--rank=0` (or omit) |
+| Rank-1 LoRA on both | `--rank=1` |
+| Rank-4 actor + rank-16 critic | `--actor-rank=4 --critic-rank=16` |
+| Rank-1 actor + full critic | `--actor-rank=1 --critic-rank=0` |
+| Full actor + rank-1 critic | `--actor-rank=0 --critic-rank=1` |
+| Full actor + frozen critic | `--freeze-critic` |
+| Rank-1 actor + frozen critic | `--rank=1 --freeze-critic` |
+| Frozen actor + full critic | `--freeze-actor` |
+| Frozen actor + rank-1 critic | `--rank=1 --freeze-actor` |
+| Frozen actor + frozen critic | `--freeze-actor --freeze-critic` |
+
+`--rank` is a shared default. `--actor-rank` and `--critic-rank` override it
+independently. A rank of zero means **full training**, not freezing. A freeze flag
+wins over the shared rank; combining it with an explicit positive rank for that
+same network is rejected as contradictory. Options do not depend on their order.
+**Changed from the original SAC CLI:** `--rank=1` now adapts both actor and critic.
+Use `--rank=1 --critic-rank=0` to recover the previous actor-only LoRA behavior.
+
+For the critic, LoRA applies to **both online Q-networks**. Each gets its own
+adapters. Their dense target networks still follow normal Polyak averaging, using
+the effective adapted weights. We do not average the two low-rank factors
+separately, which would give different target weights.
+
+A fully frozen network keeps its weights **and observation normalizer** fixed.
+A frozen critic also keeps its target networks fixed. It still passes Q-value
+gradients through actions to train the actor. No critic optimizer step runs.
+With a frozen critic, `--actor-update-every` still counts sampled update batches;
+use `--actor-update-every=1` if you want one actor step per batch. The default
+remains 20. Critic losses may still be logged as diagnostics even when frozen.
+Automatic entropy-temperature tuning stays active when the actor is trainable;
+it is also frozen when `--freeze-actor` is used. Freezing both networks collects
+rollouts without changing either model or the entropy temperature.
+
+LoRA freezes the existing parameters, including biases and LayerNorm parameters,
+and trains only the selected adapters. Observation normalizers continue adapting
+in LoRA and full modes. Adapters start at zero, preserving initial network outputs.
+
+#### Adapter gain and layer selection
+
+`--lora-alpha` and `--lora-layers` are shared defaults. Per-network overrides are:
 
 ```bash
---rank=64 --lora-alpha=64 --lora-layers=all
+--actor-lora-alpha=4 --critic-lora-alpha=16 --actor-lora-layers=all --critic-lora-layers=output
 ```
 
-`--rank=0` (the default) fine-tunes every actor weight. `--lora-alpha` defaults
-to `--rank`, which makes the applied scale `alpha/rank` equal to 1.
-`--lora-layers` takes the same modes as the PPO script: `all`, `input`,
-`output`, `input_and_output`. The adapter starts at exactly zero, so training
-begins from the pretrained policy rather than near it.
+If alpha is omitted, each network uses its **own resolved rank**, making its
+scale `alpha/rank` equal to 1 even when actor and critic ranks differ. Supported
+layer selections are `all`, `input`, `output`, and `input_and_output`. Critic
+layer selection is applied separately to each online Q-network.
 
-Only the actor is adapted. In SAC the critic is the learning signal, and
-arXiv:2602.20220 traces the transfer failure to a critic that has *not* yet
-adapted to the new dynamics. Constraining the critic would work against the
-fine-tuning instead of protecting it.
+The resolved settings are printed at startup, recorded in `run_config.json` and
+the W&B agent configuration, and saved as `mujoco_finetuning` in checkpoints.
 
-Checkpoints from a LoRA run store the actor with the adapter folded back into
-the dense weights, plus a `mujoco_lora` entry recording the settings. The files
-are therefore ordinary SAC checkpoints: the play and evaluation scripts load
-them unchanged, and a later run can fine-tune from them again. Because the saved
-actor has no adapters, `--resume` is rejected together with `--rank`; start a new
-LoRA run from the merged checkpoint with `--checkpoint` instead.
+#### Saving and starting another run
+
+LoRA checkpoints merge adapters into ordinary actor and critic weights, so play
+and evaluation need no adapters. Both online and target critics are saved.
+Start another fine-tuning run with `--checkpoint` and whichever modes you want.
+
+LoRA optimizer resume is not supported because merged files do not retain the
+original adapter factors. `--resume` is rejected if either current network uses
+LoRA, or if the source file was saved from a LoRA run. Dense/frozen runs can
+restore optimizers with `--resume` only when actor/critic freeze modes match.
+To change modes, use `--checkpoint` without `--resume`.
+
+### Loading different pretrained architectures
+
+The MJX trainer now reads hidden sizes, LayerNorm presence, observation
+normalization, actor standard-deviation layout, and categorical support from the
+checkpoint. It no longer assumes a 512-256-128 network with scalar Q heads. This
+supports the 1024-512-256, 199-bin `tacjuisg/model_3700.pt` checkpoint too.
+
+Keep the checkpoint beside its original `params/agent.yaml` (Isaac) or
+`run_config.json` (MJX). These files preserve settings that tensors cannot tell
+us, notably activations and whether categorical labels use two-hot or HL-Gauss.
+If only the `.pt` file is available, the trainer reports its assumptions: Swish
+activations, and two-hot labels for categorical heads. Override them if needed:
+
+```bash
+--actor-activation=swish --critic-activation=swish --critic-loss=hl_gauss --hl-gauss-sigma-ratio=0.75
+```
+
+CLI values override sidecar values. Scalar versus categorical head type must
+match the checkpoint; two-hot versus HL-Gauss can be selected as an ablation.
 
 ### Chaining runs
 
