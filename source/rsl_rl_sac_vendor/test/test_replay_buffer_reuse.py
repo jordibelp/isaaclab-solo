@@ -180,6 +180,47 @@ def test_degenerate_shares_sample_a_single_buffer(fraction):
     assert torch.all(obs["policy"][:, 0] == expected)
 
 
+def test_thin_online_buffer_still_delivers_the_configured_mixture():
+    """A short online buffer must not quietly turn a 50/50 batch into an all-offline one."""
+    online = make_buffer(num_envs=1, capacity_per_env=64)
+    offline = make_buffer(num_envs=1, capacity_per_env=64)
+    for _ in range(4):
+        push(online, 1)
+    for _ in range(64):
+        push(offline, 0)
+    mixture = MixedReplayBuffer(online, offline, initial_offline_fraction=0.5)
+
+    obs, *_ = next(mixture.mini_batch_generator(num_mini_batch=1, mini_batch_size=64))
+
+    values = obs["policy"][:, 0]
+    assert values.numel() == 64
+    assert int((values == 1.0).sum()) == 32
+    assert int((values == 0.0).sum()) == 32
+    # Those 32 online samples come from only 4 distinct transitions, which is worth knowing.
+    assert mixture.online_valid_transitions == 4
+
+
+def test_online_buffer_depth_is_reported_for_logging():
+    mixture = make_mixture()
+    assert mixture.online_valid_transitions == 0
+
+    next(mixture.mini_batch_generator(num_mini_batch=1, mini_batch_size=8))
+
+    assert mixture.online_valid_transitions == mixture.online.num_envs * 4
+
+
+def test_single_buffer_sampling_still_shrinks_a_batch_it_cannot_fill():
+    """Plain SAC keeps the old behavior: only the mixture asks for an exact size."""
+    buffer = make_buffer(capacity_per_env=8)
+    for _ in range(2):
+        push(buffer, 1)
+
+    with pytest.warns(RuntimeWarning, match="exceeds available transitions"):
+        obs, *_ = next(buffer.mini_batch_generator(num_mini_batch=1, mini_batch_size=64))
+
+    assert obs["policy"].shape[0] == 4
+
+
 def test_empty_online_buffer_falls_back_to_retained_data():
     online = make_buffer(capacity_per_env=4)
     offline = make_buffer(capacity_per_env=4)

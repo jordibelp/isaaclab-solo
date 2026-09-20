@@ -314,8 +314,17 @@ class ReplayBuffer:
 
         return env_indices, start_indices
 
-    def _generate_batch(self, valid_indices, mini_batch_size):
-        """Sample a transition mini-batch with optional n-step target aggregation."""
+    def _generate_batch(self, valid_indices, mini_batch_size, exact_size: bool = False):
+        """Sample a transition mini-batch with optional n-step target aggregation.
+
+        Args:
+            valid_indices: Cached output of :meth:`_generate_valid_indices`.
+            mini_batch_size: Number of samples requested.
+            exact_size: Return exactly ``mini_batch_size`` samples even when the buffer holds
+                fewer distinct transitions, which repeats some of them. Callers that mix two
+                buffers need this: shrinking one side instead would silently change the
+                composition of the combined batch.
+        """
         if valid_indices is None:
             raise ValueError("No valid indices available to sample from.")
 
@@ -324,14 +333,17 @@ class ReplayBuffer:
         if total_transitions == 0:
             raise ValueError("Replay buffer does not contain enough data to sample a batch.")
 
-        max_batch_size = total_transitions
-        if max_batch_size < mini_batch_size:
-            warnings.warn(
-                f"Requested mini_batch_size={mini_batch_size} exceeds available transitions ({total_transitions}). "
-                f"Using batch size {max_batch_size} instead.",
-                RuntimeWarning,
-            )
-        batch_size = max(1, min(mini_batch_size, max_batch_size))
+        if exact_size:
+            batch_size = mini_batch_size
+        else:
+            max_batch_size = total_transitions
+            if max_batch_size < mini_batch_size:
+                warnings.warn(
+                    f"Requested mini_batch_size={mini_batch_size} exceeds available transitions "
+                    f"({total_transitions}). Using batch size {max_batch_size} instead.",
+                    RuntimeWarning,
+                )
+            batch_size = max(1, min(mini_batch_size, max_batch_size))
 
         sampled_idxs = torch.randint(total_transitions, size=(batch_size,), device=self.device)
         sampled_envs = env_indices[sampled_idxs]

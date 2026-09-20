@@ -75,6 +75,13 @@ class MixedReplayBuffer:
         self.final_offline_fraction = float(final_offline_fraction)
         self.anneal_iterations = int(anneal_iterations)
         self.offline_fraction = self.initial_offline_fraction
+        self.online_valid_transitions = 0
+        """Distinct online transitions the last mini-batch could draw from.
+
+        Sampling is with replacement, so a batch can be much larger than this. When it is, the
+        online half repeats the same few transitions and carries far less information than its
+        size suggests. Watch it early in a run with few environments.
+        """
 
     def set_iteration(self, iteration: int) -> float:
         """Move the offline share along its linear schedule and return the new value.
@@ -101,26 +108,32 @@ class MixedReplayBuffer:
         return self.online.save_snapshot(path)
 
     def mini_batch_generator(self, num_mini_batch, mini_batch_size, num_epochs=1):
-        """Yield mini-batches whose composition follows the current offline share."""
+        """Yield mini-batches whose composition follows the current offline share.
+
+        Each side is drawn at exactly its requested size, with replacement, so the delivered
+        mixture always matches ``offline_fraction``. Shrinking a side that has little data
+        instead would quietly turn a configured 50/50 batch into a nearly all-offline one.
+        """
         # The valid-index grids are the expensive part of sampling and do not change while a
         # generator is being consumed, so build them once here and reuse them per batch.
         online_indices = self.online._generate_valid_indices()
         offline_indices = self.offline._generate_valid_indices()
+        self.online_valid_transitions = 0 if online_indices is None else int(len(online_indices[0]))
 
         num_offline = int(round(self.offline_fraction * mini_batch_size))
-        if online_indices is None or len(online_indices[0]) == 0:
-            # Nothing online to sample yet (for example an n-step window longer than the data
-            # collected so far). Fall back to the retained data rather than failing.
+        if self.online_valid_transitions == 0:
+            # Nothing online to sample yet, for example an n-step window longer than the data
+            # collected so far. Fall back to the retained data rather than failing.
             num_offline = mini_batch_size
         num_online = mini_batch_size - num_offline
 
         for _ in range(num_epochs):
             for _ in range(num_mini_batch):
                 if num_offline == 0:
-                    yield self.online._generate_batch(online_indices, num_online)
+                    yield self.online._generate_batch(online_indices, num_online, exact_size=True)
                 elif num_online == 0:
-                    yield self.offline._generate_batch(offline_indices, num_offline)
+                    yield self.offline._generate_batch(offline_indices, num_offline, exact_size=True)
                 else:
-                    online_batch = self.online._generate_batch(online_indices, num_online)
-                    offline_batch = self.offline._generate_batch(offline_indices, num_offline)
+                    online_batch = self.online._generate_batch(online_indices, num_online, exact_size=True)
+                    offline_batch = self.offline._generate_batch(offline_indices, num_offline, exact_size=True)
                     yield [torch.cat((a, b), dim=0) for a, b in zip(online_batch, offline_batch)]

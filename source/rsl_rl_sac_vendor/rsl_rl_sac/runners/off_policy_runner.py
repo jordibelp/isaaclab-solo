@@ -124,6 +124,9 @@ class OffPolicyRunner:
 
             if mixed_buffer is not None:
                 loss_dict["Replay/offline_fraction"] = mixed_buffer.offline_fraction
+                # Sampling is with replacement, so the online half of a batch can be far larger
+                # than the data behind it. Surface that instead of letting it hide.
+                loss_dict["Replay/online_valid_transitions"] = mixed_buffer.online_valid_transitions
 
             stop = time.time()
             learn_time = stop - start
