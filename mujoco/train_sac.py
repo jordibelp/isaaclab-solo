@@ -71,8 +71,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--run-name", default="[mujoco] Solo12 SAC")
     p.add_argument("--num_envs", "--num-envs", type=int, default=1)
     p.add_argument(
-        "--max-iterations", type=int, default=1500,
-        help="Episodes, including warm-up (rollouts in explicit fixed-rollout mode).",
+        "--max-episodes",
+        type=int,
+        default=1500,
+        help="Maximum number of episodes, including warm-up.",
     )
     p.add_argument(
         "--rollout-steps",
@@ -151,7 +153,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Update-bearing episodes/rollouts over which the offline share is annealed,"
-            " excluding warm-up. Default: half of --max-iterations."
+            " excluding warm-up. Default: half of --max-episodes."
         ),
     )
     p.add_argument(
@@ -425,7 +427,7 @@ def _episodic_schedule(args, env_cfg: dict) -> dict:
     if args.utd is not None and args.updates_per_iteration is not None:
         raise ValueError("--utd and --updates-per-iteration set the same quantity; pass only one.")
     for name in (
-        "num_envs", "batch_size", "n_steps", "actor_update_every", "max_iterations", "save_interval", "log_interval"
+        "num_envs", "batch_size", "n_steps", "actor_update_every", "max_episodes", "save_interval", "log_interval"
     ):
         if getattr(args, name) < 1:
             raise ValueError(f"--{name.replace('_', '-')} must be at least 1.")
@@ -457,6 +459,7 @@ def _episodic_schedule(args, env_cfg: dict) -> dict:
     updates = args.updates_per_iteration
     return {
         "mode": mode,
+        "max_episodes": args.max_episodes,
         "rollout_steps": rollout_steps,
         "episode_steps": episode_steps,
         "updates_per_iteration": updates if updates is not None else math.floor(utd * transitions),
@@ -510,7 +513,7 @@ def _install_retained_replay(runner, args) -> None:
     initial = 0.5 if args.offline_fraction is None else args.offline_fraction
     final = 0.0 if args.offline_fraction_final is None else args.offline_fraction_final
     anneal = (
-        max(args.max_iterations // 2, 1)
+        max(args.max_episodes // 2, 1)
         if args.offline_anneal_iterations is None
         else args.offline_anneal_iterations
     )
@@ -564,7 +567,7 @@ def _runner_config(args, schedule: dict) -> dict:
         "seed": args.seed,
         "device": args.device,
         "num_steps_per_env": schedule["rollout_steps"],
-        "max_iterations": args.max_iterations,
+        "max_episodes": args.max_episodes,
         "save_interval": args.save_interval,
         "log_interval": args.log_interval,
         "update_schedule": schedule,
@@ -721,7 +724,7 @@ def main() -> None:
     if args.offline_replay_buffer:
         _install_retained_replay(runner, args)
     # Episodic collection starts at reset and stops on the actual done signal.
-    runner.learn(num_learning_iterations=args.max_iterations, init_at_random_ep_len=False)
+    runner.learn(num_learning_iterations=args.max_episodes, init_at_random_ep_len=False)
     env.close()
 
 

@@ -144,12 +144,26 @@ def test_defaults_reproduce_the_paper_go1_episodic_schedule():
     cfg = runner_config(args)
 
     assert args.num_envs == 1
+    assert args.max_episodes == 1500
+    assert cfg["max_episodes"] == 1500
+    assert "max_iterations" not in cfg
     assert cfg["num_steps_per_env"] == 1000
     assert cfg["algorithm"]["num_mini_batches"] == 1250
     assert cfg["algorithm"]["mini_batch_size"] == 512
     assert cfg["update_schedule"]["utd"] == pytest.approx(1.25)
     # Requested warm start: 5000 new transitions, or five full-length episodes.
     assert cfg["update_schedule"]["transitions_before_updates"] == 5000
+
+
+def test_episode_limit_has_an_explicit_cli_name():
+    args = train_sac.build_parser().parse_args(["--max-episodes=1000"])
+    cfg = runner_config(args)
+
+    assert args.max_episodes == 1000
+    assert cfg["max_episodes"] == 1000
+    assert cfg["update_schedule"]["max_episodes"] == 1000
+    with pytest.raises(SystemExit):
+        train_sac.build_parser().parse_args(["--max-iterations=1000"])
 
 
 def test_update_budget_follows_the_episode_length():
@@ -259,7 +273,7 @@ def test_retained_replay_is_installed_with_the_resolved_schedule(tmp_path):
     online = ReplayBuffer(2, 1, obs, (12,), "cpu", buffer_size=64)
     runner = SimpleNamespace(alg=SimpleNamespace(replay_buffer=online))
     args = train_sac.build_parser().parse_args(
-        ["--no-wandb", f"--offline-replay-buffer={snapshot}", "--device=cpu", "--max-iterations=400"]
+        ["--no-wandb", f"--offline-replay-buffer={snapshot}", "--device=cpu", "--max-episodes=400"]
     )
 
     train_sac._install_retained_replay(runner, args)

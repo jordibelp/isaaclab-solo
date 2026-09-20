@@ -269,7 +269,7 @@ requested default, not an exact copy of that setting. Other existing SAC hyperpa
   forward, so short episodes do not silently change the requested UTD.
 - Warm-up counts actual new transitions, even when replay wraps. Offline transitions do not
   count. Early falls may therefore require more than five episodes to reach 5000.
-- `--max-iterations=1000` means 1000 episodes, including warm-up, not 1000 optimizer updates.
+- `--max-episodes=1000` means 1000 episodes, including warm-up.
 - `--num_transitions_before_weight_updates` and `--transitions-before-updates` are aliases.
   Replace the old `--start-training=1` with `--num-transitions-before-weight-updates=5000`.
   The old flag is still accepted, but explicitly converts full rollout lengths to a transition
@@ -282,12 +282,12 @@ requested default, not an exact copy of that setting. Other existing SAC hyperpa
 ### Retained replay and usage
 
 ```bash
-./isaaclab.sh -p mujoco/train_sac.py --task=solo12-two-feet --checkpoint=/absolute/path/to/model.pt --offline-replay-buffer=/absolute/path/to/replay_buffer.pt --offline-fraction=0.5 --offline-fraction-final=0.0 --num-envs=1 --max-iterations=1000 --utd=1.25 --batch-size=512 --num-transitions-before-weight-updates=5000 --actor-update-every=20 --symmetry-mode=augmentation --headless env.episode_length_s=20 env.curriculum_two_feet=False env.initial_position=safe env.tricky_terrain=False env.include_events_randomization=False 'env.forces_applied_to_base_curriculum=[0.0]' 'env.base_push_force_z_range=[0.0,0.0]'
+./isaaclab.sh -p mujoco/train_sac.py --task=solo12-two-feet --checkpoint=/absolute/path/to/model.pt --offline-replay-buffer=/absolute/path/to/replay_buffer.pt --offline-fraction=0.5 --offline-fraction-final=0.0 --num-envs=1 --max-episodes=1000 --utd=1.25 --batch-size=512 --num-transitions-before-weight-updates=5000 --actor-update-every=20 --symmetry-mode=augmentation --headless env.episode_length_s=20 env.curriculum_two_feet=False env.initial_position=safe env.tricky_terrain=False env.include_events_randomization=False 'env.forces_applied_to_base_curriculum=[0.0]' 'env.base_push_force_z_range=[0.0,0.0]'
 ```
 
 The offline share starts at 0.5 at the **first gradient phase**, not at the first warm-up
 episode. `--offline-anneal-iterations` counts episodes/rollouts that actually perform updates.
-Its default remains half of `--max-iterations`; set it explicitly for a faster anneal.
+Its default remains half of `--max-episodes`; set it explicitly for a faster anneal.
 The online replay and retained offline replay stay separate.
 
 To use a fixed update count instead of UTD, pass `--updates-per-iteration=1250` and omit

@@ -64,7 +64,7 @@ The file holds the whole buffer, so it is large: roughly
 Snapshots store raw observations, before the model normalizers run, so the data
 stays valid while the normalizer keeps adapting during fine-tuning.
 
-## Parallel MJX fine-tuning
+## Episodic MJX fine-tuning
 
 Start from an Isaac SAC checkpoint:
 
@@ -75,8 +75,8 @@ Start from an Isaac SAC checkpoint:
   --run-name="[cluster] MuJoCo SAC fine-tune" \
   --symmetry-mode=augmentation \
   --headless \
-  --num_envs=256 \
-  --max-iterations=2000 \
+  --num_envs=1 \
+  --max-episodes=2000 \
   env.curriculum_two_feet=False \
   env.initial_position=safe \
   env.tricky_terrain=False \
@@ -86,11 +86,11 @@ Start from an Isaac SAC checkpoint:
 ```
 
 By default, `--checkpoint` transfers actor and twin critics but starts fresh
-optimizers, entropy state, and iteration count. Add `--resume` for an exact
-optimizer/iteration resume.
+optimizers, entropy state, and training progress. Add `--resume` for an exact
+optimizer/progress resume.
 
-The first MJX iteration compiles the vectorized physics graph and can take a
-few minutes. Later iterations reuse the compiled graph.
+The first MJX episode compiles the physics graph and can take a few minutes.
+Later episodes reuse the compiled graph.
 
 ## Sim-to-online recipe
 
@@ -118,7 +118,7 @@ data only.
 
 `--offline-fraction` defaults to `0.5` and `--offline-fraction-final` to `0.0`,
 matching the paper. `--offline-anneal-iterations` defaults to half of
-`--max-iterations`. The current share is logged as `Replay/offline_fraction`.
+`--max-episodes`. The current share is logged as `Replay/offline_fraction`.
 
 Both halves are drawn at exactly their requested size, with replacement, so the
 batch always has the composition you asked for. Early in a run the online buffer
@@ -128,13 +128,11 @@ the distinct online transitions the last batch could draw from. If it stays far
 below `--batch-size`, the online half carries much less information than its size
 suggests, and you want either more environments or a smaller batch.
 
-This matters most at small `--num_envs`. With one environment and the default
-24-step rollouts, the first update has 48 stored transitions and only 44 usable
-start points, because `--n-steps=5` needs a five-step window that fits inside the
-data. Reaching 4096 distinct online samples then takes about 170 iterations. In
-that regime, lower `--batch-size` and `--updates-per-iteration`, and raise
-`--start-training` so the warm start collects a few thousand transitions before
-the first update.
+This matters most with the default single environment. The default warm start
+collects 5000 new transitions before any gradient update. With full 1000-step
+episodes, the first update phase therefore runs after episode 5. Early falls
+require more episodes to reach the same transition threshold. Use
+`--num-transitions-before-weight-updates` to change it.
 
 The paper writes this mixture with `alpha` as the *online* share, annealed up to
 1. The flags here name the offline share instead, so `--offline-fraction=0.5`
@@ -155,11 +153,10 @@ not-yet-adapted critic from wrecking the policy. The paper's ablation shows that
 
 ### Warm start
 
-`--start-training` (default `1`) is the number of iterations collected with the
-loaded policy before the first gradient update. One iteration already collects
-`num_envs * rollout_steps` transitions, so the default gives 6144 transitions at
-`--num_envs=256`. The paper prefills with about 5000. Use this when no pretraining
-snapshot is available; it approximates retained replay but works less well.
+`--num-transitions-before-weight-updates` defaults to `5000`. It counts new MJX
+transitions, not retained replay data or the saved checkpoint iteration. Learning
+starts at the first episode boundary where the count reaches or exceeds the
+threshold. The warm-up episodes do not create a backlog of gradient updates.
 
 ### Actor/critic fine-tuning ablations
 
@@ -268,7 +265,7 @@ Putting it together:
   --offline-replay-buffer="/absolute/path/to/isaac_sac/replay_buffer.pt" \
   --run-name="[cluster] MuJoCo SAC fine-tune | retained replay" \
   --symmetry-mode=augmentation --headless \
-  --num_envs=256 --max-iterations=1500 \
+  --num_envs=1 --max-episodes=1500 \
   env.curriculum_two_feet=False env.initial_position=safe \
   env.tricky_terrain=False env.include_events_randomization=False \
   "env.forces_applied_to_base_curriculum=[0.0]" "env.base_push_force_z_range=[0.0,0.0]"
