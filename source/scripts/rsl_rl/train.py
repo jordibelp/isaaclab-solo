@@ -565,6 +565,43 @@ torch.backends.cudnn.deterministic = False
 torch.backends.cudnn.benchmark = False
 
 
+def _physical_gpu_id(local_index: int) -> str:
+    """Translate a process-local CUDA index into the GPU number the node uses.
+
+    Slurm usually renumbers ``CUDA_VISIBLE_DEVICES`` from 0 inside the job, so the Slurm
+    variables are the reliable source for the node-level GPU number reported by nvidia-smi.
+    """
+
+    for env_var in ("SLURM_JOB_GPUS", "SLURM_STEP_GPUS", "CUDA_VISIBLE_DEVICES"):
+        visible = [entry.strip() for entry in os.environ.get(env_var, "").split(",") if entry.strip()]
+        if len(visible) > local_index:
+            return visible[local_index]
+    return str(local_index)
+
+
+def _runtime_placement_config() -> dict[str, object]:
+    """Describe where this run executes: process, Slurm job, host and physical GPU.
+
+    Several runs share one cluster node, so these fields are what lets a W&B run be tied back
+    to the exact process and card it used.
+    """
+
+    placement: dict[str, object] = {
+        "pid": os.getpid(),
+        "hostname": os.environ.get("SLURMD_NODENAME") or platform.node(),
+        "slurm_job_id": os.environ.get("SLURM_JOB_ID", ""),
+        "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES", ""),
+    }
+    if torch.cuda.is_available():
+        local_index = torch.cuda.current_device()
+        properties = torch.cuda.get_device_properties(local_index)
+        placement["gpu_id"] = _physical_gpu_id(local_index)
+        placement["gpu_name"] = properties.name
+        # Unique per physical card, so it still identifies the GPU when index numbering is ambiguous.
+        placement["gpu_uuid"] = str(getattr(properties, "uuid", ""))
+    return placement
+
+
 def _patch_rsl_rl_wandb_writer_for_single_stream() -> None:
     """Keep TensorBoard files local while sending a single metric stream to W&B.
 
@@ -2987,6 +3024,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             import wandb
 
             if wandb.run is not None:
+                placement = _runtime_placement_config()
+                wandb.run.config.update(placement, allow_val_change=True)
+                print(f"[INFO]: Run placement logged to W&B: {placement}", flush=True)
                 if input_checkpoint_name is not None:
                     wandb.run.config.update(
                         {
