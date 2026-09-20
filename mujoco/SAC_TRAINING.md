@@ -76,7 +76,7 @@ Start from an Isaac SAC checkpoint:
   --symmetry-mode=augmentation \
   --headless \
   --num_envs=1 \
-  --max-episodes=2000 \
+  --max-env-interactions=50000 \
   env.curriculum_two_feet=False \
   env.initial_position=safe \
   env.tricky_terrain=False \
@@ -117,8 +117,8 @@ data only.
 ```
 
 `--offline-fraction` defaults to `0.5` and `--offline-fraction-final` to `0.0`,
-matching the paper. `--offline-anneal-iterations` defaults to half of
-`--max-episodes`. The current share is logged as `Replay/offline_fraction`.
+matching the paper. `--offline-anneal-iterations` defaults to half of the
+resolved iteration count. The current share is logged as `Replay/offline_fraction`.
 
 Both halves are drawn at exactly their requested size, with replacement, so the
 batch always has the composition you asked for. Early in a run the online buffer
@@ -155,8 +155,8 @@ not-yet-adapted critic from wrecking the policy. The paper's ablation shows that
 
 `--num-transitions-before-weight-updates` defaults to `5000`. It counts new MJX
 transitions, not retained replay data or the saved checkpoint iteration. Learning
-starts at the first episode boundary where the count reaches or exceeds the
-threshold. The warm-up episodes do not create a backlog of gradient updates.
+starts at the first update boundary where the count reaches or exceeds the
+threshold. The warm-up iterations do not create a backlog of gradient updates.
 
 ### Actor/critic fine-tuning ablations
 
@@ -265,7 +265,7 @@ Putting it together:
   --offline-replay-buffer="/absolute/path/to/isaac_sac/replay_buffer.pt" \
   --run-name="[cluster] MuJoCo SAC fine-tune | retained replay" \
   --symmetry-mode=augmentation --headless \
-  --num_envs=1 --max-episodes=1500 \
+  --num_envs=1 --max-env-interactions=50000 \
   env.curriculum_two_feet=False env.initial_position=safe \
   env.tricky_terrain=False env.include_events_randomization=False \
   "env.forces_applied_to_base_curriculum=[0.0]" "env.base_push_force_z_range=[0.0,0.0]"
@@ -276,3 +276,23 @@ Putting it together:
 SAC and PPO checkpoints are intentionally different. `train_sac.py` accepts
 RSL-RL-SAC checkpoints, not PPO/LoRA PPO checkpoints. PPO training remains on
 the existing RSL-RL 3.1.2 path and is not migrated or altered by SAC.
+
+### The action map belongs to the policy, not to the simulator
+
+A SAC actor emits `action = action_range * tanh(latent) + action_bias`, and both
+`action_range` and `action_bias` are stored in the checkpoint. They are part of the
+trained policy. A loaded checkpoint keeps them, and `train_sac.py` only prints them
+at startup.
+
+Do not reset them from the target simulator's joint ranges. Both simulators apply
+`target = SAFE_Q + ACTION_SCALE * action`, so the raw `solo12.xml` ranges are much
+wider than the span any trained policy uses. Replacing the checkpoint values with
+those ranges multiplied Solo12 hip targets by 3.6x and thigh targets by 2.1x, and
+moved the neutral calf pose by 45 degrees. A checkpoint that walked for the whole
+20 s episode then fell on its base after 0.28 s, and the resulting 13-step episodes
+looked like a policy that had learned nothing during pretraining. Runs
+`jordibelp/solo12-two-feet-lora/8bjzi9ap` and `4mtmdake` are examples.
+
+`MjxSolo12VecEnv._action_bounds` still derives bounds from the XML for a run that
+starts without a checkpoint. It measures them from the `SAFE_Q` action centre,
+because `q=0` is not the centre of this action space.

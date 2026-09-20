@@ -1,6 +1,7 @@
 from collections import deque
 import json
 import math
+from pathlib import Path
 import shlex
 from types import SimpleNamespace
 
@@ -103,7 +104,7 @@ def test_sac_logger_counts_individual_environment_steps(tmp_path):
 
 def runner_config(args, episode_length_s=20.0):
     """Resolve the derived update schedule the way main() does, then build the config."""
-    schedule = train_sac._episodic_schedule(args, {"episode_length_s": episode_length_s})
+    schedule = train_sac._interaction_schedule(args, {"episode_length_s": episode_length_s})
     return train_sac._runner_config(args, schedule)
 
 
@@ -153,44 +154,54 @@ def test_synchronous_actor_updates_remain_available():
     assert runner_config(args)["algorithm"]["policy_frequency"] == 1
 
 
-def test_defaults_reproduce_the_paper_go1_episodic_schedule():
-    """arXiv:2602.20220 runs one robot, updates once per episode, and uses K=1250 at UTD 1.25.
+def test_defaults_update_every_1000_interactions_at_the_paper_ratio():
+    """arXiv:2602.20220 uses K=1250 updates at UTD 1.25 over a 1000-step Go1 collection.
 
-    Our MJX episode is 20 s at 50 Hz, so an episode is the same 1000 steps as their Go1.
+    We keep that period but count it in environment interactions, so an early termination
+    can no longer shrink an update phase.
     """
     args = train_sac.build_parser().parse_args(["--no-wandb"])
     cfg = runner_config(args)
 
     assert args.num_envs == 1
-    assert args.max_episodes == 1500
-    assert cfg["max_episodes"] == 1500
-    assert "max_iterations" not in cfg
+    assert args.max_env_interactions == 50_000
+    assert cfg["max_env_interactions"] == 50_000
+    assert cfg["update_schedule"]["max_iterations"] == 50
+    assert "max_episodes" not in cfg
     assert cfg["num_steps_per_env"] == 1000
     assert cfg["algorithm"]["num_mini_batches"] == 1250
     assert cfg["algorithm"]["mini_batch_size"] == 512
     assert cfg["update_schedule"]["utd"] == pytest.approx(1.25)
-    # Requested warm start: 5000 new transitions, or five full-length episodes.
+    # Requested warm start: 5000 new transitions, or five full update periods.
     assert cfg["update_schedule"]["transitions_before_updates"] == 5000
 
 
-def test_episode_limit_has_an_explicit_cli_name():
-    args = train_sac.build_parser().parse_args(["--max-episodes=1000"])
+def test_budget_is_counted_in_interactions_not_episodes():
+    args = train_sac.build_parser().parse_args(["--max-env-interactions=12000", "--rollout-steps=500"])
     cfg = runner_config(args)
 
-    assert args.max_episodes == 1000
-    assert cfg["max_episodes"] == 1000
-    assert cfg["update_schedule"]["max_episodes"] == 1000
-    with pytest.raises(SystemExit):
-        train_sac.build_parser().parse_args(["--max-iterations=1000"])
+    assert cfg["max_env_interactions"] == 12000
+    assert cfg["update_schedule"]["max_iterations"] == 24
+    assert cfg["num_steps_per_env"] == 500
+    assert cfg["algorithm"]["num_mini_batches"] == 625
+    for retired in ("--max-episodes=1000", "--max-iterations=1000"):
+        with pytest.raises(SystemExit):
+            train_sac.build_parser().parse_args([retired])
 
 
-def test_update_budget_follows_the_episode_length():
-    """The schedule is derived, so a shorter episode keeps the ratio instead of the count."""
+def test_a_partial_final_period_still_gets_its_iteration():
+    args = train_sac.build_parser().parse_args(["--max-env-interactions=2500"])
+    assert runner_config(args)["update_schedule"]["max_iterations"] == 3
+
+
+def test_episode_length_does_not_change_the_update_period():
+    """Collection spans episode ends, so a shorter episode no longer rescales the budget."""
     args = train_sac.build_parser().parse_args(["--no-wandb"])
     cfg = runner_config(args, episode_length_s=10.0)
 
-    assert cfg["num_steps_per_env"] == 500
-    assert cfg["algorithm"]["num_mini_batches"] == 625
+    assert cfg["num_steps_per_env"] == 1000
+    assert cfg["algorithm"]["num_mini_batches"] == 1250
+    assert cfg["update_schedule"]["episode_steps"] == 500
     assert cfg["update_schedule"]["transitions_before_updates"] == 5000
 
 
@@ -209,17 +220,16 @@ def test_utd_and_update_count_cannot_both_be_set():
         runner_config(args)
 
 
-def test_parallel_runs_require_explicit_fixed_rollout_mode():
-    args = train_sac.build_parser().parse_args(["--num_envs=256"])
-    with pytest.raises(ValueError, match="requires --num-envs=1"):
-        runner_config(args)
+def test_parallel_runs_split_the_budget_across_environments():
     args = train_sac.build_parser().parse_args(
         ["--num_envs=256", "--rollout-steps=24", "--updates-per-iteration=200"]
     )
     cfg = runner_config(args)
     assert cfg["num_steps_per_env"] == 24
     assert cfg["algorithm"]["num_mini_batches"] == 200
-    assert cfg["update_schedule"]["mode"] == "rollout"
+    assert cfg["update_schedule"]["transitions_per_iteration"] == 6144
+    # 50,000 interactions at 6,144 per iteration.
+    assert cfg["update_schedule"]["max_iterations"] == 9
 
 
 @pytest.mark.parametrize("flag", [
@@ -291,10 +301,10 @@ def test_retained_replay_is_installed_with_the_resolved_schedule(tmp_path):
     online = ReplayBuffer(2, 1, obs, (12,), "cpu", buffer_size=64)
     runner = SimpleNamespace(alg=SimpleNamespace(replay_buffer=online))
     args = train_sac.build_parser().parse_args(
-        ["--no-wandb", f"--offline-replay-buffer={snapshot}", "--device=cpu", "--max-episodes=400"]
+        ["--no-wandb", f"--offline-replay-buffer={snapshot}", "--device=cpu", "--max-env-interactions=400000"]
     )
 
-    train_sac._install_retained_replay(runner, args)
+    train_sac._install_retained_replay(runner, args, {"max_iterations": 400})
 
     mixture = runner.alg.replay_buffer
     assert isinstance(mixture, MixedReplayBuffer)
@@ -319,7 +329,7 @@ def test_retained_replay_rejects_a_snapshot_from_another_observation_layout(tmp_
     )
 
     with pytest.raises(ValueError, match="observation layout"):
-        train_sac._install_retained_replay(runner, args)
+        train_sac._install_retained_replay(runner, args, {"max_iterations": 50})
 
 
 LORA_OBS_DIM = 6
@@ -422,7 +432,12 @@ def test_invalid_lora_arguments_are_rejected(arguments, message):
         train_sac._finetuning_config(args)
 
 
-def test_checkpoint_action_scaling_is_replaced_by_target_environment():
+def test_checkpoint_action_scaling_survives_transfer(capsys):
+    """The tanh action map is part of the trained policy, so the simulator must not reset it.
+
+    Rescaling it to the raw XML joint ranges multiplied Solo12 hip targets by 3.6x and shifted
+    the neutral calf pose by 45 deg, which made a robust checkpoint fall in 0.28 s.
+    """
     import torch
 
     actor = SimpleNamespace(
@@ -436,10 +451,33 @@ def test_checkpoint_action_scaling_is_replaced_by_target_environment():
             action_lower_magnitude=torch.tensor([6.0, 8.0]),
         )
     )
-    train_sac._apply_environment_action_scaling(actor, env)
-    assert actor.action_bias.tolist() == [-2.0, -2.0]
-    assert actor.action_range.tolist() == [4.0, 6.0]
-    assert actor.log_action_range.item() == pytest.approx(__import__("math").log(24.0))
+    train_sac._report_checkpoint_action_scaling(actor, env)
+
+    assert actor.action_bias.tolist() == [0.0, 0.0]
+    assert actor.action_range.tolist() == [1.0, 1.0]
+    assert actor.log_action_range.tolist() == [0.0]
+    assert "kept from the checkpoint" in capsys.readouterr().out
+    assert not hasattr(train_sac, "_apply_environment_action_scaling")
+
+
+def test_action_bounds_are_measured_from_the_safe_q_action_centre():
+    """``target = SAFE_Q + ACTION_SCALE * action``, so q=0 is not the action centre."""
+    import numpy as np
+
+    env = train_sac.MjxSolo12VecEnv.__new__(train_sac.MjxSolo12VecEnv)
+    env.device = __import__("torch").device("cpu")
+    lower, upper = env._action_bounds()
+
+    import mujoco
+
+    model = mujoco.MjModel.from_xml_path(str(Path(train_sac.__file__).with_name("solo12.xml")))
+    for i, name in enumerate(train_sac.mjx_env.JOINT_NAMES):
+        jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, name)
+        low, high = model.jnt_range[jid]
+        centre = float(np.asarray(train_sac.mjx_env.SAFE_Q)[i])
+        scale = train_sac.mjx_env.ACTION_SCALE
+        assert centre - scale * float(lower[i]) == pytest.approx(low, abs=1e-5)
+        assert centre + scale * float(upper[i]) == pytest.approx(high, abs=1e-5)
 
 
 @pytest.mark.parametrize("actor_mode", ["full", "lora", "frozen"])

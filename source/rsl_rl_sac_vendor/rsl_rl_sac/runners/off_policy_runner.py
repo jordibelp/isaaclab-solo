@@ -54,13 +54,11 @@ class OffPolicyRunner:
         self.current_learning_iteration = 0
         self.start_training = self.cfg.get("start_training", 0)
         self.log_interval = self.cfg.get("log_interval", 20)
-        # Opt-in for single-robot fine-tuning; Isaac's fixed-rollout loop is unchanged.
+        # Opt-in for fine-tuning; Isaac's own fixed-rollout schedule is unchanged.
         self.update_schedule = self.cfg.get("update_schedule")
         if self.update_schedule is not None:
             if self.is_distributed or self.alg.num_learning_epochs != 1:
                 raise ValueError("Transition-based updates require one process and one learning epoch.")
-            if self.update_schedule["mode"] == "episode" and self.env.num_envs != 1:
-                raise ValueError("Episode-boundary updates require one environment.")
 
         # Replay-buffer snapshots. A single file is overwritten in place so long runs do not
         # accumulate multi-gigabyte copies.
@@ -101,7 +99,6 @@ class OffPolicyRunner:
         mixed_buffer = self.alg.replay_buffer if isinstance(self.alg.replay_buffer, MixedReplayBuffer) else None
         online_buffer = mixed_buffer.online if mixed_buffer is not None else self.alg.replay_buffer
         schedule = self.update_schedule
-        episodic = schedule is not None and schedule["mode"] == "episode"
         # Replay is not restored by load(), so even optimizer resumes need fresh warm-up.
         online_transitions = 0
         update_credit = 0.0
@@ -124,11 +121,6 @@ class OffPolicyRunner:
                     self.logger.process_env_step(rewards, dones, extras, intrinsic_rewards)
                     obs = next_obs
                     collected_transitions += self.env.num_envs * self.gpu_world_size
-                    if episodic and bool(dones.item()):
-                        break
-
-                if episodic and not bool(dones.item()):
-                    raise RuntimeError("Episode collection reached its step limit without an environment done signal.")
 
                 stop = time.time()
                 collection_time = stop - start
@@ -149,7 +141,7 @@ class OffPolicyRunner:
                         updates = int(update_credit + 1e-9)
                     else:
                         updates = schedule["fixed_updates"]
-                # Short terminated episodes may not yet provide even one n-step window.
+                # A rollout shorter than the n-step horizon provides no complete window yet.
                 if online_buffer.num_transitions < online_buffer.n_steps:
                     updates = 0
                 loss_dict = {}

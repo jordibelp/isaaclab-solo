@@ -71,19 +71,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--run-name", default="[mujoco] Solo12 SAC")
     p.add_argument("--num_envs", "--num-envs", type=int, default=1)
     p.add_argument(
-        "--max-episodes",
+        "--max-env-interactions",
         type=int,
-        default=1500,
-        help="Maximum number of episodes, including warm-up.",
+        default=50_000,
+        help="Total environment interactions to collect, including warm-up.",
     )
     p.add_argument(
         "--rollout-steps",
         type=int,
-        default=None,
+        default=1000,
         help=(
-            "Opt into fixed-rollout mode: collect this many steps before updating, even"
-            " across episode ends. By default, collect one episode (up to 1000 steps,"
-            " set with env.episode_length_s at 50 Hz), stopping on early termination."
+            "Interactions per environment collected before each update phase. Collection"
+            " runs across episode ends, so an early termination no longer shortens the"
+            " update budget."
         ),
     )
     p.add_argument("--save-interval", type=int, default=100)
@@ -261,8 +261,8 @@ class MjxSolo12VecEnv:
         self._state = self._reset_fn(reset_key)
 
     def _action_bounds(self) -> tuple[torch.Tensor, torch.Tensor]:
-        # The MJX XML uses the same Solo12 soft joint ranges and q=0 action centre
-        # as the direct Isaac environment. Read them instead of hard-coding values.
+        # Both simulators drive ``target = SAFE_Q + ACTION_SCALE * action``, so the action
+        # centre is SAFE_Q, not q=0. Measure each joint range from that centre.
         import mujoco
 
         model = mujoco.MjModel.from_xml_path(str(Path(__file__).with_name("solo12.xml")))
@@ -271,10 +271,15 @@ class MjxSolo12VecEnv:
             jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, name)
             ranges.append(model.jnt_range[jid].copy())
         ranges = np.asarray(ranges)
-        lower = torch.as_tensor(-ranges[:, 0] / mjx_env.ACTION_SCALE, dtype=torch.float32, device=self.device)
-        upper = torch.as_tensor(ranges[:, 1] / mjx_env.ACTION_SCALE, dtype=torch.float32, device=self.device)
+        centre = np.asarray(mjx_env.SAFE_Q, dtype=np.float64)
+        lower = torch.as_tensor(
+            (centre - ranges[:, 0]) / mjx_env.ACTION_SCALE, dtype=torch.float32, device=self.device
+        )
+        upper = torch.as_tensor(
+            (ranges[:, 1] - centre) / mjx_env.ACTION_SCALE, dtype=torch.float32, device=self.device
+        )
         if torch.any(lower <= 0) or torch.any(upper <= 0):
-            raise ValueError("MJX SAC requires q=0 to lie inside every joint range.")
+            raise ValueError("MJX SAC requires the SAFE_Q action centre to lie inside every joint range.")
         return lower, upper
 
     def get_observations(self) -> TensorDict:
@@ -330,15 +335,23 @@ def _mjx_action_scaling(env, device: str):
     )
 
 
-def _apply_environment_action_scaling(actor, env) -> None:
-    """Keep target-simulator bounds instead of checkpoint-serialized source bounds."""
+def _report_checkpoint_action_scaling(actor, env) -> None:
+    """Report the transferred action map; a loaded actor keeps its own tanh scaling.
 
+    ``action = action_range * tanh(latent) + action_bias`` is part of the trained policy,
+    not a property of the simulator. Both simulators apply the same
+    ``target = SAFE_Q + ACTION_SCALE * action``, so rescaling a transferred actor to the raw
+    XML joint ranges multiplies every joint target it emits and destroys the policy.
+    """
     upper, lower = _mjx_action_scaling(env, str(actor.action_bias.device))
-    lower_signed = -lower
-    with torch.no_grad():
-        actor.action_bias.copy_(0.5 * (upper + lower_signed))
-        actor.action_range.copy_(0.5 * (upper - lower_signed))
-        actor.log_action_range.copy_(torch.log(actor.action_range).sum())
+    to_degrees = mjx_env.ACTION_SCALE * 180.0 / math.pi
+    span = (2.0 * actor.action_range * to_degrees)
+    allowed = (upper + lower) * to_degrees
+    print(
+        f"[INFO] Action scaling kept from the checkpoint: joint target spans"
+        f" {span.min():.0f}-{span.max():.0f} deg around SAFE_Q"
+        f" (this simulator permits up to {allowed.min():.0f}-{allowed.max():.0f} deg)."
+    )
 
 
 def _apply_finetuning(runner, args) -> None:
@@ -422,28 +435,26 @@ def _finetuning_config(args) -> dict:
     return settings
 
 
-def _episodic_schedule(args, env_cfg: dict) -> dict:
-    """Resolve a single-robot episode schedule or an explicit fixed-rollout ablation."""
+def _interaction_schedule(args, env_cfg: dict) -> dict:
+    """Resolve the interaction budget and the fixed update period.
+
+    The budget is counted in environment interactions rather than episodes, so an early
+    termination costs the run one short episode instead of a whole iteration.
+    """
     if args.utd is not None and args.updates_per_iteration is not None:
         raise ValueError("--utd and --updates-per-iteration set the same quantity; pass only one.")
     for name in (
-        "num_envs", "batch_size", "n_steps", "actor_update_every", "max_episodes", "save_interval", "log_interval"
+        "num_envs", "batch_size", "n_steps", "actor_update_every", "rollout_steps",
+        "max_env_interactions", "save_interval", "log_interval",
     ):
         if getattr(args, name) < 1:
             raise ValueError(f"--{name.replace('_', '-')} must be at least 1.")
     duration = float(env_cfg["episode_length_s"])
     if not math.isfinite(duration) or duration < mjx_env.STEP_DT:
         raise ValueError("env.episode_length_s must be finite and at least one control step (0.02 s).")
-    episode_steps = round(duration / mjx_env.STEP_DT)
-    mode = "episode" if args.rollout_steps is None else "rollout"
-    if mode == "episode" and args.num_envs != 1:
-        raise ValueError("Episode-boundary training requires --num-envs=1; use --rollout-steps for parallel runs.")
-    rollout_steps = episode_steps if mode == "episode" else args.rollout_steps
-    if rollout_steps < 1:
-        raise ValueError("--rollout-steps must be at least 1.")
     if args.replay_buffer_size // args.num_envs < args.n_steps:
         raise ValueError("--replay-buffer-size must hold at least --n-steps per environment.")
-    transitions = args.num_envs * rollout_steps
+    transitions = args.num_envs * args.rollout_steps
     utd = 1.25 if args.utd is None else args.utd
     if not math.isfinite(utd) or utd <= 0:
         raise ValueError("--utd must be finite and positive.")
@@ -458,10 +469,10 @@ def _episodic_schedule(args, env_cfg: dict) -> dict:
         raise ValueError("--num-transitions-before-weight-updates must be non-negative.")
     updates = args.updates_per_iteration
     return {
-        "mode": mode,
-        "max_episodes": args.max_episodes,
-        "rollout_steps": rollout_steps,
-        "episode_steps": episode_steps,
+        "max_env_interactions": args.max_env_interactions,
+        "max_iterations": math.ceil(args.max_env_interactions / transitions),
+        "rollout_steps": args.rollout_steps,
+        "episode_steps": round(duration / mjx_env.STEP_DT),
         "updates_per_iteration": updates if updates is not None else math.floor(utd * transitions),
         "fixed_updates": updates,
         "utd": utd if updates is None else updates / transitions,
@@ -471,23 +482,24 @@ def _episodic_schedule(args, env_cfg: dict) -> dict:
 
 
 def _report_schedule(schedule: dict, args) -> None:
-    """Print the resolved schedule, including the boundary and warm-up semantics."""
+    """Print the resolved budget, update period and warm-up."""
     print(
-        f"[INFO] Update schedule ({schedule['mode']}): {args.num_envs} env(s),"
-        f" up to {schedule['rollout_steps']} steps, then {schedule['updates_per_iteration']:,}"
-        f" updates per full collection (UTD {schedule['utd']:g}, batch {args.batch_size},"
-        f" actor every {args.actor_update_every} critic updates)."
+        f"[INFO] Budget: {schedule['max_env_interactions']:,} env interactions ="
+        f" {schedule['max_iterations']:,} iterations of {args.num_envs} env(s)"
+        f" x {schedule['rollout_steps']:,} steps."
     )
     print(
-        f"[INFO] Warm start: first update at a collection boundary with at least"
-        f" {schedule['transitions_before_updates']:,} new transitions; no warm-up update backlog."
+        f"[INFO] Update every {schedule['transitions_per_iteration']:,} interactions:"
+        f" {schedule['updates_per_iteration']:,} gradient updates (UTD {schedule['utd']:g},"
+        f" batch {args.batch_size}, actor every {args.actor_update_every} critic updates)."
+    )
+    print(
+        f"[INFO] Warm start: first update once {schedule['transitions_before_updates']:,}"
+        f" new transitions exist. Episodes end at most every {schedule['episode_steps']:,}"
+        f" steps and do not interrupt collection."
     )
     if args.start_training is not None:
         print("[WARN] --start-training is deprecated; use --num-transitions-before-weight-updates.")
-    if schedule["mode"] == "rollout":
-        print("[WARN] Explicit fixed-rollout mode: updates need not align with episode ends.")
-    elif schedule["fixed_updates"] is None:
-        print("[INFO] Early terminations shorten collection and scale the update budget; fractional updates carry forward.")
 
 
 def _validate_offline_arguments(args) -> None:
@@ -500,7 +512,7 @@ def _validate_offline_arguments(args) -> None:
         )
 
 
-def _install_retained_replay(runner, args) -> None:
+def _install_retained_replay(runner, args, schedule: dict) -> None:
     """Load pretraining transitions and mix them into every mini-batch.
 
     This is the retained-replay step of arXiv:2602.20220. The recorded transitions anchor the
@@ -513,7 +525,7 @@ def _install_retained_replay(runner, args) -> None:
     initial = 0.5 if args.offline_fraction is None else args.offline_fraction
     final = 0.0 if args.offline_fraction_final is None else args.offline_fraction_final
     anneal = (
-        max(args.max_episodes // 2, 1)
+        max(schedule["max_iterations"] // 2, 1)
         if args.offline_anneal_iterations is None
         else args.offline_anneal_iterations
     )
@@ -567,7 +579,7 @@ def _runner_config(args, schedule: dict) -> dict:
         "seed": args.seed,
         "device": args.device,
         "num_steps_per_env": schedule["rollout_steps"],
-        "max_episodes": args.max_episodes,
+        "max_env_interactions": schedule["max_env_interactions"],
         "save_interval": args.save_interval,
         "log_interval": args.log_interval,
         "update_schedule": schedule,
@@ -670,7 +682,7 @@ def main() -> None:
         raise ValueError("MJX startup property randomization is not implemented.")
     _validate_offline_arguments(args)
     _finetuning_config(args)
-    schedule = _episodic_schedule(args, env_cfg)
+    schedule = _interaction_schedule(args, env_cfg)
     _report_schedule(schedule, args)
 
     torch.manual_seed(args.seed)
@@ -717,14 +729,13 @@ def main() -> None:
                 checkpoint,
                 load_cfg={"actor": True, "critic": True, "optimizer": False, "iteration": False, "rnd": False},
             )
-        _apply_environment_action_scaling(runner.alg.actor, env)
+        _report_checkpoint_action_scaling(runner.alg.actor, env)
         print(f"[INFO] Loaded SAC checkpoint: {checkpoint} (exact resume={args.resume})")
     if not args.resume:
         _apply_finetuning(runner, args)
     if args.offline_replay_buffer:
-        _install_retained_replay(runner, args)
-    # Episodic collection starts at reset and stops on the actual done signal.
-    runner.learn(num_learning_iterations=args.max_episodes, init_at_random_ep_len=False)
+        _install_retained_replay(runner, args, schedule)
+    runner.learn(num_learning_iterations=schedule["max_iterations"], init_at_random_ep_len=False)
     env.close()
 
 

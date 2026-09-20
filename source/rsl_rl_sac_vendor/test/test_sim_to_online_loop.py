@@ -149,8 +149,8 @@ def test_snapshots_are_not_written_unless_asked(tmp_path, monkeypatch):
     assert not (log_dir / "replay_buffer.pt").exists()
 
 
-def episode_schedule(warmup=5000, utd=1.25, mode="episode", fixed_updates=None):
-    return dict(mode=mode, transitions_before_updates=warmup, utd=utd, fixed_updates=fixed_updates)
+def episode_schedule(warmup=5000, utd=1.25, fixed_updates=None):
+    return dict(transitions_before_updates=warmup, utd=utd, fixed_updates=fixed_updates)
 
 
 def record_updates(runner, monkeypatch):
@@ -188,18 +188,24 @@ class EarlyTerminationEnv(StubEnv):
 
 
 @pytest.mark.parametrize("start_iteration", [0, 3700])
-def test_early_terminations_preserve_boundaries_utd_warmup_and_logging(tmp_path, monkeypatch, start_iteration):
+def test_early_terminations_do_not_interrupt_collection(tmp_path, monkeypatch, start_iteration):
+    """A fall resets the environment; it must not end the iteration.
+
+    This env terminates at steps 3, 10, 14 and 18, so every 5-step period contains one.
+    Each period must still collect its full 5 transitions and earn the same update budget.
+    """
     runner = build_runner(
         monkeypatch, tmp_path, env=EarlyTerminationEnv(num_envs=1, episode_length=1000),
-        num_steps_per_env=1000, update_schedule=episode_schedule(warmup=8),
+        num_steps_per_env=5, update_schedule=episode_schedule(warmup=8, utd=1.0),
     )
     runner.current_learning_iteration = start_iteration
     updates = record_updates(runner, monkeypatch)
     counts = []
     monkeypatch.setattr(runner.logger, "log", lambda **kw: counts.append(kw["collection_size_override"]))
     runner.learn(4)
-    assert updates == [(10, 8), (14, 5), (18, 5)]
-    assert counts == [3, 7, 4, 4]
+    # Warm-up covers the first period only; every later period earns 5 updates.
+    assert updates == [(10, 5), (15, 5), (20, 5)]
+    assert counts == [5, 5, 5, 5]
 
 
 def test_small_utd_carries_fractional_updates(tmp_path, monkeypatch):
@@ -258,7 +264,7 @@ def test_short_episodes_wait_for_a_valid_n_step_window(tmp_path, monkeypatch):
 def test_explicit_fixed_rollouts_count_all_parallel_transitions(tmp_path, monkeypatch):
     runner = build_runner(
         monkeypatch, tmp_path, env=StubEnv(num_envs=4, episode_length=3),
-        num_steps_per_env=2, update_schedule=episode_schedule(warmup=10, mode="rollout"),
+        num_steps_per_env=2, update_schedule=episode_schedule(warmup=10),
     )
     updates = record_updates(runner, monkeypatch)
     runner.learn(3)
@@ -268,11 +274,12 @@ def test_explicit_fixed_rollouts_count_all_parallel_transitions(tmp_path, monkey
 def test_fixed_update_budget_and_sparse_logging_with_early_terminations(tmp_path, monkeypatch):
     runner = build_runner(
         monkeypatch, tmp_path, env=EarlyTerminationEnv(num_envs=1, episode_length=1000),
-        num_steps_per_env=1000, log_interval=3, update_schedule=episode_schedule(warmup=0, fixed_updates=2),
+        num_steps_per_env=5, log_interval=3, update_schedule=episode_schedule(warmup=0, fixed_updates=2),
     )
     updates = record_updates(runner, monkeypatch)
     counts = []
     monkeypatch.setattr(runner.logger, "log", lambda **kw: counts.append(kw["collection_size_override"]))
     runner.learn(4)
-    assert updates == [(3, 2), (10, 2), (14, 2), (18, 2)]
-    assert counts == [3, 15]
+    # A fixed budget stays fixed, and each period ends on its step count, not on a fall.
+    assert updates == [(5, 2), (10, 2), (15, 2), (20, 2)]
+    assert counts == [5, 15]
