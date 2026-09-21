@@ -50,6 +50,9 @@ class WandbSummaryWriter(SummaryWriter):
         wandb_config = {"log_dir": log_dir}
         if cfg.get("command"):
             wandb_config["command"] = cfg["command"]
+        # Process/Slurm/GPU provenance goes to the top level so the runs table can sort and filter
+        # on it, matching the fields source/scripts/rsl_rl/train.py logs.
+        wandb_config.update(cfg.get("run_placement", {}))
         wandb.init(
             project=project,
             entity=entity,

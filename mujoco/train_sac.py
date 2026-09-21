@@ -12,6 +12,7 @@ import argparse
 import json
 import math
 import os
+import platform
 import shlex
 import sys
 from datetime import datetime
@@ -612,6 +613,42 @@ def _install_retained_replay(runner, args, schedule: dict) -> None:
     )
 
 
+def _physical_gpu_id(local_index: int) -> str:
+    """Translate a process-local CUDA index into the GPU number the node uses.
+
+    Slurm usually renumbers ``CUDA_VISIBLE_DEVICES`` from 0 inside the job, so the Slurm
+    variables are the reliable source for the node-level GPU number reported by nvidia-smi.
+    """
+    for env_var in ("SLURM_JOB_GPUS", "SLURM_STEP_GPUS", "CUDA_VISIBLE_DEVICES"):
+        visible = [entry.strip() for entry in os.environ.get(env_var, "").split(",") if entry.strip()]
+        if len(visible) > local_index:
+            return visible[local_index]
+    return str(local_index)
+
+
+def _runtime_placement(device: str) -> dict:
+    """Describe where this run executes: process, Slurm job, host and physical GPU.
+
+    Several runs share one cluster node, so these fields are what lets a W&B run be tied back
+    to the exact process and card it used. Same keys as source/scripts/rsl_rl/train.py.
+    """
+    placement = {
+        "pid": os.getpid(),
+        "hostname": os.environ.get("SLURMD_NODENAME") or platform.node(),
+        "slurm_job_id": os.environ.get("SLURM_JOB_ID", ""),
+        "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES", ""),
+    }
+    torch_device = torch.device(device)
+    if torch_device.type == "cuda" and torch.cuda.is_available():
+        local_index = torch.cuda.current_device() if torch_device.index is None else torch_device.index
+        properties = torch.cuda.get_device_properties(local_index)
+        placement["gpu_id"] = _physical_gpu_id(local_index)
+        placement["gpu_name"] = properties.name
+        # Unique per physical card, so it still identifies the GPU when index numbering is ambiguous.
+        placement["gpu_uuid"] = str(getattr(properties, "uuid", ""))
+    return placement
+
+
 def _runner_config(args, schedule: dict) -> dict:
     algorithm = {
         "class_name": "SAC",
@@ -795,6 +832,8 @@ def main() -> None:
     _configure_checkpoint_models(cfg, args)
     command = reproducible_command()
     cfg["command"] = command
+    cfg["run_placement"] = _runtime_placement(args.device)
+    print(f"[INFO] Run placement: {cfg['run_placement']}")
 
     # The released constructor calls SAC._compute_action_scaling explicitly.
     SAC._compute_action_scaling = staticmethod(_mjx_action_scaling)
