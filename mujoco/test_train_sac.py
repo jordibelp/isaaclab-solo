@@ -31,7 +31,7 @@ def test_reproducible_command_preserves_shell_sensitive_arguments():
     assert shlex.split(command) == ["./isaaclab.sh", "-p", "mujoco/train_sac.py", *arguments]
 
 
-def test_sac_wandb_writer_exposes_command_at_top_level(tmp_path, monkeypatch):
+def test_sac_wandb_writer_exposes_filterable_run_config_at_top_level(tmp_path, monkeypatch):
     captured = {}
     monkeypatch.setattr(wandb_utils.wandb, "init", lambda **kwargs: captured.update(kwargs))
     monkeypatch.setattr(wandb_utils.wandb, "Settings", lambda **kwargs: kwargs)
@@ -40,11 +40,23 @@ def test_sac_wandb_writer_exposes_command_at_top_level(tmp_path, monkeypatch):
     writer = wandb_utils.WandbSummaryWriter(
         str(tmp_path),
         flush_secs=1,
-        cfg={"wandb_project": "test", "command": "./isaaclab.sh -p mujoco/train_sac.py --headless"},
+        cfg={
+            "wandb_project": "test",
+            "command": "./isaaclab.sh -p mujoco/train_sac.py --headless",
+            "offline_replay": {
+                "offline_replay_buffer": "/tmp/replay_buffer.pt",
+                "offline_fraction": 0.5,
+                "offline_fraction_final": 0.0,
+                "offline_anneal_iterations": 13,
+            },
+        },
     )
     writer.close()
 
     assert captured["config"]["command"] == "./isaaclab.sh -p mujoco/train_sac.py --headless"
+    assert captured["config"]["offline_anneal_iterations"] == 13
+    assert captured["config"]["offline_fraction"] == pytest.approx(0.5)
+    assert captured["config"]["offline_fraction_final"] == pytest.approx(0.0)
 
 
 def test_sac_wandb_writer_stores_every_environment_config_flavour(monkeypatch):
@@ -334,6 +346,28 @@ def test_mixing_options_require_retained_data():
 def test_no_mixing_options_needs_no_retained_data():
     args = train_sac.build_parser().parse_args(["--no-wandb"])
     assert train_sac._validate_offline_arguments(args) is None
+
+
+def test_runner_config_records_resolved_retained_replay_schedule():
+    args = train_sac.build_parser().parse_args([
+        "--offline-replay-buffer=/tmp/replay_buffer.pt",
+        "--offline-fraction=0.4",
+        "--offline-fraction-final=0.1",
+        "--offline-anneal-iterations=13",
+    ])
+
+    assert runner_config(args)["offline_replay"] == {
+        "offline_replay_buffer": "/tmp/replay_buffer.pt",
+        "offline_fraction": pytest.approx(0.4),
+        "offline_fraction_final": pytest.approx(0.1),
+        "offline_anneal_iterations": 13,
+    }
+
+
+def test_runner_config_records_computed_offline_anneal_default():
+    args = train_sac.build_parser().parse_args(["--offline-replay-buffer=/tmp/replay_buffer.pt"])
+
+    assert runner_config(args)["offline_replay"]["offline_anneal_iterations"] == 25
 
 
 def write_snapshot(path, num_envs=2, obs_dim=4, action_dim=12):

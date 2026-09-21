@@ -53,6 +53,8 @@ class WandbSummaryWriter(SummaryWriter):
         # Process/Slurm/GPU provenance goes to the top level so the runs table can sort and filter
         # on it, matching the fields source/scripts/rsl_rl/train.py logs.
         wandb_config.update(cfg.get("run_placement", {}))
+        # Retained-replay settings are also top-level so W&B filters can compare runs directly.
+        wandb_config.update(cfg.get("offline_replay", {}))
         wandb.init(
             project=project,
             entity=entity,

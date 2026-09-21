@@ -583,6 +583,27 @@ def _validate_offline_arguments(args) -> None:
         )
 
 
+def _resolved_offline_replay_config(args, schedule: dict) -> dict:
+    """Return the effective retained-replay settings recorded for this run."""
+    if args.offline_replay_buffer is None:
+        return {
+            "offline_replay_buffer": None,
+            "offline_fraction": None,
+            "offline_fraction_final": None,
+            "offline_anneal_iterations": None,
+        }
+    return {
+        "offline_replay_buffer": str(Path(args.offline_replay_buffer).expanduser().resolve()),
+        "offline_fraction": 0.5 if args.offline_fraction is None else args.offline_fraction,
+        "offline_fraction_final": 0.0 if args.offline_fraction_final is None else args.offline_fraction_final,
+        "offline_anneal_iterations": (
+            max(schedule["max_iterations"] // 2, 1)
+            if args.offline_anneal_iterations is None
+            else args.offline_anneal_iterations
+        ),
+    }
+
+
 def _install_retained_replay(runner, args, schedule: dict) -> None:
     """Load pretraining transitions and mix them into every mini-batch.
 
@@ -590,16 +611,12 @@ def _install_retained_replay(runner, args, schedule: dict) -> None:
     critic while the policy meets MJX dynamics, and their share is annealed to
     ``--offline-fraction-final`` so the final policy is fitted on MJX data.
     """
-    path = str(Path(args.offline_replay_buffer).expanduser().resolve())
+    offline_config = _resolved_offline_replay_config(args, schedule)
+    path = offline_config["offline_replay_buffer"]
+    initial = offline_config["offline_fraction"]
+    final = offline_config["offline_fraction_final"]
+    anneal = offline_config["offline_anneal_iterations"]
     offline = ReplayBuffer.load_snapshot(path, args.device, n_steps=args.n_steps, gamma=args.gamma)
-
-    initial = 0.5 if args.offline_fraction is None else args.offline_fraction
-    final = 0.0 if args.offline_fraction_final is None else args.offline_fraction_final
-    anneal = (
-        max(schedule["max_iterations"] // 2, 1)
-        if args.offline_anneal_iterations is None
-        else args.offline_anneal_iterations
-    )
 
     runner.alg.replay_buffer = MixedReplayBuffer(
         runner.alg.replay_buffer,
@@ -732,6 +749,7 @@ def _runner_config(args, schedule: dict) -> dict:
         "log_interval": args.log_interval,
         "episode_log_window": args.episode_log_window,
         "update_schedule": schedule,
+        "offline_replay": _resolved_offline_replay_config(args, schedule),
         "save_replay_buffer": args.save_replay_buffer,
         "save_replay_buffer_every": args.save_replay_buffer_every,
         "experiment_name": "solo12_mujoco_sac",
