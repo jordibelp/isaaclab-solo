@@ -309,6 +309,48 @@ The resolved schedule is printed at startup and saved in `run_config.json` under
 cumulative online transitions, updates per iteration, completed update phases, and warm-up state.
 Full, LoRA, and frozen actor/critic choices remain available independently.
 
+### Checkpoint state and task compatibility
+
+Fine-tuning now transfers the checkpoint's entropy temperature and compatible Adam moments
+by default. It keeps the requested fine-tuning learning rates, starts new run counters, and
+collects a fresh online buffer. It also preserves the loaded target-network lag and the
+actor's action scaling. Do not use `--resume` just to obtain this transfer behavior.
+
+- `--reset-optimizers` starts fresh Adam moments for an ablation.
+- `--initial-alpha=0.001` explicitly replaces the checkpoint temperature and starts a fresh
+  temperature optimizer. Without a checkpoint, the default remains 0.001.
+- `--freeze-alpha` holds the transferred or explicitly chosen SAC temperature constant.
+- LoRA factors get fresh optimizers. Dense optimizer moments cannot be mapped onto factors.
+  A full critic can still inherit its optimizer when only the actor uses LoRA.
+- Merged LoRA checkpoints cannot restore their network optimizer state. Their temperature
+  state can still be transferred.
+
+SAC temperature, LoRA gain (`--lora-alpha`), and retained replay fraction are three different
+parameters. Changing one does not set either of the others.
+
+Loading a checkpoint does **not** automatically import its reward, reset, or physics settings.
+Match the source task explicitly before mixing its replay with MJX transitions. In particular,
+the MJX task supports these additional Isaac settings:
+
+- `env.base_collision_terminal_penalty`: penalty on a base-contact termination, without a
+  control-timestep multiplier.
+- `env.soft_qlim_penalty_reward_scale`: coefficient of summed joint-position violations
+  outside the soft limits, also without a control-timestep multiplier.
+- `env.joint_physical_limit_hip`, `thigh`, `calf`, `front_thigh`, and `rear_thigh`, in degrees;
+  use `env.use_asymmetric_thigh_limits=True` for the front/rear thigh settings.
+- `env.joint_soft_limit_hip_delta`, `thigh_delta`, and `calf_delta`, in degrees inward from
+  the physical ranges.
+
+The two new reward coefficients default to zero, and unspecified physical limits keep the
+XML ranges. This preserves existing MJX/PPO tasks. Also set the source tracking width,
+reward coefficients, command interval, and forbidden-contact termination settings explicitly.
+Check the source run's **active curriculum phase**, not only its initial configuration.
+
+W&B now records the full MJX environment configuration, per-term `RewardsPerStep/*`,
+termination frequencies `Terminations/*_per_step`, and fresh completed-episode
+`Episodes/return` and `Episodes/length_steps`. `Train/mean_reward` remains the rolling mean
+of the last 100 completed training episodes. It is not a deterministic policy evaluation.
+
 ## Dependency
 
 Tested in `env_isaaclab` with MuJoCo 3.3.7 and Python 3.11. Install with:

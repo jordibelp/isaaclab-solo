@@ -362,6 +362,99 @@ def build_lora_runner(rank=4, extra_args=(), critic_loss="mse"):
     return runner, args
 
 
+def test_transfer_restores_temperature_and_adam_moments_but_keeps_finetuning_lr():
+    source, _ = build_lora_runner(rank=0)
+    source.alg.update()
+    source.alg.log_alpha.data.fill_(math.log(0.00049))
+    payload = source.alg.save()
+    target, args = build_lora_runner(rank=0)
+    train_sac._apply_finetuning(target, args)
+    train_sac._restore_finetuning_state(target.alg, payload, args)
+    assert target.alg.log_alpha.exp().item() == pytest.approx(0.00049)
+    for name in ("actor", "critic", "alpha"):
+        actual = getattr(target.alg, f"{name}_optimizer").state_dict()
+        expected = payload[f"{name}_optimizer_state_dict"]
+        assert actual["state"].keys() == expected["state"].keys()
+        for key in actual["state"]:
+            torch.testing.assert_close(actual["state"][key]["exp_avg"], expected["state"][key]["exp_avg"])
+        assert actual["param_groups"][0]["lr"] == getattr(args, f"{name}_learning_rate")
+
+
+def test_mjx_accepts_pretraining_failure_and_joint_limit_settings():
+    cfg, unsupported = train_sac.mjx_env.parse_env_overrides([
+        "env.base_collision_terminal_penalty=-10.0", "env.soft_qlim_penalty_reward_scale=-0.5",
+        "env.joint_physical_limit_hip=[-70,70]", "env.joint_soft_limit_hip_delta=20",
+    ])
+    assert not unsupported
+    assert cfg["base_collision_terminal_penalty"] == -10
+
+
+def test_lora_transfer_keeps_fresh_adapter_optimizer_and_restores_dense_critic():
+    source, _ = build_lora_runner(rank=0)
+    source.alg.update()
+    payload = source.alg.save()
+    target, args = build_lora_runner(rank=0, extra_args=["--actor-rank=1"])
+    train_sac._apply_finetuning(target, args)
+    train_sac._restore_finetuning_state(target.alg, payload, args)
+    assert not target.alg.actor_optimizer.state
+    assert target.alg.critic_optimizer.state
+    assert target.alg.alpha_optimizer.state
+    target.alg.update()
+
+
+def test_explicit_temperature_and_fresh_optimizer_ablation():
+    source, _ = build_lora_runner(rank=0)
+    source.alg.update()
+    target, args = build_lora_runner(rank=0, extra_args=["--initial-alpha=0.002", "--reset-optimizers"])
+    target.alg.log_alpha.data.fill_(math.log(args.initial_alpha))
+    train_sac._apply_finetuning(target, args)
+    train_sac._restore_finetuning_state(target.alg, source.alg.save(), args)
+    assert target.alg.log_alpha.exp().item() == pytest.approx(0.002)
+    assert not target.alg.actor_optimizer.state
+    assert not target.alg.critic_optimizer.state
+    assert not target.alg.alpha_optimizer.state
+
+
+def test_fixed_temperature_transfer_uses_checkpoint_value_in_bellman_targets():
+    source, _ = build_lora_runner(rank=0)
+    source.alg.log_alpha.data.fill_(math.log(0.00049))
+    target, args = build_lora_runner(rank=0, extra_args=["--freeze-alpha"])
+    target.alg.auto_alpha = False
+    target.alg.log_alpha.requires_grad_(False)
+    target.alg.alpha_optimizer = None
+    train_sac._apply_finetuning(target, args)
+    train_sac._restore_finetuning_state(target.alg, source.alg.save(), args)
+    target.alg.update()
+    assert target.alg.log_alpha.exp().item() == pytest.approx(0.00049)
+    assert target.alg.save()["alpha"] == pytest.approx(0.00049)
+
+
+def test_mjx_terminal_and_soft_limit_penalties_match_isaac_units():
+    import jax.numpy as jnp
+    cfg = {**train_sac.mjx_env.DEFAULT_ENV, "base_collision_terminal_penalty": -10.,
+           "soft_qlim_penalty_reward_scale": -0.5}
+    terminal, soft = train_sac.mjx_env.additional_reward_terms(
+        jnp.array([[0., 0.], [1.2, -1.3]]), jnp.array([[-1., 1.], [-1., 1.]]),
+        jnp.array([False, True]), cfg,
+    )
+    assert terminal.tolist() == [0., -10.]
+    assert soft.tolist() == pytest.approx([0., -0.25])
+
+
+def test_mjx_physical_limits_apply_before_jax_model_creation():
+    import mujoco
+    import numpy as np
+    cfg = {**train_sac.mjx_env.DEFAULT_ENV, "joint_physical_limit_hip": [-70., 70.],
+           "use_asymmetric_thigh_limits": True, "joint_physical_limit_front_thigh": [-145., 55.],
+           "joint_physical_limit_rear_thigh": [-55., 145.]}
+    info = train_sac.mjx_env.build_model(Path(train_sac.__file__).with_name("solo12.xml"), 9., .2, cfg)
+    for name, limits in (("FL_hip_joint", [-70., 70.]), ("FL_thigh_joint", [-145., 55.]), ("RL_thigh_joint", [-55., 145.])):
+        jid = mujoco.mj_name2id(info.model, mujoco.mjtObj.mjOBJ_JOINT, name)
+        assert jid >= 0
+        np.testing.assert_allclose(info.model.jnt_range[jid], np.deg2rad(limits))
+        np.testing.assert_allclose(info.mjx_model.jnt_range[jid], np.deg2rad(limits), atol=1e-6)
+
+
 def base_weights(actor):
     return {name: p.clone() for name, p in actor.named_parameters() if "lora_" not in name}
 

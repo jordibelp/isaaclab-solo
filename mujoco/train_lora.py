@@ -74,6 +74,8 @@ REWARD_TERM_NAMES = (
     "two_feet_above_height",
     "undesired_contacts",
     "foot_contact",
+    "base_collision_terminal",
+    "soft_qlim_penalty",
 )
 REWARD_SCALE_KEYS = (
     "track_lin_vel_xy_reward_scale",
@@ -84,6 +86,8 @@ REWARD_SCALE_KEYS = (
     "two_feet_above_height_reward_scale",
     "undesired_contact_reward_scale",
     "foot_contact_reward_scale",
+    "base_collision_terminal_penalty",
+    "soft_qlim_penalty_reward_scale",
 )
 
 
@@ -120,6 +124,19 @@ DEFAULT_ENV = {
     "three_or_more_feet_contact_penalty_reward_scale": -100.0,
     "undesired_contact_reward_scale": -2.25,
     "foot_contact_reward_scale": -1.0e-3,
+    # These Isaac rewards are per-event/per-step, NOT multiplied by STEP_DT.
+    # Zero defaults preserve existing PPO/MJX experiments; transfer runs must match their source task.
+    "base_collision_terminal_penalty": 0.0,
+    "soft_qlim_penalty_reward_scale": 0.0,
+    "joint_physical_limit_hip": None,
+    "joint_physical_limit_thigh": None,
+    "joint_physical_limit_calf": None,
+    "joint_physical_limit_front_thigh": None,
+    "joint_physical_limit_rear_thigh": None,
+    "use_asymmetric_thigh_limits": False,
+    "joint_soft_limit_hip_delta": 0.0,
+    "joint_soft_limit_thigh_delta": 0.0,
+    "joint_soft_limit_calf_delta": 0.0,
     "front_back_asymetry": True,
     "rear_feet_in_contact_for_twofeet": False,
     "three_or_more_feet_contact_triggers_reset": False,
@@ -349,11 +366,23 @@ class ModelInfo:
     base_geom_ids: np.ndarray
 
 
-def build_model(xml_path: Path, kp: float, kd: float) -> ModelInfo:
+def build_model(xml_path: Path, kp: float, kd: float, env_cfg: dict | None = None) -> ModelInfo:
     model = mujoco.MjModel.from_xml_path(str(xml_path))
     joint_qpos = np.array([model.jnt_qposadr[mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, n)] for n in JOINT_NAMES])
     joint_dof = np.array([model.jnt_dofadr[mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, n)] for n in JOINT_NAMES])
     actuator_ids = np.array([mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, n) for n in JOINT_NAMES])
+    overrides = env_cfg or {}
+    for name, actuator in zip(JOINT_NAMES, actuator_ids):
+        kind = name.split("_")[1]
+        if kind == "thigh" and overrides.get("use_asymmetric_thigh_limits", False):
+            kind = "front_thigh" if name.startswith(("FL_", "FR_")) else "rear_thigh"
+        limits = overrides.get(f"joint_physical_limit_{kind}")
+        if limits is not None:
+            if len(limits) != 2 or not np.isfinite(limits).all() or not limits[0] < limits[1]:
+                raise ValueError(f"Invalid joint_physical_limit_{kind}: {limits}")
+            joint = model.actuator_trnid[actuator, 0]
+            model.jnt_range[joint] = np.deg2rad(limits)
+            model.jnt_limited[joint] = True
     model.actuator_gainprm[actuator_ids, 0] = kp
     model.actuator_biasprm[actuator_ids, 1] = -kp
     model.actuator_biasprm[actuator_ids, 2] = -kd
@@ -508,6 +537,16 @@ def make_training_functions(info: ModelInfo, cfg: dict, num_envs: int):
     foot_bodies, base_geoms = jnp.asarray(info.foot_body_ids), jnp.asarray(info.base_geom_ids)
     ground_geom = jnp.asarray(info.ground_geom_id)
     safe_q = jnp.asarray(SAFE_Q)
+    joint_ids = info.model.actuator_trnid[info.actuator_ids, 0]
+    soft_limits = info.model.jnt_range[joint_ids].copy()
+    margins = np.array([cfg[f"joint_soft_limit_{name.split('_')[1]}_delta"] for name in JOINT_NAMES])
+    if not np.isfinite(margins).all() or np.any(margins < 0):
+        raise ValueError("Joint soft-limit margins must be finite and nonnegative.")
+    soft_limits[:, 0] += np.deg2rad(margins)
+    soft_limits[:, 1] -= np.deg2rad(margins)
+    if np.any(soft_limits[:, 0] >= soft_limits[:, 1]):
+        raise ValueError("Joint soft-limit margins leave an empty range.")
+    soft_limits = jnp.asarray(soft_limits)
     cpu_data = mujoco.MjData(info.model)
     template = mjx.put_data(info.model, cpu_data)
     forward_batch = jax.vmap(mjx.forward, in_axes=(None, 0))
@@ -665,10 +704,11 @@ def make_training_functions(info: ModelInfo, cfg: dict, num_envs: int):
         undesired_contacts = cfg["undesired_contact_reward_scale"]*jnp.sum(thigh_forces > 0.6,axis=-1)*STEP_DT
         foot_excess = jnp.maximum(foot_forces-10.0,0.0)
         foot_contact = cfg["foot_contact_reward_scale"]*jnp.sum(foot_excess**2,axis=-1)*STEP_DT
-        reward_terms = jnp.stack((track_lin,track_ang,action_rate,dof_torques,forbidden_contact,
-                                  two_feet_height,undesired_contacts,foot_contact),axis=-1)
-        reward = jnp.sum(reward_terms,axis=-1)
         base_hit = force_against_ground(terms,base_membership) > 1.0
+        base_collision, soft_qlim = additional_reward_terms(data.qpos[:, qids], soft_limits, base_hit, cfg)
+        reward_terms = jnp.stack((track_lin,track_ang,action_rate,dof_torques,forbidden_contact,
+                                  two_feet_height,undesired_contacts,foot_contact,base_collision,soft_qlim),axis=-1)
+        reward = jnp.sum(reward_terms,axis=-1)
         timeout = steps>=max_episode_steps
         diverged = ~jnp.isfinite(data.qpos).all(-1)
         terminate_front = cfg["three_or_more_feet_contact_triggers_reset"] & forbidden
@@ -687,6 +727,13 @@ def make_training_functions(info: ModelInfo, cfg: dict, num_envs: int):
         return next_state,reward,reward_terms,done,terminated,termination_causes,final_obs,returns,steps,reward_sums
 
     return jax.jit(reset), jax.jit(env_step)
+
+
+def additional_reward_terms(joint_pos, soft_limits, base_contact, cfg):
+    """Match Isaac's unscaled terminal penalty and summed soft-limit violations."""
+    violation = jnp.maximum(soft_limits[:, 0] - joint_pos, 0) + jnp.maximum(joint_pos - soft_limits[:, 1], 0)
+    return (base_contact * cfg["base_collision_terminal_penalty"],
+            jnp.sum(violation, axis=-1) * cfg["soft_qlim_penalty_reward_scale"])
 
 
 def mirror_lr(obs, action):
@@ -759,7 +806,8 @@ def reward_metrics(reward_terms, completed_reward_sums, completed_episodes: int,
         mean_contribution = float(np.mean(terms[..., index]))
         log[f"RewardsPerStep/{name}"] = mean_contribution
         if scale != 0.0:
-            log[f"PerStepRewardRatio/{name}"] = mean_contribution / (scale * STEP_DT)
+            dt = 1.0 if name in ("base_collision_terminal", "soft_qlim_penalty") else STEP_DT
+            log[f"PerStepRewardRatio/{name}"] = mean_contribution / (scale * dt)
         if completed_episodes:
             # Match IsaacLab's Episode_Reward convention: magnitude per configured maximum
             # episode second. Keep this key for side-by-side RSL/MJX charts.
@@ -905,7 +953,7 @@ def main():
     max_delta_lora_radians=math.radians(args.constrain_delta_lora_degrees)
     key=jax.random.PRNGKey(args.seed);key,kinit,kenv=jax.random.split(key,3)
     params=init_trainable(kinit,actor,critic,args.rank,selected,log_std,args.frozen_base_weights)
-    model_info=build_model(xml,float(cfg["kp"]),float(cfg["kd"]));reset_fn,step_fn=make_training_functions(model_info,cfg,args.num_envs)
+    model_info=build_model(xml,float(cfg["kp"]),float(cfg["kd"]),cfg);reset_fn,step_fn=make_training_functions(model_info,cfg,args.num_envs)
     state=reset_fn(kenv)
     timestamp=datetime.now().strftime("%Y%m%d_%H%M%S")
     config={**vars(args),"command":reproducible_command(),"checkpoint":str(checkpoint),"selected_layer_indices":selected,"lora_scale":scale,"agent":resolved_agent_config(args),"env":cfg,"jax_devices":[str(x) for x in jax.devices()],"paper":"arXiv:2603.17092"}

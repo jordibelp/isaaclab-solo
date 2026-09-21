@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Episodic MJX SAC fine-tuning for Solo12 (arXiv:2602.20220).
+"""Interaction-budgeted MJX SAC fine-tuning for Solo12 (arXiv:2602.20220).
 
 This uses the same RSL-RL-SAC actor, critic, replay buffer, checkpoints, symmetry
 augmentation, timeout handling, and n-step targets as Isaac training. MJX only
@@ -68,6 +68,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--task", default="solo12-two-feet")
     p.add_argument("--checkpoint", default=None, help="RSL-RL-SAC checkpoint to fine-tune/resume from.")
     p.add_argument("--resume", action="store_true", help="Restore optimizers and iteration as well as networks.")
+    p.add_argument("--reset-optimizers", action="store_true",
+                   help="Start fresh Adam moments instead of transferring compatible checkpoint optimizers.")
+    p.add_argument("--freeze-alpha", action="store_true", help="Keep the SAC entropy temperature fixed.")
     p.add_argument("--run-name", default="[mujoco] Solo12 SAC")
     p.add_argument("--num_envs", "--num-envs", type=int, default=1)
     p.add_argument(
@@ -98,7 +101,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=5000,
         help=(
             "Transitions collected with the loaded policy before the first gradient update."
-            " Default 5000 (five full episodes). Updates start at the first episode boundary"
+            " Default 5000. Updates start at the first rollout boundary"
             " at or beyond this count; retained offline data does not count."
         ),
     )
@@ -153,7 +156,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Update-bearing episodes/rollouts over which the offline share is annealed,"
-            " excluding warm-up. Default: half of --max-episodes."
+            " excluding warm-up. Default: half of the interaction-budget iterations."
         ),
     )
     p.add_argument(
@@ -202,7 +205,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--actor-learning-rate", type=float, default=1.0e-5)
     p.add_argument("--critic-learning-rate", type=float, default=2.0e-4)
     p.add_argument("--alpha-learning-rate", type=float, default=2.0e-5)
-    p.add_argument("--initial-alpha", type=float, default=0.001)
+    p.add_argument("--initial-alpha", type=float, default=None,
+                   help="Override checkpoint entropy temperature; without a checkpoint use 0.001.")
     p.add_argument("--target-entropy-scale", type=float, default=0.167)
     p.add_argument("--initial-std", type=float, default=0.15)
     p.add_argument("--actor-activation", default=None, help="Override checkpoint-sidecar activation (fallback: swish).")
@@ -243,29 +247,26 @@ class MjxSolo12VecEnv:
         self.num_envs = int(num_envs)
         self.num_actions = 12
         self.device = torch.device(torch_device)
-        self.cfg = SimpleNamespace(
-            is_finite_horizon=False,
-            episode_length_s=float(env_cfg["episode_length_s"]),
-            action_scale=float(mjx_env.ACTION_SCALE),
-        )
+        self.cfg = SimpleNamespace(**env_cfg, is_finite_horizon=False, action_scale=float(mjx_env.ACTION_SCALE))
         self.max_episode_length = max(1, round(self.cfg.episode_length_s / mjx_env.STEP_DT))
         self.episode_length_buf = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self.unwrapped = self
-        self.action_lower_magnitude, self.action_upper_magnitude = self._action_bounds()
         model_info = mjx_env.build_model(
-            Path(__file__).with_name("solo12.xml"), float(env_cfg["kp"]), float(env_cfg["kd"])
+            Path(__file__).with_name("solo12.xml"), float(env_cfg["kp"]), float(env_cfg["kd"]), env_cfg
         )
+        self.action_lower_magnitude, self.action_upper_magnitude = self._action_bounds(model_info.model)
         self._reset_fn, self._step_fn = mjx_env.make_training_functions(model_info, env_cfg, self.num_envs)
         self._key = jax.random.PRNGKey(seed)
         self._key, reset_key = jax.random.split(self._key)
         self._state = self._reset_fn(reset_key)
 
-    def _action_bounds(self) -> tuple[torch.Tensor, torch.Tensor]:
+    def _action_bounds(self, model=None) -> tuple[torch.Tensor, torch.Tensor]:
         # Both simulators drive ``target = SAFE_Q + ACTION_SCALE * action``, so the action
         # centre is SAFE_Q, not q=0. Measure each joint range from that centre.
         import mujoco
 
-        model = mujoco.MjModel.from_xml_path(str(Path(__file__).with_name("solo12.xml")))
+        if model is None:
+            model = mujoco.MjModel.from_xml_path(str(Path(__file__).with_name("solo12.xml")))
         ranges = []
         for name in mjx_env.JOINT_NAMES:
             jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, name)
@@ -298,12 +299,12 @@ class MjxSolo12VecEnv:
         (
             self._state,
             rewards,
-            _reward_terms,
+            reward_terms,
             dones,
             terminated,
-            _termination_causes,
+            termination_causes,
             final_obs,
-            _episode_returns,
+            episode_returns,
             episode_steps,
             _episode_reward_sums,
         ) = result
@@ -314,12 +315,23 @@ class MjxSolo12VecEnv:
         timeout_t = dones_t & ~terminated_t
         self.episode_length_buf = _torch_from_jax(self._state.episode_steps, self.device).long()
         final_obs_t = _torch_from_jax(final_obs, self.device)
+        terms_t = _torch_from_jax(reward_terms, self.device)
+        log = {f"RewardsPerStep/{name}": terms_t[:, i].mean()
+               for i, name in enumerate(mjx_env.REWARD_TERM_NAMES)}
+        log["RewardsPerStep/total"] = rewards_t.mean()
+        causes_t = _torch_from_jax(termination_causes, self.device).float()
+        for i, name in enumerate(("base_contact", "front_contact", "diverged")):
+            log[f"Terminations/{name}_per_step"] = causes_t[:, i].mean()
+        log["Terminations/timeout_per_step"] = timeout_t.float().mean()
+        if dones_t.any():
+            log["Episodes/return"] = _torch_from_jax(episode_returns, self.device)[dones_t]
+            log["Episodes/length_steps"] = _torch_from_jax(episode_steps, self.device)[dones_t].float()
         extras = {
             "time_outs": timeout_t,
             "time_outs_obs": TensorDict(
                 {"policy": final_obs_t}, batch_size=[self.num_envs], device=self.device
             ),
-            "log": {},
+            "log": log,
         }
         return obs, rewards_t, dones_t, extras
 
@@ -433,6 +445,41 @@ def _finetuning_config(args) -> dict:
             "Start a new run with --checkpoint instead."
         )
     return settings
+
+
+def _restore_finetuning_state(algorithm, payload: dict, args) -> None:
+    """Transfer temperature and compatible Adam moments without resuming run counters.
+
+    Dense optimizers cannot be mapped to LoRA factors. Target networks and normalizers
+    have already been loaded with the model state; leave their checkpoint lag intact.
+    """
+    if args.initial_alpha is None:
+        saved_log_alpha = payload.get("log_alpha")
+        saved_alpha = payload.get("alpha")
+        if saved_log_alpha is not None:
+            algorithm.log_alpha.data.copy_(saved_log_alpha.to(algorithm.device))
+        elif saved_alpha is not None:
+            algorithm.log_alpha.data.fill_(math.log(saved_alpha))
+        algorithm.alpha = algorithm.log_alpha.exp().item()
+    restored = []
+    if not args.reset_optimizers:
+        settings = _finetuning_config(args)
+        for name in ("actor", "critic", "alpha"):
+            optimizer = getattr(algorithm, f"{name}_optimizer")
+            state = payload.get(f"{name}_optimizer_state_dict")
+            if optimizer is None or state is None:
+                continue
+            if name == "alpha":
+                if args.initial_alpha is not None:
+                    continue
+            elif settings[name]["mode"] != "full" or "mujoco_lora" in payload:
+                continue
+            optimizer.load_state_dict(state)
+            # Adam state includes the OLD LR. Keep the requested fine-tuning LR.
+            for group in optimizer.param_groups:
+                group["lr"] = getattr(args, f"{name}_learning_rate")
+            restored.append(name)
+    print(f"[INFO] Transfer: alpha={algorithm.log_alpha.exp().item():.8g}; restored Adam moments: {restored}.")
 
 
 def _interaction_schedule(args, env_cfg: dict) -> dict:
@@ -557,8 +604,8 @@ def _runner_config(args, schedule: dict) -> dict:
         "critic_optimizer": "adam",
         "gamma": args.gamma,
         "tau": args.tau,
-        "alpha": args.initial_alpha,
-        "auto_alpha": True,
+        "alpha": 0.001 if args.initial_alpha is None else args.initial_alpha,
+        "auto_alpha": not args.freeze_alpha,
         "target_entropy_scale": args.target_entropy_scale,
         "max_grad_norm": 1.0,
         "policy_frequency": args.actor_update_every,
@@ -617,6 +664,11 @@ def _configure_checkpoint_models(cfg, args) -> None:
     if args.checkpoint:
         path = Path(args.checkpoint).expanduser().resolve()
         payload = torch.load(path, map_location="cpu", weights_only=False)
+        if args.initial_alpha is None:
+            if payload.get("log_alpha") is not None:
+                cfg["algorithm"]["alpha"] = payload["log_alpha"].exp().item()
+            elif payload.get("alpha") is not None:
+                cfg["algorithm"]["alpha"] = payload["alpha"]
         saved_cfg = {}
         if (path.parent / "run_config.json").is_file():
             saved_cfg = json.loads((path.parent / "run_config.json").read_text())["agent"]
@@ -681,6 +733,10 @@ def main() -> None:
     if env_cfg["include_events_randomization"]:
         raise ValueError("MJX startup property randomization is not implemented.")
     _validate_offline_arguments(args)
+    if args.initial_alpha is not None and (not math.isfinite(args.initial_alpha) or args.initial_alpha <= 0):
+        raise ValueError("--initial-alpha must be finite and positive.")
+    if args.resume and (args.reset_optimizers or args.initial_alpha is not None or args.freeze_alpha):
+        raise ValueError("Temperature/optimizer overrides require fine-tuning without --resume.")
     _finetuning_config(args)
     schedule = _interaction_schedule(args, env_cfg)
     _report_schedule(schedule, args)
@@ -723,8 +779,8 @@ def main() -> None:
         if args.resume:
             runner.load(checkpoint)
         else:
-            # Sim-to-MJX fine-tuning deliberately starts fresh optimizers, alpha,
-            # iteration count, and replay data while transferring actor and critics.
+            # Load networks first, then adapt/freeze layers and restore compatible
+            # optimizer state. Fine-tuning starts new iteration and interaction counters.
             runner.load(
                 checkpoint,
                 load_cfg={"actor": True, "critic": True, "optimizer": False, "iteration": False, "rnd": False},
@@ -733,6 +789,10 @@ def main() -> None:
         print(f"[INFO] Loaded SAC checkpoint: {checkpoint} (exact resume={args.resume})")
     if not args.resume:
         _apply_finetuning(runner, args)
+        if args.checkpoint:
+            _restore_finetuning_state(
+                runner.alg, torch.load(checkpoint, map_location=args.device, weights_only=False), args
+            )
     if args.offline_replay_buffer:
         _install_retained_replay(runner, args, schedule)
     runner.learn(num_learning_iterations=schedule["max_iterations"], init_at_random_ep_len=False)
