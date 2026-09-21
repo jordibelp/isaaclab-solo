@@ -14,6 +14,7 @@ import math
 import os
 import platform
 import shlex
+import statistics
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -613,6 +614,47 @@ def _install_retained_replay(runner, args, schedule: dict) -> None:
     )
 
 
+def _install_best_weights_hook(runner, source_checkpoint: str | None) -> None:
+    """Overwrite ``best_weights.pt`` whenever the rolling episode return improves.
+
+    ``Train/mean_reward`` is the full return averaged over ``episode_log_window``
+    completed episodes. It is less noisy than the current log batch's
+    ``Episodes/return`` and, unlike a per-step reward, includes survival duration.
+    """
+    original_log = runner.logger.log
+    best_mean_reward = float("-inf")
+
+    def _log_with_best_weights(*log_args, **log_kwargs):
+        nonlocal best_mean_reward
+        original_log(*log_args, **log_kwargs)
+
+        logger = runner.logger
+        if logger.log_dir is None or logger.writer is None or not logger.rewbuffer:
+            return
+        mean_reward = float(statistics.mean(logger.rewbuffer))
+        if not math.isfinite(mean_reward) or mean_reward <= best_mean_reward:
+            return
+        best_mean_reward = mean_reward
+        iteration = log_kwargs.get("it", log_args[0] if log_args else None)
+        infos = {
+            "best_model_metric": "Train/mean_reward",
+            "best_model_value": mean_reward,
+            "best_model_iteration": iteration,
+            "best_model_total_timesteps": logger.tot_timesteps,
+            "best_model_total_time": logger.tot_time,
+            "source_checkpoint": source_checkpoint,
+        }
+        path = os.path.join(logger.log_dir, "best_weights.pt")
+        runner.save(path, infos=infos)
+        print(
+            f"[INFO] Saved new best weights to {path} "
+            f"(iteration={iteration}, Train/mean_reward={mean_reward:.4f}).",
+            flush=True,
+        )
+
+    runner.logger.log = _log_with_best_weights
+
+
 def _physical_gpu_id(local_index: int) -> str:
     """Translate a process-local CUDA index into the GPU number the node uses.
 
@@ -882,6 +924,12 @@ def main() -> None:
             )
     if args.offline_replay_buffer:
         _install_retained_replay(runner, args, schedule)
+    source_checkpoint = str(Path(args.checkpoint).expanduser().resolve()) if args.checkpoint else None
+    _install_best_weights_hook(runner, source_checkpoint)
+    print(
+        f"[INFO] Best-weight tracking: {log_dir / 'best_weights.pt'} from Train/mean_reward "
+        f"(last {args.episode_log_window} completed episodes)."
+    )
     runner.learn(num_learning_iterations=schedule["max_iterations"], init_at_random_ep_len=False)
     env.close()
 

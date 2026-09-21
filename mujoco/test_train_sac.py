@@ -121,6 +121,65 @@ def test_runner_config_uses_paper_sac_defaults():
     assert cfg["obs_groups"] == {"actor": ["policy"], "critic": ["policy"]}
 
 
+def test_best_weights_follow_rolling_mean_episode_return(tmp_path):
+    calls = []
+    saves = []
+    logger = SimpleNamespace(
+        log=lambda **kwargs: calls.append(kwargs),
+        log_dir=str(tmp_path),
+        writer=object(),
+        rewbuffer=deque(),
+        tot_timesteps=0,
+        tot_time=0.0,
+    )
+
+    def save(path, infos=None):
+        Path(path).write_text("checkpoint")
+        saves.append((Path(path).name, infos))
+
+    runner = SimpleNamespace(logger=logger, save=save)
+    train_sac._install_best_weights_hook(runner, "/source/model_3700.pt")
+
+    for iteration, rewards in [(0, [10.0]), (1, [10.0, 20.0]), (2, [5.0, 6.0])]:
+        logger.rewbuffer.clear()
+        logger.rewbuffer.extend(rewards)
+        logger.tot_timesteps += 1000
+        runner.logger.log(it=iteration)
+
+    assert len(calls) == 3
+    assert [name for name, _ in saves] == ["best_weights.pt", "best_weights.pt"]
+    assert (tmp_path / "best_weights.pt").exists()
+    assert saves[-1][1] == {
+        "best_model_metric": "Train/mean_reward",
+        "best_model_value": 15.0,
+        "best_model_iteration": 1,
+        "best_model_total_timesteps": 2000,
+        "best_model_total_time": 0.0,
+        "source_checkpoint": "/source/model_3700.pt",
+    }
+
+
+def test_best_weights_wait_for_a_finished_episode_and_active_writer(tmp_path):
+    saves = []
+    logger = SimpleNamespace(
+        log=lambda **kwargs: None,
+        log_dir=str(tmp_path),
+        writer=object(),
+        rewbuffer=deque(),
+        tot_timesteps=0,
+        tot_time=0.0,
+    )
+    runner = SimpleNamespace(logger=logger, save=lambda *args, **kwargs: saves.append((args, kwargs)))
+    train_sac._install_best_weights_hook(runner, None)
+
+    runner.logger.log(it=0)
+    logger.rewbuffer.append(10.0)
+    logger.writer = None
+    runner.logger.log(it=1)
+
+    assert saves == []
+
+
 def test_no_symmetry_removes_symmetry_configuration():
     args = train_sac.build_parser().parse_args(["--no-wandb", "--symmetry-mode=none"])
     assert runner_config(args)["algorithm"]["symmetry_cfg"] is None
