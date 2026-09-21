@@ -71,6 +71,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--reset-optimizers", action="store_true",
                    help="Start fresh Adam moments instead of transferring compatible checkpoint optimizers.")
     p.add_argument("--freeze-alpha", action="store_true", help="Keep the SAC entropy temperature fixed.")
+    p.add_argument(
+        "--source-env-cfg",
+        default=None,
+        metavar="PATH|auto",
+        help="Copy the environment settings of the Isaac run that produced the checkpoint, from its"
+        " params/env.yaml. 'auto' reads <checkpoint dir>/params/env.yaml. Explicit env.* overrides still win."
+        " Always attach the value with '=', because a detached value would swallow the next env.* override.",
+    )
+    p.add_argument(
+        "--curriculum-stage",
+        type=int,
+        default=None,
+        help="Curriculum stage to copy with --source-env-cfg (default: the last stage).",
+    )
     p.add_argument("--run-name", default="[mujoco] Solo12 SAC")
     p.add_argument("--num_envs", "--num-envs", type=int, default=1)
     p.add_argument(
@@ -719,11 +733,36 @@ def _configure_checkpoint_models(cfg, args) -> None:
         cfg["critic"]["hl_gauss_sigma_ratio"] = args.hl_gauss_sigma_ratio
 
 
+def _source_env_cfg(args) -> dict | None:
+    """Start from the Isaac run that trained the checkpoint instead of the MJX defaults."""
+    if args.source_env_cfg is None:
+        if args.curriculum_stage is not None:
+            raise ValueError("--curriculum-stage only applies together with --source-env-cfg.")
+        return None
+    if args.source_env_cfg == "auto":
+        if args.checkpoint is None:
+            raise ValueError("--source-env-cfg needs a path when there is no --checkpoint to locate it from.")
+        path = Path(args.checkpoint).expanduser().resolve().parent / "params" / "env.yaml"
+    else:
+        path = Path(args.source_env_cfg).expanduser().resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f"No Isaac environment config at {path}.")
+    overrides, notes = mjx_env.source_env_overrides(path, args.curriculum_stage)
+    stage = "last" if args.curriculum_stage is None else args.curriculum_stage
+    print(f"[INFO] Environment settings copied from {path} at curriculum stage {stage}:")
+    for name, value in sorted(overrides.items()):
+        marker = " " if value == mjx_env.DEFAULT_ENV[name] else "*"
+        print(f"  {marker} {name} = {value!r}")
+    for note in notes:
+        print(f"[WARN] {note}")
+    return {**mjx_env.DEFAULT_ENV, **overrides}
+
+
 def main() -> None:
     args, unknown = build_parser().parse_known_args()
     if args.task != "solo12-two-feet":
         raise ValueError("mujoco/train_sac.py currently supports --task=solo12-two-feet only.")
-    env_cfg, unsupported = mjx_env.parse_env_overrides(unknown)
+    env_cfg, unsupported = mjx_env.parse_env_overrides(unknown, _source_env_cfg(args))
     if unsupported:
         raise ValueError("Unsupported arguments/overrides: " + " ".join(unsupported))
     if any(abs(x) > 1e-9 for x in env_cfg["forces_applied_to_base_curriculum"]):

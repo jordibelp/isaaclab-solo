@@ -342,9 +342,29 @@ the MJX task supports these additional Isaac settings:
   the physical ranges.
 
 The two new reward coefficients default to zero, and unspecified physical limits keep the
-XML ranges. This preserves existing MJX/PPO tasks. Also set the source tracking width,
-reward coefficients, command interval, and forbidden-contact termination settings explicitly.
-Check the source run's **active curriculum phase**, not only its initial configuration.
+XML ranges. This preserves existing MJX/PPO tasks.
+
+### Copying the source task automatically
+
+Writing every setting by hand is easy to get wrong, because Isaac dumps the configuration it
+*started* with, while a curriculum run ends on different reward scales, command ranges, and
+delays. `--source-env-cfg` reads the source run's `params/env.yaml` and resolves every
+`<name>_curriculum` list at one stage, so one flag replaces the whole `env.*` list:
+
+```bash
+./isaaclab.sh -p mujoco/train_sac.py --task=solo12-two-feet --checkpoint=/path/to/run/model_3700.pt --source-env-cfg=auto --headless --num-envs=1
+```
+
+- `--source-env-cfg=auto` reads `<checkpoint dir>/params/env.yaml`; pass a path instead to point
+  somewhere else. Always attach the value with `=`; a detached value would swallow the next
+  `env.*` token.
+- `--curriculum-stage=N` picks an earlier stage. The default is the last stage, which is where a
+  finished curriculum run ends.
+- Explicit `env.*` overrides on the command line still win over the copied values.
+- The startup banner lists every copied setting and marks with `*` the ones that differ from the
+  MJX defaults, so the match is visible in the log.
+- Base pushes, startup property randomization, and tricky terrain have no MJX implementation.
+  They are never copied; the banner warns when the source stage used them.
 
 W&B now records the full MJX environment configuration, per-term `RewardsPerStep/*`,
 termination frequencies `Terminations/*_per_step`, and fresh completed-episode

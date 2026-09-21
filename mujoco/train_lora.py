@@ -168,12 +168,14 @@ def _boolean(raw: str | bool) -> bool:
     raise argparse.ArgumentTypeError(f"expected a boolean, got {raw!r}")
 
 
-def parse_env_overrides(tokens: list[str]) -> tuple[dict, list[str]]:
-    cfg = copy.deepcopy(DEFAULT_ENV)
+def parse_env_overrides(tokens: list[str], base: dict | None = None) -> tuple[dict, list[str]]:
+    cfg = copy.deepcopy(DEFAULT_ENV if base is None else base)
     unsupported = []
+    # ``sac_q_offset_init_actions`` only re-centres a freshly built actor mean head, and every
+    # MJX entry point starts from a trained checkpoint, so it cannot change this simulator.
     aliases = {"max_velx_range_curriculum": None, "curriculum_two_feet": None, "initial_position": None,
                "tricky_terrain": None, "track_base_height_reward_scale": None, "enabled_self_collisions": None,
-               "base_filtered_pairs": None, "extra_mass_on_front_feet": None}
+               "base_filtered_pairs": None, "extra_mass_on_front_feet": None, "sac_q_offset_init_actions": None}
     for token in tokens:
         key, sep, raw = token.partition("=")
         if not sep or not key.startswith("env."):
@@ -191,6 +193,71 @@ def parse_env_overrides(tokens: list[str]) -> tuple[dict, list[str]]:
         else:
             unsupported.append(token)
     return cfg, unsupported
+
+
+# Isaac names that differ from the MJX setting they feed.
+SOURCE_ENV_RENAMES = {"joint_pos_noise_range": "flexed_initial_joint_pos_noise_range"}
+# Isaac settings this simulator has no implementation for; ``train_sac.py`` rejects them outright,
+# so they are reported instead of copied.
+SOURCE_ENV_UNAVAILABLE = ("include_events_randomization", "forces_applied_to_base_curriculum",
+                          "base_push_force_z_range")
+
+
+def _read_isaac_env_yaml(path: Path) -> dict:
+    import yaml
+
+    class Loader(yaml.SafeLoader):
+        pass
+
+    # Isaac dumps live objects (asset spawners, index slices) next to the plain settings.
+    # Keep tuples, drop every other Python tag rather than importing and running its constructor.
+    Loader.add_constructor("tag:yaml.org,2002:python/tuple",
+                           lambda loader, node: tuple(loader.construct_sequence(node)))
+    Loader.add_multi_constructor("tag:yaml.org,2002:python/", lambda loader, suffix, node: None)
+    return yaml.load(Path(path).read_text(), Loader=Loader)
+
+
+def source_env_overrides(path: Path, stage: int | None = None) -> tuple[dict, list[str]]:
+    """Read one Isaac run's ``params/env.yaml`` as MJX settings at a curriculum stage.
+
+    Isaac dumps the configuration it started with, so every setting the curriculum later
+    changed lives in a ``<name>_curriculum`` list instead. ``stage`` selects one entry of
+    those lists; the default is the last stage, which is what a finished run ends on.
+    """
+    raw = _read_isaac_env_yaml(path)
+
+    def at_stage(values):
+        values = list(values)
+        return values[len(values) - 1 if stage is None else min(stage, len(values) - 1)]
+
+    overrides, notes = {}, []
+    for name, default in DEFAULT_ENV.items():
+        if name in SOURCE_ENV_UNAVAILABLE:
+            continue
+        source = SOURCE_ENV_RENAMES.get(name, name)
+        if f"{source}_curriculum" in raw:
+            value = at_stage(raw[f"{source}_curriculum"])
+        elif source in raw:
+            value = raw[source]
+        else:
+            notes.append(f"{name}: missing from the source config, kept at the MJX default {default!r}")
+            continue
+        overrides[name] = tuple(value) if isinstance(default, tuple) else value
+    if "max_velx_range_curriculum" in raw:
+        speed = float(at_stage(raw["max_velx_range_curriculum"]))
+        overrides["command_lin_vel_x_range"] = (-speed, speed)
+
+    unavailable = {
+        "base pushes": at_stage(raw.get("forces_applied_to_base_curriculum_by_phase", [0.0])),
+        "vertical base pushes": tuple(at_stage(raw.get("base_push_force_z_range_curriculum", [(0.0, 0.0)]))),
+        "startup property randomization": at_stage(raw.get("include_events_randomization_curriculum", [False])),
+        "tricky terrain": at_stage(raw.get("tricky_terrain_curriculum", [False])),
+    }
+    active = [f"{label}={value}" for label, value in unavailable.items() if any(np.atleast_1d(value))]
+    if active:
+        notes.append("this stage of the source task used settings MJX cannot reproduce, left off: "
+                     + ", ".join(active))
+    return overrides, notes
 
 
 def build_parser() -> argparse.ArgumentParser:

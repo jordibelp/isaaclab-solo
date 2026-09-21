@@ -9,6 +9,7 @@ import pytest
 import torch
 from tensordict import TensorDict
 
+import train_lora
 import train_sac
 from rsl_rl_sac.algorithms import SAC
 from rsl_rl_sac.models import SACActorModel, SACCriticModel
@@ -764,3 +765,101 @@ def test_freezing_preserves_checkpoint_target_lag():
     runner.alg.update()
     for k, v in runner.alg.critic.state_dict().items():
         assert torch.equal(v, before[k])
+
+
+def _isaac_env_yaml(tmp_path, **extra):
+    import yaml
+
+    config = {
+        "episode_length_s": 10,
+        "command_resampling_time_s": 5,
+        "tracking_std": 0.223,
+        "flexed_initial_joint_pos_noise_range": [-0.07, 0.07],
+        "joint_physical_limit_hip": [-70, 70],
+        "use_asymmetric_thigh_limits": True,
+        "joint_soft_limit_calf_delta": 24,
+        "max_velx_range_curriculum": [0.4, 0.6],
+        "track_lin_vel_xy_reward_scale_curriculum": [1.2, 1.8, 1.5],
+        "two_feet_above_height_reward_scale_curriculum": [2.0, 1.2, 1.5],
+        "forces_applied_to_base_curriculum_by_phase": [0, 0, 8],
+        "include_events_randomization_curriculum": [False, False, True],
+        **extra,
+    }
+    path = tmp_path / "params" / "env.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump(config))
+    return path
+
+
+def test_source_env_cfg_copies_the_last_curriculum_stage(tmp_path):
+    path = _isaac_env_yaml(tmp_path)
+    args = train_sac.build_parser().parse_args([f"--source-env-cfg={path}"])
+    cfg, unsupported = train_lora.parse_env_overrides([], train_sac._source_env_cfg(args))
+
+    assert unsupported == []
+    # Settings the curriculum moved come from the final stage, not from the dumped startup value.
+    assert cfg["track_lin_vel_xy_reward_scale"] == 1.5
+    assert cfg["two_feet_above_height_reward_scale"] == 1.5
+    assert cfg["command_lin_vel_x_range"] == (-0.6, 0.6)
+    # Static settings come straight across, including the renamed reset noise.
+    assert cfg["episode_length_s"] == 10
+    assert cfg["command_resampling_time_s"] == 5
+    assert cfg["joint_physical_limit_hip"] == [-70, 70]
+    assert cfg["joint_soft_limit_calf_delta"] == 24
+    assert cfg["joint_pos_noise_range"] == (-0.07, 0.07)
+    # Pushes and startup randomization have no MJX implementation and must stay off.
+    assert cfg["forces_applied_to_base_curriculum"] == (0.0,)
+    assert cfg["include_events_randomization"] is False
+
+
+def test_source_env_cfg_can_select_an_earlier_stage(tmp_path):
+    path = _isaac_env_yaml(tmp_path)
+    args = train_sac.build_parser().parse_args([f"--source-env-cfg={path}", "--curriculum-stage=1"])
+    cfg, _ = train_lora.parse_env_overrides([], train_sac._source_env_cfg(args))
+
+    assert cfg["track_lin_vel_xy_reward_scale"] == 1.8
+    assert cfg["two_feet_above_height_reward_scale"] == 1.2
+    assert cfg["command_lin_vel_x_range"] == (-0.6, 0.6)
+
+
+def test_explicit_overrides_win_over_the_source_config(tmp_path):
+    path = _isaac_env_yaml(tmp_path)
+    args = train_sac.build_parser().parse_args([f"--source-env-cfg={path}"])
+    cfg, _ = train_lora.parse_env_overrides(
+        ["env.tracking_std=0.4"], train_sac._source_env_cfg(args)
+    )
+
+    assert cfg["tracking_std"] == 0.4
+    assert cfg["episode_length_s"] == 10
+
+
+def test_source_env_cfg_is_found_next_to_the_checkpoint(tmp_path):
+    _isaac_env_yaml(tmp_path)
+    checkpoint = tmp_path / "model_3700.pt"
+    checkpoint.write_bytes(b"")
+    args = train_sac.build_parser().parse_args(["--source-env-cfg=auto", f"--checkpoint={checkpoint}"])
+
+    assert train_sac._source_env_cfg(args)["episode_length_s"] == 10
+
+
+def test_source_env_cfg_never_swallows_a_following_override(tmp_path):
+    path = _isaac_env_yaml(tmp_path)
+    args, unknown = train_sac.build_parser().parse_known_args(
+        [f"--source-env-cfg={path}", "env.tracking_std=0.4"]
+    )
+
+    assert unknown == ["env.tracking_std=0.4"]
+    assert args.source_env_cfg == str(path)
+
+
+def test_isaac_only_settings_are_accepted_and_ignored():
+    cfg, unsupported = train_lora.parse_env_overrides(["env.sac_q_offset_init_actions=False"])
+
+    assert unsupported == []
+    assert cfg == train_lora.DEFAULT_ENV
+
+
+def test_curriculum_stage_needs_a_source_config():
+    args = train_sac.build_parser().parse_args(["--curriculum-stage=2"])
+    with pytest.raises(ValueError, match="--source-env-cfg"):
+        train_sac._source_env_cfg(args)
