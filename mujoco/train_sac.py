@@ -105,6 +105,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--save-interval", type=int, default=100)
     p.add_argument("--log-interval", type=int, default=1)
+    p.add_argument(
+        "--episode-log-window",
+        "--episode_log_window",
+        type=int,
+        default=5,
+        help="Episodes averaged by Train/mean_reward and Train/mean_episode_length. Isaac uses 100,"
+        " which lags a whole fine-tuning budget at one environment.",
+    )
     warmup = p.add_mutually_exclusive_group()
     warmup.add_argument(
         "--num-transitions-before-weight-updates",
@@ -643,9 +651,7 @@ def _runner_config(args, schedule: dict) -> dict:
         "max_env_interactions": schedule["max_env_interactions"],
         "save_interval": args.save_interval,
         "log_interval": args.log_interval,
-        # Fine-tuning runs one environment, so the Isaac default of 100 episodes makes
-        # Train/mean_reward lag the whole interaction budget. Five keeps it readable.
-        "episode_log_window": 5,
+        "episode_log_window": args.episode_log_window,
         "update_schedule": schedule,
         "save_replay_buffer": args.save_replay_buffer,
         "save_replay_buffer_every": args.save_replay_buffer_every,
