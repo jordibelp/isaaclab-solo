@@ -643,6 +643,9 @@ def _runner_config(args, schedule: dict) -> dict:
         "max_env_interactions": schedule["max_env_interactions"],
         "save_interval": args.save_interval,
         "log_interval": args.log_interval,
+        # Fine-tuning runs one environment, so the Isaac default of 100 episodes makes
+        # Train/mean_reward lag the whole interaction budget. Five keeps it readable.
+        "episode_log_window": 5,
         "update_schedule": schedule,
         "save_replay_buffer": args.save_replay_buffer,
         "save_replay_buffer_every": args.save_replay_buffer_every,

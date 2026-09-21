@@ -40,17 +40,19 @@ class Logger:
         self.tot_timesteps = 0
         self.tot_time = 0
 
-        # Create buffers
+        # Create buffers. ``Train/mean_reward`` averages the last ``episode_log_window``
+        # finished episodes, so few-environment runs should shorten it to stay responsive.
+        window = self.cfg.get("episode_log_window", 100)
         self.ep_extras = []
-        self.rewbuffer = deque(maxlen=100)
-        self.lenbuffer = deque(maxlen=100)
+        self.rewbuffer = deque(maxlen=window)
+        self.lenbuffer = deque(maxlen=window)
         self.cur_reward_sum = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         self.cur_episode_length = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
 
         # Create RND buffers
         if self.cfg["algorithm"]["rnd_cfg"]:
-            self.erewbuffer = deque(maxlen=100)
-            self.irewbuffer = deque(maxlen=100)
+            self.erewbuffer = deque(maxlen=window)
+            self.irewbuffer = deque(maxlen=window)
             self.cur_ereward_sum = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
             self.cur_ireward_sum = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
 
