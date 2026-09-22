@@ -132,6 +132,7 @@ KP = 9.0
 KD = 0.2
 # KP = 15
 # KD = 0.5
+EFFORT_LIMIT_SIM = 2.65
 
 SOLO12_CFG = ArticulationCfg(
     spawn=sim_utils.UsdFileCfg(
@@ -156,7 +157,7 @@ SOLO12_CFG = ArticulationCfg(
     actuators={
         "legs": ImplicitActuatorCfg(
             joint_names_expr=[".*_hip_joint", ".*_thigh_joint", ".*_calf_joint"],
-            effort_limit_sim=2.65,
+            effort_limit_sim=EFFORT_LIMIT_SIM,
             stiffness=KP,
             damping=KD,
             velocity_limit_sim=100.0,
@@ -380,6 +381,7 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     observation_space = BASE_OBSERVATION_SPACE
     state_space = 0 # why is this zero? 
     kp = KP; kd = KD
+    effort_limit_sim = EFFORT_LIMIT_SIM
     proportion_steps = proportionHfDiscreteObstaclesTerrain; proportion_low_random_rough_terrain = proportionHfRandomUniformTerrain
     remove_root_lin_vel_b_from_obs = False
     # Selects the policy/observation layout. Supported values:
@@ -777,6 +779,7 @@ class Solo12EnvCfg(DirectRLEnvCfg):
         self.robot.spawn.articulation_props.enabled_self_collisions = bool(self.enabled_self_collisions)
         self.robot.actuators["legs"].stiffness = self.kp
         self.robot.actuators["legs"].damping = self.kd
+        self.robot.actuators["legs"].effort_limit_sim = self.effort_limit_sim
         self.terrain.physics_material.compliant_contact_stiffness = _optional_compliant_contact_value(
             self.compliant_contact_stiffness
         )
