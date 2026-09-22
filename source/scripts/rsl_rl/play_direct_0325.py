@@ -41,6 +41,7 @@ checkpoint_label_from_path = None
 parse_record_sequence = None
 record_sequence_command_at = None
 record_sequence_total_s = None
+widen_ranges_for_record_sequence = None
 
 
 def _solo12_policy_inference_search_paths() -> list[Path]:
@@ -64,6 +65,7 @@ def _load_sequence_analysis_helpers() -> None:
     global parse_record_sequence
     global record_sequence_command_at
     global record_sequence_total_s
+    global widen_ranges_for_record_sequence
 
     if parse_record_sequence is not None:
         return
@@ -82,6 +84,7 @@ def _load_sequence_analysis_helpers() -> None:
             parse_record_sequence as _parse_record_sequence,
             record_sequence_command_at as _record_sequence_command_at,
             record_sequence_total_s as _record_sequence_total_s,
+            widen_ranges_for_record_sequence as _widen_ranges_for_record_sequence,
         )
     except ModuleNotFoundError as exc:
         if exc.name != "solo12_policy_inference":
@@ -97,6 +100,7 @@ def _load_sequence_analysis_helpers() -> None:
     parse_record_sequence = _parse_record_sequence
     record_sequence_command_at = _record_sequence_command_at
     record_sequence_total_s = _record_sequence_total_s
+    widen_ranges_for_record_sequence = _widen_ranges_for_record_sequence
 
 
 def _truthy(value: str) -> bool:
@@ -2087,6 +2091,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     vx_range = args_cli.vx_range if args_cli.vx_range is not None else env_cfg.command_lin_vel_x_range
     vy_range = args_cli.vy_range if args_cli.vy_range is not None else env_cfg.command_lin_vel_y_range
     wz_range = args_cli.wz_range if args_cli.wz_range is not None else env_cfg.command_ang_vel_z_range
+
+    if args_cli.record_sequence:
+        vx_range, vy_range, wz_range, widened = widen_ranges_for_record_sequence(
+            RECORD_SEQUENCE, vx_range, vy_range, wz_range
+        )
+        if widened:
+            print(
+                "[WARN] --record-sequence requests commands outside the task command range; "
+                "widening the range so the sequence is executed as written: " + ", ".join(widened),
+                flush=True,
+            )
 
     vx_ui_min, vx_ui_max = tuple(map(float, vx_range))
     vy_ui_min, vy_ui_max = tuple(map(float, vy_range))
