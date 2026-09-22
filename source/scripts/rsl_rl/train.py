@@ -602,6 +602,20 @@ def _runtime_placement_config() -> dict[str, object]:
     return placement
 
 
+def _sac_utd_config(agent_cfg) -> dict[str, object]:
+    """Report the SAC update-to-data ratio as defined in arXiv:2602.20220.
+
+    One training iteration steps every environment ``num_steps_per_env`` times and then runs
+    ``num_learning_epochs * num_mini_batches`` gradient updates. The UTD ratio is the number of
+    gradient updates per parallel environment step, so it does not depend on ``num_envs``:
+    updates only keep pace with data generation when ``utd`` equals ``num_envs``.
+    """
+
+    algorithm = agent_cfg.algorithm
+    updates_per_iteration = int(algorithm.num_learning_epochs) * int(algorithm.num_mini_batches)
+    return {"utd": updates_per_iteration / int(agent_cfg.num_steps_per_env)}
+
+
 def _patch_rsl_rl_wandb_writer_for_single_stream() -> None:
     """Keep TensorBoard files local while sending a single metric stream to W&B.
 
@@ -3027,6 +3041,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 placement = _runtime_placement_config()
                 wandb.run.config.update(placement, allow_val_change=True)
                 print(f"[INFO]: Run placement logged to W&B: {placement}", flush=True)
+                if agent_cfg.class_name == "OffPolicyRunner":
+                    utd_config = _sac_utd_config(agent_cfg)
+                    wandb.run.config.update(utd_config, allow_val_change=True)
+                    print(f"[INFO]: SAC UTD logged to W&B: {utd_config}", flush=True)
                 if input_checkpoint_name is not None:
                     wandb.run.config.update(
                         {
