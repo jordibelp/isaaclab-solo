@@ -939,3 +939,6 @@ class Solo12TwoFeetEnvCfg(Solo12EnvCfg):
     episode_length_s = 10.0
     command_resampling_time_s=5.0
     enabled_self_collisions=True
+
+    # shorter bc we are using shorter episodes
+    base_push_interval_range_s = (2.0, 5.0)
