@@ -1738,6 +1738,27 @@ class Solo12Env(DirectRLEnv):
         return torch.cat((self._get_teacher_encoder_obs(corrupt=corrupt), self._commands), dim=-1)
 
     def _get_rewards(self) -> torch.Tensor:
+        rewards = self._reward_terms()
+        reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
+        step_log = {f"RewardsPerStep/{key}": torch.mean(value).item() for key, value in rewards.items()}
+        step_log.update(
+            {
+                f"PerStepRewardRatio/{key}": ratio
+                for key, ratio in _per_step_reward_ratios(rewards, self._reward_scales(), self.step_dt).items()
+            }
+        )
+        step_log["RewardsPerStep/cmd_tracking"] = (
+            step_log["RewardsPerStep/track_lin_vel_xy_exp"] + step_log["RewardsPerStep/track_ang_vel_z_exp"]
+        )
+        step_log["RewardsPerStep/total"] = torch.mean(reward).item()
+        self.extras["log"] = step_log
+        for key, value in rewards.items():
+            self._episode_sums[key] += value
+        self._episode_reward_sums += reward
+        return reward
+
+    def _reward_terms(self) -> dict[str, torch.Tensor]:
+        """Return every scaled reward term of the current step, keyed like ``_reward_scales``."""
         if self.cfg.track_commands_in_world_heading_frame:
             tracked_lin_vel_xy = _world_velocity_in_heading_frame_xy(
                 self._robot.data.root_lin_vel_w, self._robot.data.root_quat_w
@@ -1777,7 +1798,7 @@ class Solo12Env(DirectRLEnv):
         track_ang_vel_z = torch.exp(-yaw_rate_error / self.cfg.tracking_std**2)
         track_base_height = torch.exp(-self.cfg.base_height_exp_scale * base_height_error)
 
-        rewards = {
+        return {
             "track_lin_vel_xy_exp": self._scale_bounded_positive_reward(
                 track_lin_vel_xy, self.cfg.track_lin_vel_xy_reward_scale
             ),
@@ -1809,24 +1830,6 @@ class Solo12Env(DirectRLEnv):
             * self.step_dt,
             "foot_contact": foot_contact * self.cfg.foot_contact_reward_scale * self.step_dt,
         }
-
-        reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
-        step_log = {f"RewardsPerStep/{key}": torch.mean(value).item() for key, value in rewards.items()}
-        step_log.update(
-            {
-                f"PerStepRewardRatio/{key}": ratio
-                for key, ratio in _per_step_reward_ratios(rewards, self._reward_scales(), self.step_dt).items()
-            }
-        )
-        step_log["RewardsPerStep/cmd_tracking"] = (
-            step_log["RewardsPerStep/track_lin_vel_xy_exp"] + step_log["RewardsPerStep/track_ang_vel_z_exp"]
-        )
-        step_log["RewardsPerStep/total"] = torch.mean(reward).item()
-        self.extras["log"] = step_log
-        for key, value in rewards.items():
-            self._episode_sums[key] += value
-        self._episode_reward_sums += reward
-        return reward
 
     def _scale_bounded_positive_reward(self, reward: torch.Tensor, scale: float) -> torch.Tensor:
         if self.cfg.negate_positive_rewards and scale > 0.0:
