@@ -893,8 +893,10 @@ def _bootstrap_value(
 
     Mirrors the SAC training target: the pre-reset observation from ``time_outs_obs``, an
     action sampled from the policy, and the frozen target critics combined with the training
-    ``q_reduction_method``. Returns that raw twin-critic value and ``log_pi`` separately so the
-    caller can decide whether to apply the entropy term. Sampling here advances the RNG, so a
+    ``q_reduction_method``. Under ``mean_pi_q_none`` each critic has its own target; they
+    average to the value returned here, which is the target of the averaged Q the log is
+    compared with. Returns that raw twin-critic value and ``log_pi`` separately so the caller
+    can decide whether to apply the entropy term. Sampling here advances the RNG, so a
     ``--q_value_log`` rollout is not bit-identical to one recorded without it.
     """
     timed_out = extras["time_outs"].reshape(-1, 1).bool() if "time_outs" in extras else None

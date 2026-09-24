@@ -532,14 +532,20 @@ class SACCriticModel(MLPModel):
     def losses_from_outputs(
         self, output1: torch.Tensor, output2: torch.Tensor, targets: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Twin critic losses; the default branch retains the original scalar MSE."""
+        """Twin critic losses; the default branch retains the original scalar MSE.
+
+        ``targets`` is ``(batch, 1)`` when both critics regress onto one shared target, or
+        ``(batch, 2)`` when column ``i`` is critic ``i``'s own target.
+        """
         if self.popart:
             targets = (targets - self.popart_mean) / self.popart_std
+        target1, target2 = (targets[..., :1], targets[..., 1:]) if targets.shape[-1] == 2 else (targets, targets)
         if not self.distributional_critic_ce:
-            return nn.functional.mse_loss(output1, targets), nn.functional.mse_loss(output2, targets)
-        labels = self.categorical_labels(targets)
-        loss1 = -(labels * output1.float().log_softmax(-1)).sum(-1).mean()
-        loss2 = -(labels * output2.float().log_softmax(-1)).sum(-1).mean()
+            return nn.functional.mse_loss(output1, target1), nn.functional.mse_loss(output2, target2)
+        labels1 = self.categorical_labels(target1)
+        labels2 = labels1 if target2 is target1 else self.categorical_labels(target2)
+        loss1 = -(labels1 * output1.float().log_softmax(-1)).sum(-1).mean()
+        loss2 = -(labels2 * output2.float().log_softmax(-1)).sum(-1).mean()
         return loss1, loss2
 
     def td_losses(

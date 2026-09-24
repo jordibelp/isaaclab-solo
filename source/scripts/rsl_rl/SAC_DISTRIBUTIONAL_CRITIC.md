@@ -40,7 +40,7 @@ in reward units. `hl_gauss_sigma_ratio` only applies to `hl_gauss`, and
 the two scalar modes. Neither rewards nor environment penalties are modified.
 
 To average the two critics instead of taking their minimum, add
-`agent.algorithm.q_reduction_method=mean`. See
+`agent.algorithm.q_reduction_method=mean` or `=mean_pi_q_none`. See
 [Twin-critic reduction](#twin-critic-reduction-min-or-mean).
 
 ## What problem does this address?
@@ -324,12 +324,13 @@ the global scale of the targets.
 SAC has two critics. One flag picks how their two values are combined:
 
 ```text
-agent.algorithm.q_reduction_method=min    # default: clipped double Q-learning
-agent.algorithm.q_reduction_method=mean   # the average of the two critics
+agent.algorithm.q_reduction_method=min             # default: clipped double Q-learning
+agent.algorithm.q_reduction_method=mean            # the average, in the target and the actor loss
+agent.algorithm.q_reduction_method=mean_pi_q_none  # FastSAC reference code: average in the actor loss only
 ```
 
-The flag works with every critic loss above. It applies in two places, always
-in the same way:
+The flag works with every critic loss above. `min` and `mean` apply the same
+reduction in two places:
 
 ```text
 y          = r + gamma * bootstrap_mask * (reduce(Q1_target(s',a'), Q2_target(s',a')) - alpha * log_pi(a'|s'))
@@ -339,9 +340,24 @@ min:   reduce(Q1, Q2) = min(Q1, Q2)
 mean:  reduce(Q1, Q2) = (Q1 + Q2) / 2
 ```
 
-Both critics still regress onto the same target `y`. With a categorical critic,
-`Q1` and `Q2` are the decoded means. So `mean` averages two means. It does not
-mix the two probability vectors.
+With these two, both critics regress onto the same target `y`.
+
+`mean_pi_q_none` does not reduce the target at all. Each critic gets its own
+target, from its own target network. The actor loss uses the average:
+
+```text
+y_1        = r + gamma * bootstrap_mask * (Q1_target(s',a') - alpha * log_pi(a'|s'))    # critic 1 learns y_1
+y_2        = r + gamma * bootstrap_mask * (Q2_target(s',a') - alpha * log_pi(a'|s'))    # critic 2 learns y_2
+actor loss = mean(alpha * log_pi(a|s) - (Q1(s,a) + Q2(s,a)) / 2)
+```
+
+Both critics use the same sampled next action `a'`. Note that `(y_1 + y_2) / 2`
+is exactly the `mean` target. The two modes differ only in what each critic
+learns, not in the average target.
+
+With a categorical critic, `Q1` and `Q2` are the decoded means. So `mean`
+averages two means. It does not mix the two probability vectors. Under
+`mean_pi_q_none`, each critic gets two-hot (or HL-Gauss) labels of its own `y_i`.
 
 ### Why try `mean`
 
@@ -355,25 +371,35 @@ mix the two probability vectors.
   which found CDQ harmful together with layer normalization. Our Solo12 critic
   runs with `agent.critic.layer_norm=True`, so this ablation is relevant for us.
 
-Expect higher Q values with `mean`. Most of that is the pessimism that `min`
-added. Some of it can be real overestimation, which is exactly what CDQ was
-designed to prevent. The `Q - G` error of `q_spread_plots.py` shows which one
-you get.
+Expect higher Q values with both `mean` modes. Most of that is the pessimism
+that `min` added. Some of it can be real overestimation, which is exactly what
+CDQ was designed to prevent. The `Q - G` error of `q_spread_plots.py` shows
+which one you get.
 
-### Difference from the FastSAC code
+### `mean` or `mean_pi_q_none`?
 
 The paper only says "the average of Q-values". Its reference code (Holosoma
 FastSAC, and FastTD3 with `use_cdq=False`) does this:
 
-- **Actor:** the average of the critics. This matches our `mean`.
+- **Actor:** the average of the critics.
 - **Critic target:** each critic bootstraps from **its own** target network.
   There is no minimum and no average in the target.
 
-Our `mean` also averages in the target, as requested. Both versions remove the
-CDQ pessimism. With one shared average target, the two critics learn the same
-target, so they stay closer to each other. With separate targets, each critic
-keeps its own bootstrap chain. An exact copy of the reference code would need a
-third option. It is not implemented.
+`mean_pi_q_none` copies exactly this. `mean` also averages in the target. Both
+remove the CDQ pessimism. The difference is how independent the two critics
+stay:
+
+- With `mean`, both critics learn the same target. So they are pulled toward
+  each other, and only their initialization and their own fit errors keep them
+  apart. Averaging also reduces the target noise, unless both critics make
+  exactly the same errors.
+- With `mean_pi_q_none`, each critic keeps its own bootstrap chain. An error in
+  one critic feeds only its own next targets, so the two stay more different.
+  The actor then averages two more independent estimates.
+
+`mean_pi_q_none` copies how the reference code combines the critics. It does
+not copy the rest of FastSAC. For example, FastSAC uses a C51 distributional
+projection, and our categorical critic regresses scalar targets.
 
 ### Logs, checkpoints, and other tools
 
@@ -382,14 +408,19 @@ third option. It is not implemented.
 - Checkpoints store `q_reduction_method`. Older checkpoints have no entry. They
   were all trained with `min`, and every tool reads them that way.
 - Resuming uses the value from the command, like `gamma` or `tau`. Pass the
-  same flag again to continue a `mean` run.
+  same flag again to continue a `mean` or `mean_pi_q_none` run.
+- Under `mean_pi_q_none`, `critic_target_clipped_fraction` counts both critics'
+  targets. PopArt keeps one pair of statistics, fitted to both critics' targets.
 - `play_direct_0325.py --q_value_log` reads the value from the checkpoint. It
   builds the bootstrap value the same way and saves the value in the `.npz`.
-  You do not need the flag at play time.
-- `q_spread_plots.py` measures the same combined Q that training used, and
-  prints a note for `mean` runs. Older logs count as `min`.
+  Under `mean_pi_q_none` it uses the average of the two targets, which is the
+  target of the averaged Q that the log compares. You do not need the flag at
+  play time.
+- `q_spread_plots.py` measures the Q that the actor used: `min(Q1,Q2)`, or
+  `mean(Q1,Q2)` for both `mean` modes. It prints a note for those. Older logs
+  count as `min`.
 - `mujoco/train_sac.py` keeps the checkpoint's value when fine-tuning. Change it
-  with `--q-reduction-method=min` or `--q-reduction-method=mean`.
+  with `--q-reduction-method=min`, `=mean`, or `=mean_pi_q_none`.
 - Multi-GPU needs nothing new. The reduction works per sample, before the
   gradient all-reduce.
 
@@ -720,27 +751,34 @@ can branch off a common checkpoint if you want to control for early training.
   (swish, LayerNorm critic, mixed terminals, timeouts, and n-step lengths) in 16
   settings: `mse`, `two_hot`, `hl_gauss`, and PopArt; actor update every 1 or 2
   steps; CPU and CUDA. Losses, actor and critic state dicts, `log_alpha`, and
-  the critic Adam state are bit-identical to git HEAD, both without the flag and
-  with `min`. With `mean`, none of the 16 are identical, so the flag has an effect.
-- `test_q_reduction.py` (28 cases) rebuilds the Bellman target by hand for both
-  reductions and all four critic losses, and the actor loss for `mse` and
-  `two_hot`, on CPU and CUDA. It also checks the config path and the checkpoint
-  entry. Forcing the target to one fixed reduction fails 8 of these tests.
-  Forcing the actor loss to one fixed reduction fails 4.
-- 213 tests pass with the command below. `mujoco/test_train_sac.py` passes all
-  132 tests, including 6 new ones, and the other 68 MuJoCo tests still pass.
-- Real Isaac Sim smoke: the full `solo12-two-feet` SAC command with a 199-bin
-  categorical critic and symmetry augmentation, scaled down to 64 envs, five
-  iterations, and 20 minibatches of 1024, plus
-  `agent.algorithm.q_reduction_method=mean`. It exited cleanly with finite
-  losses. The value reached `params/agent.yaml`, the checkpoints, and the W&B
-  config.
-- `play_direct_0325.py --q_value_log` on that checkpoint, without any reduction
-  flag, read `mean` from the checkpoint and stored it in the `.npz`.
+  the critic Adam state are bit-identical to the code before this flag, both
+  without the flag and with `min`. After `mean_pi_q_none` was added, `mean` is
+  still bit-identical to its first version (commit `4704da4`) in all 16. Each
+  `mean` mode differs from `min` in all 16, and from each other, so every value
+  has an effect.
+- `test_q_reduction.py` (48 cases) rebuilds the Bellman target by hand for all
+  three modes and all four critic losses, and the actor loss for `mse` and
+  `two_hot`, on CPU and CUDA. It checks that under `mean_pi_q_none` each critic
+  is trained on its own target column, and that the two targets average to the
+  `mean` target. It also checks the config path and the checkpoint entry.
+- We broke the code on purpose to check that these tests notice. Each of these
+  small breaks fails at least 4 tests: forcing the target or the actor loss
+  to one fixed reduction, reducing the `mean_pi_q_none` target, swapping its two
+  target columns (in the target or in the loss), giving both critics the first
+  column, and giving the `mean_pi_q_none` actor the minimum.
+- 234 tests pass with the command below. `mujoco/test_train_sac.py` passes all
+  134 tests, including 8 new ones, and the other 68 MuJoCo tests still pass.
+- Real Isaac Sim smoke, once for `mean` and once for `mean_pi_q_none`: the full
+  `solo12-two-feet` SAC command with a 199-bin categorical critic and symmetry
+  augmentation, scaled down to 64 envs, five iterations, and 20 minibatches of
+  1024. Both exited cleanly with finite losses. The value reached
+  `params/agent.yaml`, the checkpoints, and the W&B config.
+- `play_direct_0325.py --q_value_log` on each checkpoint, without any reduction
+  flag, read the mode from the checkpoint and stored it in the `.npz`.
   `q_spread_plots.py` then measured `mean(Q1,Q2)` and printed its note.
-- `mujoco/train_sac.py` fine-tuned the same checkpoint for 2000 interactions
-  without the flag. It kept `mean` and recorded it in `run_config.json` and in
-  its own checkpoints.
+- `mujoco/train_sac.py` fine-tuned each checkpoint for 2000 interactions
+  without the flag. It kept the checkpoint's mode and recorded it in
+  `run_config.json` and in its own checkpoints.
 - **Not verified:** no long run, and no learning comparison yet. Multi-GPU is
   untested, but the change adds no communication.
 

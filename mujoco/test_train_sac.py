@@ -852,6 +852,7 @@ def test_checkpoint_architecture_and_loss_survive_transfer(tmp_path, critic_loss
 @pytest.mark.parametrize("saved,flag,expected", [
     (None, None, "min"), ("mean", None, "mean"), ("min", None, "min"),
     ("mean", "min", "min"), (None, "mean", "mean"),
+    ("mean_pi_q_none", None, "mean_pi_q_none"), ("mean", "mean_pi_q_none", "mean_pi_q_none"),
 ])
 def test_q_reduction_follows_the_checkpoint_unless_overridden(tmp_path, saved, flag, expected):
     obs = TensorDict({"policy": torch.randn(8, LORA_OBS_DIM)}, batch_size=[8])

@@ -159,7 +159,7 @@ def test_soft_bootstrap_is_used_for_the_soft_return_only():
     np.testing.assert_allclose(out["soft"][1], [GAMMA * 6.0])
 
 
-@pytest.mark.parametrize("stored", [None, "min", "mean"])
+@pytest.mark.parametrize("stored", [None, "min", "mean", "mean_pi_q_none"])
 def test_estimate_combines_the_twin_critics_as_training_did(tmp_path, stored):
     # (steps, envs, twin critics): Q1 differs from Q2 in both directions.
     q = np.array([[[1.0, 3.0], [-2.0, 0.5]], [[4.0, 4.5], [0.0, -6.0]]], dtype=np.float32)
@@ -178,8 +178,11 @@ def test_estimate_combines_the_twin_critics_as_training_did(tmp_path, stored):
     run = Run(tmp_path / "log.npz", None, drop_first=0)
     # Logs written before the key existed come from "min" training.
     assert run.q_reduction == (stored or "min")
-    expected = (q[..., 0] + q[..., 1]) / 2 if stored == "mean" else np.minimum(q[..., 0], q[..., 1])
+    # Both mean modes train the actor on the average, so that is the estimate to score.
+    averaged = stored in ("mean", "mean_pi_q_none")
+    expected = (q[..., 0] + q[..., 1]) / 2 if averaged else np.minimum(q[..., 0], q[..., 1])
     np.testing.assert_array_equal(run.q_combined, expected)
+    assert run.q_label == ("mean(Q1,Q2)" if averaged else "min(Q1,Q2)")
     np.testing.assert_allclose(run.error(), expected - run.target_return()[0])
 
 

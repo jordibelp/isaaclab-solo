@@ -3,7 +3,8 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Twin-critic reduction: clipped double Q ("min") or the FastSAC average ("mean")."""
+"""Twin-critic reduction: clipped double Q ("min"), the FastSAC average ("mean"), or the FastSAC
+reference code ("mean_pi_q_none": average in the actor, each critic keeps its own target)."""
 
 import copy
 from types import SimpleNamespace
@@ -15,7 +16,7 @@ from tensordict import TensorDict
 from rsl_rl_sac.algorithms import SAC, reduce_twin_q
 from rsl_rl_sac.models import SACActorModel, SACCriticModel
 
-METHODS = ["min", "mean"]
+METHODS = ["min", "mean", "mean_pi_q_none"]
 LOSSES = ["mse", "two_hot", "hl_gauss", "mse_target_norm_popart"]
 
 
@@ -68,6 +69,8 @@ def test_reduce_twin_q_values_and_gradients():
     # The average sends half of every gradient to each critic.
     torch.testing.assert_close(q1.grad, torch.full_like(q1, 0.5))
     torch.testing.assert_close(q2.grad, torch.full_like(q2, 0.5))
+    # The reference-code mode gives its actor the same average.
+    torch.testing.assert_close(reduce_twin_q(q1, q2, "mean_pi_q_none"), mean)
 
     with pytest.raises(ValueError, match="q_reduction_method"):
         reduce_twin_q(q1, q2, "max")
@@ -99,12 +102,20 @@ def test_bellman_target_uses_the_configured_reduction(device, method, loss):
         expected = {
             "min": rewards + mask * (torch.minimum(q1, q2) - 0.01 * logp),
             "mean": rewards + mask * ((q1 + q2) / 2 - 0.01 * logp),
+            # No reduction: column i is the target of critic i, from its own target network.
+            "mean_pi_q_none": torch.cat(
+                (rewards + mask * (q1 - 0.01 * logp), rewards + mask * (q2 - 0.01 * logp)), dim=-1
+            ),
         }
     torch.random.set_rng_state(rng)
     if cuda_rng is not None:
         torch.cuda.set_rng_state(cuda_rng)
-    # The two reductions give different targets here, so this test can tell them apart.
+    # The reductions give different targets here, so this test can tell them apart.
+    independent = expected["mean_pi_q_none"]
     assert not torch.allclose(expected["min"], expected["mean"])
+    assert not torch.allclose(independent[:, :1], independent[:, 1:])
+    # The two separate targets average to the shared "mean" target.
+    torch.testing.assert_close(independent.mean(-1, keepdim=True), expected["mean"])
 
     original_loss = critic.losses_from_outputs
     seen = []
@@ -115,9 +126,27 @@ def test_bellman_target_uses_the_configured_reduction(device, method, loss):
 
     critic.losses_from_outputs = capture
     losses = alg.update()
-    # One shared target for both critics, built from the configured reduction.
+    # One shared target, or one column per critic, built from the configured reduction.
     torch.testing.assert_close(seen[0], expected[method])
     assert all(torch.isfinite(torch.tensor(value)) for value in losses.values())
+
+
+@pytest.mark.parametrize("loss", LOSSES)
+def test_each_critic_regresses_onto_its_own_target_column(device, loss):
+    torch.manual_seed(3)
+    obs, actor, critic = models(device, loss=loss)
+    if critic.popart:
+        critic.update_popart(torch.tensor(1.5, device=device), torch.tensor(6.0, device=device))
+    output1, output2 = critic.critic_outputs(obs, torch.randn(8, 2, device=device))
+    target1 = torch.linspace(-4.0, 3.0, 8, device=device)[:, None]
+    target2 = torch.linspace(2.0, -1.0, 8, device=device)[:, None]
+    loss1, loss2 = critic.losses_from_outputs(output1, output2, torch.cat((target1, target2), dim=-1))
+    # Same numbers as training each critic alone on the shared path with its own target.
+    torch.testing.assert_close(loss1, critic.losses_from_outputs(output1, output2, target1)[0], rtol=0, atol=0)
+    torch.testing.assert_close(loss2, critic.losses_from_outputs(output1, output2, target2)[1], rtol=0, atol=0)
+    # And not the other critic's target.
+    assert not torch.isclose(loss1, critic.losses_from_outputs(output1, output2, target2)[0])
+    assert not torch.isclose(loss2, critic.losses_from_outputs(output1, output2, target1)[1])
 
 
 @pytest.mark.parametrize("loss", ["mse", "two_hot"])
@@ -152,7 +181,10 @@ def test_actor_loss_uses_the_configured_reduction(device, method, loss):
     assert not torch.allclose(q1, q2)
     # With one mini-batch, the final temperature is the one the actor loss used.
     alpha = alg.log_alpha.exp().detach()
-    expected = {name: (alpha * log_prob - reduce_twin_q(q1, q2, name)).mean().item() for name in METHODS}
+    # Written out by hand, not with reduce_twin_q, so a wrong reduction cannot hide here.
+    average = (alpha * log_prob - (q1 + q2) / 2).mean().item()
+    expected = {"min": (alpha * log_prob - torch.minimum(q1, q2)).mean().item(), "mean": average,
+                "mean_pi_q_none": average}
     assert expected["min"] != pytest.approx(expected["mean"], rel=1e-3)
     assert losses["actor"] == pytest.approx(expected[method], rel=1e-5, abs=1e-6)
 
@@ -175,6 +207,8 @@ def test_runner_config_reaches_the_algorithm(monkeypatch):
     # agent.algorithm.q_reduction_method arrives as a key of the algorithm config dict.
     assert build_algorithm(monkeypatch).q_reduction_method == "min"
     assert build_algorithm(monkeypatch, q_reduction_method="mean").q_reduction_method == "mean"
+    alg = build_algorithm(monkeypatch, q_reduction_method="mean_pi_q_none")
+    assert alg.q_reduction_method == "mean_pi_q_none"
     with pytest.raises(ValueError, match="q_reduction_method"):
         build_algorithm(monkeypatch, q_reduction_method="Mean")
 

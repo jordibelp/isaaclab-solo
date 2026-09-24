@@ -16,19 +16,23 @@ from rsl_rl_sac.models import DISTRIBUTION_STAT_NAMES, SACActorModel, SACCriticM
 from rsl_rl_sac.storage import ReplayBuffer
 from rsl_rl_sac.utils import resolve_callable, resolve_obs_groups, resolve_optimizer
 
-Q_REDUCTION_METHODS = ("min", "mean")
+Q_REDUCTION_METHODS = ("min", "mean", "mean_pi_q_none")
 
 
 def reduce_twin_q(q1: torch.Tensor, q2: torch.Tensor, method: str) -> torch.Tensor:
-    """Combine the twin critics into the one value SAC bootstraps from and the actor maximizes.
+    """Combine the twin critics into the one value the actor maximizes.
 
     ``"min"`` is clipped double Q-learning (Fujimoto et al. 2018). ``"mean"`` averages the two,
     following FastSAC (arXiv:2512.01996), which found the average better than the minimum; BRO
-    (arXiv:2405.16158) found clipped double Q harmful with layer-normalized critics.
+    (arXiv:2405.16158) found clipped double Q harmful with layer-normalized critics. Both also
+    set the one Bellman target the two critics share. ``"mean_pi_q_none"`` is the FastSAC
+    reference code: the actor averages, but the target is not reduced at all, because each
+    critic bootstraps from its own target network. Its two targets still average to the value
+    returned here.
     """
     if method == "min":
         return torch.min(q1, q2)
-    if method == "mean":
+    if method in ("mean", "mean_pi_q_none"):
         return 0.5 * (q1 + q2)
     raise ValueError(f"q_reduction_method must be one of {Q_REDUCTION_METHODS}, got {method!r}.")
 
@@ -101,7 +105,9 @@ class SAC:
             policy_frequency: Frequency of actor updates relative to critic updates.
             n_steps: Number of steps for n-step returns (default: 1).
             q_reduction_method: How the twin critics are combined in the Bellman target and the
-                actor loss: "min" (clipped double Q, default) or "mean" (their average).
+                actor loss: "min" (clipped double Q, default) or "mean" (their average) in both, or
+                "mean_pi_q_none": average in the actor loss, and each critic bootstraps from its own
+                target network.
             rnd_cfg: Optional dictionary of RND configuration parameters. If None, RND is not used.
             symmetry_cfg: Optional dictionary of symmetry configuration parameters. If None, symmetry is not used.
             multi_gpu_cfg: Optional dictionary of multi-GPU configuration parameters. If None, multi-GPU is not used.
@@ -309,8 +315,12 @@ class SAC:
                 next_state_entropy = -self.log_alpha.exp() * next_log_prob
 
                 q1_target, q2_target = self.critic.evaluate_all_target_q(next_obs_batch, new_actions)
-                reduced_target_q = reduce_twin_q(q1_target, q2_target, self.q_reduction_method)
-                q_target_next = reduced_target_q + next_state_entropy
+                if self.q_reduction_method == "mean_pi_q_none":
+                    # No reduction: column i is critic i's own target, as in the FastSAC code.
+                    next_q = torch.cat((q1_target, q2_target), dim=-1)
+                else:
+                    next_q = reduce_twin_q(q1_target, q2_target, self.q_reduction_method)
+                q_target_next = next_q + next_state_entropy
                 n_step_discount = torch.pow(self.gamma, effective_n_steps.to(dtype=q_target_next.dtype))
                 target_q = rewards_batch + n_step_discount * bootstrap_mask * q_target_next
 

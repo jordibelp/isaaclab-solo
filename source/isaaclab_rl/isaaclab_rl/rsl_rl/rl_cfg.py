@@ -187,10 +187,12 @@ class RslRlSacAlgorithmCfg:
     max_grad_norm: float = MISSING
     policy_frequency: int = MISSING
     n_steps: int = MISSING
-    q_reduction_method: Literal["min", "mean"] = "min"
+    q_reduction_method: Literal["min", "mean", "mean_pi_q_none"] = "min"
     """How the twin critics are combined in the Bellman target and the actor loss.
 
     "min" is clipped double Q-learning. "mean" uses their average in both places (see FastSAC, arXiv:2512.01996).
+    "mean_pi_q_none" follows the FastSAC reference code: the actor loss uses the average, and each critic
+    bootstraps from its own target network, with no reduction in the target.
     """
     actor_optimizer: Literal["adam", "adamw", "sgd", "rmsprop"] = "adam"
     critic_optimizer: Literal["adam", "adamw", "sgd", "rmsprop"] = "adam"

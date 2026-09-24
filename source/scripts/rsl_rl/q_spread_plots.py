@@ -23,9 +23,10 @@ matching the ``CriticDist/*`` scalars logged during training. Critic disagreemen
 widens the reported spread, exactly as it widens the range of values the pair can encode.
 
 The last two panels compare the estimate SAC actually acts on — ``min(Q1, Q2)``, or
-``(Q1 + Q2) / 2`` for a checkpoint trained with ``agent.algorithm.q_reduction_method=mean`` —
-against the return it predicts, using the training ``gamma`` stored in the log. Three things
-make that comparison easy to get wrong, and all three are handled explicitly:
+``(Q1 + Q2) / 2`` for a checkpoint trained with ``agent.algorithm.q_reduction_method=mean`` or
+``=mean_pi_q_none`` — against the return it predicts, using the training ``gamma`` stored in
+the log. Three things make that comparison easy to get wrong, and all three are handled
+explicitly:
 
 * **Entropy.** SAC's Q predicts the *soft* return, which adds ``alpha * -log_pi`` for every
   step after the evaluated action. The logged per-step ``log_prob`` supplies it; without it
@@ -146,6 +147,7 @@ class Run:
         # error matters. Logs written before the key existed all come from "min" training.
         self.q_reduction = str(data["q_reduction_method"]) if "q_reduction_method" in data else "min"
         self.q_combined = reduce_twin_q(self.q[..., 0], self.q[..., 1], self.q_reduction).numpy().astype(np.float64)
+        self.q_label = "min(Q1,Q2)" if self.q_reduction == "min" else "mean(Q1,Q2)"
         self.gamma = float(data["gamma"]) if "gamma" in data else None
         self.alpha = float(data["alpha"]) if "alpha" in data else None
         self.deterministic = bool(data["deterministic"]) if "deterministic" in data else None
@@ -287,7 +289,7 @@ def print_summary(runs: list[Run], min_observed: float) -> None:
 
     for _, summary, run in rows:
         if run.q_reduction != "min":
-            print(f"[NOTE] {run.label}: combined Q is {run.q_reduction}(Q1,Q2), the reduction it was trained with.")
+            print(f"[NOTE] {run.label}: combined Q is {run.q_label}, as its actor was trained ({run.q_reduction}).")
         if summary["edge_mass"] > 1e-3:
             print(
                 f"[WARN] {run.label}: {summary['edge_mass']:.3g} mean mass on the outermost atoms. "
@@ -339,7 +341,7 @@ def add_error_panels(axes, runs, colors, min_observed: float) -> None:
         steps = np.arange(target.shape[0])
         keep = run.valid(min_observed)
         # Averaging over envs matches the other time-series panels.
-        value_axis.plot(steps, run.q_combined.mean(axis=1), color=color, label=f"{run.label}: {run.q_reduction}(Q1,Q2)")
+        value_axis.plot(steps, run.q_combined.mean(axis=1), color=color, label=f"{run.label}: {run.q_label}")
         value_axis.plot(steps, target.mean(axis=1), color=color, linestyle="--", alpha=0.8,
                         label=f"{run.label}: realized G ({kind})")
 
