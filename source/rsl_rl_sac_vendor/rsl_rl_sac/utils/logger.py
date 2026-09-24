@@ -181,7 +181,13 @@ class Logger:
                         if len(ep_info[key].shape) == 0:
                             ep_info[key] = ep_info[key].unsqueeze(0)
                         infotensor = torch.cat((infotensor, ep_info[key].to(self.device)))
-                    value = torch.mean(infotensor)
+                    # Running extremes must not be averaged over the iteration's steps.
+                    if key.endswith("_min"):
+                        value = torch.min(infotensor)
+                    elif key.endswith("_max"):
+                        value = torch.max(infotensor)
+                    else:
+                        value = torch.mean(infotensor)
                     if key == "Curriculum/terrain_levels":
                         terrain_level_mean = float(value.item())
                     if "/" in key:

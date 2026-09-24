@@ -310,6 +310,9 @@ class Solo12Env(DirectRLEnv):
             for key in _EPISODE_REWARD_KEYS
         }
         self._episode_reward_sums = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        # Extremes over every completed episode in any env since this process started.
+        self._alltime_episode_return_min = float("inf")
+        self._alltime_episode_return_max = float("-inf")
         self._base_collision_terminated = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self._forbidden_feet_contact_terminated = torch.zeros(
             self.num_envs, dtype=torch.bool, device=self.device
@@ -1861,6 +1864,10 @@ class Solo12Env(DirectRLEnv):
         mean_episode_return = (
             torch.mean(completed_episode_returns).item() if len(completed_episode_returns) > 0 else 0.0
         )
+        if len(completed_episode_returns) > 0:
+            batch_min, batch_max = torch.aminmax(completed_episode_returns)
+            self._alltime_episode_return_min = min(self._alltime_episode_return_min, batch_min.item())
+            self._alltime_episode_return_max = max(self._alltime_episode_return_max, batch_max.item())
         mean_episode_length_steps = (
             torch.mean(self.episode_length_buf[completed_env_ids].float()).item()
             if len(completed_env_ids) > 0
@@ -1958,6 +1965,9 @@ class Solo12Env(DirectRLEnv):
 
         extras['Episode_Reward/cmd_tracking'] = extras[f"Episode_Reward/track_lin_vel_xy_exp"] + extras[f"Episode_Reward/track_ang_vel_z_exp"]
         extras["Episode_Reward/total"] = mean_episode_return
+        if len(completed_episode_returns) > 0:
+            extras["Episode_Reward/alltime_min"] = self._alltime_episode_return_min
+            extras["Episode_Reward/alltime_max"] = self._alltime_episode_return_max
         self._episode_reward_sums[env_ids] = 0.0
         extras["Episode/length_steps"] = mean_episode_length_steps
         extras["Episode/length_seconds"] = mean_episode_length_steps * self.step_dt
