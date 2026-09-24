@@ -16,6 +16,22 @@ from rsl_rl_sac.models import DISTRIBUTION_STAT_NAMES, SACActorModel, SACCriticM
 from rsl_rl_sac.storage import ReplayBuffer
 from rsl_rl_sac.utils import resolve_callable, resolve_obs_groups, resolve_optimizer
 
+Q_REDUCTION_METHODS = ("min", "mean")
+
+
+def reduce_twin_q(q1: torch.Tensor, q2: torch.Tensor, method: str) -> torch.Tensor:
+    """Combine the twin critics into the one value SAC bootstraps from and the actor maximizes.
+
+    ``"min"`` is clipped double Q-learning (Fujimoto et al. 2018). ``"mean"`` averages the two,
+    following FastSAC (arXiv:2512.01996), which found the average better than the minimum; BRO
+    (arXiv:2405.16158) found clipped double Q harmful with layer-normalized critics.
+    """
+    if method == "min":
+        return torch.min(q1, q2)
+    if method == "mean":
+        return 0.5 * (q1 + q2)
+    raise ValueError(f"q_reduction_method must be one of {Q_REDUCTION_METHODS}, got {method!r}.")
+
 
 class SAC:
     """Soft Actor-Critic algorithm (https://arxiv.org/abs/1812.05905).
@@ -52,6 +68,7 @@ class SAC:
         max_grad_norm: float = 1.0,
         policy_frequency: int = 2,
         n_steps: int = 1,
+        q_reduction_method: str = "min",
         # RND parameters
         rnd_cfg: dict | None = None,
         # Symmetry parameters
@@ -83,6 +100,8 @@ class SAC:
             max_grad_norm: Max norm for gradient clipping.
             policy_frequency: Frequency of actor updates relative to critic updates.
             n_steps: Number of steps for n-step returns (default: 1).
+            q_reduction_method: How the twin critics are combined in the Bellman target and the
+                actor loss: "min" (clipped double Q, default) or "mean" (their average).
             rnd_cfg: Optional dictionary of RND configuration parameters. If None, RND is not used.
             symmetry_cfg: Optional dictionary of symmetry configuration parameters. If None, symmetry is not used.
             multi_gpu_cfg: Optional dictionary of multi-GPU configuration parameters. If None, multi-GPU is not used.
@@ -147,6 +166,9 @@ class SAC:
         self.update_step = 0
         self.n_steps = n_steps
         self.max_grad_norm = max_grad_norm
+        if q_reduction_method not in Q_REDUCTION_METHODS:
+            raise ValueError(f"q_reduction_method must be one of {Q_REDUCTION_METHODS}, got {q_reduction_method!r}.")
+        self.q_reduction_method = q_reduction_method
 
         self.target_entropy = -target_entropy_scale * self.actor.output_dim
 
@@ -287,8 +309,8 @@ class SAC:
                 next_state_entropy = -self.log_alpha.exp() * next_log_prob
 
                 q1_target, q2_target = self.critic.evaluate_all_target_q(next_obs_batch, new_actions)
-                min_target_q = torch.min(q1_target, q2_target)
-                q_target_next = min_target_q + next_state_entropy
+                reduced_target_q = reduce_twin_q(q1_target, q2_target, self.q_reduction_method)
+                q_target_next = reduced_target_q + next_state_entropy
                 n_step_discount = torch.pow(self.gamma, effective_n_steps.to(dtype=q_target_next.dtype))
                 target_q = rewards_batch + n_step_discount * bootstrap_mask * q_target_next
 
@@ -355,7 +377,7 @@ class SAC:
                     p.requires_grad_(False)
 
                 q1, q2 = self.critic.evaluate_all_q(obs_batch, new_actions)
-                q_new = torch.min(q1, q2)
+                q_new = reduce_twin_q(q1, q2, self.q_reduction_method)
                 actor_loss = (entropy - q_new).mean()
 
                 # Symmetry loss
@@ -499,6 +521,8 @@ class SAC:
             "critic_optimizer_state_dict": self.critic_optimizer.state_dict() if self.critic_optimizer else None,
             "log_alpha": self.log_alpha.detach().cpu() if self.auto_alpha else None,
             "alpha": self.alpha if not self.auto_alpha else None,
+            # Tools that rebuild the training target read this; older checkpoints all used "min".
+            "q_reduction_method": self.q_reduction_method,
         }
         if self.auto_alpha and self.alpha_optimizer is not None:
             saved_dict["alpha_optimizer_state_dict"] = self.alpha_optimizer.state_dict()

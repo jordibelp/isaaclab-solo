@@ -41,7 +41,7 @@ for _path in (
         sys.path.insert(0, str(_path))
 
 import solo12_symmetry
-from rsl_rl_sac.algorithms import SAC
+from rsl_rl_sac.algorithms import Q_REDUCTION_METHODS, SAC
 from rsl_rl_sac.modules import LAYER_CHOICES, apply_lora, merged_state_dict
 from rsl_rl_sac.runners import OffPolicyRunner
 from rsl_rl_sac.storage import MixedReplayBuffer, ReplayBuffer
@@ -154,6 +154,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--n-steps", type=int, default=5)
     p.add_argument("--gamma", type=float, default=0.97)
     p.add_argument("--tau", type=float, default=0.003)
+    p.add_argument(
+        "--q-reduction-method", choices=Q_REDUCTION_METHODS, default=None,
+        help="Twin-critic reduction for the Bellman target and actor loss. Defaults to the checkpoint's"
+        " own setting (checkpoints that predate it used min), and to min without a checkpoint.",
+    )
     p.add_argument(
         "--offline-replay-buffer",
         default=None,
@@ -728,6 +733,7 @@ def _runner_config(args, schedule: dict) -> dict:
         "max_grad_norm": 1.0,
         "policy_frequency": args.actor_update_every,
         "n_steps": args.n_steps,
+        "q_reduction_method": args.q_reduction_method or "min",
         "rnd_cfg": None,
         "symmetry_cfg": None,
     }
@@ -789,6 +795,9 @@ def _configure_checkpoint_models(cfg, args) -> None:
                 cfg["algorithm"]["alpha"] = payload["log_alpha"].exp().item()
             elif payload.get("alpha") is not None:
                 cfg["algorithm"]["alpha"] = payload["alpha"]
+        if args.q_reduction_method is None:
+            # Keep the objective the critics were trained on; older checkpoints all used "min".
+            cfg["algorithm"]["q_reduction_method"] = payload.get("q_reduction_method", "min")
         saved_cfg = {}
         if (path.parent / "run_config.json").is_file():
             saved_cfg = json.loads((path.parent / "run_config.json").read_text())["agent"]

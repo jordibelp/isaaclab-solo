@@ -849,6 +849,35 @@ def test_checkpoint_architecture_and_loss_survive_transfer(tmp_path, critic_loss
     torch.testing.assert_close(restored_critic(obs, actions=actions), critic(obs, actions=actions), rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("saved,flag,expected", [
+    (None, None, "min"), ("mean", None, "mean"), ("min", None, "min"),
+    ("mean", "min", "min"), (None, "mean", "mean"),
+])
+def test_q_reduction_follows_the_checkpoint_unless_overridden(tmp_path, saved, flag, expected):
+    obs = TensorDict({"policy": torch.randn(8, LORA_OBS_DIM)}, batch_size=[8])
+    groups = {"actor": ["policy"], "critic": ["policy"]}
+    actor = SACActorModel(obs, groups, "actor", LORA_ACTION_DIM, hidden_dims=[16, 8])
+    critic = SACCriticModel(obs, groups, "critic", 1, num_actions=LORA_ACTION_DIM, hidden_dims=[16, 8])
+    payload = {"actor_state_dict": actor.state_dict(), "critic_state_dict": critic.state_dict()}
+    if saved is not None:
+        payload["q_reduction_method"] = saved
+    checkpoint = tmp_path / "model.pt"
+    torch.save(payload, checkpoint)
+    flags = [f"--checkpoint={checkpoint}"] + ([f"--q-reduction-method={flag}"] if flag else [])
+    args = train_sac.build_parser().parse_args(flags)
+    config = runner_config(args)
+    train_sac._configure_checkpoint_models(config, args)
+    assert config["algorithm"]["q_reduction_method"] == expected
+
+
+def test_q_reduction_without_a_checkpoint_defaults_to_min():
+    assert runner_config(train_sac.build_parser().parse_args([]))["algorithm"]["q_reduction_method"] == "min"
+    args = train_sac.build_parser().parse_args(["--q-reduction-method=mean"])
+    assert runner_config(args)["algorithm"]["q_reduction_method"] == "mean"
+    with pytest.raises(SystemExit):
+        train_sac.build_parser().parse_args(["--q-reduction-method=max"])
+
+
 def test_freezing_preserves_checkpoint_target_lag():
     runner, args = build_lora_runner(rank=1, extra_args=["--freeze-critic"])
     with torch.no_grad():

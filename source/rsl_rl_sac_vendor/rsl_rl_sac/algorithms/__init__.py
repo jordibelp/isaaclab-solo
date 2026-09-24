@@ -7,6 +7,6 @@
 
 from .distillation import Distillation
 from .ppo import PPO
-from .sac import SAC
+from .sac import Q_REDUCTION_METHODS, SAC, reduce_twin_q
 
-__all__ = ["PPO", "Distillation", "SAC"]
+__all__ = ["PPO", "Distillation", "SAC", "Q_REDUCTION_METHODS", "reduce_twin_q"]

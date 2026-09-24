@@ -489,6 +489,7 @@ import torch
 import wandb
 from rsl_rl.networks import EmpiricalNormalization
 from rsl_rl.runners import DistillationRunner, OnPolicyRunner
+from rsl_rl_sac.algorithms import reduce_twin_q
 from rsl_rl_sac.runners import OffPolicyRunner
 from tensordict import TensorDict
 
@@ -885,14 +886,16 @@ def _checkpoint_model_state_dict(path: str, map_location: str | torch.device = "
     raise ValueError(f"Could not find model state_dict in checkpoint: {path}")
 
 
-def _bootstrap_value(actor, critic, next_obs, extras: dict) -> tuple[torch.Tensor, torch.Tensor]:
+def _bootstrap_value(
+    actor, critic, next_obs, extras: dict, q_reduction_method: str
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Value of the state reached by this step, for bootstrapping truncated episodes.
 
     Mirrors the SAC training target: the pre-reset observation from ``time_outs_obs``, an
-    action sampled from the policy, and the frozen target critics. Returns the raw
-    ``min(Q1, Q2)`` and ``log_pi`` separately so the caller can decide whether to apply the
-    entropy term. Sampling here advances the RNG, so a ``--q_value_log`` rollout is not
-    bit-identical to one recorded without it.
+    action sampled from the policy, and the frozen target critics combined with the training
+    ``q_reduction_method``. Returns that raw twin-critic value and ``log_pi`` separately so the
+    caller can decide whether to apply the entropy term. Sampling here advances the RNG, so a
+    ``--q_value_log`` rollout is not bit-identical to one recorded without it.
     """
     timed_out = extras["time_outs"].reshape(-1, 1).bool() if "time_outs" in extras else None
     if timed_out is not None and timed_out.any():
@@ -913,7 +916,7 @@ def _bootstrap_value(actor, critic, next_obs, extras: dict) -> tuple[torch.Tenso
         )
     next_actions, next_log_prob = actor.sample_action_logp(next_obs)
     q1_target, q2_target = critic.evaluate_all_target_q(next_obs, next_actions)
-    return torch.min(q1_target, q2_target).squeeze(-1), next_log_prob.squeeze(-1)
+    return reduce_twin_q(q1_target, q2_target, q_reduction_method).squeeze(-1), next_log_prob.squeeze(-1)
 
 
 def _load_dagger_adapter_checkpoint(path: str, map_location: str | torch.device = "cpu") -> dict[str, Any] | None:
@@ -2383,7 +2386,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             else:
                 q_alpha = float(runner.alg.alpha)
                 print("[WARN] Checkpoint stores no alpha; using the configured value.", flush=True)
-            print(f"[INFO] Q-value log uses training gamma={q_gamma:g}, alpha={q_alpha:g}.", flush=True)
+            # Also from the checkpoint: it records how its critics were combined in training,
+            # and every checkpoint written before that entry existed was trained with "min".
+            q_reduction = checkpoint.get("q_reduction_method", "min")
+            print(
+                f"[INFO] Q-value log uses training gamma={q_gamma:g}, alpha={q_alpha:g}, "
+                f"q_reduction_method={q_reduction}.",
+                flush=True,
+            )
         del runner
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -2496,7 +2506,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 q_heads = (q_critic.critic1(q_input), q_critic.critic2(q_input))
             obs, rewards, dones, extras = vec_env.step(actions)
             if q_critic is not None:
-                bootstrap_q, bootstrap_log_prob = _bootstrap_value(policy, q_critic, obs, extras)
+                bootstrap_q, bootstrap_log_prob = _bootstrap_value(policy, q_critic, obs, extras, q_reduction)
                 q_log["bootstrap_q"].append(bootstrap_q.cpu())
                 q_log["bootstrap_log_prob"].append(bootstrap_log_prob.cpu())
                 q_log["q"].append(torch.cat([q_critic.q_from_output(head) for head in q_heads], dim=-1).cpu())
@@ -2684,6 +2694,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             value_support=q_critic.value_support.cpu().numpy() if q_critic.distributional_critic_ce else np.array([]),
             gamma=float(agent_cfg.algorithm.gamma),
             alpha=q_alpha,
+            q_reduction_method=q_reduction,
             dt=float(dt),
             checkpoint=resume_path,
             deterministic=not q_sample_policy,

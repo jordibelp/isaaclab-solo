@@ -22,9 +22,10 @@ The twin critics are mixed as ``(p1 + p2) / 2`` before any spread statistic is c
 matching the ``CriticDist/*`` scalars logged during training. Critic disagreement therefore
 widens the reported spread, exactly as it widens the range of values the pair can encode.
 
-The last two panels compare ``min(Q1, Q2)`` — the estimate SAC actually acts on — against
-the return it predicts, using the training ``gamma`` stored in the log. Three things make
-that comparison easy to get wrong, and all three are handled explicitly:
+The last two panels compare the estimate SAC actually acts on — ``min(Q1, Q2)``, or
+``(Q1 + Q2) / 2`` for a checkpoint trained with ``agent.algorithm.q_reduction_method=mean`` —
+against the return it predicts, using the training ``gamma`` stored in the log. Three things
+make that comparison easy to get wrong, and all three are handled explicitly:
 
 * **Entropy.** SAC's Q predicts the *soft* return, which adds ``alpha * -log_pi`` for every
   step after the evaluated action. The logged per-step ``log_prob`` supplies it; without it
@@ -52,6 +53,7 @@ import torch
 
 sys.path.append(str(Path(__file__).resolve().parents[2] / "rsl_rl_sac_vendor"))
 
+from rsl_rl_sac.algorithms import reduce_twin_q  # noqa: E402
 from rsl_rl_sac.models import symlog_distribution_stats  # noqa: E402
 
 ACTIVE_PROB = 0.1
@@ -140,8 +142,10 @@ class Run:
         self.episodes = int(self.done.sum())
         self.samples = self.probs.shape[0] * self.probs.shape[1]
 
-        # SAC acts on min(Q1, Q2), so that is the estimate whose error matters.
-        self.q_min = self.q.min(dim=-1).values.numpy().astype(np.float64)
+        # SAC acts on the twin critics combined as in training, so that is the estimate whose
+        # error matters. Logs written before the key existed all come from "min" training.
+        self.q_reduction = str(data["q_reduction_method"]) if "q_reduction_method" in data else "min"
+        self.q_combined = reduce_twin_q(self.q[..., 0], self.q[..., 1], self.q_reduction).numpy().astype(np.float64)
         self.gamma = float(data["gamma"]) if "gamma" in data else None
         self.alpha = float(data["alpha"]) if "alpha" in data else None
         self.deterministic = bool(data["deterministic"]) if "deterministic" in data else None
@@ -181,7 +185,7 @@ class Run:
 
     def error(self) -> np.ndarray:
         """Q - G, the estimation error at every logged step."""
-        return self.q_min - self.target_return()[0]
+        return self.q_combined - self.target_return()[0]
 
     def flat(self, key: str) -> np.ndarray:
         return self.stats[key].reshape(-1).numpy()
@@ -220,12 +224,12 @@ class Run:
         out["error_abs_mean"] = float(np.abs(error).mean())
         out["error_std"] = float(error.std())
         out["return_mean"] = float(self.target_return()[0][keep].mean())
-        out["q_on_valid"] = float(self.q_min[keep].mean())
+        out["q_on_valid"] = float(self.q_combined[keep].mean())
         if self.entropy_bonus is not None:
             out["alpha"] = self.alpha
             out["entropy_bonus_per_step"] = float(self.entropy_bonus.mean())
             # How much of the error the entropy term explains.
-            out["error_mean_no_entropy"] = float((self.q_min - self.returns["plain"])[keep].mean())
+            out["error_mean_no_entropy"] = float((self.q_combined - self.returns["plain"])[keep].mean())
         return out
 
 
@@ -250,7 +254,7 @@ ERROR_FIELDS = [
     ("gamma", "gamma"),
     ("alpha", "alpha"),
     ("entropy_bonus_per_step", "entropy bonus/step"),
-    ("q_on_valid", "mean min(Q1,Q2)"),
+    ("q_on_valid", "mean combined Q"),
     ("return_mean", "mean realized G"),
     ("error_mean", "mean error Q - G"),
     ("error_mean_no_entropy", "  ... ignoring entropy"),
@@ -282,6 +286,8 @@ def print_summary(runs: list[Run], min_observed: float) -> None:
     table(f"Estimation error in reward units (steps with >= {min_observed:.0%} of G observed)", ERROR_FIELDS)
 
     for _, summary, run in rows:
+        if run.q_reduction != "min":
+            print(f"[NOTE] {run.label}: combined Q is {run.q_reduction}(Q1,Q2), the reduction it was trained with.")
         if summary["edge_mass"] > 1e-3:
             print(
                 f"[WARN] {run.label}: {summary['edge_mass']:.3g} mean mass on the outermost atoms. "
@@ -333,7 +339,7 @@ def add_error_panels(axes, runs, colors, min_observed: float) -> None:
         steps = np.arange(target.shape[0])
         keep = run.valid(min_observed)
         # Averaging over envs matches the other time-series panels.
-        value_axis.plot(steps, run.q_min.mean(axis=1), color=color, label=f"{run.label}: min(Q1,Q2)")
+        value_axis.plot(steps, run.q_combined.mean(axis=1), color=color, label=f"{run.label}: {run.q_reduction}(Q1,Q2)")
         value_axis.plot(steps, target.mean(axis=1), color=color, linestyle="--", alpha=0.8,
                         label=f"{run.label}: realized G ({kind})")
 

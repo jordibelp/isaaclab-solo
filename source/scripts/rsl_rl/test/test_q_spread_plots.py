@@ -9,7 +9,7 @@ Run with the command in SAC_DISTRIBUTIONAL_CRITIC.md from env_isaaclab.
 import numpy as np
 import pytest
 import torch
-from q_spread_plots import discounted_returns
+from q_spread_plots import Run, discounted_returns
 from rsl_rl_sac.models import SACActorModel
 from tensordict import TensorDict
 
@@ -157,6 +157,30 @@ def test_soft_bootstrap_is_used_for_the_soft_return_only():
     )
     np.testing.assert_allclose(out["plain"][1], [GAMMA * 10.0])
     np.testing.assert_allclose(out["soft"][1], [GAMMA * 6.0])
+
+
+@pytest.mark.parametrize("stored", [None, "min", "mean"])
+def test_estimate_combines_the_twin_critics_as_training_did(tmp_path, stored):
+    # (steps, envs, twin critics): Q1 differs from Q2 in both directions.
+    q = np.array([[[1.0, 3.0], [-2.0, 0.5]], [[4.0, 4.5], [0.0, -6.0]]], dtype=np.float32)
+    extra = {} if stored is None else {"q_reduction_method": stored}
+    np.savez_compressed(
+        tmp_path / "log.npz",
+        q=q,
+        probs=np.full((*q.shape, 5), 0.2, dtype=np.float32),
+        done=np.zeros(q.shape[:2], dtype=np.float32),
+        value_support=np.linspace(-2.0, 2.0, 5),
+        gamma=GAMMA,
+        reward=np.ones(q.shape[:2], dtype=np.float32),
+        time_out=np.zeros(q.shape[:2], dtype=np.float32),
+        **extra,
+    )
+    run = Run(tmp_path / "log.npz", None, drop_first=0)
+    # Logs written before the key existed come from "min" training.
+    assert run.q_reduction == (stored or "min")
+    expected = (q[..., 0] + q[..., 1]) / 2 if stored == "mean" else np.minimum(q[..., 0], q[..., 1])
+    np.testing.assert_array_equal(run.q_combined, expected)
+    np.testing.assert_allclose(run.error(), expected - run.target_return()[0])
 
 
 @pytest.mark.parametrize("gamma", [0.9, 0.99])
