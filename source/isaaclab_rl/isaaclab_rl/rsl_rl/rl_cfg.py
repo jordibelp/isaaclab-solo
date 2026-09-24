@@ -93,13 +93,16 @@ class RslRlSacCriticModelCfg:
     obs_normalization: bool = MISSING
     layer_norm: bool = False
     distributional_loss: str = "mse"
-    """Critic loss: "mse" scalar heads, or categorical cross entropy with "two_hot" or "hl_gauss" labels."""
+    """Critic loss: "mse" scalar heads, categorical cross entropy with "two_hot" or "hl_gauss" labels,
+    or "mse_target_norm_popart" for scalar heads with MSE on PopArt-normalized targets."""
     distributional_num_bins: int = 255
     """Odd number of symmetrically spaced symexp atoms (categorical modes only)."""
     distributional_symlog_limit: float = 8.0
     """Support is symexp(linspace(-limit, limit, num_bins)), in reward units."""
     hl_gauss_sigma_ratio: float = 0.75
     """HL-Gauss label width as a fraction of the atom spacing; 0.75 is the published default."""
+    popart_beta: float = 3e-4
+    """Step size of PopArt's running target mean/std (mse_target_norm_popart only); 3e-4 as in Hessel et al. 2018."""
 
 
 ############################

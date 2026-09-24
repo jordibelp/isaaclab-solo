@@ -6,6 +6,7 @@
 """Numerical and SAC-update checks, without starting Isaac Sim."""
 
 import copy
+import math
 from types import SimpleNamespace
 
 import pytest
@@ -35,6 +36,7 @@ def models(device="cpu", loss="two_hot", **kwargs):
 
 
 CATEGORICAL = ["two_hot", "hl_gauss"]
+POPART = "mse_target_norm_popart"
 
 
 def test_projection_edges_and_mean_in_reward_units(device):
@@ -216,7 +218,62 @@ def test_default_action_gradient_matches_float64_reference(device):
     torch.testing.assert_close(grad, grad64.float(), atol=2e-7, rtol=2e-3)
 
 
-@pytest.mark.parametrize("loss", ["mse", *CATEGORICAL])
+def test_popart_starts_as_the_scalar_mse_critic(device):
+    torch.manual_seed(3)
+    obs, _, scalar = models(device, loss="mse")
+    torch.manual_seed(3)
+    _, _, popart = models(device, loss=POPART)
+    actions = torch.randn(8, 2, device=device)
+    for a, b in zip(popart.evaluate_all_q(obs, actions), scalar.evaluate_all_q(obs, actions)):
+        torch.testing.assert_close(a, b, atol=0, rtol=0)
+    assert set(popart.state_dict()) == set(scalar.state_dict()) | {"popart_mean", "popart_std"}
+    assert not popart.distributional_critic_ce and popart.critic1[-1].out_features == 1
+
+
+def test_popart_statistics_follow_the_paper_and_rescaling_keeps_every_q(device):
+    # Proposition 1 is exact algebra, so check it in float64 across large jumps of the statistics.
+    torch.manual_seed(4)
+    obs, _, critic = models(device, loss=POPART, popart_beta=0.2)
+    critic.double()
+    obs = TensorDict({"policy": obs["policy"].double()}, batch_size=[8])
+    actions = torch.randn(8, 2, device=device, dtype=torch.float64)
+    with torch.no_grad():  # a lagging target, so two different functions must survive
+        for p in (*critic.critic1_target.parameters(), *critic.critic2_target.parameters()):
+            p.add_(0.1 * torch.randn_like(p))
+    mean, nu = 0.0, 1.0  # the paper's Eq. 4 state: running first and second moments
+    for batch_mean, batch_std in ((3.0, 0.5), (-40.0, 25.0), (-40.0, 1e-3), (1e3, 2e2)):
+        before = (*critic.evaluate_all_q(obs, actions), *critic.evaluate_all_target_q(obs, actions))
+        second = batch_mean**2 + batch_std**2
+        critic.update_popart(*torch.tensor([batch_mean, second], dtype=torch.float64, device=device))
+        mean, nu = 0.8 * mean + 0.2 * batch_mean, 0.8 * nu + 0.2 * second
+        assert critic.popart_mean.item() == pytest.approx(mean, rel=1e-12)
+        assert critic.popart_std.item() == pytest.approx(math.sqrt(nu - mean**2), rel=1e-9)
+        after = (*critic.evaluate_all_q(obs, actions), *critic.evaluate_all_target_q(obs, actions))
+        for old, new in zip(before, after):
+            torch.testing.assert_close(new, old, atol=1e-9, rtol=1e-12)
+    # Targets without spread cannot pull the scale to zero.
+    critic.popart_beta = 1.0
+    critic.update_popart(*torch.tensor([5.0, 25.0], dtype=torch.float64, device=device))
+    assert critic.popart_mean.item() == 5.0 and critic.popart_std.item() == pytest.approx(1e-4)
+
+
+def test_popart_loss_is_mse_on_normalized_targets(device):
+    obs, _, critic = models(device, loss=POPART)
+    critic.popart_mean.fill_(2.0)
+    critic.popart_std.fill_(4.0)
+    actions = torch.randn(8, 2, device=device)
+    targets = torch.tensor([0.01, -2, -10, -1e3, 1, 2, 3, 4], device=device)[:, None]
+    output1, output2 = critic.critic_outputs(obs, actions)
+    loss1, loss2 = critic.losses_from_outputs(output1, output2, targets)
+    torch.testing.assert_close(loss1, torch.nn.functional.mse_loss(output1, (targets - 2) / 4))
+    torch.testing.assert_close(loss2, torch.nn.functional.mse_loss(output2, (targets - 2) / 4))
+    # Every raw residual is divided by the same std: unlike CE's bounded p - t, a sample with a
+    # 10x larger TD error keeps a 10x larger output gradient.
+    q1 = critic.q_from_output(output1)
+    torch.testing.assert_close(output1 - (targets - 2) / 4, (q1 - targets) / 4)
+
+
+@pytest.mark.parametrize("loss", ["mse", *CATEGORICAL, POPART])
 def test_complete_sac_update_bootstrap_and_checkpoint(device, loss):
     torch.manual_seed(21)
     obs, actor, critic = models(device, loss=loss)
@@ -240,21 +297,31 @@ def test_complete_sac_update_bootstrap_and_checkpoint(device, loss):
         torch.cuda.set_rng_state(cuda_rng)
     original_loss = critic.losses_from_outputs
     seen = []
+    loss_time_std = []
 
     def capture(output1, output2, y):
         seen.append(y.clone())
+        if critic.popart:
+            loss_time_std.append(critic.popart_std.clone())
         return original_loss(output1, output2, y)
 
     critic.losses_from_outputs = capture
     before = [p.clone() for p in actor.parameters()]
     losses = alg.update()
+    # PopArt rescales the target heads before the loss, so this also checks that it kept them.
     torch.testing.assert_close(seen[0], expected)
     assert all(torch.isfinite(torch.tensor(value)) for value in losses.values())
     assert any(not torch.equal(a, b) for a, b in zip(before, actor.parameters()))
-    if loss == "mse":
-        assert "critic_target_clipped_fraction" not in losses
-    else:
+    if loss in CATEGORICAL:
         assert losses["critic_target_clipped_fraction"] == 1 / 8
+    else:
+        assert "critic_target_clipped_fraction" not in losses
+    if loss == POPART:
+        # Algorithm 1 order: the loss already used the statistics this batch produced.
+        assert loss_time_std[0].item() == losses["PopArt/std"] != 1.0
+        assert losses["PopArt/mean"] == critic.popart_mean.item() != 0.0
+    else:
+        assert "PopArt/std" not in losses
     assert all(p.grad is None for p in critic.critic1_target.parameters())
     saved = copy.deepcopy(alg.save())
     _, actor2, critic2 = models(device, loss=loss)
@@ -281,13 +348,16 @@ def build_runner(monkeypatch, **cfg_extra):
     return SAC.construct_algorithm(obs, env, cfg, "cpu")
 
 
-@pytest.mark.parametrize("loss", ["mse", *CATEGORICAL])
+@pytest.mark.parametrize("loss", ["mse", *CATEGORICAL, POPART])
 def test_runner_flag_constructs_requested_head(monkeypatch, loss):
     alg = build_runner(monkeypatch, critic=dict(class_name="SACCriticModel", hidden_dims=[8],
-                                                distributional_loss=loss))
+                                                distributional_loss=loss, popart_beta=1e-3))
     assert alg.critic.distributional_loss == loss
-    assert alg.critic.distributional_critic_ce == (loss != "mse")
-    assert alg.critic.critic1[-1].out_features == (1 if loss == "mse" else 255)
+    assert alg.critic.distributional_critic_ce == (loss in CATEGORICAL)
+    assert alg.critic.popart == (loss == POPART)
+    assert alg.critic.critic1[-1].out_features == (255 if loss in CATEGORICAL else 1)
+    if loss == POPART:
+        assert alg.critic.popart_beta == 1e-3
 
 
 def test_deprecated_boolean_still_selects_two_hot(monkeypatch):
@@ -304,6 +374,8 @@ def test_deprecated_boolean_still_selects_two_hot(monkeypatch):
     {"distributional_symlog_limit": 90},
     {"loss": "hl_gauss", "hl_gauss_sigma_ratio": 0}, {"loss": "hl_gauss", "hl_gauss_sigma_ratio": -1},
     {"loss": "hl_gauss", "hl_gauss_sigma_ratio": float("inf")}, {"loss": "hl_gaus"},
+    {"loss": POPART, "popart_beta": 0}, {"loss": POPART, "popart_beta": 1.5},
+    {"loss": POPART, "popart_beta": float("nan")},
 ])
 def test_invalid_support_rejected(kwargs):
     with pytest.raises(ValueError):

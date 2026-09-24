@@ -21,6 +21,9 @@ from .mlp_model import MLPModel
 # An atom counts as "used" above this probability, matching the threshold the eval plots use.
 _ACTIVE_ATOM_PROB = 0.1
 
+# PopArt scale floor, from the multi-task PopArt paper (Hessel et al. 2018, Table 3).
+_POPART_MIN_STD = 1e-4
+
 #: Log keys for :meth:`SACCriticModel.distribution_stats`, in the order it stacks them.
 DISTRIBUTION_STAT_NAMES = (
     "CriticDist/symlog_mean",
@@ -303,6 +306,7 @@ class SACCriticModel(MLPModel):
         distributional_num_bins: int = 255,
         distributional_symlog_limit: float = 8.0,
         hl_gauss_sigma_ratio: float = 0.75,
+        popart_beta: float = 3e-4,
         **kwargs,
     ) -> None:
         """Initialize the SAC critic model.
@@ -317,11 +321,14 @@ class SACCriticModel(MLPModel):
             obs_normalization: Whether to normalize observations.
             num_actions: Dimension of the action space (concatenated with observations).
             layer_norm: Whether to apply layer normalization in MLP hidden layers.
-            distributional_loss: ``"mse"`` for the original scalar heads, or a categorical
-                cross-entropy head whose labels are ``"two_hot"`` or ``"hl_gauss"``.
+            distributional_loss: ``"mse"`` for the original scalar heads, a categorical
+                cross-entropy head whose labels are ``"two_hot"`` or ``"hl_gauss"``, or
+                ``"mse_target_norm_popart"`` for scalar heads trained with MSE on PopArt-normalized
+                targets.
             distributional_num_bins: Odd number of categorical atoms, including zero.
             distributional_symlog_limit: Symmetric log-space bound for the raw-unit support.
             hl_gauss_sigma_ratio: HL-Gauss label width, as a fraction of the atom spacing.
+            popart_beta: Step size of PopArt's moving target mean and variance.
         """
         super().__init__(
             obs,
@@ -336,11 +343,21 @@ class SACCriticModel(MLPModel):
         )
 
         self.num_actions = num_actions
-        if distributional_loss not in ("mse", "two_hot", "hl_gauss"):
-            raise ValueError("distributional_loss must be one of 'mse', 'two_hot', 'hl_gauss'.")
+        if distributional_loss not in ("mse", "two_hot", "hl_gauss", "mse_target_norm_popart"):
+            raise ValueError(
+                "distributional_loss must be one of 'mse', 'two_hot', 'hl_gauss', 'mse_target_norm_popart'."
+            )
         self.distributional_loss = distributional_loss
         # Every consumer only ever asks "is the head logits or a scalar?", so keep that one name.
-        self.distributional_critic_ce = distributional_loss != "mse"
+        self.distributional_critic_ce = distributional_loss in ("two_hot", "hl_gauss")
+        self.popart = distributional_loss == "mse_target_norm_popart"
+        if self.popart:
+            if not 0 < popart_beta <= 1:
+                raise ValueError("popart_beta must be in (0, 1].")
+            self.popart_beta = popart_beta
+            # Q = std * head + mean. Starting at (0, 1) makes the initial critic the MSE one.
+            self.register_buffer("popart_mean", torch.zeros(1))
+            self.register_buffer("popart_std", torch.ones(1))
         if self.distributional_critic_ce:
             if output_dim != 1:
                 raise ValueError("Categorical SAC requires scalar Q-values (output_dim=1).")
@@ -422,6 +439,8 @@ class SACCriticModel(MLPModel):
 
     def q_from_output(self, output: torch.Tensor) -> torch.Tensor:
         """Decode the raw-unit mean, not symexp(E[symlog(Q)]); keep action gradients."""
+        if self.popart:
+            return self.popart_std * output + self.popart_mean
         if not self.distributional_critic_ce:
             return output
         probs = output.float().softmax(dim=-1)
@@ -514,6 +533,8 @@ class SACCriticModel(MLPModel):
         self, output1: torch.Tensor, output2: torch.Tensor, targets: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Twin critic losses; the default branch retains the original scalar MSE."""
+        if self.popart:
+            targets = (targets - self.popart_mean) / self.popart_std
         if not self.distributional_critic_ce:
             return nn.functional.mse_loss(output1, targets), nn.functional.mse_loss(output2, targets)
         labels = self.categorical_labels(targets)
@@ -526,6 +547,31 @@ class SACCriticModel(MLPModel):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Twin critic losses; the default branch retains the original scalar MSE."""
         return self.losses_from_outputs(*self.critic_outputs(obs, actions), targets)
+
+    @torch.no_grad()
+    def update_popart(self, batch_mean: torch.Tensor, batch_second_moment: torch.Tensor) -> None:
+        """PopArt (van Hasselt et al. 2016): update the target statistics, then keep every Q value.
+
+        ART moves the running mean and variance of the Bellman targets toward this minibatch's
+        moments with step ``popart_beta``. It is the paper's minibatch rule, Eq. 4 with
+        ``nu = std^2 + mean^2``, rearranged so float32 never subtracts two large squares.
+
+        POP then rescales the last linear layer, ``w' = w * std / std'`` and
+        ``b' = (std * b + mean - mean') / std'`` (Proposition 1), so ``std * head + mean`` is
+        unchanged for every input. The target critics share the statistics and are rescaled
+        too; Polyak averaging stays exact because it commutes with this affine map.
+        """
+        beta = self.popart_beta
+        old_mean, old_std = self.popart_mean.clone(), self.popart_std.clone()
+        delta = batch_mean - old_mean
+        batch_variance = (batch_second_moment - batch_mean.square()).clamp_min(0.0)
+        variance = (1 - beta) * (old_std.square() + beta * delta.square()) + beta * batch_variance
+        self.popart_mean.add_(beta * delta)
+        self.popart_std.copy_(variance.sqrt().clamp_min(_POPART_MIN_STD))
+        for network in (self.critic1, self.critic2, self.critic1_target, self.critic2_target):
+            head = network[-1]
+            head.weight.mul_(old_std / self.popart_std)
+            head.bias.mul_(old_std).add_(old_mean - self.popart_mean).div_(self.popart_std)
 
     def support_symlog(self) -> torch.Tensor:
         """Support atoms in the symlog units the ``distributional_symlog_limit`` flag sets."""

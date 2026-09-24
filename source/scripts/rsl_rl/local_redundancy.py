@@ -195,12 +195,8 @@ def measure(runner, obs, cfg: dict, iteration: int) -> dict[str, dict[str, float
                 for name in ("critic1", "critic2"):
                     network = getattr(critic, name)
                     results[name] = _measure(
-                        # Keep this a scalar-Q probe when the heads output CE logits.
-                        lambda batch, net=network: (
-                            critic.q_from_output(net(batch["q"]))
-                            if getattr(critic, "distributional_critic_ce", False)
-                            else net(batch["q"])
-                        ),
+                        # Probe raw-unit Q in every mode: decode CE logits and PopArt's normalized head.
+                        lambda batch, net=network: critic.q_from_output(net(batch["q"])),
                         [p for p in network.parameters() if p.requires_grad],
                         {"q": q_inputs},
                         cfg=cfg,

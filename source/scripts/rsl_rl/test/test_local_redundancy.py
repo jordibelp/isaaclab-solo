@@ -100,6 +100,17 @@ def test_ce_critic_probe_still_measures_scalar_q(cfg, device, distributional_los
         assert math.isfinite(measured[name]["local_redundancy"])
 
 
+def test_popart_critic_probe_measures_raw_unit_q(cfg, device):
+    runner, obs = sac(device, distributional_loss="mse_target_norm_popart")
+    base = lr.measure(runner, obs, cfg, 0)
+    runner.alg.critic.popart_std.fill_(3.0)
+    runner.alg.critic.popart_mean.fill_(-7.0)
+    scaled = lr.measure(runner, obs, cfg, 0)
+    for name in ("critic1", "critic2"):
+        # Q = std * head + mean, so squared gradient norms grow by std^2 and ignore the mean.
+        assert scaled[name]["local_redundancy"] == pytest.approx(9 * base[name]["local_redundancy"], rel=1e-4)
+
+
 def test_linear_gradient_matches_closed_form_and_no_cancellation(device):
     model = nn.Linear(2, 1).to(device)
     x = torch.tensor([[3.0, 4.0], [3.0, 4.0]], device=device)

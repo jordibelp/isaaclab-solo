@@ -8,10 +8,12 @@ One flag on an existing **SAC** training command picks the critic loss:
 agent.critic.distributional_loss=mse       # default: the original scalar heads
 agent.critic.distributional_loss=two_hot   # two-hot labels, Dreamer style
 agent.critic.distributional_loss=hl_gauss  # Gaussian labels, Farebrother et al. 2024
+agent.critic.distributional_loss=mse_target_norm_popart  # scalar MSE on PopArt-normalized targets
 ```
 
 `mse` keeps the original scalar heads, MSE, initialization, state-dict keys, and
-optimizer behavior. PPO is unchanged in all three modes.
+optimizer behavior. PPO is unchanged in all four modes. The PopArt mode is not
+categorical; see [its own section](#popart-mse-on-normalized-targets).
 
 Start a **fresh experiment** when you move between `mse` and either categorical
 mode, because the head shapes differ. `two_hot` and `hl_gauss` share the same
@@ -28,12 +30,14 @@ Optional settings:
 ```text
 agent.critic.distributional_num_bins=255 agent.critic.distributional_symlog_limit=8.0
 agent.critic.hl_gauss_sigma_ratio=0.75
+agent.critic.popart_beta=3e-4
 ```
 
 The number of bins must be odd and at least 3. The symmetric support includes
 zero and is `symexp(linspace(-8, 8, 255))`, approximately **[-2979.96, 2979.96]**
-in reward units. `hl_gauss_sigma_ratio` only applies to `hl_gauss`. Neither
-rewards nor environment penalties are modified.
+in reward units. `hl_gauss_sigma_ratio` only applies to `hl_gauss`, and
+`popart_beta` only to `mse_target_norm_popart`. The bin settings are ignored by
+the two scalar modes. Neither rewards nor environment penalties are modified.
 
 ## What problem does this address?
 
@@ -186,6 +190,127 @@ below, and near zero it is dominated by a fixed offset of the order of
 `sigma^2 / 2` rather than by anything that compounds. Two-hot prints about 1e-7,
 because its label preserves the mean exactly by construction. If you sweep the
 bin count, watch this line.
+
+## PopArt: MSE on normalized targets
+
+`mse_target_norm_popart` keeps the scalar MSE critic and adds PopArt
+([van Hasselt et al. 2016](https://arxiv.org/abs/1602.07714)). It is meant as an
+ablation for the CE result. It fixes the *global* scale and offset of the
+regression problem, but it keeps the per-sample weighting of MSE.
+
+### What it does
+
+Each critic head now predicts a normalized value `g`. Everything outside the
+critic loss sees the raw value:
+
+```text
+Q = sigma * g + mu
+```
+
+`mu` and `sigma` are running estimates of the mean and standard deviation of
+the Bellman targets `y`. They describe the targets, not the rewards. The target
+`y` is computed exactly as before, in raw reward units. Each minibatch update
+then does three things, in the order of the paper's Algorithm 1:
+
+1. **ART: update the statistics** with the moments of this minibatch's `y`:
+
+   ```text
+   mu'    = (1 - beta) * mu + beta * mean(y)
+   nu'    = (1 - beta) * nu + beta * mean(y^2)        where nu = sigma^2 + mu^2
+   sigma' = max(sqrt(nu' - mu'^2), 1e-4)
+   ```
+
+2. **POP: rescale the last linear layer** so that no Q value changes:
+
+   ```text
+   w' = w * sigma / sigma'
+   b' = (sigma * b + mu - mu') / sigma'
+   ```
+
+3. **Fit** with plain MSE on the normalized target:
+
+   ```text
+   L_j = mean((g_j - (y - mu') / sigma')^2)
+   L   = (L_1 + L_2) / 2
+   ```
+
+Step 1 comes before step 3. So the update that sees a new target already uses
+the new normalization. The paper stresses that this order matters.
+
+### Design choices
+
+- **The actor, the Bellman target, and the temperature all see raw Q.** SAC's
+  objective and the balance between Q and the entropy bonus are unchanged. Only
+  the critic's regression problem is rescaled. The multi-task PopArt paper also
+  normalizes its policy loss. We do not, so this stays a pure critic-loss ablation.
+- **One pair of statistics for both critics and their targets.** Both critics
+  regress the same `y`. The target networks share the statistics, so step 2
+  rescales their heads too, and the target Q values stay exactly the same.
+  Polyak averaging stays exact as well, because averaging commutes with this
+  rescaling.
+- **It starts at `mu = 0`, `sigma = 1`.** At step 0 the PopArt critic is identical
+  to the MSE critic with the same seed. The statistics then move toward the data
+  with a time constant of `1 / beta` updates. At `beta = 3e-4` and 400
+  minibatches per iteration, that is about 8 iterations.
+- **The defaults `beta = 3e-4` and the `1e-4` floor on sigma** come from the
+  multi-task PopArt paper ([Hessel et al. 2018](https://arxiv.org/abs/1809.04474),
+  Table 3). There, beta "didn't require any tuning". Change it with
+  `agent.critic.popart_beta`.
+- **Adam's state is not rescaled** when step 2 changes the head. Each update
+  changes the head by a factor of about `1 ± beta`, and Adam's moving averages
+  absorb that.
+- The code updates the variance in a rearranged form. It is equal to step 1, but
+  float32 never has to subtract two large squares. A test checks it against the
+  formula above.
+
+### What to expect with Adam
+
+The paper's main argument is about plain SGD. There, doubling the target scale
+makes the hidden-layer updates four times larger, and PopArt removes this. Our
+critic uses Adam, and Adam divides each gradient by its own running size. So a
+fixed rescaling of all targets already cancels out.
+
+With constant statistics, PopArt + Adam behaves almost like plain MSE + Adam
+with the head's step size multiplied by sigma. What still differs:
+
+- how the critic reacts when the target scale *changes* during training, for
+  example at curriculum phases or as the policy improves;
+- the head's effective step size, which is multiplied by sigma;
+- the norm-1 gradient clip. It acts on the whole critic gradient, and PopArt
+  divides the head gradient by sigma and the hidden-layer gradient by sigma².
+  So PopArt changes how often the clip triggers.
+
+If `PopArt/std` stays near 1, expect this arm to look almost like plain MSE.
+That result would still be useful: it would say the CE gain does not come from
+the global scale of the targets.
+
+### What PopArt does not change
+
+- **Per-sample influence.** Every residual is divided by the same sigma. A
+  transition with a 10× larger TD error still gets a 10× larger output gradient.
+  CE's `p - t` has no such multiplier. This is the main contrast with the CE arms.
+- **Rare large targets.** The paper bounds each normalized target by
+  `sqrt((1 - beta) / beta)`. That bound holds for one-sample updates. Here the
+  statistics move once per minibatch of about 16k targets. One rare -10
+  collision target barely moves them, so the bound does not protect against it.
+- **Rewards and penalties.** Nothing in the environment changes.
+
+### Logs, checkpoints, and other tools
+
+- `PopArt/mean` and `PopArt/std` are logged every iteration.
+- `Loss/critic1` and `Loss/critic2` are in *normalized* units. Multiply them by
+  `PopArt/std²` to compare with a plain MSE run.
+- The checkpoint stores the statistics as `popart_mean` and `popart_std`, so a
+  resume restores them.
+- Start a fresh experiment when you switch between PopArt and any other mode.
+  The two extra buffers make strict checkpoint loading fail loudly, on purpose.
+- `play_direct_0325.py --q_value_log` needs the same
+  `agent.critic.distributional_loss=mse_target_norm_popart` override. Actor-only
+  playback and export are unchanged.
+- Local-redundancy probes decode raw Q in every mode, so PopArt and MSE runs are
+  measured on the same quantity.
+- `mujoco/train_sac.py` does not support PopArt checkpoints yet. Loading one
+  fails loudly on the two extra buffers.
 
 ## Why the default support is narrower than Dreamer's
 
@@ -358,7 +483,7 @@ step is itself the diagnostic.
 | Huber TD loss | Minimal scalar-head change; caps output-error influence | Generally changes the conditional mean estimator under asymmetric tails |
 | Scalar symlog MSE | Compresses large targets | Inverse-transformed mean in log-space is not the raw expected return |
 | Fixed positive reward scaling | Cheap magnitude reduction | Leaves relative tail severity unchanged; preserving SAC's objective requires corresponding entropy-temperature scaling |
-| PopArt | Adaptive target normalization while preserving unnormalized outputs | More moving parts; does not by itself fix rare-event sampling or policy-gradient scale |
+| PopArt | Adaptive target normalization while preserving unnormalized outputs | Now `distributional_loss=mse_target_norm_popart`; keeps MSE's per-sample weighting, and under Adam mostly changes the head step size and gradient clipping |
 | HL-Gauss | Smooth categorical targets; promising empirical results | Adds a smoothing bandwidth; on this log support it needs the skew correction above |
 
 Relevant primary references: [RLPD / Ball et al.](https://proceedings.mlr.press/v202/ball23a.html)
@@ -468,6 +593,45 @@ can branch off a common checkpoint if you want to control for early training.
   with these metrics, so their behavior on a converged policy is unmeasured. The
   `alpha` used for the entropy correction is the checkpoint's final value, which
   is only the value in force during training if `auto_alpha` had settled.
+
+## Verification of PopArt (2026-09-24)
+
+- 182 tests pass with the command below, and the 126 MuJoCo SAC tests in
+  `mujoco/test_train_sac.py` still pass.
+- At step 0, a PopArt critic built with the same seed gives bit-identical Q to
+  the MSE critic. Its state dict is the MSE one plus `popart_mean` and
+  `popart_std`.
+- Proposition 1 is checked in float64 over large jumps of the statistics, up to
+  a mean of about 190 and a std of about 420. The online and target Q values stay
+  equal to 1e-9. The statistics match the paper's formula to 1e-9 relative, and
+  the 1e-4 floor holds for targets with no spread.
+- The loss is checked to be plain MSE on `(y - mu) / sigma`. Each normalized
+  residual is checked to be the raw residual divided by sigma.
+- A complete SAC update with PopArt, including terminal, timeout, and mixed
+  n-step samples, builds the same Bellman target as a hand computation. The
+  loss already uses the statistics from that same batch. `PopArt/mean` and
+  `PopArt/std` reach the loss dict, and a checkpoint round trip restores Q
+  exactly.
+- The config flag builds a scalar head with the requested `popart_beta`. Values
+  of beta outside (0, 1] are rejected.
+- The local-redundancy probe is checked to measure raw Q: setting `sigma = 3`
+  multiplies its score by 9, and the mean has no effect.
+- The old modes are unchanged. Six complete SAC updates (swish, LayerNorm
+  critic, mixed terminals and timeouts) give bit-identical losses, actor and
+  critic state dicts, and `log_alpha` against git HEAD for `mse`, `two_hot`,
+  and `hl_gauss`, on CPU and CUDA.
+- Real `solo12-two-feet` headless smoke: 64 envs, five iterations, two
+  minibatches of 128, 1024-512-256 critic with LayerNorm, symmetry augmentation,
+  and both plasticity diagnostics every iteration. It exited cleanly.
+  `PopArt/std` went 1.0125 → 1.0528 and `PopArt/mean` -0.0035 → -0.0148 over
+  eight updates, and `Loss/critic1` fell from 32.9 to 11.9. The checkpoint holds
+  the same two values.
+- From how fast the statistics moved, the first targets had a mean near -6 and a
+  std near 3. This is a rough estimate from eight small batches. It suggests
+  sigma will leave 1 quickly in a real run.
+- **Not verified:** no long run, and no learning result yet. The multi-GPU
+  all-reduce of the target moments is untested, because no multi-GPU machine
+  was used.
 
 Run the numerical suite from the repository root:
 

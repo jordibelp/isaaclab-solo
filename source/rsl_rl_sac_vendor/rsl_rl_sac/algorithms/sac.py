@@ -292,6 +292,15 @@ class SAC:
                 n_step_discount = torch.pow(self.gamma, effective_n_steps.to(dtype=q_target_next.dtype))
                 target_q = rewards_batch + n_step_discount * bootstrap_mask * q_target_next
 
+            if self.critic.popart:
+                # PopArt updates the statistics before the loss (Algorithm 1), so this very
+                # update already regresses onto the new normalization.
+                moments = torch.stack((target_q.mean(), target_q.square().mean()))
+                if self.is_multi_gpu:
+                    torch.distributed.all_reduce(moments, op=torch.distributed.ReduceOp.SUM)
+                    moments /= self.gpu_world_size
+                self.critic.update_popart(*moments)
+
             output1, output2 = self.critic.critic_outputs(obs_batch, actions_batch)
             critic1_loss, critic2_loss = self.critic.losses_from_outputs(output1, output2, target_q)
             if self.critic.distributional_critic_ce:
@@ -457,6 +466,9 @@ class SAC:
         if summed_dist_stats is not None:
             names = (*DISTRIBUTION_STAT_NAMES, "critic_target_clipped_fraction")
             loss_dict.update(zip(names, (summed_dist_stats / num_updates).tolist()))
+        if self.critic.popart:
+            loss_dict["PopArt/mean"] = self.critic.popart_mean.item()
+            loss_dict["PopArt/std"] = self.critic.popart_std.item()
 
         return loss_dict
 
