@@ -1121,36 +1121,59 @@ def _match_optimizer_param_groups_to_checkpoint(runner, checkpoint_path: str | N
         )
 
 
+def _agent_policy_optimizers(runner) -> list[tuple[str, torch.optim.Optimizer]]:
+    """Return the trainable policy optimizers (PPO: one; SAC: actor and critic)."""
+
+    alg = getattr(runner, "alg", None)
+    optimizer = getattr(alg, "optimizer", None)
+    if optimizer is not None:
+        return [("policy", optimizer)]
+    optimizers = []
+    for name in ("actor", "critic"):
+        optimizer = getattr(alg, f"{name}_optimizer", None)
+        if optimizer is not None:
+            optimizers.append((name, optimizer))
+    return optimizers
+
+
 def _apply_agent_weight_decay_to_optimizer(runner, agent_cfg: RslRlBaseRunnerCfg) -> None:
     weight_decay = float(getattr(agent_cfg, "weight_decay", 0.0) or 0.0)
     if weight_decay < 0.0:
         raise ValueError(f"agent.weight_decay must be non-negative, got {weight_decay}.")
 
-    optimizer = getattr(getattr(runner, "alg", None), "optimizer", None)
-    if optimizer is None:
+    optimizers = _agent_policy_optimizers(runner)
+    if not optimizers:
         if weight_decay == 0.0:
             return
         raise ValueError("agent.weight_decay was set, but the selected RSL-RL runner has no optimizer.")
 
     # The action-noise std/log_std is exploration state, not a network weight: decaying it
-    # toward zero silently shrinks exploration, so it must stay in a decay-free group.
+    # toward zero silently shrinks exploration, so it must stay in a decay-free PPO group.
     policy = getattr(runner.alg, "policy", None) or getattr(runner.alg, "actor_critic", None)
     noise_param_ids = _policy_action_noise_param_ids(policy)
 
-    previous_values = {float(group.get("weight_decay", 0.0)) for group in optimizer.param_groups}
-    _split_action_noise_optimizer_group(optimizer, noise_param_ids)
-    for group in optimizer.param_groups:
-        if any(id(p) in noise_param_ids for p in group["params"]):
-            group["weight_decay"] = 0.0
-        else:
-            group["weight_decay"] = weight_decay
+    previous_values = {
+        float(group.get("weight_decay", 0.0)) for _, optimizer in optimizers for group in optimizer.param_groups
+    }
+    for name, optimizer in optimizers:
+        if name == "policy":
+            _split_action_noise_optimizer_group(optimizer, noise_param_ids)
+        for group in optimizer.param_groups:
+            if name == "policy" and any(id(p) in noise_param_ids for p in group["params"]):
+                group["weight_decay"] = 0.0
+            else:
+                group["weight_decay"] = weight_decay
 
     if weight_decay != 0.0 or previous_values != {0.0}:
+        decayed_groups = sum(
+            not (name == "policy" and any(id(p) in noise_param_ids for p in group["params"]))
+            for name, optimizer in optimizers
+            for group in optimizer.param_groups
+        )
         print(
             "[INFO]: Set RSL-RL optimizer weight_decay="
-            f"{weight_decay:g} on "
-            f"{sum(not any(id(p) in noise_param_ids for p in group['params']) for group in optimizer.param_groups)} "
-            f"parameter group(s); kept {len(noise_param_ids)} action-noise std parameter(s) decay-free."
+            f"{weight_decay:g} on {decayed_groups} "
+            f"parameter group(s); kept {len(noise_param_ids)} PPO action-noise std parameter(s) decay-free."
         )
 
 
@@ -1162,8 +1185,8 @@ def _apply_agent_adam_betas_to_optimizer(runner, agent_cfg: RslRlBaseRunnerCfg) 
     if not 0.0 <= beta2 < 1.0:
         raise ValueError(f"agent.adam_beta2 must be in [0, 1), got {beta2}.")
 
-    optimizer = getattr(getattr(runner, "alg", None), "optimizer", None)
-    if optimizer is None:
+    optimizers = _agent_policy_optimizers(runner)
+    if not optimizers:
         if (beta1, beta2) == (0.9, 0.999):
             return
         raise ValueError(
@@ -1172,15 +1195,19 @@ def _apply_agent_adam_betas_to_optimizer(runner, agent_cfg: RslRlBaseRunnerCfg) 
 
     betas = (beta1, beta2)
     previous_values = {
-        tuple(float(beta) for beta in group.get("betas", (0.9, 0.999))) for group in optimizer.param_groups
+        tuple(float(beta) for beta in group.get("betas", (0.9, 0.999)))
+        for _, optimizer in optimizers
+        for group in optimizer.param_groups
     }
-    for group in optimizer.param_groups:
-        group["betas"] = betas
+    for _, optimizer in optimizers:
+        for group in optimizer.param_groups:
+            group["betas"] = betas
 
     if betas != (0.9, 0.999) or previous_values != {(0.9, 0.999)}:
+        num_groups = sum(len(optimizer.param_groups) for _, optimizer in optimizers)
         print(
             "[INFO]: Set RSL-RL optimizer Adam betas="
-            f"({beta1:g}, {beta2:g}) on {len(optimizer.param_groups)} parameter group(s)."
+            f"({beta1:g}, {beta2:g}) on {num_groups} parameter group(s)."
         )
 
 
