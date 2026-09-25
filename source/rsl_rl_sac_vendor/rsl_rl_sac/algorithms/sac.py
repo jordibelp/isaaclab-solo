@@ -5,6 +5,9 @@
 
 from __future__ import annotations
 
+import functools
+import socket
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -35,6 +38,21 @@ def reduce_twin_q(q1: torch.Tensor, q2: torch.Tensor, method: str) -> torch.Tens
     if method in ("mean", "mean_pi_q_none"):
         return 0.5 * (q1 + q2)
     raise ValueError(f"q_reduction_method must be one of {Q_REDUCTION_METHODS}, got {method!r}.")
+
+
+def _configure_cluster_torch_compile() -> None:
+    """Keep Inductor away from its nvidia-smi clock query, which can hang on IRICluster.
+
+    Same workaround as the Dreamer core: compile in-process and use the L40S max SM clock.
+    """
+    if "drslurm" not in socket.gethostname().lower():
+        return
+    import torch._inductor.config as inductor_config
+    import torch._utils_internal as torch_utils_internal
+
+    inductor_config.compile_threads = 1
+    torch_utils_internal.max_clock_rate = functools.lru_cache(None)(lambda: 2520)
+    print("[INFO] SAC torch.compile: cluster workaround enabled (compile_threads=1, max_clock_mhz=2520).")
 
 
 class SAC:
@@ -73,10 +91,12 @@ class SAC:
         policy_frequency: int = 2,
         n_steps: int = 1,
         q_reduction_method: str = "min",
+        torch_compile: bool = False,
         # RND parameters
         rnd_cfg: dict | None = None,
         # Symmetry parameters
         symmetry_cfg: dict | None = None,
+        symmetry_log_interval: int = 100,
         # Distributed training parameters
         multi_gpu_cfg: dict | None = None,
     ):
@@ -108,8 +128,12 @@ class SAC:
                 actor loss: "min" (clipped double Q, default) or "mean" (their average) in both, or
                 "mean_pi_q_none": average in the actor loss, and each critic bootstraps from its own
                 target network.
+            torch_compile: Compile the per-mini-batch Bellman target, critic loss and actor objective
+                with ``torch.compile``. The math is unchanged; the compiler fuses it into fewer kernels.
             rnd_cfg: Optional dictionary of RND configuration parameters. If None, RND is not used.
             symmetry_cfg: Optional dictionary of symmetry configuration parameters. If None, symmetry is not used.
+            symmetry_log_interval: When the mirror loss is only logged (``use_mirror_loss=False``), compute it
+                on one mini-batch every this many ``update()`` calls instead of on every mini-batch.
             multi_gpu_cfg: Optional dictionary of multi-GPU configuration parameters. If None, multi-GPU is not used.
         """
         self.device = device
@@ -147,6 +171,10 @@ class SAC:
             self.symmetry = symmetry_cfg
         else:
             self.symmetry = None
+        if symmetry_log_interval < 1:
+            raise ValueError(f"symmetry_log_interval must be at least 1, got {symmetry_log_interval}.")
+        self.symmetry_log_interval = symmetry_log_interval
+        self.update_calls = 0
 
         # Store actor and critic
         self.actor = actor.to(device)
@@ -203,6 +231,17 @@ class SAC:
         # Init target networks
         self.critic.init_target_networks()
 
+        # The same three methods run eagerly or compiled, so both paths share one implementation.
+        self.torch_compile = torch_compile
+        self._bellman_targets_fn = self._bellman_targets
+        self._critic_losses_fn = self._critic_losses
+        self._actor_objective_fn = self._actor_objective
+        if torch_compile:
+            _configure_cluster_torch_compile()
+            self._bellman_targets_fn = torch.compile(self._bellman_targets)
+            self._critic_losses_fn = torch.compile(self._critic_losses)
+            self._actor_objective_fn = torch.compile(self._actor_objective)
+
     def act(self, obs: TensorDict) -> torch.Tensor:
         """Select an action using the actor (stochastic during training)."""
         with torch.no_grad():
@@ -229,6 +268,10 @@ class SAC:
         else:
             time_outs = torch.zeros_like(dones, device=self.device)
             true_next_obs = next_obs
+        # The target mask is bootstrap + 1 - done, so a time-out must also be a done. Checking each
+        # transition once here keeps a host sync out of every update mini-batch.
+        if torch.any(time_outs.reshape(dones.shape).bool() & ~dones.bool()):
+            raise ValueError("A time-out without a done would bootstrap past 1. Check bootstrapping logic.")
 
         # Update normalizers
         if self.actor_parameters:
@@ -254,14 +297,20 @@ class SAC:
         self.actor.reset(dones)
 
     def update(self) -> dict:
-        """Perform off-policy SAC updates, returning mean losses."""
-        mean_critic1_loss = 0.0
-        mean_critic2_loss = 0.0
-        mean_actor_loss = 0.0
-        mean_alpha_loss = 0.0
-        mean_rnd_loss = 0.0 if self.rnd else None
-        mean_symmetry_loss = 0.0 if self.symmetry else None
+        """Perform off-policy SAC updates, returning mean losses.
+
+        Per-mini-batch values stay on the device, so the loop never waits for the GPU. The host
+        reads them once, after the last mini-batch.
+        """
+        critic1_losses, critic2_losses, actor_losses, alpha_losses = [], [], [], []
+        rnd_losses, mirror_losses = [], []
         summed_dist_stats = None
+        use_mirror_loss = self.symmetry is not None and self.symmetry["use_mirror_loss"]
+        # A mirror loss that is only logged is measured on one mini-batch every few updates.
+        log_mirror_loss = (
+            self.symmetry is not None and not use_mirror_loss and self.update_calls % self.symmetry_log_interval == 0
+        )
+        self.update_calls += 1
 
         for batch in self.replay_buffer.mini_batch_generator(
             num_mini_batch=self.num_mini_batches,
@@ -282,12 +331,8 @@ class SAC:
                 obs_batch.batch_size[0] if isinstance(obs_batch, TensorDict) else obs_batch.shape[0]
             )
 
-            num_aug = 1
             # Perform symmetric augmentation
             if self.symmetry and self.symmetry["use_data_augmentation"]:
-                original_batch_size = (
-                    obs_batch.batch_size[0] if isinstance(obs_batch, TensorDict) else obs_batch.shape[0]
-                )
                 data_augmentation_func = self.symmetry["data_augmentation_func"]
                 obs_batch, actions_batch = data_augmentation_func(
                     obs=obs_batch, actions=actions_batch, env=self.symmetry["_env"]
@@ -307,79 +352,31 @@ class SAC:
             ###########################################################################
             # 1) Critic update
             with torch.no_grad():
-                bootstrap_mask = bootstrap_batch + 1 - dones_batch
-                if torch.any(bootstrap_mask > 1):
-                    raise ValueError("bootstrap_mask has values greater than 1. Check bootstrapping logic.")
-
-                new_actions, next_log_prob = self.actor.sample_action_logp(next_obs_batch)
-                next_state_entropy = -self.log_alpha.exp() * next_log_prob
-
-                if self.critic.distributional_loss == "c51":
-                    n_step_discount = torch.pow(self.gamma, effective_n_steps.to(dtype=rewards_batch.dtype))
-                    target_output1, target_output2 = self.critic.target_outputs(next_obs_batch, new_actions)
-                    probabilities1 = target_output1.float().softmax(-1)
-                    probabilities2 = target_output2.float().softmax(-1)
-                    if self.q_reduction_method == "mean_pi_q_none":
-                        # FastSAC: each critic projects its own target distribution.
-                        target_probabilities1, target_probabilities2 = probabilities1, probabilities2
-                    elif self.q_reduction_method == "mean":
-                        target_probabilities1 = target_probabilities2 = 0.5 * (probabilities1 + probabilities2)
-                    else:
-                        q1 = (probabilities1 * self.critic.value_support).sum(-1, keepdim=True)
-                        q2 = (probabilities2 * self.critic.value_support).sum(-1, keepdim=True)
-                        choose_first = q1 <= q2
-                        target_probabilities1 = target_probabilities2 = torch.where(
-                            choose_first, probabilities1, probabilities2
-                        )
-                    reward_with_entropy = rewards_batch + n_step_discount * bootstrap_mask * next_state_entropy
-                    discount = n_step_discount * bootstrap_mask
-                    target_dist1 = self.critic.c51_project(target_probabilities1, reward_with_entropy, discount)
-                    target_dist2 = (
-                        target_dist1 if target_probabilities2 is target_probabilities1 else
-                        self.critic.c51_project(target_probabilities2, reward_with_entropy, discount)
-                    )
-                else:
-                    q1_target, q2_target = self.critic.evaluate_all_target_q(next_obs_batch, new_actions)
-                    if self.q_reduction_method == "mean_pi_q_none":
-                        # No reduction: column i is critic i's own target, as in the FastSAC code.
-                        next_q = torch.cat((q1_target, q2_target), dim=-1)
-                    else:
-                        next_q = reduce_twin_q(q1_target, q2_target, self.q_reduction_method)
-                    q_target_next = next_q + next_state_entropy
-                    n_step_discount = torch.pow(self.gamma, effective_n_steps.to(dtype=q_target_next.dtype))
-                    target_q = rewards_batch + n_step_discount * bootstrap_mask * q_target_next
+                targets = self._bellman_targets_fn(
+                    next_obs_batch, rewards_batch, dones_batch, bootstrap_batch, effective_n_steps
+                )
 
             if self.critic.popart:
                 # PopArt updates the statistics before the loss (Algorithm 1), so this very
                 # update already regresses onto the new normalization.
+                (target_q,) = targets
                 moments = torch.stack((target_q.mean(), target_q.square().mean()))
                 if self.is_multi_gpu:
                     torch.distributed.all_reduce(moments, op=torch.distributed.ReduceOp.SUM)
                     moments /= self.gpu_world_size
                 self.critic.update_popart(*moments)
 
-            output1, output2 = self.critic.critic_outputs(obs_batch, actions_batch)
-            if self.critic.distributional_loss == "c51":
-                critic1_loss, critic2_loss = self.critic.c51_losses(output1, output2, target_dist1, target_dist2)
-            else:
-                critic1_loss, critic2_loss = self.critic.losses_from_outputs(output1, output2, target_q)
+            # Two-hot/HL-Gauss labels use searchsorted; distribution statistics use it too.
+            # Inductor 2.7 cannot lower their bucket search on CUDA, so keep those small
+            # bookkeeping operations eager and compile the networks plus CE loss.
+            loss_targets = self._critic_loss_targets(targets)
+            critic1_loss, critic2_loss, output1, output2 = self._critic_losses_fn(
+                obs_batch, actions_batch, loss_targets
+            )
             if self.critic.distributional_critic_ce:
-                support = self.critic.value_support
-                if self.critic.distributional_loss == "c51":
-                    transformed = reward_with_entropy + discount * support
-                    clipped = (transformed < support[0]) | (transformed > support[-1])
-                    clipped_fraction = 0.5 * (
-                        (target_probabilities1 * clipped).sum(-1).mean()
-                        + (target_probabilities2 * clipped).sum(-1).mean()
-                    )
-                else:
-                    clipped_fraction = ((target_q < support[0]) | (target_q > support[-1])).float().mean()
-                # Accumulate on device; one host sync per update() instead of one per mini-batch.
-                batch_stats = torch.cat((
-                    self.critic.distribution_stats(output1, output2),
-                    clipped_fraction.reshape(1),
-                ))
-                summed_dist_stats = batch_stats if summed_dist_stats is None else summed_dist_stats + batch_stats
+                with torch.no_grad():
+                    dist_stats = self._critic_distribution_stats(output1.detach(), output2.detach(), targets)
+                    summed_dist_stats = dist_stats if summed_dist_stats is None else summed_dist_stats + dist_stats
 
             total_critic_loss = 0.5 * (critic1_loss + critic2_loss)
             if self.critic_optimizer is not None:
@@ -393,8 +390,16 @@ class SAC:
                 self.critic_optimizer.step()
 
             ###########################################################################
-            # Sample new actions for actor and alpha update
-            new_actions, log_prob = self.actor.sample_action_logp(obs_batch)
+            # One policy sample feeds both the alpha and the actor update
+            update_actor = self.actor_optimizer is not None and self.update_step % self.policy_frequency == 0
+            if update_actor:
+                # Freeze critic parameters for actor update
+                for p in self.critic_parameters:
+                    p.requires_grad_(False)
+                log_prob, q_new = self._actor_objective_fn(obs_batch)
+            else:
+                with torch.no_grad():
+                    _, log_prob = self.actor.sample_action_logp(obs_batch)
 
             ###########################################################################
             # 2) Alpha update
@@ -409,57 +414,16 @@ class SAC:
                         self.log_alpha.grad /= self.gpu_world_size
 
                 self.alpha_optimizer.step()
-                self.alpha = self.log_alpha.exp().item()
-            else:
-                alpha_loss = torch.tensor(0.0, device=self.device)
-
-            entropy = self.log_alpha.exp().detach() * log_prob
+                alpha_losses.append(alpha_loss.detach())
 
             ###########################################################################
-            # 3) Actor update
-            if self.actor_optimizer is not None and self.update_step % self.policy_frequency == 0:
-                # Freeze critic parameters for actor update
-                for p in self.critic_parameters:
-                    p.requires_grad_(False)
-
-                q1, q2 = self.critic.evaluate_all_q(obs_batch, new_actions)
-                q_new = reduce_twin_q(q1, q2, self.q_reduction_method)
-                actor_loss = (entropy - q_new).mean()
-
-                # Symmetry loss
-                if self.symmetry:
-                    if not self.symmetry["use_data_augmentation"]:
-                        data_augmentation_func = self.symmetry["data_augmentation_func"]
-                        obs_batch, _ = data_augmentation_func(
-                            obs=obs_batch, actions=None, env=self.symmetry["_env"]
-                        )
-                        num_aug = int(
-                            (obs_batch.batch_size[0] if isinstance(obs_batch, TensorDict) else obs_batch.shape[0])
-                            / original_batch_size
-                        )
-
-                    # Deterministic mean actions for symmetry loss
-                    mean_actions_batch = self.actor(obs_batch.detach().clone())
-
-                    action_mean_orig = mean_actions_batch[:original_batch_size]
-                    _, actions_mean_symm_batch = data_augmentation_func(
-                        obs=None, actions=action_mean_orig, env=self.symmetry["_env"]
-                    )
-
-                    if num_aug > 1:
-                        mse_loss = torch.nn.MSELoss()
-                        symmetry_loss = mse_loss(
-                            mean_actions_batch[original_batch_size:],
-                            actions_mean_symm_batch.detach()[original_batch_size:],
-                        )
-                        if self.symmetry["use_mirror_loss"]:
-                            actor_loss += self.symmetry["mirror_loss_coeff"] * symmetry_loss
-                        else:
-                            symmetry_loss = symmetry_loss.detach()
-                    else:
-                        symmetry_loss = torch.tensor(0.0, device=self.device)
-                else:
-                    symmetry_loss = torch.tensor(0.0, device=self.device)
+            # 3) Actor update, with the temperature this step just produced
+            if update_actor:
+                actor_loss = (self.log_alpha.exp().detach() * log_prob - q_new).mean()
+                if use_mirror_loss:
+                    mirror_loss = self._mirror_loss(obs_batch, original_batch_size)
+                    actor_loss = actor_loss + self.symmetry["mirror_loss_coeff"] * mirror_loss
+                    mirror_losses.append(mirror_loss.detach())
 
                 self.actor_optimizer.zero_grad()
                 actor_loss.backward()
@@ -473,9 +437,7 @@ class SAC:
                 # Unfreeze critic parameters after actor update
                 for p in self.critic_parameters:
                     p.requires_grad_(True)
-            else:
-                actor_loss = torch.tensor(0.0, device=self.device)
-                symmetry_loss = torch.tensor(0.0, device=self.device)
+                actor_losses.append(actor_loss.detach())
 
             ###########################################################################
             # 4) Soft update target networks
@@ -498,39 +460,41 @@ class SAC:
                 if self.is_multi_gpu:
                     self.reduce_parameters(self.rnd.parameters())
                 self.rnd_optimizer.step()
+                rnd_losses.append(rnd_loss.detach())
 
-            # Accumulate losses
-            mean_critic1_loss += critic1_loss.item()
-            mean_critic2_loss += critic2_loss.item()
-            mean_actor_loss += actor_loss.item()
-            mean_alpha_loss += alpha_loss.item()
-            if mean_rnd_loss is not None:
-                mean_rnd_loss += rnd_loss.item()
-            if mean_symmetry_loss is not None:
-                mean_symmetry_loss += symmetry_loss.item()
+            critic1_losses.append(critic1_loss.detach())
+            critic2_losses.append(critic2_loss.detach())
             self.update_step += 1
 
-        # Average losses
+        if log_mirror_loss:
+            with torch.no_grad():
+                mirror_losses.append(self._mirror_loss(obs_batch, original_batch_size))
+
+        # Average losses, reading every sum in one host sync
         num_updates = self.num_learning_epochs * self.num_mini_batches
-        mean_critic1_loss /= num_updates
-        mean_critic2_loss /= num_updates
-        mean_actor_loss /= max((num_updates // self.policy_frequency), 1)
-        mean_alpha_loss /= num_updates
-        if mean_rnd_loss is not None:
-            mean_rnd_loss /= num_updates
-        if mean_symmetry_loss is not None:
-            mean_symmetry_loss /= max((num_updates // self.policy_frequency), 1)
+        num_actor_updates = max(num_updates // self.policy_frequency, 1)
+        sums = [
+            torch.stack(values).sum() if values else torch.zeros((), device=self.device)
+            for values in (critic1_losses, critic2_losses, actor_losses, alpha_losses, rnd_losses, mirror_losses)
+        ]
+        critic1_sum, critic2_sum, actor_sum, alpha_sum, rnd_sum, mirror_sum, alpha = torch.stack(
+            [*sums, self.log_alpha.detach().exp()]
+        ).tolist()
+        if self.auto_alpha:
+            self.alpha = alpha
 
         loss_dict = {
-            "critic1": mean_critic1_loss,
-            "critic2": mean_critic2_loss,
-            "actor": mean_actor_loss,
-            "alpha": mean_alpha_loss,
+            "critic1": critic1_sum / num_updates,
+            "critic2": critic2_sum / num_updates,
+            "actor": actor_sum / num_actor_updates,
+            "alpha": alpha_sum / num_updates,
         }
         if self.rnd:
-            loss_dict["rnd"] = mean_rnd_loss
-        if self.symmetry:
-            loss_dict["symmetry"] = mean_symmetry_loss
+            loss_dict["rnd"] = rnd_sum / num_updates
+        if use_mirror_loss:
+            loss_dict["symmetry"] = mirror_sum / num_actor_updates
+        elif log_mirror_loss:
+            loss_dict["symmetry"] = mirror_sum
         if summed_dist_stats is not None:
             names = (*DISTRIBUTION_STAT_NAMES, "critic_target_clipped_fraction")
             loss_dict.update(zip(names, (summed_dist_stats / num_updates).tolist()))
@@ -539,6 +503,135 @@ class SAC:
             loss_dict["PopArt/std"] = self.critic.popart_std.item()
 
         return loss_dict
+
+    def _bellman_targets(
+        self,
+        next_obs_batch: TensorDict,
+        rewards_batch: torch.Tensor,
+        dones_batch: torch.Tensor,
+        bootstrap_batch: torch.Tensor,
+        effective_n_steps: torch.Tensor,
+    ) -> tuple[torch.Tensor, ...]:
+        """Detached Bellman targets of one mini-batch. ``update()`` calls this under ``no_grad``.
+
+        Returns ``(target_q,)`` for scalar targets. For C51 it returns the two projected target
+        distributions, then the reward, discount and target probabilities of the clipped-mass log.
+        """
+        bootstrap_mask = bootstrap_batch + 1 - dones_batch
+        new_actions, next_log_prob = self.actor.sample_action_logp(next_obs_batch)
+        next_state_entropy = -self.log_alpha.exp() * next_log_prob
+
+        if self.critic.distributional_loss == "c51":
+            n_step_discount = torch.pow(self.gamma, effective_n_steps.to(dtype=rewards_batch.dtype))
+            target_output1, target_output2 = self.critic.target_outputs(next_obs_batch, new_actions)
+            probabilities1 = target_output1.float().softmax(-1)
+            probabilities2 = target_output2.float().softmax(-1)
+            if self.q_reduction_method == "mean_pi_q_none":
+                # FastSAC: each critic projects its own target distribution.
+                target_probabilities1, target_probabilities2 = probabilities1, probabilities2
+            elif self.q_reduction_method == "mean":
+                target_probabilities1 = target_probabilities2 = 0.5 * (probabilities1 + probabilities2)
+            else:
+                q1 = (probabilities1 * self.critic.value_support).sum(-1, keepdim=True)
+                q2 = (probabilities2 * self.critic.value_support).sum(-1, keepdim=True)
+                choose_first = q1 <= q2
+                target_probabilities1 = target_probabilities2 = torch.where(
+                    choose_first, probabilities1, probabilities2
+                )
+            reward_with_entropy = rewards_batch + n_step_discount * bootstrap_mask * next_state_entropy
+            discount = n_step_discount * bootstrap_mask
+            target_dist1 = self.critic.c51_project(target_probabilities1, reward_with_entropy, discount)
+            target_dist2 = (
+                target_dist1 if target_probabilities2 is target_probabilities1 else
+                self.critic.c51_project(target_probabilities2, reward_with_entropy, discount)
+            )
+            return (
+                target_dist1,
+                target_dist2,
+                reward_with_entropy,
+                discount,
+                target_probabilities1,
+                target_probabilities2,
+            )
+
+        q1_target, q2_target = self.critic.evaluate_all_target_q(next_obs_batch, new_actions)
+        if self.q_reduction_method == "mean_pi_q_none":
+            # No reduction: column i is critic i's own target, as in the FastSAC code.
+            next_q = torch.cat((q1_target, q2_target), dim=-1)
+        else:
+            next_q = reduce_twin_q(q1_target, q2_target, self.q_reduction_method)
+        q_target_next = next_q + next_state_entropy
+        n_step_discount = torch.pow(self.gamma, effective_n_steps.to(dtype=q_target_next.dtype))
+        return (rewards_batch + n_step_discount * bootstrap_mask * q_target_next,)
+
+    def _critic_loss_targets(self, targets: tuple[torch.Tensor, ...]) -> tuple[torch.Tensor, ...]:
+        """Prepare scalar-target CE labels outside the compiled network/loss graph."""
+        if not self.torch_compile or self.critic.distributional_loss not in ("two_hot", "hl_gauss"):
+            return targets
+        (target_q,) = targets
+        target1, target2 = (
+            (target_q[..., :1], target_q[..., 1:]) if target_q.shape[-1] == 2 else (target_q, target_q)
+        )
+        labels1 = self.critic.categorical_labels(target1)
+        labels2 = labels1 if target2 is target1 else self.critic.categorical_labels(target2)
+        return labels1, labels2
+
+    def _critic_losses(
+        self, obs_batch: TensorDict, actions_batch: torch.Tensor, loss_targets: tuple[torch.Tensor, ...]
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Twin critic forward passes and their losses; compiled when requested."""
+        output1, output2 = self.critic.critic_outputs(obs_batch, actions_batch)
+        if self.critic.distributional_loss == "c51":
+            critic1_loss, critic2_loss = self.critic.c51_losses(output1, output2, loss_targets[0], loss_targets[1])
+        elif self.torch_compile and self.critic.distributional_loss in ("two_hot", "hl_gauss"):
+            labels1, labels2 = loss_targets
+            critic1_loss = -(labels1 * output1.float().log_softmax(-1)).sum(-1).mean()
+            critic2_loss = -(labels2 * output2.float().log_softmax(-1)).sum(-1).mean()
+        else:
+            (target_q,) = loss_targets
+            critic1_loss, critic2_loss = self.critic.losses_from_outputs(output1, output2, target_q)
+        return critic1_loss, critic2_loss, output1, output2
+
+    def _critic_distribution_stats(
+        self, output1: torch.Tensor, output2: torch.Tensor, targets: tuple[torch.Tensor, ...]
+    ) -> torch.Tensor:
+        """Categorical diagnostics, kept eager because their quantiles use searchsorted."""
+        support = self.critic.value_support
+        if self.critic.distributional_loss == "c51":
+            _, _, reward_with_entropy, discount, target_probabilities1, target_probabilities2 = targets
+            transformed = reward_with_entropy + discount * support
+            clipped = (transformed < support[0]) | (transformed > support[-1])
+            clipped_fraction = 0.5 * (
+                (target_probabilities1 * clipped).sum(-1).mean()
+                + (target_probabilities2 * clipped).sum(-1).mean()
+            )
+        else:
+            (target_q,) = targets
+            clipped_fraction = ((target_q < support[0]) | (target_q > support[-1])).float().mean()
+        return torch.cat((self.critic.distribution_stats(output1, output2), clipped_fraction.reshape(1)))
+
+    def _actor_objective(self, obs_batch: TensorDict) -> tuple[torch.Tensor, torch.Tensor]:
+        """Log-probability of a fresh policy sample, and the twin-Q value the actor maximizes there."""
+        new_actions, log_prob = self.actor.sample_action_logp(obs_batch)
+        q1, q2 = self.critic.evaluate_all_q(obs_batch, new_actions)
+        return log_prob, reduce_twin_q(q1, q2, self.q_reduction_method)
+
+    def _mirror_loss(self, obs_batch: TensorDict, original_batch_size: int) -> torch.Tensor:
+        """MSE between the policy mean on mirrored states and the mirrored policy mean."""
+        data_augmentation_func = self.symmetry["data_augmentation_func"]
+        if not self.symmetry["use_data_augmentation"]:
+            obs_batch, _ = data_augmentation_func(obs=obs_batch, actions=None, env=self.symmetry["_env"])
+        batch_size = obs_batch.batch_size[0] if isinstance(obs_batch, TensorDict) else obs_batch.shape[0]
+        if batch_size // original_batch_size <= 1:
+            return torch.zeros((), device=self.device)
+        # Deterministic mean actions
+        mean_actions_batch = self.actor(obs_batch.detach().clone())
+        _, actions_mean_symm_batch = data_augmentation_func(
+            obs=None, actions=mean_actions_batch[:original_batch_size], env=self.symmetry["_env"]
+        )
+        return nn.functional.mse_loss(
+            mean_actions_batch[original_batch_size:], actions_mean_symm_batch.detach()[original_batch_size:]
+        )
 
     def train_mode(self) -> None:
         """Set actor, critic, and RND to training mode."""

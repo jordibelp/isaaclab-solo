@@ -201,8 +201,21 @@ class RslRlSacAlgorithmCfg:
     """
     actor_optimizer: Literal["adam", "adamw", "sgd", "rmsprop"] = "adam"
     critic_optimizer: Literal["adam", "adamw", "sgd", "rmsprop"] = "adam"
+    torch_compile: bool = False
+    """Compile the per-mini-batch Bellman target, critic loss and actor objective with ``torch.compile``.
+
+    The math is unchanged; the compiler fuses it into fewer GPU kernels. The first update is slower while
+    the kernels compile.
+    """
     rnd_cfg: RslRlRndCfg | None = None
     symmetry_cfg: RslRlSymmetryCfg | None = None
+    symmetry_log_interval: int = 100
+    """Iterations between two measurements of the mirror loss when it is only logged.
+
+    With ``--symmetry-mode=augmentation`` the mirror loss is a diagnostic, so it is computed on one mini-batch
+    every this many iterations. The ``loss`` and ``both`` modes still compute it on every actor update, because
+    there it is part of the actor loss.
+    """
 
 
 #########################

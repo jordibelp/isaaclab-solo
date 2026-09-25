@@ -54,7 +54,11 @@ def symlog_distribution_stats(probs: torch.Tensor, atoms: torch.Tensor) -> dict[
     """
     mean = (probs * atoms).sum(-1)
     variance = (probs * (atoms - mean.unsqueeze(-1)).square()).sum(-1)
-    levels = probs.new_tensor([0.05, 0.5, 0.95]).expand(*probs.shape[:-1], 3)
+    # new_tensor([...]) copies host constants to CUDA and synchronizes once per mini-batch.
+    levels = probs.new_empty(*probs.shape[:-1], 3)
+    levels[..., 0].fill_(0.05)
+    levels[..., 1].fill_(0.5)
+    levels[..., 2].fill_(0.95)
     indices = torch.searchsorted(probs.cumsum(-1).contiguous(), levels.contiguous())
     quantiles = atoms[indices.clamp(max=atoms.numel() - 1)]
     entropy = -(probs * probs.clamp_min(torch.finfo(probs.dtype).tiny).log()).sum(-1)
@@ -705,14 +709,17 @@ class SACCriticModel(MLPModel):
         """
         # Targets remain dense. Average the effective W + scale * B @ A, not A/B
         # separately: the product of averaged factors is not the averaged weight.
+        targets, sources = [], []
         for online, target in ((self.critic1, self.critic1_target), (self.critic2, self.critic2_target)):
             if any(isinstance(layer, LoRALinear) for layer in online.modules()):
                 parameters = merged_state_dict(online)
             else:
                 parameters = dict(online.named_parameters())
             for name, target_param in target.named_parameters():
-                param = parameters[name]
-                target_param.data.copy_(tau * param.data + (1.0 - tau) * target_param.data)
+                targets.append(target_param.data)
+                sources.append(parameters[name].data)
+        # One multi-tensor kernel instead of four small kernels per parameter tensor.
+        torch._foreach_lerp_(targets, sources, tau)
 
 
 ##############################################
