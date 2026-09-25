@@ -83,3 +83,10 @@ A front-back mirror would turn a backflip into a frontflip.
 
 Do not pass `env.three_or_more_feet_contact_triggers_reset=True` from the two-feet command. With
 `front_back_asymetry=True` it ends the episode whenever a front foot touches the ground.
+
+
+## Things to watch
+
+- Front thigh range: with your asymmetric thigh limits, the front thigh can move only about 12° above the standing pose. A flip may need more, so a run without asymmetric limits is worth trying. 
+- Discount: with γ=0.97 the critic looks about 0.7 s ahead, which may be too short to value a clean landing. Try agent.algorithm.gamma=0.99 if the robot flips but keeps crashing.
+- Back walkover: the policy may learn to rotate backward while staying on the ground, like a gymnast's back walkover, instead of flipping in the air. Episode/backflips counts both, so check the videos.

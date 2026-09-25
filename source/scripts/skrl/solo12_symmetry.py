@@ -255,8 +255,20 @@ def _uses_front_back_symmetry(env: Any) -> bool:
     return True
 
 
+_DEVICE_CONSTANTS: dict[tuple[int, torch.device], torch.Tensor] = {}
+
+
 def _as_device_tensor(values: torch.Tensor, device: torch.device) -> torch.Tensor:
-    return values.to(device=device)
+    """Return one of this module's constant tensors on ``device``, copying it only once.
+
+    A blocking host-to-device copy waits for all queued GPU work, and the SAC update augments
+    every mini-batch, so a fresh copy per call stalled training. Pass only module constants: the
+    cache is keyed by object identity.
+    """
+    key = (id(values), torch.device(device))
+    if key not in _DEVICE_CONSTANTS:
+        _DEVICE_CONSTANTS[key] = values.to(device=device)
+    return _DEVICE_CONSTANTS[key]
 
 # transform angle left -> right
 def _transform_joint_data_left_right(joint_data: torch.Tensor) -> torch.Tensor:
