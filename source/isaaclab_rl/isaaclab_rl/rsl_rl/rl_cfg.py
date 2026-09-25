@@ -93,14 +93,19 @@ class RslRlSacCriticModelCfg:
     obs_normalization: bool = MISSING
     layer_norm: bool = False
     distributional_loss: str = "mse"
-    """Critic loss: "mse" scalar heads, categorical cross entropy with "two_hot" or "hl_gauss" labels,
-    or "mse_target_norm_popart" for scalar heads with MSE on PopArt-normalized targets."""
+    """Critic loss: "mse", scalar-target "two_hot"/"hl_gauss", distributional Bellman "c51",
+    or "mse_target_norm_popart" for MSE on PopArt-normalized targets."""
     distributional_num_bins: int = 255
-    """Odd number of symmetrically spaced symexp atoms (categorical modes only)."""
+    """Odd number of symmetrically spaced symexp atoms (two_hot and hl_gauss only)."""
     distributional_symlog_limit: float = 8.0
-    """Support is symexp(linspace(-limit, limit, num_bins)), in reward units."""
+    """Two-hot/HL-Gauss support is symexp(linspace(-limit, limit, num_bins)), in reward units."""
     hl_gauss_sigma_ratio: float = 0.75
     """HL-Gauss label width as a fraction of the atom spacing; 0.75 is the published default."""
+    c51_num_atoms: int = 101
+    """Number of equally spaced C51 atoms; FastSAC uses 101."""
+    c51_v_min: float = -20.0
+    c51_v_max: float = 20.0
+    """C51 support bounds in reward units; FastSAC uses [-20, 20]."""
     popart_beta: float = 3e-4
     """Step size of PopArt's running target mean/std (mse_target_norm_popart only); 3e-4 as in Hessel et al. 2018."""
 

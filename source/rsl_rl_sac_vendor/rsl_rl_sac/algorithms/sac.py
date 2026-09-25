@@ -314,15 +314,40 @@ class SAC:
                 new_actions, next_log_prob = self.actor.sample_action_logp(next_obs_batch)
                 next_state_entropy = -self.log_alpha.exp() * next_log_prob
 
-                q1_target, q2_target = self.critic.evaluate_all_target_q(next_obs_batch, new_actions)
-                if self.q_reduction_method == "mean_pi_q_none":
-                    # No reduction: column i is critic i's own target, as in the FastSAC code.
-                    next_q = torch.cat((q1_target, q2_target), dim=-1)
+                if self.critic.distributional_loss == "c51":
+                    n_step_discount = torch.pow(self.gamma, effective_n_steps.to(dtype=rewards_batch.dtype))
+                    target_output1, target_output2 = self.critic.target_outputs(next_obs_batch, new_actions)
+                    probabilities1 = target_output1.float().softmax(-1)
+                    probabilities2 = target_output2.float().softmax(-1)
+                    if self.q_reduction_method == "mean_pi_q_none":
+                        # FastSAC: each critic projects its own target distribution.
+                        target_probabilities1, target_probabilities2 = probabilities1, probabilities2
+                    elif self.q_reduction_method == "mean":
+                        target_probabilities1 = target_probabilities2 = 0.5 * (probabilities1 + probabilities2)
+                    else:
+                        q1 = (probabilities1 * self.critic.value_support).sum(-1, keepdim=True)
+                        q2 = (probabilities2 * self.critic.value_support).sum(-1, keepdim=True)
+                        choose_first = q1 <= q2
+                        target_probabilities1 = target_probabilities2 = torch.where(
+                            choose_first, probabilities1, probabilities2
+                        )
+                    reward_with_entropy = rewards_batch + n_step_discount * bootstrap_mask * next_state_entropy
+                    discount = n_step_discount * bootstrap_mask
+                    target_dist1 = self.critic.c51_project(target_probabilities1, reward_with_entropy, discount)
+                    target_dist2 = (
+                        target_dist1 if target_probabilities2 is target_probabilities1 else
+                        self.critic.c51_project(target_probabilities2, reward_with_entropy, discount)
+                    )
                 else:
-                    next_q = reduce_twin_q(q1_target, q2_target, self.q_reduction_method)
-                q_target_next = next_q + next_state_entropy
-                n_step_discount = torch.pow(self.gamma, effective_n_steps.to(dtype=q_target_next.dtype))
-                target_q = rewards_batch + n_step_discount * bootstrap_mask * q_target_next
+                    q1_target, q2_target = self.critic.evaluate_all_target_q(next_obs_batch, new_actions)
+                    if self.q_reduction_method == "mean_pi_q_none":
+                        # No reduction: column i is critic i's own target, as in the FastSAC code.
+                        next_q = torch.cat((q1_target, q2_target), dim=-1)
+                    else:
+                        next_q = reduce_twin_q(q1_target, q2_target, self.q_reduction_method)
+                    q_target_next = next_q + next_state_entropy
+                    n_step_discount = torch.pow(self.gamma, effective_n_steps.to(dtype=q_target_next.dtype))
+                    target_q = rewards_batch + n_step_discount * bootstrap_mask * q_target_next
 
             if self.critic.popart:
                 # PopArt updates the statistics before the loss (Algorithm 1), so this very
@@ -334,14 +359,25 @@ class SAC:
                 self.critic.update_popart(*moments)
 
             output1, output2 = self.critic.critic_outputs(obs_batch, actions_batch)
-            critic1_loss, critic2_loss = self.critic.losses_from_outputs(output1, output2, target_q)
+            if self.critic.distributional_loss == "c51":
+                critic1_loss, critic2_loss = self.critic.c51_losses(output1, output2, target_dist1, target_dist2)
+            else:
+                critic1_loss, critic2_loss = self.critic.losses_from_outputs(output1, output2, target_q)
             if self.critic.distributional_critic_ce:
                 support = self.critic.value_support
-                clipped = (target_q < support[0]) | (target_q > support[-1])
+                if self.critic.distributional_loss == "c51":
+                    transformed = reward_with_entropy + discount * support
+                    clipped = (transformed < support[0]) | (transformed > support[-1])
+                    clipped_fraction = 0.5 * (
+                        (target_probabilities1 * clipped).sum(-1).mean()
+                        + (target_probabilities2 * clipped).sum(-1).mean()
+                    )
+                else:
+                    clipped_fraction = ((target_q < support[0]) | (target_q > support[-1])).float().mean()
                 # Accumulate on device; one host sync per update() instead of one per mini-batch.
                 batch_stats = torch.cat((
                     self.critic.distribution_stats(output1, output2),
-                    clipped.float().mean().reshape(1),
+                    clipped_fraction.reshape(1),
                 ))
                 summed_dist_stats = batch_stats if summed_dist_stats is None else summed_dist_stats + batch_stats
 
@@ -534,6 +570,8 @@ class SAC:
             # Tools that rebuild the training target read this; older checkpoints all used "min".
             "q_reduction_method": self.q_reduction_method,
         }
+        if self.critic.distributional_loss == "c51":
+            saved_dict["critic_distributional_loss"] = "c51"
         if self.auto_alpha and self.alpha_optimizer is not None:
             saved_dict["alpha_optimizer_state_dict"] = self.alpha_optimizer.state_dict()
         if self.rnd:
@@ -576,6 +614,14 @@ class SAC:
         if load_cfg.get("actor"):
             self.actor.load_state_dict(loaded_dict["actor_state_dict"], strict=strict)
         if load_cfg.get("critic"):
+            saved_loss = loaded_dict.get("critic_distributional_loss")
+            current_loss = self.critic.distributional_loss
+            if saved_loss is not None and (saved_loss == "c51") != (current_loss == "c51"):
+                raise ValueError("Cannot load a C51 critic checkpoint into another critic mode, or vice versa.")
+            if current_loss == "c51":
+                saved_support = loaded_dict["critic_state_dict"].get("value_support")
+                if saved_support is None or not torch.equal(saved_support.cpu(), self.critic.value_support.cpu()):
+                    raise ValueError("C51 checkpoint support differs from the configured C51 support.")
             self.critic.load_state_dict(loaded_dict["critic_state_dict"], strict=strict)
         if load_cfg.get("optimizer"):
             if self.actor_optimizer is not None:

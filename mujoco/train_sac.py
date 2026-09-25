@@ -833,6 +833,8 @@ def _configure_checkpoint_models(cfg, args) -> None:
         if support is not None:
             if cfg["critic"].get("distributional_loss", "mse") == "mse":
                 cfg["critic"]["distributional_loss"] = "two_hot"
+            if cfg["critic"]["distributional_loss"] == "c51":
+                raise ValueError("MJX SAC fine-tuning does not implement C51 Bellman projection.")
             cfg["critic"]["distributional_num_bins"] = support.numel()
             cfg["critic"]["distributional_symlog_limit"] = support[-1].log1p().item()
         else:

@@ -306,6 +306,9 @@ class SACCriticModel(MLPModel):
         distributional_num_bins: int = 255,
         distributional_symlog_limit: float = 8.0,
         hl_gauss_sigma_ratio: float = 0.75,
+        c51_num_atoms: int = 101,
+        c51_v_min: float = -20.0,
+        c51_v_max: float = 20.0,
         popart_beta: float = 3e-4,
         **kwargs,
     ) -> None:
@@ -322,12 +325,16 @@ class SACCriticModel(MLPModel):
             num_actions: Dimension of the action space (concatenated with observations).
             layer_norm: Whether to apply layer normalization in MLP hidden layers.
             distributional_loss: ``"mse"`` for the original scalar heads, a categorical
-                cross-entropy head whose labels are ``"two_hot"`` or ``"hl_gauss"``, or
+                cross-entropy head with scalar ``"two_hot"``/``"hl_gauss"`` labels or a
+                distributional Bellman ``"c51"`` target, or
                 ``"mse_target_norm_popart"`` for scalar heads trained with MSE on PopArt-normalized
                 targets.
             distributional_num_bins: Odd number of categorical atoms, including zero.
             distributional_symlog_limit: Symmetric log-space bound for the raw-unit support.
             hl_gauss_sigma_ratio: HL-Gauss label width, as a fraction of the atom spacing.
+            c51_num_atoms: Number of equally spaced C51 atoms.
+            c51_v_min: Lower C51 support bound in reward units.
+            c51_v_max: Upper C51 support bound in reward units.
             popart_beta: Step size of PopArt's moving target mean and variance.
         """
         super().__init__(
@@ -343,13 +350,13 @@ class SACCriticModel(MLPModel):
         )
 
         self.num_actions = num_actions
-        if distributional_loss not in ("mse", "two_hot", "hl_gauss", "mse_target_norm_popart"):
+        if distributional_loss not in ("mse", "two_hot", "hl_gauss", "c51", "mse_target_norm_popart"):
             raise ValueError(
-                "distributional_loss must be one of 'mse', 'two_hot', 'hl_gauss', 'mse_target_norm_popart'."
+                "distributional_loss must be one of 'mse', 'two_hot', 'hl_gauss', 'c51', 'mse_target_norm_popart'."
             )
         self.distributional_loss = distributional_loss
         # Every consumer only ever asks "is the head logits or a scalar?", so keep that one name.
-        self.distributional_critic_ce = distributional_loss in ("two_hot", "hl_gauss")
+        self.distributional_critic_ce = distributional_loss in ("two_hot", "hl_gauss", "c51")
         self.popart = distributional_loss == "mse_target_norm_popart"
         if self.popart:
             if not 0 < popart_beta <= 1:
@@ -361,13 +368,20 @@ class SACCriticModel(MLPModel):
         if self.distributional_critic_ce:
             if output_dim != 1:
                 raise ValueError("Categorical SAC requires scalar Q-values (output_dim=1).")
-            if distributional_num_bins < 3 or distributional_num_bins % 2 != 1:
-                raise ValueError("distributional_num_bins must be odd and at least 3.")
-            if not math.isfinite(distributional_symlog_limit) or not 0 < distributional_symlog_limit <= 80:
-                raise ValueError("distributional_symlog_limit must be finite and in (0, 80] for float32.")
-            # Build exact +/- pairs and an exact zero atom, avoiding linspace roundoff.
-            positive = torch.linspace(0, distributional_symlog_limit, distributional_num_bins // 2 + 1).expm1()
-            self.register_buffer("value_support", torch.cat((-positive[1:].flip(0), positive)))
+            if distributional_loss == "c51":
+                if c51_num_atoms < 2:
+                    raise ValueError("c51_num_atoms must be at least 2.")
+                if not all(map(math.isfinite, (c51_v_min, c51_v_max))) or c51_v_min >= c51_v_max:
+                    raise ValueError("C51 support bounds must be finite and c51_v_min < c51_v_max.")
+                self.register_buffer("value_support", torch.linspace(c51_v_min, c51_v_max, c51_num_atoms))
+            else:
+                if distributional_num_bins < 3 or distributional_num_bins % 2 != 1:
+                    raise ValueError("distributional_num_bins must be odd and at least 3.")
+                if not math.isfinite(distributional_symlog_limit) or not 0 < distributional_symlog_limit <= 80:
+                    raise ValueError("distributional_symlog_limit must be finite and in (0, 80] for float32.")
+                # Build exact +/- pairs and an exact zero atom, avoiding linspace roundoff.
+                positive = torch.linspace(0, distributional_symlog_limit, distributional_num_bins // 2 + 1).expm1()
+                self.register_buffer("value_support", torch.cat((-positive[1:].flip(0), positive)))
 
         if distributional_loss == "hl_gauss":
             if not math.isfinite(hl_gauss_sigma_ratio) or hl_gauss_sigma_ratio <= 0:
@@ -383,19 +397,21 @@ class SACCriticModel(MLPModel):
             # Non-persistent: two-hot and HL-Gauss checkpoints stay loadable in either mode.
             self.register_buffer("support_edges_symlog", edges, persistent=False)
 
-        if self.distributional_critic_ce:
+        if self.distributional_critic_ce and distributional_loss != "c51":
             print(
                 f"SAC critic: {distributional_loss} labels on {distributional_num_bins} symexp atoms"
                 f" (symlog limit {distributional_symlog_limit}); worst decoded-mean bias"
                 f" {self.label_decode_bias():.2e}."
             )
+        elif distributional_loss == "c51":
+            print(f"SAC critic: C51 on {c51_num_atoms} linear atoms in [{c51_v_min}, {c51_v_max}].")
 
         # Override parent's MLP — critic input is obs_dim + num_actions
         q_input_dim = self.obs_dim + num_actions
         self.mlp = None  # type: ignore[assignment]
 
         # Twin Q-networks
-        head_dim = distributional_num_bins if self.distributional_critic_ce else output_dim
+        head_dim = self.value_support.numel() if self.distributional_critic_ce else output_dim
         self.critic1 = MLP(q_input_dim, head_dim, hidden_dims, activation, layer_norm=layer_norm)
         self.critic2 = MLP(q_input_dim, head_dim, hidden_dims, activation, layer_norm=layer_norm)
         if self.distributional_critic_ce:
@@ -444,6 +460,8 @@ class SACCriticModel(MLPModel):
         if not self.distributional_critic_ce:
             return output
         probs = output.float().softmax(dim=-1)
+        if self.distributional_loss == "c51":
+            return (probs * self.value_support).sum(dim=-1, keepdim=True)
         mid = self.value_support.numel() // 2
         # Sum opposite atoms together so a symmetric distribution gives exactly zero,
         # even with wide supports. Algebraically this is E[B]. The default limit
@@ -498,7 +516,24 @@ class SACCriticModel(MLPModel):
 
     def categorical_labels(self, targets: torch.Tensor) -> torch.Tensor:
         """Project detached scalar targets onto the support using the configured label scheme."""
+        if self.distributional_loss == "c51":
+            raise ValueError("C51 requires a projected target distribution, not scalar labels.")
         return self.hl_gauss(targets) if self.distributional_loss == "hl_gauss" else self.two_hot(targets)
+
+    @torch.no_grad()
+    def c51_project(self, probabilities: torch.Tensor, reward: torch.Tensor, discount: torch.Tensor) -> torch.Tensor:
+        """C51 projection of reward + discount * target atoms onto the fixed linear support."""
+        support = self.value_support
+        transformed = reward.float() + discount.float() * support
+        clipped = transformed.clamp(support[0], support[-1])
+        position = (clipped - support[0]) / (support[-1] - support[0]) * (support.numel() - 1)
+        lower = position.floor().long().clamp(max=support.numel() - 1)
+        upper = (lower + 1).clamp(max=support.numel() - 1)
+        upper_weight = position - lower
+        projected = torch.zeros_like(probabilities)
+        projected.scatter_add_(-1, lower, probabilities * (1 - upper_weight))
+        projected.scatter_add_(-1, upper, probabilities * upper_weight)
+        return projected
 
     @torch.no_grad()
     def label_decode_bias(self) -> float:
@@ -542,11 +577,22 @@ class SACCriticModel(MLPModel):
         target1, target2 = (targets[..., :1], targets[..., 1:]) if targets.shape[-1] == 2 else (targets, targets)
         if not self.distributional_critic_ce:
             return nn.functional.mse_loss(output1, target1), nn.functional.mse_loss(output2, target2)
+        if self.distributional_loss == "c51":
+            raise ValueError("C51 requires projected target distributions; use c51_losses.")
         labels1 = self.categorical_labels(target1)
         labels2 = labels1 if target2 is target1 else self.categorical_labels(target2)
         loss1 = -(labels1 * output1.float().log_softmax(-1)).sum(-1).mean()
         loss2 = -(labels2 * output2.float().log_softmax(-1)).sum(-1).mean()
         return loss1, loss2
+
+    def c51_losses(
+        self, output1: torch.Tensor, output2: torch.Tensor, target1: torch.Tensor, target2: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Cross entropy against projected, detached C51 Bellman distributions."""
+        return (
+            -(target1 * output1.float().log_softmax(-1)).sum(-1).mean(),
+            -(target2 * output2.float().log_softmax(-1)).sum(-1).mean(),
+        )
 
     def td_losses(
         self, obs: TensorDict, actions: torch.Tensor, targets: torch.Tensor
@@ -638,6 +684,11 @@ class SACCriticModel(MLPModel):
         latent = self.get_latent(obs)
         latent = torch.cat([latent, actions], dim=-1)
         return self.q_from_output(self.critic1_target(latent)), self.q_from_output(self.critic2_target(latent))
+
+    def target_outputs(self, obs: TensorDict, actions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Raw target logits for the C51 Bellman projection."""
+        latent = torch.cat([self.get_latent(obs), actions], dim=-1)
+        return self.critic1_target(latent), self.critic2_target(latent)
 
     def init_target_networks(self) -> None:
         """Initialize the target networks with the current critic network parameters."""

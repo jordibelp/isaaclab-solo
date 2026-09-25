@@ -39,6 +39,111 @@ CATEGORICAL = ["two_hot", "hl_gauss"]
 POPART = "mse_target_norm_popart"
 
 
+def test_c51_projects_full_distribution_and_terminal_to_reward(device):
+    _, _, critic = models(device, loss="c51", c51_num_atoms=5, c51_v_min=-2, c51_v_max=2)
+    support = critic.value_support
+    probabilities = torch.tensor([[0.25, 0, 0, 0, 0.75], [0, 0, 1, 0, 0]], device=device)
+    projected = critic.c51_project(probabilities, torch.tensor([[0.5], [-0.5]], device=device),
+                                   torch.tensor([[0.5], [0]], device=device))
+    expected = torch.tensor([[0, 0.125, 0.125, 0.375, 0.375], [0, 0.5, 0.5, 0, 0]], device=device)
+    torch.testing.assert_close(projected, expected)
+    torch.testing.assert_close(projected.sum(-1), torch.ones(2, device=device))
+    torch.testing.assert_close((projected * support).sum(-1), torch.tensor([1.0, -0.5], device=device))
+    assert (projected[0] > 0).sum() == 4  # not a two-hot projection of the scalar mean
+    edge = critic.c51_project(probabilities[:1], torch.tensor([[100.]], device=device),
+                              torch.ones(1, 1, device=device))
+    torch.testing.assert_close(edge, torch.tensor([[0, 0, 0, 0, 1.]], device=device))
+
+
+def test_c51_critic_decodes_mean_and_passes_action_gradients(device):
+    obs, _, critic = models(device, loss="c51")
+    actions = torch.randn(8, 2, device=device, requires_grad=True)
+    with torch.no_grad():
+        critic.critic1[-1].weight.normal_(0, 0.01)
+    output = critic.critic_outputs(obs, actions)[0]
+    expected = (output.softmax(-1) * critic.value_support).sum(-1, keepdim=True)
+    torch.testing.assert_close(critic.evaluate_all_q(obs, actions)[0], expected)
+    gradient, = torch.autograd.grad(expected.sum(), actions)
+    assert torch.isfinite(gradient).all() and gradient.abs().sum() > 0
+    labels = critic.c51_project(output.detach().softmax(-1), torch.zeros(8, 1, device=device),
+                                torch.full((8, 1), 0.97, device=device))
+    logits = torch.zeros_like(output, requires_grad=True)
+    grad, = torch.autograd.grad(-(labels * logits.log_softmax(-1)).sum(), logits)
+    torch.testing.assert_close(grad, logits.softmax(-1) - labels)
+    assert grad.abs().max() <= 1
+
+
+@pytest.mark.parametrize("method", ["min", "mean", "mean_pi_q_none"])
+def test_c51_update_uses_projected_target_and_retains_sac_settings(device, method):
+    torch.manual_seed(41)
+    obs, actor, critic = models(device, loss="c51")
+    with torch.no_grad():
+        critic.critic1_target[-1].bias[0] = 3
+        critic.critic2_target[-1].bias[-1] = 3
+    actions = torch.randn(8, 2, device=device)
+    rewards = torch.tensor([-10., -2., 0.045, -1e9, 1., 2., 3., 4.], device=device)[:, None]
+    dones = torch.tensor([1., 1., 0., 1., 0., 0., 0., 0.], device=device)[:, None]
+    timeouts = torch.tensor([0., 1., 0., 0., 0., 0., 0., 0.], device=device)[:, None]
+    steps = torch.tensor([1, 2, 5, 1, 3, 4, 2, 1], device=device)[:, None]
+    replay = SimpleNamespace(mini_batch_generator=lambda **kw: iter([(obs, actions, rewards, obs, dones, timeouts, steps)]))
+    alg = SAC(actor, critic, replay, gamma=0.97, alpha=0.01, device=device, policy_frequency=1,
+              q_reduction_method=method)
+    rng = torch.random.get_rng_state()
+    cuda_rng = torch.cuda.get_rng_state() if device == "cuda" else None
+    with torch.no_grad():
+        next_actions, logp = actor.sample_action_logp(obs)
+        t1, t2 = critic.target_outputs(obs, next_actions)
+        p1, p2 = t1.softmax(-1), t2.softmax(-1)
+        q1 = (p1 * critic.value_support).sum(-1, keepdim=True)
+        q2 = (p2 * critic.value_support).sum(-1, keepdim=True)
+        if method == "min":
+            source1 = source2 = torch.where(q1 <= q2, p1, p2)
+        elif method == "mean":
+            source1 = source2 = (p1 + p2) / 2
+        else:
+            source1, source2 = p1, p2
+        discount = 0.97 ** steps * (1 + timeouts - dones)
+        reward = rewards - discount * 0.01 * logp
+        expected1 = critic.c51_project(source1, reward, discount)
+        expected2 = critic.c51_project(source2, reward, discount)
+    torch.random.set_rng_state(rng)
+    if cuda_rng is not None:
+        torch.cuda.set_rng_state(cuda_rng)
+    seen = []
+    original = critic.c51_losses
+
+    def capture(o1, o2, y1, y2):
+        seen.append((y1.clone(), y2.clone()))
+        return original(o1, o2, y1, y2)
+
+    critic.c51_losses = capture
+    losses = alg.update()
+    torch.testing.assert_close(seen[0][0], expected1)
+    torch.testing.assert_close(seen[0][1], expected2)
+    assert all(math.isfinite(value) for value in losses.values())
+    assert losses["critic_target_clipped_fraction"] > 0
+    assert alg.gamma == 0.97 and alg.q_reduction_method == method
+    saved = copy.deepcopy(alg.save())
+    _, actor2, critic2 = models(device, loss="c51")
+    resumed = SAC(actor2, critic2, replay, device=device)
+    assert resumed.load(saved, load_cfg=None, strict=True)
+    for actual, restored in zip(critic.evaluate_all_q(obs, actions), critic2.evaluate_all_q(obs, actions)):
+        torch.testing.assert_close(actual, restored, atol=0, rtol=0)
+
+
+def test_c51_checkpoint_rejects_a_different_support_or_scalar_target_mode():
+    obs, actor, critic = models(loss="c51")
+    alg = SAC(actor, critic, SimpleNamespace(), device="cpu")
+    saved = copy.deepcopy(alg.save())
+    assert saved["critic_distributional_loss"] == "c51"
+    _, actor2, wrong_support = models(loss="c51", c51_v_min=-10, c51_v_max=10)
+    with pytest.raises(ValueError, match="support differs"):
+        SAC(actor2, wrong_support, SimpleNamespace(), device="cpu").load(saved, load_cfg=None, strict=True)
+    _, actor3, scalar_target = models(loss="two_hot", distributional_num_bins=101)
+    with pytest.raises(ValueError, match="C51 critic checkpoint"):
+        SAC(actor3, scalar_target, SimpleNamespace(), device="cpu").load(saved, load_cfg=None, strict=True)
+
+
 def test_projection_edges_and_mean_in_reward_units(device):
     _, _, critic = models(device)
     b = critic.value_support
@@ -360,6 +465,17 @@ def test_runner_flag_constructs_requested_head(monkeypatch, loss):
         assert alg.critic.popart_beta == 1e-3
 
 
+def test_c51_runner_flag_uses_reference_support_without_changing_other_sac_options(monkeypatch):
+    alg = build_runner(monkeypatch, critic=dict(class_name="SACCriticModel", hidden_dims=[8],
+                                                distributional_loss="c51"),
+                       algorithm=dict(class_name="SAC", replay_buffer_size=64,
+                                      q_reduction_method="mean_pi_q_none", target_entropy_scale=0.166))
+    assert alg.critic.distributional_loss == "c51"
+    assert alg.critic.critic1[-1].out_features == 101
+    torch.testing.assert_close(alg.critic.value_support[[0, -1]], torch.tensor([-20., 20.]))
+    assert alg.q_reduction_method == "mean_pi_q_none"
+
+
 def test_deprecated_boolean_still_selects_two_hot(monkeypatch):
     alg = build_runner(monkeypatch, distributional_critic_ce=True)
     assert alg.critic.distributional_loss == "two_hot"
@@ -376,6 +492,9 @@ def test_deprecated_boolean_still_selects_two_hot(monkeypatch):
     {"loss": "hl_gauss", "hl_gauss_sigma_ratio": float("inf")}, {"loss": "hl_gaus"},
     {"loss": POPART, "popart_beta": 0}, {"loss": POPART, "popart_beta": 1.5},
     {"loss": POPART, "popart_beta": float("nan")},
+    {"loss": "c51", "c51_num_atoms": 1},
+    {"loss": "c51", "c51_v_min": 2, "c51_v_max": 1},
+    {"loss": "c51", "c51_v_min": float("nan")},
 ])
 def test_invalid_support_rejected(kwargs):
     with pytest.raises(ValueError):

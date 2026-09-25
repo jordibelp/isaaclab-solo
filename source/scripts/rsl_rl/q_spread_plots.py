@@ -4,10 +4,11 @@
 """Plot how much of a categorical SAC critic's support is used, and how wrong it is.
 
 Input is one or more ``.npz`` files written by ``play_direct_0325.py --q_value_log``,
-from a checkpoint trained with ``agent.critic.distributional_loss=two_hot`` or ``=hl_gauss``.
+from a checkpoint trained with ``agent.critic.distributional_loss=two_hot``, ``=hl_gauss``, or ``=c51``.
 
 The spread panels are reported in **symlog units**: the ``x`` in ``Q = sign(x)(exp|x| - 1)``,
-so the axes are directly comparable to ``agent.critic.distributional_symlog_limit``. Runs
+so the axes are directly comparable to ``agent.critic.distributional_symlog_limit`` for
+two-hot/HL-Gauss. C51 support is linear in reward units. Runs
 with different limits can therefore be overlaid, and the dotted verticals mark each run's
 own limit. The estimation-error panels are in raw reward units instead.
 
