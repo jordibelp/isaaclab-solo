@@ -789,8 +789,9 @@ _PERIODIC_CHECKPOINT_PATTERN = re.compile(r"model_(\d+)\.pt")
 def _save_best_model_checkpoints(
     runner, log_dir: str, curriculum_state: dict | None, curriculum_model_filename: str | None,
     mean_reward: float, iteration: int | None, resume_path: str | None,
+    save_generic_best: bool = True,
 ) -> str | None:
-    """Write ``best_model.pt`` plus, when a curriculum is active, the per-stage best checkpoint."""
+    """Write the stage best and optionally the generic best checkpoint."""
 
     logger = getattr(runner, "logger", None)
     best_infos = {
@@ -816,7 +817,8 @@ def _save_best_model_checkpoints(
         )
         curriculum_model_path = os.path.join(log_dir, curriculum_model_filename)
         runner.save(curriculum_model_path, infos=best_infos)
-    runner.save(os.path.join(log_dir, "best_model.pt"), infos=best_infos)
+    if save_generic_best or curriculum_model_path is None:
+        runner.save(os.path.join(log_dir, "best_model.pt"), infos=best_infos)
     return curriculum_model_path
 
 
@@ -906,11 +908,10 @@ def _install_sac_best_model_hook(runner, log_dir: str, resume_path: str | None, 
             best_by_stage[stage] = mean_reward
 
         curriculum_model_path = _save_best_model_checkpoints(
-            runner, log_dir, curriculum_state, stage_filename, mean_reward, iteration, resume_path
+            runner, log_dir, curriculum_state, stage_filename, mean_reward, iteration, resume_path,
+            save_generic_best=False,
         )
-        destination = "best_model.pt" if curriculum_model_path is None else (
-            f"best_model.pt and {os.path.basename(curriculum_model_path)}"
-        )
+        destination = "best_model.pt" if curriculum_model_path is None else os.path.basename(curriculum_model_path)
         print(
             f"[INFO]: Saved new best model to {destination} "
             f"(iteration={iteration}, Train/mean_reward={mean_reward:.4f})",
@@ -3395,8 +3396,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if isinstance(runner, OffPolicyRunner):
         _install_sac_best_model_hook(runner, log_dir, resume_path, best_mean_reward)
         print(
-            "[INFO]: SAC best-model tracking enabled: best_model.pt and one best_model_*.pt per curriculum "
-            "stage are written from Train/mean_reward.",
+            "[INFO]: SAC best-model tracking enabled: one best_model_*.pt per curriculum stage "
+            "(best_model.pt only without a curriculum), selected from Train/mean_reward.",
             flush=True,
         )
 

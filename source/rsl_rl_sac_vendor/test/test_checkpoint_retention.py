@@ -148,12 +148,32 @@ def test_sac_hook_writes_best_model_per_curriculum_stage(tmp_path):
     runner.logger.log(it=300)
 
     assert (tmp_path / "best_model_curriculum_idx_1.pt").exists()
-    assert (tmp_path / "best_model.pt").exists()
-    saved = [infos["best_model_iteration"] for name, infos in runner.saved if name == "best_model.pt"]
+    assert not (tmp_path / "best_model.pt").exists()
+    saved = [infos["best_model_iteration"] for name, infos in runner.saved if name == "best_model_curriculum_idx_1.pt"]
     assert saved == [100, 200]
     assert runner.saved[-1][1]["best_model_value"] == 20.0
     assert runner.saved[-1][1]["best_model_curriculum_idx"] == 1
     assert len(runner.logger.calls) == 3, "the original logger.log must still run every iteration"
+
+
+def test_sac_hook_without_curriculum_still_saves_generic_best(tmp_path):
+    runner = _Runner(tmp_path)
+    HELPER_NS["_install_sac_best_model_hook"](runner, str(tmp_path), None, float("-inf"))
+
+    runner.logger.rewbuffer.append(10.0)
+    runner.logger.log(it=100)
+
+    assert [name for name, _ in runner.saved] == ["best_model.pt"]
+
+
+def test_shared_save_helper_keeps_generic_best_by_default(tmp_path):
+    runner = _Runner(tmp_path, curriculum=1)
+    state = HELPER_NS["_get_curriculum_state_from_runner"](runner)
+    _, filename = HELPER_NS["_curriculum_checkpoint_stage"](state)
+
+    HELPER_NS["_save_best_model_checkpoints"](runner, str(tmp_path), state, filename, 10.0, 100, None)
+
+    assert [name for name, _ in runner.saved] == [filename, "best_model.pt"]
 
 
 def test_sac_hook_resets_tracking_when_the_curriculum_advances(tmp_path):
@@ -200,7 +220,6 @@ def test_retention_and_sac_hook_compose_without_losing_stage_bests(tmp_path):
         runner.save(str(tmp_path / f"model_{iteration}.pt"))
 
     assert sorted(p.name for p in tmp_path.iterdir()) == [
-        "best_model.pt",
         "best_model_curriculum_idx_1.pt",
         "best_model_curriculum_idx_2.pt",
         "model_400.pt",
