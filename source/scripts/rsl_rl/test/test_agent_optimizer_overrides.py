@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[4]
 def _train_helpers():
     tree = ast.parse((ROOT / "source/scripts/rsl_rl/train.py").read_text())
     wanted = {
-        "_agent_policy_optimizers",
+        "_agent_optimizers",
         "_configure_sac_optimizer",
         "_policy_action_noise_param_ids",
         "_split_action_noise_optimizer_group",
@@ -62,7 +62,8 @@ def test_sac_optimizer_ablation_keeps_betas_and_decay(name, expected):
         assert isinstance(optimizer, expected)
         assert optimizer.param_groups[0]["betas"] == (0.85, 0.95)
         assert optimizer.param_groups[0]["weight_decay"] == 0.01
-    assert runner.alg.alpha_optimizer.param_groups[0]["weight_decay"] == 0.0
+    assert runner.alg.alpha_optimizer.param_groups[0]["betas"] == (0.85, 0.95)
+    assert runner.alg.alpha_optimizer.param_groups[0]["weight_decay"] == 0.01
 
 
 def test_invalid_sac_optimizer_fails():
@@ -85,24 +86,22 @@ def _sac_runner():
     return SimpleNamespace(alg=alg)
 
 
-def test_sac_agent_overrides_actor_and_critic_but_not_temperature():
+def test_sac_agent_overrides_actor_critic_and_temperature():
     runner = _sac_runner()
     cfg = _cfg()
     train._apply_agent_weight_decay_to_optimizer(runner, cfg)
     train._apply_agent_adam_betas_to_optimizer(runner, cfg)
 
-    for optimizer in (runner.alg.actor_optimizer, runner.alg.critic_optimizer):
+    for optimizer in (runner.alg.actor_optimizer, runner.alg.critic_optimizer, runner.alg.alpha_optimizer):
         assert all(group["betas"] == (0.85, 0.95) for group in optimizer.param_groups)
         assert all(group["weight_decay"] == 0.01 for group in optimizer.param_groups)
-    assert runner.alg.alpha_optimizer.param_groups[0]["betas"] == (0.9, 0.999)
-    assert runner.alg.alpha_optimizer.param_groups[0]["weight_decay"] == 0.0
 
 
 def test_sac_default_overrides_leave_optimizer_defaults_unchanged():
     runner = _sac_runner()
     train._apply_agent_weight_decay_to_optimizer(runner, _cfg(weight_decay=0.0))
     train._apply_agent_adam_betas_to_optimizer(runner, _cfg(beta1=0.9, beta2=0.999))
-    for optimizer in (runner.alg.actor_optimizer, runner.alg.critic_optimizer):
+    for optimizer in (runner.alg.actor_optimizer, runner.alg.critic_optimizer, runner.alg.alpha_optimizer):
         assert len(optimizer.param_groups) == 1
         assert optimizer.param_groups[0]["betas"] == (0.9, 0.999)
         assert optimizer.param_groups[0]["weight_decay"] == 0.0
@@ -111,7 +110,7 @@ def test_sac_default_overrides_leave_optimizer_defaults_unchanged():
 def test_sac_beta2_only_keeps_default_beta1():
     runner = _sac_runner()
     train._apply_agent_adam_betas_to_optimizer(runner, _cfg(beta1=0.9, beta2=0.95))
-    for optimizer in (runner.alg.actor_optimizer, runner.alg.critic_optimizer):
+    for optimizer in (runner.alg.actor_optimizer, runner.alg.critic_optimizer, runner.alg.alpha_optimizer):
         assert optimizer.param_groups[0]["betas"] == (0.9, 0.95)
 
 

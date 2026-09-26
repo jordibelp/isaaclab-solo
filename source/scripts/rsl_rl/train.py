@@ -1122,15 +1122,15 @@ def _match_optimizer_param_groups_to_checkpoint(runner, checkpoint_path: str | N
         )
 
 
-def _agent_policy_optimizers(runner) -> list[tuple[str, torch.optim.Optimizer]]:
-    """Return the trainable policy optimizers (PPO: one; SAC: actor and critic)."""
+def _agent_optimizers(runner) -> list[tuple[str, torch.optim.Optimizer]]:
+    """Return PPO's policy optimizer or SAC's actor, critic, and alpha optimizers."""
 
     alg = getattr(runner, "alg", None)
     optimizer = getattr(alg, "optimizer", None)
     if optimizer is not None:
         return [("policy", optimizer)]
     optimizers = []
-    for name in ("actor", "critic"):
+    for name in ("actor", "critic", "alpha"):
         optimizer = getattr(alg, f"{name}_optimizer", None)
         if optimizer is not None:
             optimizers.append((name, optimizer))
@@ -1153,7 +1153,7 @@ def _apply_agent_weight_decay_to_optimizer(runner, agent_cfg: RslRlBaseRunnerCfg
     if weight_decay < 0.0:
         raise ValueError(f"agent.weight_decay must be non-negative, got {weight_decay}.")
 
-    optimizers = _agent_policy_optimizers(runner)
+    optimizers = _agent_optimizers(runner)
     if not optimizers:
         if weight_decay == 0.0:
             return
@@ -1197,7 +1197,7 @@ def _apply_agent_adam_betas_to_optimizer(runner, agent_cfg: RslRlBaseRunnerCfg) 
     if not 0.0 <= beta2 < 1.0:
         raise ValueError(f"agent.adam_beta2 must be in [0, 1), got {beta2}.")
 
-    optimizers = _agent_policy_optimizers(runner)
+    optimizers = _agent_optimizers(runner)
     if not optimizers:
         if (beta1, beta2) == (0.9, 0.999):
             return
