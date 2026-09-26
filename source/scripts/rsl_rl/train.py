@@ -1137,6 +1137,17 @@ def _agent_policy_optimizers(runner) -> list[tuple[str, torch.optim.Optimizer]]:
     return optimizers
 
 
+def _configure_sac_optimizer(agent_cfg: RslRlBaseRunnerCfg) -> None:
+    """Apply the Solo12 SAC actor/critic optimizer ablation before runner construction."""
+    if not hasattr(agent_cfg, "optimizer"):
+        return
+    optimizer = str(agent_cfg.optimizer).lower()
+    if optimizer not in ("adam", "adamw"):
+        raise ValueError(f"agent.optimizer must be adam or adamW, got {agent_cfg.optimizer!r}.")
+    agent_cfg.algorithm.actor_optimizer = optimizer
+    agent_cfg.algorithm.critic_optimizer = optimizer
+
+
 def _apply_agent_weight_decay_to_optimizer(runner, agent_cfg: RslRlBaseRunnerCfg) -> None:
     weight_decay = float(getattr(agent_cfg, "weight_decay", 0.0) or 0.0)
     if weight_decay < 0.0:
@@ -2861,6 +2872,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             flush=True,
         )
 
+    _configure_sac_optimizer(agent_cfg)
     runner_cfg = agent_cfg.to_dict()
     runner_cfg["command"] = _REPRODUCIBLE_COMMAND
     if agent_cfg.class_name == "OnPolicyRunner":

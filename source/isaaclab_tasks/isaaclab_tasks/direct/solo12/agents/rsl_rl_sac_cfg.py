@@ -57,6 +57,9 @@ SAC._compute_action_scaling = staticmethod(Solo12SAC._compute_action_scaling)
 class Solo12SACRunnerCfg(RslRlOffPolicyRunnerCfg):
     """Paper-style SAC defaults adapted to the Solo12 direct task."""
 
+    optimizer: str = "adam"
+    """Optimizer for both actor and critic: ``adam`` or ``adamW`` (case-insensitive)."""
+
     num_steps_per_env = 24
     max_iterations = 1500
     save_interval = 100

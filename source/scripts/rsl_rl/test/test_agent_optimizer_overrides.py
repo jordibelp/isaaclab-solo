@@ -18,6 +18,7 @@ def _train_helpers():
     tree = ast.parse((ROOT / "source/scripts/rsl_rl/train.py").read_text())
     wanted = {
         "_agent_policy_optimizers",
+        "_configure_sac_optimizer",
         "_policy_action_noise_param_ids",
         "_split_action_noise_optimizer_group",
         "_apply_agent_weight_decay_to_optimizer",
@@ -35,6 +36,39 @@ train = _train_helpers()
 
 def _cfg(beta1=0.85, beta2=0.95, weight_decay=0.01):
     return SimpleNamespace(adam_beta1=beta1, adam_beta2=beta2, weight_decay=weight_decay)
+
+
+@pytest.mark.parametrize("name,expected", [("adam", torch.optim.Adam), ("adamW", torch.optim.AdamW)])
+def test_sac_optimizer_ablation_keeps_betas_and_decay(name, expected):
+    cfg = _cfg()
+    cfg.optimizer = name
+    cfg.algorithm = SimpleNamespace(actor_optimizer="adam", critic_optimizer="adam")
+    train._configure_sac_optimizer(cfg)
+    assert cfg.algorithm.actor_optimizer == cfg.algorithm.critic_optimizer == name.lower()
+
+    actor = torch.nn.Linear(2, 2)
+    critic = torch.nn.Linear(2, 1)
+    alpha = torch.nn.Parameter(torch.zeros(()))
+    runner = SimpleNamespace(
+        alg=SimpleNamespace(
+            actor_optimizer=expected(actor.parameters()),
+            critic_optimizer=expected(critic.parameters()),
+            alpha_optimizer=torch.optim.Adam([alpha]),
+        )
+    )
+    train._apply_agent_weight_decay_to_optimizer(runner, cfg)
+    train._apply_agent_adam_betas_to_optimizer(runner, cfg)
+    for optimizer in (runner.alg.actor_optimizer, runner.alg.critic_optimizer):
+        assert isinstance(optimizer, expected)
+        assert optimizer.param_groups[0]["betas"] == (0.85, 0.95)
+        assert optimizer.param_groups[0]["weight_decay"] == 0.01
+    assert runner.alg.alpha_optimizer.param_groups[0]["weight_decay"] == 0.0
+
+
+def test_invalid_sac_optimizer_fails():
+    cfg = SimpleNamespace(optimizer="sgd", algorithm=SimpleNamespace())
+    with pytest.raises(ValueError, match="agent.optimizer"):
+        train._configure_sac_optimizer(cfg)
 
 
 def _sac_runner():
