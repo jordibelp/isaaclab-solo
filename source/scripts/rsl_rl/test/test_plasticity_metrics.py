@@ -24,7 +24,16 @@ from tensordict import TensorDict
 ROOT = Path(__file__).resolve().parents[4]
 HIDDEN_DIMS = [8, 5]
 NUM_HIDDEN_LAYERS = len(HIDDEN_DIMS)
-ACTIVATION_METRICS = ("dormant_pct", "dormant_tau_pct", "feature_rank", "feature_rank_frac", "feature_num")
+PER_LAYER_ACTIVATION_METRICS = ("dormant_pct", "dormant_tau_pct", "feature_rank", "feature_rank_frac", "feature_num")
+SUMMARY_ACTIVATION_METRICS = (
+    "dormant_pct",
+    "dormant_tau_pct",
+    "feature_rank",
+    "feature_rank_frac_median",
+    "feature_rank_frac_mean",
+    "feature_rank_frac_min",
+    "feature_num",
+)
 
 
 def _train_helpers():
@@ -94,8 +103,10 @@ def test_sac_logs_each_twin_critic_separately(parsed_args):
     assert not any(key.startswith(("Plasticity/summary/critic/", "Plasticity/per_layer/critic/")) for key in scalars)
     for net in ("actor", "critic1", "critic2"):
         assert f"Plasticity/summary/{net}/weight_norm" in scalars
-        for metric in ACTIVATION_METRICS:
+        for metric in SUMMARY_ACTIVATION_METRICS:
             assert f"Plasticity/summary/{net}/{metric}" in scalars
+        assert f"Plasticity/summary/{net}/feature_rank_frac" not in scalars
+        for metric in PER_LAYER_ACTIVATION_METRICS:
             for layer in range(NUM_HIDDEN_LAYERS):
                 assert f"Plasticity/per_layer/{net}/{metric}/layer_{layer:02d}" in scalars
     assert all(math.isfinite(value) for value in scalars.values())
@@ -156,7 +167,23 @@ def test_activation_metrics_pool_per_layer_values():
     assert per_layer["feature_rank"] == [1.0, 1.0]
     assert per_layer["feature_rank_frac"] == pytest.approx([0.25, 1.0 / 6.0])
     assert summary["feature_rank"] == 1.0
-    assert summary["feature_rank_frac"] == pytest.approx(0.5 * (0.25 + 1.0 / 6.0))
+    assert summary["feature_rank_frac_median"] == pytest.approx(0.5 * (0.25 + 1.0 / 6.0))
+    assert summary["feature_rank_frac_mean"] == pytest.approx(0.5 * (0.25 + 1.0 / 6.0))
+    assert summary["feature_rank_frac_min"] == pytest.approx(1.0 / 6.0)
+
+
+def test_rank_fraction_summaries_distinguish_mean_median_and_min(monkeypatch):
+    ranks_by_width = {4: 4.0, 8: 2.0, 16: 8.0}
+    monkeypatch.setattr(pm, "feature_rank", lambda act, **kwargs: ranks_by_width[act.shape[-1]])
+    activations = [torch.ones(16, width) for width in ranks_by_width]
+
+    summary, per_layer = pm.activation_plasticity_metrics(activations)
+
+    assert per_layer["feature_rank_frac"] == [1.0, 0.25, 0.5]
+    assert summary["feature_rank_frac_median"] == 0.5
+    assert summary["feature_rank_frac_mean"] == pytest.approx(1.75 / 3.0)
+    assert summary["feature_rank_frac_min"] == 0.25
+    assert "feature_rank_frac" not in summary
 
 
 def test_no_activations_yields_no_metrics():

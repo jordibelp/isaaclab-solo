@@ -27,7 +27,8 @@ Parallelized Data Collection on Deep Reinforcement Learning Networks"
 
 :func:`activation_plasticity_metrics` returns (a) and (b) twice: once per hidden
 layer, and once as a network-level summary (dormant percentages pooled over all
-units, feature-rank statistics as the median across layers).
+units, raw feature rank as the median across layers, and rank fractions as the
+median, mean, and minimum across layers).
 """
 
 from __future__ import annotations
@@ -186,9 +187,9 @@ def activation_plasticity_metrics(
     """Feature-rank and dormant-unit metrics over collected hidden activations.
 
     Returns ``(summary, per_layer)``. ``per_layer`` maps each metric name to one
-    value per hidden layer, in execution order; ``summary`` holds the same metric
-    names reduced to one scalar for the whole network (dormant percentages pooled
-    over every unit, feature ranks as the median across layers).
+    value per hidden layer, in execution order. ``summary`` pools dormant
+    percentages over every unit, takes the median raw feature rank, and reports
+    the median, mean, and minimum of the per-layer rank fractions.
     """
     if not activations:
         return {}, {}
@@ -216,11 +217,14 @@ def activation_plasticity_metrics(
         per_layer["feature_rank_frac"].append(rank / float(num_features) if num_features > 0 else float("nan"))
         per_layer["feature_num"].append(float(num_features))
 
+    finite_rank_fracs = [value for value in per_layer["feature_rank_frac"] if value == value]
     summary = {
         "dormant_pct": 100.0 * total_dormant_eps / total_units if total_units else float("nan"),
         "dormant_tau_pct": 100.0 * total_dormant_tau / total_units if total_units else float("nan"),
         "feature_rank": _median(per_layer["feature_rank"]),
-        "feature_rank_frac": _median(per_layer["feature_rank_frac"]),
+        "feature_rank_frac_median": _median(finite_rank_fracs),
+        "feature_rank_frac_mean": sum(finite_rank_fracs) / len(finite_rank_fracs) if finite_rank_fracs else float("nan"),
+        "feature_rank_frac_min": min(finite_rank_fracs) if finite_rank_fracs else float("nan"),
         "feature_num": per_layer["feature_num"][-1],
     }
     return summary, per_layer
