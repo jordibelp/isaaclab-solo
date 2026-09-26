@@ -58,6 +58,15 @@ def build(monkeypatch, device="cpu", symmetry=None, critic_loss="two_hot", **alg
     return alg
 
 
+@pytest.mark.parametrize("name,expected", [("adam", torch.optim.Adam), ("adamW", torch.optim.AdamW)])
+def test_alpha_optimizer_is_configured_independently(monkeypatch, name, expected):
+    alg = build(monkeypatch, alpha_optimizer=name, actor_optimizer="adamw", critic_optimizer="adamw")
+    assert isinstance(alg.alpha_optimizer, expected)
+    assert alg.alpha_optimizer.param_groups[0]["weight_decay"] == 0.0
+    assert isinstance(alg.actor_optimizer, torch.optim.AdamW)
+    assert isinstance(alg.critic_optimizer, torch.optim.AdamW)
+
+
 def test_logged_mirror_loss_is_measured_once_per_interval(monkeypatch):
     alg = build(monkeypatch, symmetry={}, symmetry_log_interval=3)
     calls = []

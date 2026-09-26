@@ -201,6 +201,7 @@ class RslRlSacAlgorithmCfg:
     """
     actor_optimizer: Literal["adam", "adamw", "sgd", "rmsprop"] = "adam"
     critic_optimizer: Literal["adam", "adamw", "sgd", "rmsprop"] = "adam"
+    alpha_optimizer: Literal["adam", "adamw"] = "adam"
     torch_compile: bool = False
     """Compile the per-mini-batch Bellman target, critic loss and actor objective with ``torch.compile``.
 
@@ -256,13 +257,13 @@ class RslRlBaseRunnerCfg:
     """The device for the rl-agent. Default is cuda:0."""
 
     weight_decay: float = 0.0
-    """The Adam optimizer weight decay for trainable parameters. Default is 0.0."""
+    """PPO policy or SAC actor/critic weight decay. SAC alpha uses a separate setting."""
 
     adam_beta1: float = 0.9
-    """The first Adam optimizer beta coefficient. Default is 0.9."""
+    """PPO policy or SAC actor/critic first Adam beta coefficient. Default is 0.9."""
 
     adam_beta2: float = 0.999
-    """The second Adam optimizer beta coefficient. Default is 0.999."""
+    """PPO policy or SAC actor/critic second Adam beta coefficient. Default is 0.999."""
 
     num_steps_per_env: int = MISSING
     """The number of steps per environment per update."""
@@ -368,6 +369,13 @@ class RslRlOffPolicyRunnerCfg(RslRlBaseRunnerCfg):
     """Configuration for the RSL-RL-SAC off-policy runner."""
 
     class_name: str = "OffPolicyRunner"
+    sac_alpha_optimizer: str = "adamW"
+    """SAC entropy-temperature optimizer: ``adam`` or ``adamW`` (case-insensitive)."""
+    sac_alpha_adam_beta1: float = 0.9
+    sac_alpha_adam_beta2: float = 0.999
+    """SAC entropy-temperature Adam beta coefficients; independent of actor and critic."""
+    sac_alpha_adam_weight_decay: float = 0.0
+    """SAC entropy-temperature optimizer weight decay; independent of actor and critic."""
     distributional_critic_ce: bool = False
     """Deprecated alias for critic.distributional_loss="two_hot"; set that instead."""
     local_redundancy: RslRlLocalRedundancyCfg = RslRlLocalRedundancyCfg()

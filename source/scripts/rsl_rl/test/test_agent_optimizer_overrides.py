@@ -23,6 +23,7 @@ def _train_helpers():
         "_split_action_noise_optimizer_group",
         "_apply_agent_weight_decay_to_optimizer",
         "_apply_agent_adam_betas_to_optimizer",
+        "_apply_sac_alpha_optimizer_hparams",
     }
     body = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in wanted]
     assert {node.name for node in body} == wanted
@@ -35,7 +36,11 @@ train = _train_helpers()
 
 
 def _cfg(beta1=0.85, beta2=0.95, weight_decay=0.01):
-    return SimpleNamespace(adam_beta1=beta1, adam_beta2=beta2, weight_decay=weight_decay)
+    return SimpleNamespace(
+        adam_beta1=beta1, adam_beta2=beta2, weight_decay=weight_decay,
+        sac_alpha_optimizer="adamW", sac_alpha_adam_beta1=0.9,
+        sac_alpha_adam_beta2=0.999, sac_alpha_adam_weight_decay=0.0,
+    )
 
 
 @pytest.mark.parametrize("name,expected", [("adam", torch.optim.Adam), ("adamW", torch.optim.AdamW)])
@@ -45,6 +50,7 @@ def test_sac_optimizer_ablation_keeps_betas_and_decay(name, expected):
     cfg.algorithm = SimpleNamespace(actor_optimizer="adam", critic_optimizer="adam")
     train._configure_sac_optimizer(cfg)
     assert cfg.algorithm.actor_optimizer == cfg.algorithm.critic_optimizer == name.lower()
+    assert cfg.algorithm.alpha_optimizer == "adamw"
 
     actor = torch.nn.Linear(2, 2)
     critic = torch.nn.Linear(2, 1)
@@ -58,12 +64,13 @@ def test_sac_optimizer_ablation_keeps_betas_and_decay(name, expected):
     )
     train._apply_agent_weight_decay_to_optimizer(runner, cfg)
     train._apply_agent_adam_betas_to_optimizer(runner, cfg)
+    train._apply_sac_alpha_optimizer_hparams(runner, cfg)
     for optimizer in (runner.alg.actor_optimizer, runner.alg.critic_optimizer):
         assert isinstance(optimizer, expected)
         assert optimizer.param_groups[0]["betas"] == (0.85, 0.95)
         assert optimizer.param_groups[0]["weight_decay"] == 0.01
-    assert runner.alg.alpha_optimizer.param_groups[0]["betas"] == (0.85, 0.95)
-    assert runner.alg.alpha_optimizer.param_groups[0]["weight_decay"] == 0.01
+    assert runner.alg.alpha_optimizer.param_groups[0]["betas"] == (0.9, 0.999)
+    assert runner.alg.alpha_optimizer.param_groups[0]["weight_decay"] == 0.0
 
 
 def test_invalid_sac_optimizer_fails():
@@ -86,15 +93,18 @@ def _sac_runner():
     return SimpleNamespace(alg=alg)
 
 
-def test_sac_agent_overrides_actor_critic_and_temperature():
+def test_sac_agent_overrides_actor_critic_but_not_temperature():
     runner = _sac_runner()
     cfg = _cfg()
     train._apply_agent_weight_decay_to_optimizer(runner, cfg)
     train._apply_agent_adam_betas_to_optimizer(runner, cfg)
+    train._apply_sac_alpha_optimizer_hparams(runner, cfg)
 
-    for optimizer in (runner.alg.actor_optimizer, runner.alg.critic_optimizer, runner.alg.alpha_optimizer):
+    for optimizer in (runner.alg.actor_optimizer, runner.alg.critic_optimizer):
         assert all(group["betas"] == (0.85, 0.95) for group in optimizer.param_groups)
         assert all(group["weight_decay"] == 0.01 for group in optimizer.param_groups)
+    assert runner.alg.alpha_optimizer.param_groups[0]["betas"] == (0.9, 0.999)
+    assert runner.alg.alpha_optimizer.param_groups[0]["weight_decay"] == 0.0
 
 
 def test_sac_default_overrides_leave_optimizer_defaults_unchanged():
@@ -110,8 +120,66 @@ def test_sac_default_overrides_leave_optimizer_defaults_unchanged():
 def test_sac_beta2_only_keeps_default_beta1():
     runner = _sac_runner()
     train._apply_agent_adam_betas_to_optimizer(runner, _cfg(beta1=0.9, beta2=0.95))
-    for optimizer in (runner.alg.actor_optimizer, runner.alg.critic_optimizer, runner.alg.alpha_optimizer):
+    for optimizer in (runner.alg.actor_optimizer, runner.alg.critic_optimizer):
         assert optimizer.param_groups[0]["betas"] == (0.9, 0.95)
+    assert runner.alg.alpha_optimizer.param_groups[0]["betas"] == (0.9, 0.999)
+
+
+def test_sac_alpha_overrides_do_not_change_actor_or_critic():
+    runner = _sac_runner()
+    cfg = _cfg(beta1=0.9, beta2=0.999, weight_decay=0.0)
+    cfg.sac_alpha_adam_beta1 = 0.8
+    cfg.sac_alpha_adam_beta2 = 0.97
+    cfg.sac_alpha_adam_weight_decay = 0.02
+    train._apply_sac_alpha_optimizer_hparams(runner, cfg)
+    assert runner.alg.alpha_optimizer.param_groups[0]["betas"] == (0.8, 0.97)
+    assert runner.alg.alpha_optimizer.param_groups[0]["weight_decay"] == 0.02
+    for optimizer in (runner.alg.actor_optimizer, runner.alg.critic_optimizer):
+        assert optimizer.param_groups[0]["betas"] == (0.9, 0.999)
+        assert optimizer.param_groups[0]["weight_decay"] == 0.0
+
+
+def test_sac_alpha_overrides_reapply_after_checkpoint_load():
+    runner = _sac_runner()
+    alpha_optimizer = runner.alg.alpha_optimizer
+    alpha = alpha_optimizer.param_groups[0]["params"][0]
+    alpha.grad = torch.ones_like(alpha)
+    alpha_optimizer.step()
+    old_state = alpha_optimizer.state_dict()
+
+    resumed = _sac_runner()
+    resumed_alpha = resumed.alg.alpha_optimizer.param_groups[0]["params"][0]
+    resumed.alg.alpha_optimizer = torch.optim.AdamW([resumed_alpha], weight_decay=0.0)
+    resumed.alg.alpha_optimizer.load_state_dict(old_state)
+    cfg = _cfg()
+    cfg.sac_alpha_adam_beta2 = 0.97
+    cfg.sac_alpha_adam_weight_decay = 0.02
+    train._apply_sac_alpha_optimizer_hparams(resumed, cfg)
+    assert isinstance(resumed.alg.alpha_optimizer, torch.optim.AdamW)
+    assert resumed.alg.alpha_optimizer.state_dict()["state"]
+    assert resumed.alg.alpha_optimizer.param_groups[0]["betas"] == (0.9, 0.97)
+    assert resumed.alg.alpha_optimizer.param_groups[0]["weight_decay"] == 0.02
+
+
+@pytest.mark.parametrize("field,value", [
+    ("sac_alpha_adam_beta1", -0.1),
+    ("sac_alpha_adam_beta2", 1.0),
+    ("sac_alpha_adam_weight_decay", -0.01),
+])
+def test_invalid_sac_alpha_hparam_fails(field, value):
+    cfg = _cfg()
+    setattr(cfg, field, value)
+    with pytest.raises(ValueError, match=f"agent.{field}"):
+        train._apply_sac_alpha_optimizer_hparams(_sac_runner(), cfg)
+
+
+def test_invalid_sac_alpha_optimizer_fails():
+    cfg = _cfg()
+    cfg.optimizer = "adam"
+    cfg.algorithm = SimpleNamespace()
+    cfg.sac_alpha_optimizer = "sgd"
+    with pytest.raises(ValueError, match="agent.sac_alpha_optimizer"):
+        train._configure_sac_optimizer(cfg)
 
 
 def test_ppo_action_noise_stays_decay_free():
@@ -125,6 +193,7 @@ def test_ppo_action_noise_stays_decay_free():
     runner = SimpleNamespace(alg=SimpleNamespace(policy=policy, optimizer=torch.optim.Adam(policy.parameters())))
     train._apply_agent_weight_decay_to_optimizer(runner, _cfg())
     train._apply_agent_adam_betas_to_optimizer(runner, _cfg())
+    train._apply_sac_alpha_optimizer_hparams(runner, _cfg())
     assert len(runner.alg.optimizer.param_groups) == 2
     groups = {id(group["params"][0]): group for group in runner.alg.optimizer.param_groups}
     assert groups[id(policy.weight)]["weight_decay"] == 0.01

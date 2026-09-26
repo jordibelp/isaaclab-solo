@@ -1123,14 +1123,14 @@ def _match_optimizer_param_groups_to_checkpoint(runner, checkpoint_path: str | N
 
 
 def _agent_optimizers(runner) -> list[tuple[str, torch.optim.Optimizer]]:
-    """Return PPO's policy optimizer or SAC's actor, critic, and alpha optimizers."""
+    """Return PPO's policy optimizer or SAC's actor and critic optimizers."""
 
     alg = getattr(runner, "alg", None)
     optimizer = getattr(alg, "optimizer", None)
     if optimizer is not None:
         return [("policy", optimizer)]
     optimizers = []
-    for name in ("actor", "critic", "alpha"):
+    for name in ("actor", "critic"):
         optimizer = getattr(alg, f"{name}_optimizer", None)
         if optimizer is not None:
             optimizers.append((name, optimizer))
@@ -1138,14 +1138,20 @@ def _agent_optimizers(runner) -> list[tuple[str, torch.optim.Optimizer]]:
 
 
 def _configure_sac_optimizer(agent_cfg: RslRlBaseRunnerCfg) -> None:
-    """Apply the Solo12 SAC actor/critic optimizer ablation before runner construction."""
-    if not hasattr(agent_cfg, "optimizer"):
-        return
-    optimizer = str(agent_cfg.optimizer).lower()
-    if optimizer not in ("adam", "adamw"):
-        raise ValueError(f"agent.optimizer must be adam or adamW, got {agent_cfg.optimizer!r}.")
-    agent_cfg.algorithm.actor_optimizer = optimizer
-    agent_cfg.algorithm.critic_optimizer = optimizer
+    """Set the SAC optimizer types before runner construction."""
+    if hasattr(agent_cfg, "optimizer"):
+        optimizer = str(agent_cfg.optimizer).lower()
+        if optimizer not in ("adam", "adamw"):
+            raise ValueError(f"agent.optimizer must be adam or adamW, got {agent_cfg.optimizer!r}.")
+        agent_cfg.algorithm.actor_optimizer = optimizer
+        agent_cfg.algorithm.critic_optimizer = optimizer
+    if hasattr(agent_cfg, "sac_alpha_optimizer"):
+        optimizer = str(agent_cfg.sac_alpha_optimizer).lower()
+        if optimizer not in ("adam", "adamw"):
+            raise ValueError(
+                f"agent.sac_alpha_optimizer must be adam or adamW, got {agent_cfg.sac_alpha_optimizer!r}."
+            )
+        agent_cfg.algorithm.alpha_optimizer = optimizer
 
 
 def _apply_agent_weight_decay_to_optimizer(runner, agent_cfg: RslRlBaseRunnerCfg) -> None:
@@ -1220,6 +1226,33 @@ def _apply_agent_adam_betas_to_optimizer(runner, agent_cfg: RslRlBaseRunnerCfg) 
         print(
             "[INFO]: Set RSL-RL optimizer Adam betas="
             f"({beta1:g}, {beta2:g}) on {num_groups} parameter group(s)."
+        )
+
+
+def _apply_sac_alpha_optimizer_hparams(runner, agent_cfg: RslRlBaseRunnerCfg) -> None:
+    """Keep SAC entropy-temperature betas and decay independent of network optimizers."""
+    if not hasattr(agent_cfg, "sac_alpha_optimizer"):
+        return
+    beta1 = float(agent_cfg.sac_alpha_adam_beta1)
+    beta2 = float(agent_cfg.sac_alpha_adam_beta2)
+    weight_decay = float(agent_cfg.sac_alpha_adam_weight_decay)
+    if not 0.0 <= beta1 < 1.0:
+        raise ValueError(f"agent.sac_alpha_adam_beta1 must be in [0, 1), got {beta1}.")
+    if not 0.0 <= beta2 < 1.0:
+        raise ValueError(f"agent.sac_alpha_adam_beta2 must be in [0, 1), got {beta2}.")
+    if weight_decay < 0.0:
+        raise ValueError(f"agent.sac_alpha_adam_weight_decay must be non-negative, got {weight_decay}.")
+
+    optimizer = getattr(getattr(runner, "alg", None), "alpha_optimizer", None)
+    if optimizer is None:
+        return
+    for group in optimizer.param_groups:
+        group["betas"] = (beta1, beta2)
+        group["weight_decay"] = weight_decay
+    if (beta1, beta2, weight_decay) != (0.9, 0.999, 0.0):
+        print(
+            "[INFO]: Set SAC alpha optimizer Adam betas="
+            f"({beta1:g}, {beta2:g}), weight_decay={weight_decay:g}."
         )
 
 
@@ -2926,6 +2959,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         _sanitize_policy_action_std(runner)
     _apply_agent_weight_decay_to_optimizer(runner, agent_cfg)
     _apply_agent_adam_betas_to_optimizer(runner, agent_cfg)
+    _apply_sac_alpha_optimizer_hparams(runner, agent_cfg)
     mitigation_controller = None
     if mitigation_spec.name != "none":
         if float(getattr(agent_cfg, "weight_decay", 0.0) or 0.0) != 0.0:

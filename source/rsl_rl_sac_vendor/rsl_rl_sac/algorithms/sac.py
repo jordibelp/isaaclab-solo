@@ -81,6 +81,7 @@ class SAC:
         alpha_learning_rate: float = 1e-3,
         actor_optimizer: str = "adam",
         critic_optimizer: str = "adam",
+        alpha_optimizer: str = "adam",
         auto_alpha: bool = True,
         alpha: float = 0.05,
         tau: float = 0.005,
@@ -115,6 +116,7 @@ class SAC:
             alpha_learning_rate: LR for the alpha parameter, if auto_alpha=True.
             actor_optimizer: Optimizer name for the actor (e.g., "adam", "adamw").
             critic_optimizer: Optimizer name for the critic (e.g., "adam", "adamw").
+            alpha_optimizer: Optimizer name for the entropy temperature ("adam" or "adamw").
             auto_alpha: Whether to learn alpha automatically.
             alpha: Initial temperature (if auto_alpha=False) or initial value for alpha learning.
             tau: Soft update coefficient for target networks.
@@ -209,7 +211,9 @@ class SAC:
         # Initialize log_alpha and its optimizer
         if self.auto_alpha:
             self.log_alpha = torch.log(torch.tensor(self.alpha, device=self.device)).detach().clone().requires_grad_(True)
-            self.alpha_optimizer = optim.Adam([self.log_alpha], lr=self.alpha_learning_rate)
+            self.alpha_optimizer = resolve_optimizer(alpha_optimizer)(
+                [self.log_alpha], lr=self.alpha_learning_rate, weight_decay=0.0
+            )
         else:
             self.log_alpha = (
                 torch.log(torch.tensor(self.alpha, device=self.device)).detach().clone().requires_grad_(False)
