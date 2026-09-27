@@ -1,7 +1,7 @@
 # Solo12 backflip task (`solo12-backflip`)
 
-The robot is rewarded for rotating backwards about its own lateral axis as fast as it can. One backflip
-is enough, but the robot may keep flipping until the episode ends (10 s).
+The robot is rewarded for rotating backwards about a horizontal axis perpendicular to its forward axis.
+One backflip is enough, but the robot may keep flipping until the episode ends (10 s).
 
 The task reuses the `solo12` environment through subclassing. It shares the USD, actuators, joint limits,
 observation layout (48-D), pushes, observation noise and startup randomizers. The velocity command in the
@@ -11,16 +11,53 @@ observation is always zero. Only the reward, the curriculum and a few metrics ar
 
 | Term | Default scale | What it does |
 |---|---:|---|
-| `backflip_ang_vel` | `5.0` | `scale * (-omega_y) * dt`. `omega_y` is the base angular velocity about body `+y` (left). A backward, nose-up rotation gives `-omega_y > 0`. |
+| `backflip_ang_vel` | `5.0` | `scale * (-dot(omega, flip_axis)) * dt`. The unit flip axis is horizontal, perpendicular to body `+x`, and signed toward body `+y` (left). |
 | `ang_vel_x_penalty` | `-2.0` | `scale * abs(omega_x) * dt` penalizes roll in either direction, measured in the base frame. |
 | `ang_vel_z_penalty` | `-2.0` | `scale * abs(omega_z) * dt` penalizes yaw in either direction, measured in the base frame. |
 | `base_collision_terminal` | `-10.0` | One-time penalty when the base touches anything. The episode ends. |
 | `undesired_contacts` | `-2.25` | Per second, for each thigh in contact. |
 | action rate, joint torque, foot contact, soft joint limit | `0.0` | Preferences. They are off for the first experiments. |
 
-The backflip term is **signed**. Rocking back and forth therefore earns nothing. Over an episode, the
-undiscounted sum of this term is `scale` times the net backward rotation in radians, so one whole backflip
-is worth `2 * pi * scale` (about 31 with the default scale).
+The backflip term is **signed**. For planar flips with clipping disabled, rocking back and forth earns
+nothing in the undiscounted sum. That sum is `scale` times the net backward rotation in radians, so one
+whole planar backflip is worth `2 * pi * scale` (about 31 with the default scale). For general 3-D motion,
+the reward integrates speed about a changing axis; it is not a count of completed flips.
+
+### Horizontal flip axis (reward-hacking fix, 2026-09-27)
+
+The old term used `-omega_body_y`. A robot lying on its side could point body Y vertically and earn
+reward by spinning around world Z. The new term gives a pure world-Z spin zero flip reward, at any pose
+(up to floating-point tolerance).
+
+We construct the axis in three steps:
+
+1. Compute `c = world_up cross body_x`, with both vectors expressed in the same frame.
+2. Normalize `c`. Choose its sign so its dot product with body `+y` is nonnegative.
+3. If the cross-product norm is at most `1e-6`, use body `+y`. Here body X is vertical within numerical
+   tolerance, so body Y is horizontal within the same tolerance.
+
+The sign rule matters: the raw cross product reverses during the inverted half of a planar flip.
+Choosing the sign toward body-left keeps a backward flip positive through the full 360 degrees.
+When body-left itself is vertical, it cannot resolve the sign. We keep the cross-product sign in that
+exact tie; vertical spinning still projects to zero. Close to a vertical body X, the cross product is
+inherently sensitive to small changes in pose. The fallback handles the numerical singularity, not a
+smooth heading for every possible 3-D motion.
+
+The code computes this in body coordinates, without extra state or quaternion conversions:
+
+```text
+g = projected_gravity_b
+c_body = (0, -g_z, g_y)       # (-g) cross (1, 0, 0)
+backward_speed = -dot(root_ang_vel_b, signed_unit_axis_body)
+reward = backflip_ang_vel_reward_scale * backward_speed * step_dt
+```
+
+`projected_gravity_b` is the unit world gravity direction expressed in the body frame, not a noisy
+accelerometer sample. This matches the [IsaacLab data definitions](https://isaac-sim.github.io/IsaacLab/main/_modules/isaaclab/assets/articulation/articulation_data.html).
+
+The X and Z angular-speed penalties remain in the **body frame**, with their existing absolute-value
+form and scales. The flip counter and curriculum are unchanged. This correction removes the incentive
+for vertical spinning; it does not require takeoff or a clean landing.
 
 Set `env.ang_vel_x_penalty_scale=-2.0` and `env.ang_vel_z_penalty_scale=-2.0` on the training
 command line to change the new penalties. Set either scale to `0.0` to turn that penalty off.
@@ -58,7 +95,7 @@ Each phase keeps its own best checkpoint: `best_model_curriculum_idx_<phase - 1>
 
 ## Optional ideas (off by default)
 
-- `env.backflip_ang_vel_clip=10.0` clips `-omega_y` to `[-10, 10]` rad/s. Use it if impact spikes or very
+- `env.backflip_ang_vel_clip=10.0` clips the signed horizontal-axis speed to `[-10, 10]` rad/s. Use it if impact spikes or very
   violent motions appear. The Genesis Go2 backflip clips at 7.2 rad/s.
 - `env.backflip_airborne_reset_prob=0.3` starts 30% of the episodes in the air, at 0.45-0.8 m, already
   rotated backwards by 0-360 degrees and spinning backwards at 4-12 rad/s. The policy then practises

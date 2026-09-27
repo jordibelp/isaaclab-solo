@@ -20,6 +20,24 @@ from .solo12_backflip_env_cfg import Solo12BackflipEnvCfg
 _BACKFLIP_COUNT_TOLERANCE = math.pi / 4
 
 
+def _backflip_axis_b(projected_gravity_b: torch.Tensor) -> torch.Tensor:
+    """Horizontal unit flip axis perpendicular to base x, expressed in the base frame.
+
+    Compute world-up cross base-x in base coordinates, then choose the sign closest to body +y.
+    This avoids reversing the reward during the inverted half of a planar backflip. When base x
+    is vertical (within numerical tolerance), body +y is horizontal and supplies the missing axis.
+    """
+    axis = torch.stack(
+        (torch.zeros_like(projected_gravity_b[:, 0]), -projected_gravity_b[:, 2], projected_gravity_b[:, 1]), dim=1
+    )
+    norm = torch.linalg.vector_norm(axis, dim=1, keepdim=True)
+    axis = axis / norm.clamp_min(1e-6)
+    axis = torch.where(axis[:, 1:2] < 0.0, -axis, axis)
+    lateral = torch.zeros_like(axis)
+    lateral[:, 1] = 1.0
+    return torch.where(norm > 1e-6, axis, lateral)
+
+
 def _backward_pitch(projected_gravity_b: torch.Tensor) -> torch.Tensor:
     """Nose-up angle of the base in its x-z plane: 0 upright, pi/2 nose straight up, pi upside down."""
     return torch.atan2(-projected_gravity_b[:, 0], -projected_gravity_b[:, 2])
@@ -125,7 +143,8 @@ class Solo12BackflipEnv(Solo12Env):
 
     def _reward_terms(self) -> dict[str, torch.Tensor]:
         ang_vel_b = self._robot.data.root_ang_vel_b
-        backward_ang_vel = -ang_vel_b[:, 1]
+        flip_axis_b = _backflip_axis_b(self._robot.data.projected_gravity_b)
+        backward_ang_vel = -torch.sum(ang_vel_b * flip_axis_b, dim=1)
         clip = self.cfg.backflip_ang_vel_clip
         if clip > 0.0:
             backward_ang_vel = backward_ang_vel.clamp(-clip, clip)

@@ -10,6 +10,8 @@ simulation_app = AppLauncher(headless=True).app
 
 import torch
 
+import isaaclab.utils.math as math_utils
+
 from isaaclab_tasks.direct.solo12.solo12_env_cfg import Solo12EnvCfg
 from isaaclab_tasks.direct.solo12_backflip.backflip_runner_cfg import (
     Solo12BackflipPPORunnerCfg,
@@ -17,6 +19,7 @@ from isaaclab_tasks.direct.solo12_backflip.backflip_runner_cfg import (
 )
 from isaaclab_tasks.direct.solo12_backflip.solo12_backflip_env import (
     Solo12BackflipEnv,
+    _backflip_axis_b,
     _backward_pitch,
     _completed_backflips,
 )
@@ -74,7 +77,10 @@ def test_body_frame_x_z_rotation_penalties_are_symmetric(monkeypatch):
     cfg.ang_vel_z_penalty_scale = -1.0
     env = _bare_env(cfg, num_envs=2)
     env._robot = SimpleNamespace(
-        data=SimpleNamespace(root_ang_vel_b=torch.tensor([[2.0, -4.0, -3.0], [-2.0, -4.0, 3.0]]))
+        data=SimpleNamespace(
+            root_ang_vel_b=torch.tensor([[2.0, -4.0, -3.0], [-2.0, -4.0, 3.0]]),
+            projected_gravity_b=torch.tensor([[0.0, 0.0, -1.0], [0.0, 0.0, -1.0]]),
+        )
     )
     monkeypatch.setattr(Solo12Env, "_reward_terms", lambda self: {})
 
@@ -85,6 +91,112 @@ def test_body_frame_x_z_rotation_penalties_are_symmetric(monkeypatch):
     assert torch.allclose(terms["ang_vel_z_penalty"], torch.full((2,), -0.06))
     assert env._reward_scales()["ang_vel_x_penalty"] == -3.0
     assert env._reward_scales()["ang_vel_z_penalty"] == -1.0
+
+
+def test_world_vertical_spin_has_no_backflip_reward(monkeypatch):
+    from isaaclab_tasks.direct.solo12.solo12_env import Solo12Env
+
+    # Both sideways poses, a tilted pose, upright, inverted, and both vertical-nose poses.
+    gravity_b = torch.tensor(
+        [
+            [0.0, 1.0, 0.0],
+            [0.0, -1.0, 0.0],
+            [0.0, 0.6, -0.8],
+            [0.0, 0.0, -1.0],
+            [0.0, 0.0, 1.0],
+            [-1.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+        ]
+    )
+    env = _bare_env(Solo12BackflipEnvCfg(), num_envs=len(gravity_b))
+    env._robot = SimpleNamespace(
+        data=SimpleNamespace(root_ang_vel_b=-12.0 * gravity_b, projected_gravity_b=gravity_b)
+    )
+    monkeypatch.setattr(Solo12Env, "_reward_terms", lambda self: {})
+
+    for direction in (-1.0, 1.0):
+        env._robot.data.root_ang_vel_b = direction * 12.0 * gravity_b
+        assert torch.allclose(env._reward_terms()["backflip_ang_vel"], torch.zeros(len(gravity_b)), atol=1e-6)
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_flip_axis_is_unit_horizontal_perpendicular_to_base_x_and_points_left(device):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is not available")
+    # Arbitrary orientations, including arbitrary world headings, at the usual training batch size.
+    quat = torch.randn(10000, 4, generator=torch.Generator().manual_seed(17)).to(device)
+    quat /= torch.linalg.vector_norm(quat, dim=1, keepdim=True)
+    up_w = torch.tensor([0.0, 0.0, 1.0], device=device).expand(len(quat), -1)
+    gravity_b = math_utils.quat_apply_inverse(quat, -up_w)
+    axis_b = _backflip_axis_b(gravity_b)
+    axis_w = math_utils.quat_apply(quat, axis_b)
+    x_b = torch.tensor([1.0, 0.0, 0.0], device=device).expand(len(quat), -1)
+    x_w = math_utils.quat_apply(quat, x_b)
+
+    assert torch.isfinite(axis_b).all()
+    assert torch.allclose(torch.linalg.vector_norm(axis_b, dim=1), torch.ones(len(quat), device=device), atol=1e-6)
+    assert axis_w[:, 2].abs().max() < 1e-6
+    assert (axis_w * x_w).sum(dim=1).abs().max() < 1e-6
+    assert (axis_b[:, 1] >= 0.0).all()
+    # Adding world yaw cannot change the projection, whatever the orientation or other angular motion.
+    omega_w = torch.tensor([2.0, -4.0, 3.0], device=device).expand(len(quat), -1)
+    omega_b = math_utils.quat_apply_inverse(quat, omega_w)
+    with_yaw_b = math_utils.quat_apply_inverse(quat, omega_w + 12.0 * up_w)
+    assert torch.allclose((omega_b * axis_b).sum(1), (with_yaw_b * axis_b).sum(1), atol=1e-5)
+
+
+def test_vertical_nose_uses_body_left_without_nan_or_zero_axis():
+    gravity_b = torch.tensor(
+        [[-1.0, 0.0, 0.0], [1.0, 0.0, 0.0], [-1.0, 1e-8, -1e-8], [1.0, -1e-8, 1e-8]]
+    )
+    axis_b = _backflip_axis_b(gravity_b)
+    assert torch.equal(axis_b, torch.tensor([[0.0, 1.0, 0.0]]).expand_as(axis_b))
+    assert (axis_b * gravity_b).sum(1).abs().max() < 1e-6
+
+
+@pytest.mark.parametrize("clip", [0.0, 3.0])
+def test_full_planar_flips_keep_signed_speed_and_clip(monkeypatch, clip):
+    from isaaclab_tasks.direct.solo12.solo12_env import Solo12Env
+
+    # Two turns in both directions, including vertical noses and the inverted halves.
+    angles = torch.linspace(-4.0 * math.pi, 4.0 * math.pi, 1441)
+    cfg = Solo12BackflipEnvCfg()
+    cfg.backflip_ang_vel_clip = clip
+    env = _bare_env(cfg, num_envs=len(angles))
+    ang_vel_b = torch.zeros(len(angles), 3)
+    env._robot = SimpleNamespace(
+        data=SimpleNamespace(root_ang_vel_b=ang_vel_b, projected_gravity_b=_gravity_after_backward_rotation(angles))
+    )
+    monkeypatch.setattr(Solo12Env, "_reward_terms", lambda self: {})
+
+    for speed in (-4.0, 0.0, 4.0):
+        ang_vel_b[:, 1] = -speed
+        expected_speed = max(-clip, min(clip, speed)) if clip > 0 else speed
+        expected = expected_speed * cfg.backflip_ang_vel_reward_scale * env.step_dt
+        terms = env._reward_terms()
+        assert torch.allclose(terms["backflip_ang_vel"], torch.full_like(angles, expected), atol=1e-6)
+        assert torch.count_nonzero(terms["ang_vel_x_penalty"]) == 0
+        assert torch.count_nonzero(terms["ang_vel_z_penalty"]) == 0
+
+
+def test_tilted_reward_uses_unit_axis_and_keeps_body_x_z_penalties(monkeypatch):
+    from isaaclab_tasks.direct.solo12.solo12_env import Solo12Env
+
+    env = _bare_env(Solo12BackflipEnvCfg(), num_envs=2)
+    # In this pose world-up cross body-x is (0, 0.48, -0.36), with norm 0.6.
+    # Unit axis: (0, 0.8, -0.6). Second row is the left-right mirrored state.
+    env._robot = SimpleNamespace(
+        data=SimpleNamespace(
+            projected_gravity_b=torch.tensor([[0.8, -0.36, -0.48], [0.8, 0.36, -0.48]]),
+            root_ang_vel_b=torch.tensor([[2.0, -4.0, 3.0], [-2.0, -4.0, -3.0]]),
+        )
+    )
+    monkeypatch.setattr(Solo12Env, "_reward_terms", lambda self: {})
+
+    terms = env._reward_terms()
+    assert torch.allclose(terms["backflip_ang_vel"], torch.tensor([0.5, 0.5]))
+    assert torch.allclose(terms["ang_vel_x_penalty"], torch.tensor([-0.08, -0.08]))
+    assert torch.allclose(terms["ang_vel_z_penalty"], torch.tensor([-0.12, -0.12]))
 
 
 def test_backflip_runner_configs_use_their_own_wandb_project():

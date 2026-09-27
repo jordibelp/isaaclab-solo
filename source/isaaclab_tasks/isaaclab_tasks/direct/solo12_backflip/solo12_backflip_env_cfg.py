@@ -14,20 +14,21 @@ from ..solo12.solo12_env_cfg import Solo12EnvCfg
 
 @configclass
 class Solo12BackflipEnvCfg(Solo12EnvCfg):
-    """Solo12 task that rewards fast backward rotation about the base lateral axis (repeated backflips).
+    """Solo12 task that rewards fast backward rotation about a horizontal lateral axis (repeated backflips).
 
     The USD, actuators, joint limits, observation layout, sensors, pushes, observation noise and startup
     randomizers come from ``Solo12EnvCfg``. The velocity-command slot of the 48-D observation stays zero.
     """
 
-    # Task reward: scale * (-omega_y) * dt, where omega_y is the base angular velocity about body +y (left).
-    # -omega_y > 0 is a nose-up, backward rotation. The term is signed, so rocking back and forth earns
-    # nothing and the undiscounted episode sum is scale times the net backward rotation in radians.
+    # Task reward: scale * (-dot(omega, flip_axis)) * dt. The unit flip axis is perpendicular to world +z
+    # and base +x, with its sign toward body +y (left). At vertical base +x, use body +y. Pure world-z
+    # spinning earns no flip reward, even on the robot's side. For a planar flip the signed reward
+    # integrates to scale times net backward rotation, including the inverted half of the turn.
     backflip_ang_vel_reward_scale = 5.0
     # Penalize roll and yaw angular speed in the base frame, in either direction.
     ang_vel_x_penalty_scale = -2.0
     ang_vel_z_penalty_scale = -2.0
-    # Symmetric clip of -omega_y in rad/s before scaling. 0 disables the clip.
+    # Symmetric clip of the signed backward angular speed in rad/s before scaling. 0 disables the clip.
     backflip_ang_vel_clip = 0.0
 
     base_collision_terminal_penalty = -10.0
