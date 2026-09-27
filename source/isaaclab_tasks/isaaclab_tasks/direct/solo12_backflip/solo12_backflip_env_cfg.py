@@ -63,9 +63,9 @@ class Solo12BackflipEnvCfg(Solo12EnvCfg):
     # A push starts 2-5 s after reset or after the previous push, so pushes happen within an episode.
     base_push_interval_range_s = (2.0, 5.0)
     # Used when backflip_curriculum=False. The curriculum overrides them phase by phase.
-    actuation_delay_range = (0, 3)
-    base_push_force_xy_range = (-8.0, 8.0)
-    base_push_force_z_range = (-8.0, 8.0)
+    actuation_delay_range = (0, 0)
+    base_push_force_xy_range = (-0.0, 0.0)
+    base_push_force_z_range = (-0.0, 0.0)
 
     # Phase k uses entry k-1 of each phase tuple below. The task moves to the next phase when finished
     # episodes that started on the ground average at least the threshold number of completed backflips,
