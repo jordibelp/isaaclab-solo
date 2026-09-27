@@ -401,8 +401,8 @@ parser.add_argument(
 parser.add_argument(
     "--training_wandb_project",
     type=str,
-    default="borinotIsaacLab",
-    help="W&B project that contains the training run used to produce the checkpoint.",
+    default=None,
+    help="W&B project that contains the training run. Defaults to the selected agent's project.",
 )
 parser.add_argument(
     "--training_wandb_entity",
@@ -2164,7 +2164,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
         training_wandb_run_path, training_run_config = _fetch_training_run_config_from_wandb(
             entity=args_cli.training_wandb_entity,
-            project=args_cli.training_wandb_project,
+            project=args_cli.training_wandb_project or agent_cfg.wandb_project,
             run_id=training_run_id,
         )
         training_kp, training_kd = _extract_training_kp_kd_from_wandb_config(training_run_config)
