@@ -5,8 +5,6 @@
 
 import gymnasium as gym
 
-from ..solo12 import agents
-
 
 gym.register(
     id="solo12-backflip",
@@ -14,10 +12,10 @@ gym.register(
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.solo12_backflip_env_cfg:Solo12BackflipEnvCfg",
-        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:Solo12PPORunnerCfg",
+        "rsl_rl_cfg_entry_point": f"{__name__}.backflip_runner_cfg:Solo12BackflipPPORunnerCfg",
         "rsl_rl_with_symmetry_cfg_entry_point": (
-            f"{agents.__name__}.rsl_rl_ppo_cfg:Solo12PPORunnerWithSymmetryCfg"
+            f"{__name__}.backflip_runner_cfg:Solo12BackflipPPORunnerWithSymmetryCfg"
         ),
-        "rsl_rl_sac_cfg_entry_point": f"{agents.__name__}.rsl_rl_sac_cfg:Solo12SACRunnerCfg",
+        "rsl_rl_sac_cfg_entry_point": f"{__name__}.backflip_sac_runner_cfg:Solo12BackflipSACRunnerCfg",
     },
 )

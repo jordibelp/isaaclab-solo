@@ -11,6 +11,10 @@ simulation_app = AppLauncher(headless=True).app
 import torch
 
 from isaaclab_tasks.direct.solo12.solo12_env_cfg import Solo12EnvCfg
+from isaaclab_tasks.direct.solo12_backflip.backflip_runner_cfg import (
+    Solo12BackflipPPORunnerCfg,
+    Solo12BackflipPPORunnerWithSymmetryCfg,
+)
 from isaaclab_tasks.direct.solo12_backflip.solo12_backflip_env import (
     Solo12BackflipEnv,
     _backward_pitch,
@@ -36,10 +40,12 @@ def _bare_env(cfg: Solo12BackflipEnvCfg, num_envs: int = 4) -> Solo12BackflipEnv
     return env
 
 
-def test_defaults_keep_only_task_reward_and_collision_penalties():
+def test_defaults_keep_backflip_reward_and_rotation_contact_penalties():
     cfg = Solo12BackflipEnvCfg()
 
     assert cfg.backflip_ang_vel_reward_scale > 0.0
+    assert cfg.ang_vel_x_penalty_scale == -2.0
+    assert cfg.ang_vel_z_penalty_scale == -2.0
     assert cfg.base_collision_terminal_penalty == -10.0
     assert cfg.undesired_contact_reward_scale == -2.25
     for name in (
@@ -58,6 +64,39 @@ def test_defaults_keep_only_task_reward_and_collision_penalties():
     # Left-right augmentation only: a front-back mirror would turn the backflip into a frontflip.
     assert cfg.front_back_asymetry is True
     assert cfg.observation_space == Solo12EnvCfg().observation_space
+
+
+def test_body_frame_x_z_rotation_penalties_are_symmetric(monkeypatch):
+    from isaaclab_tasks.direct.solo12.solo12_env import Solo12Env
+
+    cfg = Solo12BackflipEnvCfg()
+    cfg.ang_vel_x_penalty_scale = -3.0
+    cfg.ang_vel_z_penalty_scale = -1.0
+    env = _bare_env(cfg, num_envs=2)
+    env._robot = SimpleNamespace(
+        data=SimpleNamespace(root_ang_vel_b=torch.tensor([[2.0, -4.0, -3.0], [-2.0, -4.0, 3.0]]))
+    )
+    monkeypatch.setattr(Solo12Env, "_reward_terms", lambda self: {})
+
+    terms = env._reward_terms()
+
+    assert torch.allclose(terms["backflip_ang_vel"], torch.full((2,), 0.4))
+    assert torch.allclose(terms["ang_vel_x_penalty"], torch.full((2,), -0.12))
+    assert torch.allclose(terms["ang_vel_z_penalty"], torch.full((2,), -0.06))
+    assert env._reward_scales()["ang_vel_x_penalty"] == -3.0
+    assert env._reward_scales()["ang_vel_z_penalty"] == -1.0
+
+
+def test_backflip_runner_configs_use_their_own_wandb_project():
+    from isaaclab_tasks.direct.solo12.agents.rsl_rl_ppo_cfg import Solo12PPORunnerCfg
+
+    assert Solo12PPORunnerCfg().wandb_project == "borinotIsaacLab"
+    for runner_cfg in (
+        Solo12BackflipPPORunnerCfg,
+        Solo12BackflipPPORunnerWithSymmetryCfg,
+    ):
+        assert runner_cfg().wandb_project == "solo-backflip"
+        assert runner_cfg().wandb_entity == "jordibelp"
 
 
 def test_backward_pitch_is_positive_for_nose_up_rotation():

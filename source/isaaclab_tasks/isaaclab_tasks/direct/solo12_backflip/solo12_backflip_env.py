@@ -38,7 +38,8 @@ class Solo12BackflipEnv(Solo12Env):
         self._backflip_phase = num_phases if cfg.skip_curriculum else int(cfg.backflip_curriculum_start_phase)
         super().__init__(cfg, render_mode, **kwargs)
 
-        self._episode_sums["backflip_ang_vel"] = torch.zeros(self.num_envs, device=self.device)
+        for key in ("backflip_ang_vel", "ang_vel_x_penalty", "ang_vel_z_penalty"):
+            self._episode_sums[key] = torch.zeros(self.num_envs, device=self.device)
         # Net backward rotation of the base since reset, unwrapped from the gravity direction (rad).
         self._backflip_rotation = torch.zeros(self.num_envs, device=self.device)
         self._backflip_pitch = torch.zeros(self.num_envs, device=self.device)
@@ -111,19 +112,27 @@ class Solo12BackflipEnv(Solo12Env):
         return len(self.cfg.backflip_curriculum_advance_thresholds) if self.cfg.backflip_curriculum else None
 
     def _reward_scales(self) -> dict[str, float]:
-        return {**super()._reward_scales(), "backflip_ang_vel": self.cfg.backflip_ang_vel_reward_scale}
+        return {
+            **super()._reward_scales(),
+            "backflip_ang_vel": self.cfg.backflip_ang_vel_reward_scale,
+            "ang_vel_x_penalty": self.cfg.ang_vel_x_penalty_scale,
+            "ang_vel_z_penalty": self.cfg.ang_vel_z_penalty_scale,
+        }
 
     def _get_rewards(self) -> torch.Tensor:
         self._update_backflip_rotation()
         return super()._get_rewards()
 
     def _reward_terms(self) -> dict[str, torch.Tensor]:
-        backward_ang_vel = -self._robot.data.root_ang_vel_b[:, 1]
+        ang_vel_b = self._robot.data.root_ang_vel_b
+        backward_ang_vel = -ang_vel_b[:, 1]
         clip = self.cfg.backflip_ang_vel_clip
         if clip > 0.0:
             backward_ang_vel = backward_ang_vel.clamp(-clip, clip)
         terms = super()._reward_terms()
         terms["backflip_ang_vel"] = backward_ang_vel * self.cfg.backflip_ang_vel_reward_scale * self.step_dt
+        terms["ang_vel_x_penalty"] = ang_vel_b[:, 0].abs() * self.cfg.ang_vel_x_penalty_scale * self.step_dt
+        terms["ang_vel_z_penalty"] = ang_vel_b[:, 2].abs() * self.cfg.ang_vel_z_penalty_scale * self.step_dt
         return terms
 
     def _update_backflip_rotation(self):

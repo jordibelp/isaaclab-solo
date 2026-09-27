@@ -12,6 +12,8 @@ observation is always zero. Only the reward, the curriculum and a few metrics ar
 | Term | Default scale | What it does |
 |---|---:|---|
 | `backflip_ang_vel` | `5.0` | `scale * (-omega_y) * dt`. `omega_y` is the base angular velocity about body `+y` (left). A backward, nose-up rotation gives `-omega_y > 0`. |
+| `ang_vel_x_penalty` | `-2.0` | `scale * abs(omega_x) * dt` penalizes roll in either direction, measured in the base frame. |
+| `ang_vel_z_penalty` | `-2.0` | `scale * abs(omega_z) * dt` penalizes yaw in either direction, measured in the base frame. |
 | `base_collision_terminal` | `-10.0` | One-time penalty when the base touches anything. The episode ends. |
 | `undesired_contacts` | `-2.25` | Per second, for each thigh in contact. |
 | action rate, joint torque, foot contact, soft joint limit | `0.0` | Preferences. They are off for the first experiments. |
@@ -19,6 +21,9 @@ observation is always zero. Only the reward, the curriculum and a few metrics ar
 The backflip term is **signed**. Rocking back and forth therefore earns nothing. Over an episode, the
 undiscounted sum of this term is `scale` times the net backward rotation in radians, so one whole backflip
 is worth `2 * pi * scale` (about 31 with the default scale).
+
+Set `env.ang_vel_x_penalty_scale=-2.0` and `env.ang_vel_z_penalty_scale=-2.0` on the training
+command line to change the new penalties. Set either scale to `0.0` to turn that penalty off.
 
 The scale is 5 because a partial flip that ends on the back must still pay off during learning. A half
 turn followed by a crash earns `pi * 5 - 10 > 0`. With a scale of 1 this would be `-6.9`, and the policy
@@ -70,11 +75,15 @@ Each phase keeps its own best checkpoint: `best_model_curriculum_idx_<phase - 1>
   whole turn still counts.
 - `Episode/backward_rotation_rad`: net backward rotation per finished episode.
 - `Episode_Reward/backflip_ang_vel`: backflip reward per second.
+- `Episode_Reward/ang_vel_x_penalty` and `Episode_Reward/ang_vel_z_penalty`: roll and yaw penalties per second.
 - `Curriculum/backflip_phase`, `Curriculum/backflip_window_mean_backflips`, `Curriculum/base_push_force_xy_abs`,
   `Curriculum/base_push_force_z_abs`, `Curriculum/actuation_delay_max`, `Curriculum/events_randomization_active`.
 
 The rotation for these metrics comes from the change of the gravity direction in the base frame. It is exact
 for a planar flip and is not affected by angular-velocity spikes at impacts.
+
+Backflip PPO, PPO with symmetry, and SAC runs log to the `jordibelp/solo-backflip` W&B project by default.
+Other Solo12 tasks keep their existing project. The training script's `--log_project_name` option can override it.
 
 ## Symmetry
 

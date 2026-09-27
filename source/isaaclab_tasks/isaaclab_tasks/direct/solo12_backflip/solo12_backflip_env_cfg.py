@@ -24,6 +24,9 @@ class Solo12BackflipEnvCfg(Solo12EnvCfg):
     # -omega_y > 0 is a nose-up, backward rotation. The term is signed, so rocking back and forth earns
     # nothing and the undiscounted episode sum is scale times the net backward rotation in radians.
     backflip_ang_vel_reward_scale = 5.0
+    # Penalize roll and yaw angular speed in the base frame, in either direction.
+    ang_vel_x_penalty_scale = -2.0
+    ang_vel_z_penalty_scale = -2.0
     # Symmetric clip of -omega_y in rad/s before scaling. 0 disables the clip.
     backflip_ang_vel_clip = 0.0
 
