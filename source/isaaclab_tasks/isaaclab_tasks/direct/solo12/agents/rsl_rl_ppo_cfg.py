@@ -63,6 +63,9 @@ class RslRlPpoSolo12BaseImuStudentCfg(RslRlPpoActorCriticCfg):
 
 @configclass
 class Solo12PPORunnerCfg(RslRlOnPolicyRunnerCfg):
+    optimizer: str = "adam"
+    """PPO policy optimizer: ``adam`` or ``adamW`` (case-insensitive)."""
+
     num_steps_per_env = 24
     max_iterations = 45573
     save_interval = 469

@@ -1154,6 +1154,19 @@ def _configure_sac_optimizer(agent_cfg: RslRlBaseRunnerCfg) -> None:
         agent_cfg.algorithm.alpha_optimizer = optimizer
 
 
+def _configure_ppo_optimizer(runner, agent_cfg: RslRlBaseRunnerCfg) -> None:
+    """Replace RSL-RL PPO's built-in Adam only when AdamW is requested."""
+    if not hasattr(agent_cfg, "optimizer"):
+        return
+    optimizer = str(agent_cfg.optimizer).lower()
+    if optimizer not in ("adam", "adamw"):
+        raise ValueError(f"agent.optimizer must be adam or adamW, got {agent_cfg.optimizer!r}.")
+    if optimizer == "adamw":
+        policy = runner.alg.policy
+        runner.alg.optimizer = torch.optim.AdamW(policy.parameters(), lr=runner.alg.learning_rate)
+        print("[INFO]: Set RSL-RL PPO policy optimizer to AdamW.")
+
+
 def _apply_agent_weight_decay_to_optimizer(runner, agent_cfg: RslRlBaseRunnerCfg) -> None:
     weight_decay = float(getattr(agent_cfg, "weight_decay", 0.0) or 0.0)
     if weight_decay < 0.0:
@@ -2905,7 +2918,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             flush=True,
         )
 
-    _configure_sac_optimizer(agent_cfg)
+    if agent_cfg.class_name == "OffPolicyRunner":
+        _configure_sac_optimizer(agent_cfg)
     runner_cfg = agent_cfg.to_dict()
     runner_cfg["command"] = _REPRODUCIBLE_COMMAND
     if agent_cfg.class_name == "OnPolicyRunner":
@@ -2916,6 +2930,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         runner = DistillationRunner(env, runner_cfg, log_dir=log_dir, device=agent_cfg.device)
     else:
         raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
+    if agent_cfg.class_name == "OnPolicyRunner":
+        _configure_ppo_optimizer(runner, agent_cfg)
 
     layer_norm_result = None
     if mitigation_spec.layer_norm:

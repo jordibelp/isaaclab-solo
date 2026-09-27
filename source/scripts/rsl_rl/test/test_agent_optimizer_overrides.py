@@ -19,6 +19,7 @@ def _train_helpers():
     wanted = {
         "_agent_optimizers",
         "_configure_sac_optimizer",
+        "_configure_ppo_optimizer",
         "_policy_action_noise_param_ids",
         "_split_action_noise_optimizer_group",
         "_apply_agent_weight_decay_to_optimizer",
@@ -199,6 +200,31 @@ def test_ppo_action_noise_stays_decay_free():
     assert groups[id(policy.weight)]["weight_decay"] == 0.01
     assert groups[id(policy.log_std)]["weight_decay"] == 0.0
     assert all(group["betas"] == (0.85, 0.95) for group in groups.values())
+
+
+def test_ppo_adamw_uses_matched_betas_and_decay():
+    policy = torch.nn.Linear(2, 2)
+    runner = SimpleNamespace(alg=SimpleNamespace(
+        policy=policy,
+        learning_rate=1e-3,
+        optimizer=torch.optim.Adam(policy.parameters(), lr=1e-3),
+    ))
+    cfg = _cfg(beta1=0.9, beta2=0.95, weight_decay=0.001)
+    cfg.optimizer = "adamW"
+    train._configure_ppo_optimizer(runner, cfg)
+    train._apply_agent_weight_decay_to_optimizer(runner, cfg)
+    train._apply_agent_adam_betas_to_optimizer(runner, cfg)
+    assert isinstance(runner.alg.optimizer, torch.optim.AdamW)
+    group = runner.alg.optimizer.param_groups[0]
+    assert group["lr"] == 1e-3
+    assert group["betas"] == (0.9, 0.95)
+    assert group["weight_decay"] == 0.001
+
+
+def test_invalid_ppo_optimizer_fails():
+    runner = SimpleNamespace(alg=SimpleNamespace())
+    with pytest.raises(ValueError, match="agent.optimizer"):
+        train._configure_ppo_optimizer(runner, SimpleNamespace(optimizer="sgd"))
 
 
 @pytest.mark.parametrize("field,value", [("adam_beta1", -0.1), ("adam_beta2", 1.0), ("weight_decay", -0.01)])
