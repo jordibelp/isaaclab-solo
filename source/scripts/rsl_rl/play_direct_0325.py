@@ -309,6 +309,14 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
+    "--view-hint-bf",
+    "--view_hint_bf",
+    dest="view_hint_bf",
+    action="store_true",
+    default=False,
+    help="Draw a red ball on each front foot to tell the robot's front from its back. Default: disabled.",
+)
+parser.add_argument(
     "--chase_camera",
     "--follow_camera",
     dest="follow_camera",
@@ -2076,6 +2084,38 @@ class HelperHeightPlaneVisualizer:
         self._markers.visualize(position)
 
 
+class FrontFeetViewHint:
+    """Red balls on the front feet so the robot's front and back are easy to tell apart."""
+
+    def __init__(self, raw_env, radius_m: float = 0.025):
+        self.raw_env = raw_env
+        cfg = VisualizationMarkersCfg(
+            prim_path="/Visuals/Solo12FrontFeetViewHint",
+            markers={
+                "ball": sim_utils.SphereCfg(
+                    radius=radius_m,
+                    visual_material=sim_utils.PreviewSurfaceCfg(
+                        diffuse_color=(1.0, 0.05, 0.05), emissive_color=(0.4, 0.0, 0.0)
+                    ),
+                )
+            },
+        )
+        self._markers = VisualizationMarkers(cfg)
+        # The env renders inside step(), after physics. Updating right before each render keeps the
+        # balls on the feet; updating from the play loop would draw them one control step late.
+        render = raw_env.sim.render
+
+        def render_with_hint(*args, **kwargs):
+            self.update()
+            return render(*args, **kwargs)
+
+        raw_env.sim.render = render_with_hint
+
+    def update(self):
+        front_feet_w = self.raw_env._get_foot_positions_w()[:, self.raw_env._front_feet_robot_indices]
+        self._markers.visualize(front_feet_w.reshape(-1, 3))
+
+
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
@@ -2322,6 +2362,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             "below env 0's front feet.",
             flush=True,
         )
+    if args_cli.view_hint_bf:
+        FrontFeetViewHint(raw_env)
+        print("[INFO] Drawing a red ball on each front foot (--view-hint-bf).", flush=True)
 
     q_critic = None
     dagger_adapter_checkpoint = _load_dagger_adapter_checkpoint(resume_path)
