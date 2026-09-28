@@ -733,10 +733,10 @@ class SAC:
             current_loss = self.critic.distributional_loss
             if saved_loss is not None and (saved_loss == "c51") != (current_loss == "c51"):
                 raise ValueError("Cannot load a C51 critic checkpoint into another critic mode, or vice versa.")
-            if current_loss == "c51":
+            if self.critic.distributional_critic_ce:
                 saved_support = loaded_dict["critic_state_dict"].get("value_support")
                 if saved_support is None or not torch.equal(saved_support.cpu(), self.critic.value_support.cpu()):
-                    raise ValueError("C51 checkpoint support differs from the configured C51 support.")
+                    raise ValueError("Categorical critic checkpoint support differs from the configured support.")
             self.critic.load_state_dict(loaded_dict["critic_state_dict"], strict=strict)
         if load_cfg.get("optimizer"):
             if self.actor_optimizer is not None:

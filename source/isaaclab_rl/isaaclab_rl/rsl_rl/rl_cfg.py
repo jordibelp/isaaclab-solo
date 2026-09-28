@@ -96,9 +96,11 @@ class RslRlSacCriticModelCfg:
     """Critic loss: "mse", scalar-target "two_hot"/"hl_gauss", distributional Bellman "c51",
     or "mse_target_norm_popart" for MSE on PopArt-normalized targets."""
     distributional_num_bins: int = 255
-    """Odd number of symmetrically spaced symexp atoms (two_hot and hl_gauss only)."""
+    """Odd number of symmetric atoms for two_hot or hl_gauss, including zero."""
     distributional_symlog_limit: float = 8.0
-    """Two-hot/HL-Gauss support is symexp(linspace(-limit, limit, num_bins)), in reward units."""
+    """Default two-hot/HL-Gauss support is symexp(linspace(-limit, limit, num_bins)), in reward units."""
+    distributional_linear_limit: float = 0.0
+    """If positive, two-hot uses evenly spaced atoms from -limit to +limit in reward units; 0 keeps symexp."""
     hl_gauss_sigma_ratio: float = 0.75
     """HL-Gauss label width as a fraction of the atom spacing; 0.75 is the published default."""
     c51_num_atoms: int = 101

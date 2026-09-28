@@ -1,4 +1,4 @@
-# SAC with a categorical cross-entropy critic on a symexp support
+# SAC with a categorical cross-entropy critic
 
 ## Use
 
@@ -18,9 +18,10 @@ categorical; see [its own section](#popart-mse-on-normalized-targets).
 Start a **fresh experiment** when you move between `mse` and either categorical
 mode, because the head shapes differ. `two_hot` and `hl_gauss` share the same
 head and the same state dict, so you can resume one from the other's checkpoint
-and change only the labels. Keep the number of bins the same when you resume;
-the support is stored in the checkpoint. Actor-only inference and export are
-unchanged.
+and change only the labels if their support is identical. Keep the number of
+bins and the support limits the same when you resume; loading a categorical
+checkpoint with different support now raises an error. Actor-only inference and
+export are unchanged.
 
 The old flag `agent.distributional_critic_ce=True` still works and now selects
 `two_hot`. It prints a deprecation line. Setting both flags at once is an error.
@@ -29,15 +30,24 @@ Optional settings:
 
 ```text
 agent.critic.distributional_num_bins=255 agent.critic.distributional_symlog_limit=8.0
+agent.critic.distributional_linear_limit=0.0
 agent.critic.hl_gauss_sigma_ratio=0.75
 agent.critic.popart_beta=3e-4
 ```
 
-The number of bins must be odd and at least 3. The symmetric support includes
-zero and is `symexp(linspace(-8, 8, 255))`, approximately **[-2979.96, 2979.96]**
-in reward units. `hl_gauss_sigma_ratio` only applies to `hl_gauss`, and
-`popart_beta` only to `mse_target_norm_popart`. The bin settings are ignored by
-the two scalar modes. Neither rewards nor environment penalties are modified.
+The number of bins must be odd and at least 3. By default, the symmetric support
+includes zero and is `symexp(linspace(-8, 8, 255))`, approximately
+**[-2979.96, 2979.96]** in reward units. For **two-hot only**, a positive
+`distributional_linear_limit` switches to equally spaced atoms in raw reward
+units. For example, use
+`agent.critic.distributional_num_bins=199 agent.critic.distributional_linear_limit=10.0`
+to get 199 atoms from **-10 to 10**, including zero. Leave the linear limit at
+`0.0` to keep the old symexp spacing. Do not combine a positive linear limit
+with `hl_gauss`: its Gaussian labels are defined in symlog space.
+`hl_gauss_sigma_ratio` only applies to `hl_gauss`, and
+`popart_beta` only to `mse_target_norm_popart`. For scalar modes, leave the
+linear limit at zero; the other bin settings are ignored. Neither rewards nor
+environment penalties are modified.
 
 To average the two critics instead of taking their minimum, add
 `agent.algorithm.q_reduction_method=mean` or `=mean_pi_q_none`. See

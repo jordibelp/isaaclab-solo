@@ -161,6 +161,21 @@ def test_projection_edges_and_mean_in_reward_units(device):
     torch.testing.assert_close(critic.q_from_output(mixture.log()), b.new_tensor([[-0.01]]), atol=2e-6, rtol=0)
 
 
+def test_linear_two_hot_support_and_projection(device):
+    _, _, critic = models(device, distributional_num_bins=199, distributional_linear_limit=10.0)
+    support = critic.value_support
+    assert support.numel() == 199
+    torch.testing.assert_close(support[[0, 99, -1]], support.new_tensor([-10.0, 0.0, 10.0]), atol=0, rtol=0)
+    torch.testing.assert_close(support, -support.flip(0), atol=0, rtol=0)
+    torch.testing.assert_close(torch.diff(support), torch.full_like(support[:-1], 20.0 / 198), atol=1e-6, rtol=1e-5)
+    targets = support.new_tensor([[-20.0], [-10.0], [-0.05], [0.0], [1.5], [10.0], [20.0]])
+    labels = critic.two_hot(targets)
+    assert (labels >= 0).all() and ((labels > 0).sum(-1) <= 2).all()
+    torch.testing.assert_close(labels.sum(-1), torch.ones(targets.shape[0], device=device))
+    torch.testing.assert_close((labels * support).sum(-1, keepdim=True), targets.clamp(-10, 10), atol=1e-6, rtol=0)
+    torch.testing.assert_close(critic.q_from_output(labels.clamp_min(1e-30).log()), targets.clamp(-10, 10), atol=1e-5, rtol=0)
+
+
 def test_logit_gradients_bounded_for_large_targets(device):
     _, _, critic = models(device)
     targets = torch.tensor([0.01, -2, -10, -1e6, 1e6, 1e12], device=device)[:, None]
@@ -378,10 +393,13 @@ def test_popart_loss_is_mse_on_normalized_targets(device):
     torch.testing.assert_close(output1 - (targets - 2) / 4, (q1 - targets) / 4)
 
 
-@pytest.mark.parametrize("loss", ["mse", *CATEGORICAL, POPART])
-def test_complete_sac_update_bootstrap_and_checkpoint(device, loss):
+@pytest.mark.parametrize("loss, critic_kwargs", [
+    *((loss, {}) for loss in ["mse", *CATEGORICAL, POPART]),
+    ("two_hot", {"distributional_num_bins": 199, "distributional_linear_limit": 10.0}),
+])
+def test_complete_sac_update_bootstrap_and_checkpoint(device, loss, critic_kwargs):
     torch.manual_seed(21)
-    obs, actor, critic = models(device, loss=loss)
+    obs, actor, critic = models(device, loss=loss, **critic_kwargs)
     actions = torch.randn(8, 2, device=device)
     rewards = torch.tensor([-10., -2., 0.045, -1e9, 1., 2., 3., 4.], device=device)[:, None]
     dones = torch.tensor([1., 1., 0., 1., 0., 0., 0., 0.], device=device)[:, None]
@@ -429,7 +447,7 @@ def test_complete_sac_update_bootstrap_and_checkpoint(device, loss):
         assert "PopArt/std" not in losses
     assert all(p.grad is None for p in critic.critic1_target.parameters())
     saved = copy.deepcopy(alg.save())
-    _, actor2, critic2 = models(device, loss=loss)
+    _, actor2, critic2 = models(device, loss=loss, **critic_kwargs)
     resumed = SAC(actor2, critic2, replay, device=device)
     assert resumed.load(saved, load_cfg=None, strict=True)
     for original, restored in zip(critic.evaluate_all_q(obs, actions), critic2.evaluate_all_q(obs, actions)):
@@ -484,10 +502,30 @@ def test_deprecated_boolean_still_selects_two_hot(monkeypatch):
                      critic=dict(class_name="SACCriticModel", hidden_dims=[8], distributional_loss="hl_gauss"))
 
 
+def test_runner_linear_limit_selects_linear_two_hot_support(monkeypatch):
+    alg = build_runner(monkeypatch, distributional_critic_ce=True,
+                       critic=dict(class_name="SACCriticModel", hidden_dims=[8],
+                                   distributional_num_bins=199, distributional_symlog_limit=5.0,
+                                   distributional_linear_limit=10.0))
+    assert alg.critic.distributional_loss == "two_hot"
+    torch.testing.assert_close(alg.critic.value_support[[0, 99, -1]], torch.tensor([-10., 0., 10.]))
+
+
+def test_two_hot_checkpoint_rejects_a_different_support():
+    _, actor, critic = models(distributional_num_bins=199, distributional_linear_limit=10.0)
+    saved = copy.deepcopy(SAC(actor, critic, SimpleNamespace(), device="cpu").save())
+    _, actor2, other_spacing = models(distributional_num_bins=199)
+    with pytest.raises(ValueError, match="support differs"):
+        SAC(actor2, other_spacing, SimpleNamespace(), device="cpu").load(saved, load_cfg=None, strict=True)
+
+
 @pytest.mark.parametrize("kwargs", [
     {"distributional_num_bins": 2}, {"distributional_num_bins": 254},
     {"distributional_symlog_limit": 0}, {"distributional_symlog_limit": float("nan")},
     {"distributional_symlog_limit": 90},
+    {"distributional_linear_limit": -1}, {"distributional_linear_limit": float("nan")},
+    {"distributional_linear_limit": float("inf")},
+    {"loss": "hl_gauss", "distributional_linear_limit": 10.0},
     {"loss": "hl_gauss", "hl_gauss_sigma_ratio": 0}, {"loss": "hl_gauss", "hl_gauss_sigma_ratio": -1},
     {"loss": "hl_gauss", "hl_gauss_sigma_ratio": float("inf")}, {"loss": "hl_gaus"},
     {"loss": POPART, "popart_beta": 0}, {"loss": POPART, "popart_beta": 1.5},

@@ -309,6 +309,7 @@ class SACCriticModel(MLPModel):
         distributional_loss: str = "mse",
         distributional_num_bins: int = 255,
         distributional_symlog_limit: float = 8.0,
+        distributional_linear_limit: float = 0.0,
         hl_gauss_sigma_ratio: float = 0.75,
         c51_num_atoms: int = 101,
         c51_v_min: float = -20.0,
@@ -335,6 +336,8 @@ class SACCriticModel(MLPModel):
                 targets.
             distributional_num_bins: Odd number of categorical atoms, including zero.
             distributional_symlog_limit: Symmetric log-space bound for the raw-unit support.
+            distributional_linear_limit: Positive raw-unit bound selects linear two-hot atoms;
+                zero keeps the symexp support.
             hl_gauss_sigma_ratio: HL-Gauss label width, as a fraction of the atom spacing.
             c51_num_atoms: Number of equally spaced C51 atoms.
             c51_v_min: Lower C51 support bound in reward units.
@@ -359,6 +362,10 @@ class SACCriticModel(MLPModel):
                 "distributional_loss must be one of 'mse', 'two_hot', 'hl_gauss', 'c51', 'mse_target_norm_popart'."
             )
         self.distributional_loss = distributional_loss
+        if not math.isfinite(distributional_linear_limit) or distributional_linear_limit < 0:
+            raise ValueError("distributional_linear_limit must be finite and nonnegative.")
+        if distributional_linear_limit > 0 and distributional_loss != "two_hot":
+            raise ValueError("distributional_linear_limit > 0 is only supported for two_hot.")
         # Every consumer only ever asks "is the head logits or a scalar?", so keep that one name.
         self.distributional_critic_ce = distributional_loss in ("two_hot", "hl_gauss", "c51")
         self.popart = distributional_loss == "mse_target_norm_popart"
@@ -381,10 +388,13 @@ class SACCriticModel(MLPModel):
             else:
                 if distributional_num_bins < 3 or distributional_num_bins % 2 != 1:
                     raise ValueError("distributional_num_bins must be odd and at least 3.")
-                if not math.isfinite(distributional_symlog_limit) or not 0 < distributional_symlog_limit <= 80:
-                    raise ValueError("distributional_symlog_limit must be finite and in (0, 80] for float32.")
                 # Build exact +/- pairs and an exact zero atom, avoiding linspace roundoff.
-                positive = torch.linspace(0, distributional_symlog_limit, distributional_num_bins // 2 + 1).expm1()
+                if distributional_linear_limit > 0:
+                    positive = torch.linspace(0, distributional_linear_limit, distributional_num_bins // 2 + 1)
+                else:
+                    if not math.isfinite(distributional_symlog_limit) or not 0 < distributional_symlog_limit <= 80:
+                        raise ValueError("distributional_symlog_limit must be finite and in (0, 80] for float32.")
+                    positive = torch.linspace(0, distributional_symlog_limit, distributional_num_bins // 2 + 1).expm1()
                 self.register_buffer("value_support", torch.cat((-positive[1:].flip(0), positive)))
 
         if distributional_loss == "hl_gauss":
@@ -402,9 +412,14 @@ class SACCriticModel(MLPModel):
             self.register_buffer("support_edges_symlog", edges, persistent=False)
 
         if self.distributional_critic_ce and distributional_loss != "c51":
+            spacing_description = (
+                f"linear atoms in [{-distributional_linear_limit}, {distributional_linear_limit}]"
+                if distributional_linear_limit > 0
+                else f"symexp atoms (symlog limit {distributional_symlog_limit})"
+            )
             print(
-                f"SAC critic: {distributional_loss} labels on {distributional_num_bins} symexp atoms"
-                f" (symlog limit {distributional_symlog_limit}); worst decoded-mean bias"
+                f"SAC critic: {distributional_loss} labels on {distributional_num_bins} {spacing_description};"
+                " worst decoded-mean bias"
                 f" {self.label_decode_bias():.2e}."
             )
         elif distributional_loss == "c51":

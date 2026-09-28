@@ -8,7 +8,8 @@ from a checkpoint trained with ``agent.critic.distributional_loss=two_hot``, ``=
 
 The spread panels are reported in **symlog units**: the ``x`` in ``Q = sign(x)(exp|x| - 1)``,
 so the axes are directly comparable to ``agent.critic.distributional_symlog_limit`` for
-two-hot/HL-Gauss. C51 support is linear in reward units. Runs
+two-hot/HL-Gauss with symexp atoms. Linear two-hot and C51 supports are spaced in
+reward units, but the plots still show them in symlog units. Runs
 with different limits can therefore be overlaid, and the dotted verticals mark each run's
 own limit. The estimation-error panels are in raw reward units instead.
 
