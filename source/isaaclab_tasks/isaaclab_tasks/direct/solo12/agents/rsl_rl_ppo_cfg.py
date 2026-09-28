@@ -6,7 +6,6 @@
 from pathlib import Path
 import sys
 
-import torch
 from isaaclab.utils import configclass
 
 from isaaclab_rl.rsl_rl import (
@@ -16,7 +15,6 @@ from isaaclab_rl.rsl_rl import (
     RslRlSymmetryCfg,
 )
 import rsl_rl.runners.on_policy_runner as rsl_rl_on_policy_runner
-from rsl_rl.algorithms import PPO
 
 _SOLO12_AGENTS_DIR = Path(__file__).resolve().parent
 _ISAACLAB_ROOT = _SOLO12_AGENTS_DIR.parents[5]
@@ -31,23 +29,11 @@ from isaaclab_tasks.direct.solo12.solo12_env_cfg import (
 )
 
 from .base_imu_actor_critic import Solo12BaseImuStudentActorCritic, Solo12BaseImuTeacherActorCritic
+from .solo12_ppo import Solo12PPO
 
 
 rsl_rl_on_policy_runner.Solo12BaseImuTeacherActorCritic = Solo12BaseImuTeacherActorCritic
 rsl_rl_on_policy_runner.Solo12BaseImuStudentActorCritic = Solo12BaseImuStudentActorCritic
-
-
-class Solo12PPO(PPO):
-    """PPO with optional compiled actor and critic MLP forwards."""
-
-    def __init__(self, *args, torch_compile: bool = False, **kwargs):
-        super().__init__(*args, **kwargs)
-        if torch_compile:
-            if self.policy.is_recurrent:
-                raise ValueError("Solo12 PPO torch_compile does not support recurrent policies.")
-            self.policy.actor.forward = torch.compile(self.policy.actor.forward)
-            self.policy.critic.forward = torch.compile(self.policy.critic.forward)
-            print("[INFO]: Enabled torch.compile for Solo12 PPO actor and critic forwards.")
 
 
 rsl_rl_on_policy_runner.Solo12PPO = Solo12PPO
