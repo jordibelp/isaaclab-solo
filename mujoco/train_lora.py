@@ -134,6 +134,9 @@ DEFAULT_ENV = {
     "joint_physical_limit_front_thigh": None,
     "joint_physical_limit_rear_thigh": None,
     "use_asymmetric_thigh_limits": False,
+    "joint_physical_limit_front_calf": None,
+    "joint_physical_limit_rear_calf": None,
+    "use_asymmetric_calf_limits": False,
     "joint_soft_limit_hip_delta": 0.0,
     "joint_soft_limit_thigh_delta": 0.0,
     "joint_soft_limit_calf_delta": 0.0,
@@ -441,8 +444,8 @@ def build_model(xml_path: Path, kp: float, kd: float, env_cfg: dict | None = Non
     overrides = env_cfg or {}
     for name, actuator in zip(JOINT_NAMES, actuator_ids):
         kind = name.split("_")[1]
-        if kind == "thigh" and overrides.get("use_asymmetric_thigh_limits", False):
-            kind = "front_thigh" if name.startswith(("FL_", "FR_")) else "rear_thigh"
+        if overrides.get(f"use_asymmetric_{kind}_limits", False):
+            kind = ("front_" if name.startswith(("FL_", "FR_")) else "rear_") + kind
         limits = overrides.get(f"joint_physical_limit_{kind}")
         if limits is not None:
             if len(limits) != 2 or not np.isfinite(limits).all() or not limits[0] < limits[1]:

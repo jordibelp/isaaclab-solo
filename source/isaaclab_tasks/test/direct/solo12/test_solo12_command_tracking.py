@@ -182,6 +182,51 @@ def test_asymmetric_thigh_limits_shift_front_negative_and_rear_positive():
     )
 
 
+def test_asymmetric_calf_limits_bend_front_negative_and_rear_positive():
+    class FakeRobot:
+        def __init__(self):
+            self.data = SimpleNamespace(joint_pos_limits=torch.zeros((2, len(JOINT_NAMES), 2)))
+            self.written_limits = None
+
+        def write_joint_position_limit_to_sim(self, limits, joint_ids):
+            self.written_limits = limits.clone()
+            self.data.joint_pos_limits[:, joint_ids] = limits
+
+    env = object.__new__(Solo12Env)
+    env._is_closed = True
+    env.cfg = Solo12EnvCfg()
+    env.cfg.use_asymmetric_calf_limits = True
+    env.cfg.joint_soft_limit_calf_delta = 15.0
+    env._joint_ids = list(range(len(JOINT_NAMES)))
+    env._robot = FakeRobot()
+
+    env._configure_joint_position_limits()
+
+    expected_hard_degrees = torch.tensor(
+        (
+            (-50.0, 50.0), (-90.0, 90.0), (-170.0, 20.0),
+            (-50.0, 50.0), (-90.0, 90.0), (-170.0, 20.0),
+            (-50.0, 50.0), (-90.0, 90.0), (-20.0, 170.0),
+            (-50.0, 50.0), (-90.0, 90.0), (-20.0, 170.0),
+        )
+    )
+    expected_soft_degrees = expected_hard_degrees.clone()
+    expected_soft_degrees[:, 0] += torch.tensor((5.0, 10.0, 15.0) * 4)
+    expected_soft_degrees[:, 1] -= torch.tensor((5.0, 10.0, 15.0) * 4)
+    torch.testing.assert_close(
+        env._robot.written_limits, torch.deg2rad(expected_hard_degrees).unsqueeze(0).expand(2, -1, -1)
+    )
+    torch.testing.assert_close(
+        env._joint_soft_pos_limits, torch.deg2rad(expected_soft_degrees).unsqueeze(0).expand(2, -1, -1)
+    )
+    # The dog-like standing poses (knees toward the body center) must start inside the soft limits.
+    for pose_name in ("safe", "crab"):
+        pose = env.cfg.initial_joint_pos_by_name[pose_name]
+        pose_degrees = torch.rad2deg(torch.tensor([pose[joint_name] for joint_name in JOINT_NAMES]))
+        assert torch.all(pose_degrees >= expected_soft_degrees[:, 0]), pose_name
+        assert torch.all(pose_degrees <= expected_soft_degrees[:, 1]), pose_name
+
+
 def test_joint_limit_penalty_is_zero_inside_and_linear_outside_soft_limits():
     soft_limits = torch.tensor([[[-1.0, 1.0], [-2.0, 2.0]]])
     joint_pos = torch.tensor([[0.0, 0.0], [-1.25, 2.5]])

@@ -142,6 +142,19 @@ def test_physical_joint_limit_overrides_reach_mujoco():
     np.testing.assert_allclose(env.model.jnt_range[joint_ids], np.deg2rad(expected))
 
 
+def test_asymmetric_calf_limit_overrides_reach_mujoco():
+    overrides, ignored = sim2sim.consume_env_overrides([
+        "env.use_asymmetric_calf_limits=True",
+        "env.joint_physical_limit_front_calf=[-170,20]",
+        "env.joint_physical_limit_rear_calf=[-20,170]",
+    ])
+    assert ignored == []
+    env = make_env(env_overrides=overrides)
+    calf_ids = env.model.actuator_trnid[env.actuator_ids[2::3], 0]
+    expected = [[-170, 20]] * 2 + [[-20, 170]] * 2
+    np.testing.assert_allclose(env.model.jnt_range[calf_ids], np.deg2rad(expected))
+
+
 def test_symmetric_thigh_override_leaves_other_xml_limits_unchanged():
     baseline = make_env()
     overrides, ignored = sim2sim.consume_env_overrides([

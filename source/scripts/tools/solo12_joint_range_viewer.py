@@ -10,7 +10,7 @@ into the simulator, so you cannot drag a joint anywhere the policy could not go 
 It reads every limit from the task config, so there are no duplicated numbers here:
 
     hard limits   <- cfg.joint_physical_limit_{hip,thigh,calf}
-                     or cfg.joint_physical_limit_{front,rear}_thigh when asymmetric limits are on
+                     or cfg.joint_physical_limit_{front,rear}_{thigh,calf} when asymmetric limits are on
     soft limits   <- hard limits moved inward by cfg.joint_soft_limit_{type}_delta
     standing pose <- cfg.initial_joint_pos_by_name[cfg.initial_position]
 
@@ -47,6 +47,11 @@ parser.add_argument(
     "--asymmetric",
     action="store_true",
     help="Start with use_asymmetric_thigh_limits=True. You can also toggle it live in the panel.",
+)
+parser.add_argument(
+    "--asymmetric_calf",
+    action="store_true",
+    help="Use use_asymmetric_calf_limits=True (front/rear calf ranges) for the whole session.",
 )
 parser.add_argument(
     "--initial_position",
@@ -100,9 +105,11 @@ def joint_type_of(joint_name: str) -> str:
 def hard_limits_deg(cfg, joint_name: str, asymmetric: bool) -> tuple[float, float]:
     """Mirror Solo12Env._configure_joint_position_limits for one joint."""
     joint_type = joint_type_of(joint_name)
+    side = "front" if joint_name.startswith(("FL_", "FR_")) else "rear"
     if joint_type == "thigh" and asymmetric:
-        side = "front" if joint_name.startswith(("FL_", "FR_")) else "rear"
         return tuple(getattr(cfg, f"joint_physical_limit_{side}_thigh"))
+    if joint_type == "calf" and cfg.use_asymmetric_calf_limits:
+        return tuple(getattr(cfg, f"joint_physical_limit_{side}_calf"))
     return tuple(getattr(cfg, f"joint_physical_limit_{joint_type}"))
 
 
@@ -268,6 +275,7 @@ def print_summary(joint_names, stand_deg, cfg, asymmetric: bool):
 
 def main():
     cfg = TaskCfg()
+    cfg.use_asymmetric_calf_limits = args_cli.asymmetric_calf
     if args_cli.initial_position is not None:
         cfg.initial_position = args_cli.initial_position
 

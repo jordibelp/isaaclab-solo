@@ -99,8 +99,10 @@ _ENV_RANGE_KEYS = {
     "env.command_ang_vel_z_range": 2,
 }
 _ENV_JOINT_LIMIT_KEYS = {
-    f"env.joint_physical_limit_{name}" for name in ("hip", "thigh", "calf", "front_thigh", "rear_thigh")
+    f"env.joint_physical_limit_{name}"
+    for name in ("hip", "thigh", "calf", "front_thigh", "rear_thigh", "front_calf", "rear_calf")
 }
+_ENV_ASYMMETRIC_LIMIT_KEYS = {"env.use_asymmetric_thigh_limits", "env.use_asymmetric_calf_limits"}
 
 
 def consume_env_overrides(unknown: list[str]) -> tuple[dict, list[str]]:
@@ -120,7 +122,7 @@ def consume_env_overrides(unknown: list[str]) -> tuple[dict, list[str]]:
                 raise ValueError(f"{key} requires finite [lower, upper] degrees with lower < upper.") from exc
             overrides[key.removeprefix("env.")] = (low, high)
             continue
-        if key == "env.use_asymmetric_thigh_limits":
+        if key in _ENV_ASYMMETRIC_LIMIT_KEYS:
             if raw.lower() not in ("true", "false"):
                 raise ValueError(f"{key} requires True or False.")
             overrides[key.removeprefix("env.")] = raw.lower() == "true"
@@ -213,8 +215,9 @@ class Solo12Mujoco:
         overrides = env_overrides or {}
         for name, actuator_id in zip(JOINT_NAMES, self.actuator_ids):
             joint_type = name.split("_")[1]
-            if joint_type == "thigh" and overrides.get("use_asymmetric_thigh_limits", False):
-                joint_type = "front_thigh" if name.startswith(("FL_", "FR_")) else "rear_thigh"
+            if overrides.get(f"use_asymmetric_{joint_type}_limits", False):
+                side = "front" if name.startswith(("FL_", "FR_")) else "rear"
+                joint_type = f"{side}_{joint_type}"
             limits = overrides.get(f"joint_physical_limit_{joint_type}")
             if limits is not None:
                 joint_id = self.model.actuator_trnid[actuator_id, 0]

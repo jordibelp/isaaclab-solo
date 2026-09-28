@@ -691,6 +691,14 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     joint_physical_limit_front_thigh = (-135.0, 45.0)
     joint_physical_limit_rear_thigh = (-45.0, 135.0)
 
+    # Optionally replace the common calf range with front/rear-specific ranges. In the standing
+    # pose the knees point toward the body center, like a dog: front calves bend negative and rear
+    # calves bend positive. The defaults allow almost full bending and only 20 deg past straight,
+    # so a leg cannot fold backwards over the body.
+    use_asymmetric_calf_limits = False
+    joint_physical_limit_front_calf = (-170.0, 20.0)
+    joint_physical_limit_rear_calf = (-20.0, 170.0)
+
     # Per-joint-type safety margins in degrees. The task's soft lower/upper limits are
     # the configured physical limits moved inward by these amounts on each side.
     joint_soft_limit_hip_delta = 5.0
