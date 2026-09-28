@@ -80,15 +80,17 @@ def test_logged_mirror_loss_is_measured_once_per_interval(monkeypatch):
     assert len(calls) == 3
 
 
-def test_logged_gradient_norms_are_pre_clip_means_over_optimizer_steps(monkeypatch):
+def test_logged_gradient_norms_are_pre_and_post_clip_means_over_optimizer_steps(monkeypatch):
     alg = build(monkeypatch, max_grad_norm=1e-12, policy_frequency=2)
     recorded = {"actor": [], "critic": [], "alpha": []}
+    clipped = {"actor": [], "critic": []}
     clip_grad_norm = torch.nn.utils.clip_grad_norm_
 
     def record_clipped_norm(parameters, max_norm):
         norm = clip_grad_norm(parameters, max_norm)
         name = "actor" if parameters is alg.actor_parameters else "critic"
         recorded[name].append(norm.item())
+        clipped[name].append(torch.nn.utils.get_total_norm([p.grad for p in parameters if p.grad is not None]).item())
         return norm
 
     alpha_step = alg.alpha_optimizer.step
@@ -104,6 +106,11 @@ def test_logged_gradient_norms_are_pre_clip_means_over_optimizer_steps(monkeypat
     assert {name: len(values) for name, values in recorded.items()} == {"actor": 2, "critic": 3, "alpha": 3}
     for name, values in recorded.items():
         assert losses[f"Gradients/grad_norm_{name}"] == pytest.approx(sum(values) / len(values))
+    for name, values in clipped.items():
+        # Measured on the gradients the optimizer actually steps with.
+        assert losses[f"Gradients/clipped_grad_norm_{name}"] == pytest.approx(sum(values) / len(values), rel=1e-4)
+        assert losses[f"Gradients/clipped_grad_norm_{name}"] == pytest.approx(alg.max_grad_norm, rel=1e-4)
+    assert "Gradients/clipped_grad_norm_alpha" not in losses
     assert max(recorded["actor"]) > alg.max_grad_norm
     assert max(recorded["critic"]) > alg.max_grad_norm
 

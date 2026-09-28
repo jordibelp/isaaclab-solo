@@ -664,7 +664,7 @@ def _patch_rsl_rl_wandb_writer_for_single_stream() -> None:
             wandb.config.update({"log_dir": log_dir, "command": _REPRODUCIBLE_COMMAND})
 
         def add_scalar(self, tag, scalar_value, global_step=None, walltime=None, new_style=False):
-            if tag in ("Loss/grad_norm_actor", "Loss/grad_norm_critic"):
+            if tag.startswith("Loss/") and tag.endswith(("grad_norm_actor", "grad_norm_critic")):
                 tag = tag.replace("Loss/", "Gradients/", 1)
             super().add_scalar(tag, scalar_value, global_step, walltime, new_style)
 

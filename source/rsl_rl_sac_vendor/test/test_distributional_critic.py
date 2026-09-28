@@ -607,13 +607,15 @@ def test_namespaced_stats_bypass_the_loss_prefix():
         it=1, start_it=0, total_it=2, collect_time=0.1, learn_time=0.1,
         loss_dict={"critic1": 0.5, DISTRIBUTION_STAT_NAMES[0]: -0.25,
                    "Gradients/grad_norm_actor": 1.5, "Gradients/grad_norm_critic": 2.5,
-                   "Gradients/grad_norm_alpha": 0.5},
+                   "Gradients/grad_norm_alpha": 0.5, "Gradients/clipped_grad_norm_actor": 1.0,
+                   "Gradients/clipped_grad_norm_critic": 1.0},
         learning_rate=1e-3, action_std=torch.zeros(2), rnd_weight=None,
     )
     assert "Loss/critic1" in tags
     assert DISTRIBUTION_STAT_NAMES[0] in tags
     assert f"Loss/{DISTRIBUTION_STAT_NAMES[0]}" not in tags
-    assert {"Gradients/grad_norm_actor", "Gradients/grad_norm_critic", "Gradients/grad_norm_alpha"} <= set(tags)
+    assert {"Gradients/grad_norm_actor", "Gradients/grad_norm_critic", "Gradients/grad_norm_alpha",
+            "Gradients/clipped_grad_norm_actor", "Gradients/clipped_grad_norm_critic"} <= set(tags)
 
 
 def test_support_symlog_recovers_the_configured_grid(device):

@@ -57,20 +57,27 @@ def test_ppo_logs_pre_clip_actor_and_critic_norms_without_changing_update(monkey
         return alg
 
     baseline = make_algorithm(PPO)
-    observed = {"actor": [], "critic": []}
+    observed = {"grad_norm_actor": [], "grad_norm_critic": [], "clipped_grad_norm_actor": [],
+                "clipped_grad_norm_critic": []}
     original_clip = torch.nn.utils.clip_grad_norm_
 
-    def capture_before_combined_clip(parameters, max_norm):
-        for name in observed:
-            grads = [
-                p.grad for param_name, p in baseline.policy.named_parameters()
-                if (param_name.startswith("critic") == (name == "critic")) and p.grad is not None
-            ]
-            observed[name].append(torch.nn.utils.get_total_norm(grads).item())
-        return original_clip(parameters, max_norm)
+    def group_norm(group):
+        grads = [
+            p.grad for param_name, p in baseline.policy.named_parameters()
+            if (param_name.startswith("critic") == (group == "critic")) and p.grad is not None
+        ]
+        return torch.nn.utils.get_total_norm(grads).item()
+
+    def capture_around_combined_clip(parameters, max_norm):
+        for group in ("actor", "critic"):
+            observed[f"grad_norm_{group}"].append(group_norm(group))
+        total_norm = original_clip(parameters, max_norm)
+        for group in ("actor", "critic"):
+            observed[f"clipped_grad_norm_{group}"].append(group_norm(group))
+        return total_norm
 
     with monkeypatch.context() as patch:
-        patch.setattr(torch.nn.utils, "clip_grad_norm_", capture_before_combined_clip)
+        patch.setattr(torch.nn.utils, "clip_grad_norm_", capture_around_combined_clip)
         baseline.update()
 
     instrumented = make_algorithm(_solo12_ppo_class())
@@ -78,8 +85,12 @@ def test_ppo_logs_pre_clip_actor_and_critic_norms_without_changing_update(monkey
 
     for name, norms in observed.items():
         assert len(norms) == 2
-        assert losses[f"grad_norm_{name}"] == pytest.approx(sum(norms) / len(norms), rel=1e-5)
-        assert max(norms) > instrumented.max_grad_norm
+        assert losses[name] == pytest.approx(sum(norms) / len(norms), rel=1e-5)
+    for group in ("actor", "critic"):
+        assert max(observed[f"grad_norm_{group}"]) > instrumented.max_grad_norm
+    # One combined clip: the two clipped groups together have exactly the max norm.
+    for actor, critic in zip(observed["clipped_grad_norm_actor"], observed["clipped_grad_norm_critic"]):
+        assert (actor**2 + critic**2) ** 0.5 == pytest.approx(instrumented.max_grad_norm, rel=1e-4)
     assert instrumented.max_grad_norm == 0.01
     assert not instrumented.optimizer._optimizer_step_pre_hooks
     for expected, actual in zip(baseline.policy.parameters(), instrumented.policy.parameters()):
@@ -105,9 +116,10 @@ def test_ppo_gradient_tags_reach_the_wandb_gradients_section(monkeypatch):
         patch.setattr(wandb_utils.wandb, "log", lambda values, step: wandb_tags.append((values, step)))
         namespace["_patch_rsl_rl_wandb_writer_for_single_stream"]()
         writer = wandb_utils.WandbSummaryWriter.__new__(wandb_utils.WandbSummaryWriter)
-        writer.add_scalar("Loss/grad_norm_actor", 1.0, 1)
-        writer.add_scalar("Loss/grad_norm_critic", 2.0, 1)
-        writer.add_scalar("Loss/surrogate", 3.0, 1)
-        expected = ["Gradients/grad_norm_actor", "Gradients/grad_norm_critic", "Loss/surrogate"]
+        names = ("grad_norm_actor", "grad_norm_critic", "clipped_grad_norm_actor", "clipped_grad_norm_critic")
+        for value, name in enumerate(names):
+            writer.add_scalar(f"Loss/{name}", float(value), 1)
+        writer.add_scalar("Loss/surrogate", 4.0, 1)
+        expected = [*(f"Gradients/{name}" for name in names), "Loss/surrogate"]
         assert tensorboard_tags == expected
-        assert wandb_tags == [({tag: value}, 1) for tag, value in zip(expected, (1.0, 2.0, 3.0))]
+        assert wandb_tags == [({tag: float(value)}, 1) for value, tag in enumerate(expected)]

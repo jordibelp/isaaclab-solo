@@ -308,6 +308,7 @@ class SAC:
         """
         critic1_losses, critic2_losses, actor_losses, alpha_losses = [], [], [], []
         critic_grad_norms, actor_grad_norms, alpha_grad_norms = [], [], []
+        critic_clipped_grad_norms, actor_clipped_grad_norms = [], []
         rnd_losses, mirror_losses = [], []
         summed_dist_stats = None
         use_mirror_loss = self.symmetry is not None and self.symmetry["use_mirror_loss"]
@@ -391,9 +392,10 @@ class SAC:
                 if self.is_multi_gpu:
                     self.reduce_parameters(self.critic_parameters)
 
-                critic_grad_norms.append(
-                    torch.nn.utils.clip_grad_norm_(self.critic_parameters, self.max_grad_norm).detach()
-                )
+                critic_grad_norm = torch.nn.utils.clip_grad_norm_(self.critic_parameters, self.max_grad_norm).detach()
+                critic_grad_norms.append(critic_grad_norm)
+                # clip_grad_norm_ rescales a gradient above max_grad_norm down to that norm.
+                critic_clipped_grad_norms.append(critic_grad_norm.clamp(max=self.max_grad_norm))
                 self.critic_optimizer.step()
 
             ###########################################################################
@@ -439,9 +441,9 @@ class SAC:
                 if self.is_multi_gpu:
                     self.reduce_parameters(self.actor_parameters)
 
-                actor_grad_norms.append(
-                    torch.nn.utils.clip_grad_norm_(self.actor_parameters, self.max_grad_norm).detach()
-                )
+                actor_grad_norm = torch.nn.utils.clip_grad_norm_(self.actor_parameters, self.max_grad_norm).detach()
+                actor_grad_norms.append(actor_grad_norm)
+                actor_clipped_grad_norms.append(actor_grad_norm.clamp(max=self.max_grad_norm))
                 self.actor_optimizer.step()
 
                 # Unfreeze critic parameters after actor update
@@ -488,11 +490,13 @@ class SAC:
             for values in (
                 critic1_losses, critic2_losses, actor_losses, alpha_losses, rnd_losses, mirror_losses,
                 critic_grad_norms, actor_grad_norms, alpha_grad_norms,
+                critic_clipped_grad_norms, actor_clipped_grad_norms,
             )
         ]
         (
             critic1_sum, critic2_sum, actor_sum, alpha_sum, rnd_sum, mirror_sum,
-            critic_grad_norm_sum, actor_grad_norm_sum, alpha_grad_norm_sum, alpha,
+            critic_grad_norm_sum, actor_grad_norm_sum, alpha_grad_norm_sum,
+            critic_clipped_grad_norm_sum, actor_clipped_grad_norm_sum, alpha,
         ) = torch.stack(
             [*sums, self.log_alpha.detach().exp()]
         ).tolist()
@@ -507,8 +511,10 @@ class SAC:
         }
         if critic_grad_norms:
             loss_dict["Gradients/grad_norm_critic"] = critic_grad_norm_sum / len(critic_grad_norms)
+            loss_dict["Gradients/clipped_grad_norm_critic"] = critic_clipped_grad_norm_sum / len(critic_grad_norms)
         if actor_grad_norms:
             loss_dict["Gradients/grad_norm_actor"] = actor_grad_norm_sum / len(actor_grad_norms)
+            loss_dict["Gradients/clipped_grad_norm_actor"] = actor_clipped_grad_norm_sum / len(actor_grad_norms)
         if alpha_grad_norms:
             loss_dict["Gradients/grad_norm_alpha"] = alpha_grad_norm_sum / len(alpha_grad_norms)
         if self.rnd:

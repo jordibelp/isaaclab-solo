@@ -22,7 +22,7 @@ class Solo12PPO(PPO):
     def update(self) -> dict[str, float]:
         actor_params = [param for name, param in self.policy.named_parameters() if not name.startswith("critic")]
         critic_params = [param for name, param in self.policy.named_parameters() if name.startswith("critic")]
-        actor_norms, critic_norms = [], []
+        actor_norms, critic_norms, clipped_actor_norms, clipped_critic_norms = [], [], [], []
         max_grad_norm = self.max_grad_norm
 
         def record_norms_and_clip(_optimizer, _args, _kwargs):
@@ -31,6 +31,9 @@ class Solo12PPO(PPO):
             actor_norms.append(torch.nn.utils.get_total_norm(actor_gradients))
             critic_norms.append(torch.nn.utils.get_total_norm(critic_gradients))
             torch.nn.utils.clip_grad_norm_(self.policy.parameters(), max_grad_norm)
+            # The combined clip scales both groups by one factor, so measure each group again.
+            clipped_actor_norms.append(torch.nn.utils.get_total_norm(actor_gradients))
+            clipped_critic_norms.append(torch.nn.utils.get_total_norm(critic_gradients))
 
         # Upstream PPO clips the whole policy immediately before optimizer.step(). Let that
         # call be a no-op, then measure both groups and apply the same combined clip here.
@@ -43,9 +46,7 @@ class Solo12PPO(PPO):
             hook.remove()
 
         if actor_norms:
-            actor_norm, critic_norm = torch.stack(
-                (torch.stack(actor_norms).mean(), torch.stack(critic_norms).mean())
-            ).tolist()
-            losses["grad_norm_actor"] = actor_norm
-            losses["grad_norm_critic"] = critic_norm
+            names = ("grad_norm_actor", "grad_norm_critic", "clipped_grad_norm_actor", "clipped_grad_norm_critic")
+            norms = (actor_norms, critic_norms, clipped_actor_norms, clipped_critic_norms)
+            losses.update(zip(names, torch.stack([torch.stack(values).mean() for values in norms]).tolist()))
         return losses
