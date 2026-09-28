@@ -83,8 +83,10 @@ class Solo12BackflipEnvCfg(Solo12EnvCfg):
     # backwards, so the policy practises landings before it can do a whole flip. 0 disables it.
     backflip_airborne_reset_prob = 0.0
     backflip_airborne_reset_height_range = (0.45, 0.8)  # base height above the terrain, m
-    backflip_airborne_reset_rotation_range = (0.0, 2.0 * math.pi)  # backward rotation already done, rad
-    backflip_airborne_reset_ang_vel_range = (4.0, 12.0)  # backward rotation rate -omega_y, rad/s
+    #backflip_airborne_reset_rotation_range = (0.0, 2.0 * math.pi)  # backward rotation already done, rad
+    backflip_airborne_reset_rotation_range = (.5 * math.pi, 1.5 * math.pi)  # backward rotation already done, rad
+
+    backflip_airborne_reset_ang_vel_range = (4.0, 10.0)  # backward rotation rate -omega_y, rad/s
 
     def prepare_curriculum_event_randomization(self):
         """Keep startup randomizers dormant until a curriculum phase enables them."""
