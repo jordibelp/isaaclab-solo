@@ -307,6 +307,7 @@ class SAC:
         reads them once, after the last mini-batch.
         """
         critic1_losses, critic2_losses, actor_losses, alpha_losses = [], [], [], []
+        critic_grad_norms, actor_grad_norms, alpha_grad_norms = [], [], []
         rnd_losses, mirror_losses = [], []
         summed_dist_stats = None
         use_mirror_loss = self.symmetry is not None and self.symmetry["use_mirror_loss"]
@@ -390,7 +391,9 @@ class SAC:
                 if self.is_multi_gpu:
                     self.reduce_parameters(self.critic_parameters)
 
-                torch.nn.utils.clip_grad_norm_(self.critic_parameters, self.max_grad_norm)
+                critic_grad_norms.append(
+                    torch.nn.utils.clip_grad_norm_(self.critic_parameters, self.max_grad_norm).detach()
+                )
                 self.critic_optimizer.step()
 
             ###########################################################################
@@ -417,6 +420,7 @@ class SAC:
                         torch.distributed.all_reduce(self.log_alpha.grad, op=torch.distributed.ReduceOp.SUM)
                         self.log_alpha.grad /= self.gpu_world_size
 
+                alpha_grad_norms.append(self.log_alpha.grad.detach().abs())
                 self.alpha_optimizer.step()
                 alpha_losses.append(alpha_loss.detach())
 
@@ -435,7 +439,9 @@ class SAC:
                 if self.is_multi_gpu:
                     self.reduce_parameters(self.actor_parameters)
 
-                torch.nn.utils.clip_grad_norm_(self.actor_parameters, self.max_grad_norm)
+                actor_grad_norms.append(
+                    torch.nn.utils.clip_grad_norm_(self.actor_parameters, self.max_grad_norm).detach()
+                )
                 self.actor_optimizer.step()
 
                 # Unfreeze critic parameters after actor update
@@ -479,9 +485,15 @@ class SAC:
         num_actor_updates = max(num_updates // self.policy_frequency, 1)
         sums = [
             torch.stack(values).sum() if values else torch.zeros((), device=self.device)
-            for values in (critic1_losses, critic2_losses, actor_losses, alpha_losses, rnd_losses, mirror_losses)
+            for values in (
+                critic1_losses, critic2_losses, actor_losses, alpha_losses, rnd_losses, mirror_losses,
+                critic_grad_norms, actor_grad_norms, alpha_grad_norms,
+            )
         ]
-        critic1_sum, critic2_sum, actor_sum, alpha_sum, rnd_sum, mirror_sum, alpha = torch.stack(
+        (
+            critic1_sum, critic2_sum, actor_sum, alpha_sum, rnd_sum, mirror_sum,
+            critic_grad_norm_sum, actor_grad_norm_sum, alpha_grad_norm_sum, alpha,
+        ) = torch.stack(
             [*sums, self.log_alpha.detach().exp()]
         ).tolist()
         if self.auto_alpha:
@@ -493,6 +505,12 @@ class SAC:
             "actor": actor_sum / num_actor_updates,
             "alpha": alpha_sum / num_updates,
         }
+        if critic_grad_norms:
+            loss_dict["Gradients/grad_norm_critic"] = critic_grad_norm_sum / len(critic_grad_norms)
+        if actor_grad_norms:
+            loss_dict["Gradients/grad_norm_actor"] = actor_grad_norm_sum / len(actor_grad_norms)
+        if alpha_grad_norms:
+            loss_dict["Gradients/grad_norm_alpha"] = alpha_grad_norm_sum / len(alpha_grad_norms)
         if self.rnd:
             loss_dict["rnd"] = rnd_sum / num_updates
         if use_mirror_loss:

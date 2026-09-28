@@ -80,6 +80,34 @@ def test_logged_mirror_loss_is_measured_once_per_interval(monkeypatch):
     assert len(calls) == 3
 
 
+def test_logged_gradient_norms_are_pre_clip_means_over_optimizer_steps(monkeypatch):
+    alg = build(monkeypatch, max_grad_norm=1e-12, policy_frequency=2)
+    recorded = {"actor": [], "critic": [], "alpha": []}
+    clip_grad_norm = torch.nn.utils.clip_grad_norm_
+
+    def record_clipped_norm(parameters, max_norm):
+        norm = clip_grad_norm(parameters, max_norm)
+        name = "actor" if parameters is alg.actor_parameters else "critic"
+        recorded[name].append(norm.item())
+        return norm
+
+    alpha_step = alg.alpha_optimizer.step
+
+    def record_alpha_step(*args, **kwargs):
+        recorded["alpha"].append(alg.log_alpha.grad.abs().item())
+        return alpha_step(*args, **kwargs)
+
+    monkeypatch.setattr(torch.nn.utils, "clip_grad_norm_", record_clipped_norm)
+    monkeypatch.setattr(alg.alpha_optimizer, "step", record_alpha_step)
+    losses = alg.update()
+
+    assert {name: len(values) for name, values in recorded.items()} == {"actor": 2, "critic": 3, "alpha": 3}
+    for name, values in recorded.items():
+        assert losses[f"Gradients/grad_norm_{name}"] == pytest.approx(sum(values) / len(values))
+    assert max(recorded["actor"]) > alg.max_grad_norm
+    assert max(recorded["critic"]) > alg.max_grad_norm
+
+
 @pytest.mark.parametrize("augment", [False, True])
 def test_mirror_loss_that_trains_the_actor_still_runs_on_every_actor_update(monkeypatch, augment):
     alg = build(monkeypatch, symmetry=dict(use_data_augmentation=augment, use_mirror_loss=True),
