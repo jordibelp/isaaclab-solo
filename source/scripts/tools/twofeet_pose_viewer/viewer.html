@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Solo12 · Pose lab</title>
+<style>
+:root{color-scheme:dark;--bg:#11191e;--panel:#182329;--line:#304149;--text:#e6eeed;--muted:#a0b2b6;--accent:#ffc56c;--teal:#60dbc6}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px system-ui,sans-serif}header{height:74px;padding:14px 26px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--line)}h1{font-size:21px;letter-spacing:-.5px;margin:0}h1 span{color:var(--accent)}header p{margin:4px 0 0;color:var(--muted);font-size:12px}.tag{border:1px solid var(--line);padding:7px 11px;border-radius:20px;color:var(--teal);font-size:12px}main{display:grid;grid-template-columns:355px 1fr;height:calc(100vh - 74px)}aside{overflow:auto;padding:18px;background:var(--panel);border-right:1px solid var(--line)}section{padding:0 0 18px;margin-bottom:17px;border-bottom:1px solid var(--line)}h2{font-size:12px;text-transform:uppercase;letter-spacing:1.2px;margin:0 0 12px;color:var(--accent)}p.hint{color:var(--muted);font-size:12px;line-height:1.5;margin:9px 0}.row{display:flex;align-items:center;gap:8px;margin:8px 0}.row label{flex:1}.range-row{display:grid;grid-template-columns:35px 1fr 70px;gap:9px;align-items:center;margin:6px 0}.range-row label{font-size:12px;color:var(--muted)}input[type=range]{width:100%;accent-color:var(--accent);cursor:pointer}input[type=number]{width:70px;padding:5px}input,select,button,textarea{font:inherit;border:1px solid var(--line);color:var(--text);background:#101b20;border-radius:7px}select{padding:9px;width:100%}button{padding:10px 12px;cursor:pointer;transition:background .15s}button:hover{background:#304149}button.primary{background:var(--accent);color:#20272a;border-color:var(--accent);font-weight:750}button.primary:hover{background:#ffdaa3}.wide{width:100%}input[type=checkbox]{accent-color:var(--accent)}.param-title{font-size:13px;margin-top:12px}.phase-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:5px}.phase-grid input{width:100%}.phase-grid label{font-size:11px;color:var(--muted)}#stage{position:relative;min-width:0;overflow:hidden;background:#11191e}canvas{display:block;touch-action:none}#stats{position:absolute;left:22px;right:22px;top:20px;display:flex;flex-wrap:wrap;gap:10px;pointer-events:none}.stat{background:#17252bdc;border:1px solid var(--line);border-radius:10px;padding:9px 14px;min-width:102px}.stat small{display:block;font-size:10px;text-transform:uppercase;letter-spacing:1px;color:var(--muted)}.stat strong{display:block;font-size:20px;margin-top:3px;font-weight:550}#view-tools{position:absolute;top:111px;left:22px;display:flex;gap:5px}#view-tools button{font-size:12px;background:#17252bdd}#legend{position:absolute;bottom:98px;left:22px;color:#b7c8cc;font-size:12px;line-height:1.8;pointer-events:none}.dot{display:inline-block;border-radius:50%;width:8px;height:8px;margin-right:5px}.front{background:#ffa050}.rear{background:#66b8ff}.linear{background:#60dbc6}.angular{background:#db99ff}#status{position:absolute;bottom:45px;left:22px;right:22px;background:#17252be8;border:1px solid var(--line);border-radius:8px;padding:10px 13px;font-size:12px;line-height:1.5}#status.warn{border-color:var(--accent);color:#ffd69e}#camera-hint{position:absolute;bottom:14px;left:22px;color:var(--muted);font-size:11px}details summary{cursor:pointer;color:var(--muted);font-size:12px}details .row{font-size:12px}textarea{width:100%;resize:vertical;font:11px ui-monospace,monospace;padding:10px;line-height:1.6}#state-text{font:11px ui-monospace,monospace;white-space:pre-wrap;color:var(--muted);line-height:1.6}#fatal{position:absolute;inset:40%;width:50%;color:#ffb391}button:disabled{opacity:.4;cursor:not-allowed}@media(max-width:850px){main{grid-template-columns:300px 1fr}aside{padding:13px}#stats{gap:5px;left:12px;right:12px}.stat{min-width:80px;padding:6px 9px}.stat strong{font-size:16px}}@media(max-width:650px){header{padding:12px 16px}.tag{display:none}main{display:flex;flex-direction:column-reverse;height:auto}#stage{height:65vh;min-height:430px}aside{overflow:visible;border-right:0}#view-tools{top:102px}.stat{min-width:65px}.stat strong{font-size:15px}}
+</style>
+</head>
+<body>
+<header><div><h1>Solo12 <span>/ Pose lab</span></h1><p>Explore the starting states for two-feet training.</p></div><span class="tag">Reset geometry · no physics</span></header>
+<main>
+<aside>
+<section>
+<h2>Sample a reset</h2>
+<select id="mode" aria-label="Sampling mode"><option value="posed">Posed starts only · inspect geometry</option><option value="mixture">Training mixture · use probability</option></select>
+<div class="row"><button class="primary wide" id="sample">↻ Sample pose / reset</button></div>
+<p class="hint" id="sample-hint">Every click draws a new tilt, drop, joint noise and velocity.</p>
+<div class="row"><label for="prob">Posed reset probability</label><input id="prob" type="number" min="0" max="1" step="0.05" value="0"></div>
+<div class="row"><input type="checkbox" id="use-phases"><label for="use-phases">Use per-phase probabilities</label><select id="phase" aria-label="Curriculum phase" style="width:96px"><option value="0">Phase 1</option><option value="1">Phase 2</option><option value="2">Phase 3</option><option value="3">Phase 4</option><option value="4">Phase 5</option></select></div>
+<div class="phase-grid" id="phase-inputs"></div>
+<p class="hint" id="prob-hint"></p>
+</section>
+<section><h2>Sampling ranges</h2><div id="range-controls"></div><p class="hint">Tilt 0° = nose straight up. Positive = forward lean. Negative = backward lean. Drop adds height above the regular rear-foot position.</p></section>
+<section><h2>Inspect this pose</h2><div id="pose-controls"></div><p class="hint">These sliders move the current pose without changing its joint noise or velocities. They do not change the training ranges.</p></section>
+<section><h2>Pose &amp; joint limits</h2>
+<select id="limits" aria-label="Joint limit preset"><option value="sac">Recent SAC command · rear thigh −35°…125° soft</option><option value="task">Task default · symmetric thigh limits</option></select>
+<details style="margin-top:12px"><summary>Reset settings</summary>
+<div class="row"><label for="height">Regular base height (m)</label><input id="height" type="number" min="0.1" max="1.5" step="0.01" value="0.35"></div>
+<div class="row"><label for="noise">Joint noise ± (rad)</label><input id="noise" type="number" min="0" max="0.3" step="0.01" value="0.07"></div>
+<div class="row"><label for="yaw">Heading (degrees)</label><input id="yaw" type="number" min="-180" max="180" step="5" value="180"></div>
+<p class="hint">Safe joint pose, flat ground, zero joint velocities. XY translation is centred for viewing. Only the rear thighs are clamped, as in training.</p>
+</details>
+<div class="row"><input type="checkbox" id="helpers" checked><label for="helpers">Show guides and velocity arrows</label></div>
+<button class="wide" id="defaults">Restore defaults</button>
+</section>
+<section><h2>Training overrides</h2><textarea id="command" rows="5" readonly aria-label="Training overrides"></textarea><button class="wide" id="copy" style="margin-top:8px">Copy overrides</button><p class="hint">Viewer mode and inspection sliders are not exported. Joint-limit preset matches your recent SAC command; keep its limit flags in your launch.</p></section>
+<details><summary>Sampled state</summary><pre id="state-text"></pre></details>
+<p class="hint">Mesh and joint geometry: local Solo12 model. The sampler mirrors the training reset. This view does not predict landing, contacts or policy recovery. <a href="https://threejs.org/" style="color:var(--muted)">Three.js</a> · MIT license embedded.</p>
+</aside>
+<div id="stage">
+<div id="stats"><div class="stat"><small>Start type</small><strong id="type-value">Loading…</strong></div><div class="stat"><small>Tilt</small><strong id="tilt-value">—</strong></div><div class="stat"><small>Drop</small><strong id="drop-value">—</strong></div><div class="stat"><small>Base height</small><strong id="height-value">—</strong></div></div>
+<div id="view-tools"><button id="orbit">3D</button><button id="side">Side</button><button id="front">Front</button><button id="top">Top</button></div>
+<div id="legend"><span class="dot front"></span>Front feet &nbsp; <span class="dot rear"></span>Rear feet<br><span class="dot linear"></span>Linear velocity &nbsp; <span class="dot angular"></span>Angular velocity axis<br>Grey line: world vertical · orange arc: tilt · grid: 10 cm</div>
+<div id="status">Loading robot meshes…</div><div id="camera-hint">Drag to orbit · scroll to zoom · Space to sample</div>
+<div id="fatal" hidden></div>
+</div>
+</main>
+<!--
+/* THREE_LICENSE */
+-->
+<script>/* THREE_LIBRARY */</script>
+<script>
+'use strict';
+const DATA = /* MODEL_DATA */null;
+const $ = id => document.getElementById(id);
+const D = DATA.defaults, RAD = Math.PI / 180;
+const ranges = [
+  ['tilt','Tilt from vertical','°',-80,90,1,D.twofeet_airborne_reset_tilt_range],
+  ['drop','Extra drop height','m',0,0.5,0.005,D.twofeet_airborne_reset_drop_height_range],
+  ['lin','Linear velocity / world axis','m/s',-1,1,0.01,D.twofeet_airborne_reset_lin_vel_range],
+  ['ang','Angular velocity / world axis','rad/s',-2,2,0.01,D.twofeet_airborne_reset_ang_vel_range]
+];
+let state, sampleNumber = 0;
+function control(parent,id,label,min,max,step,value,onchange) {
+  const row=document.createElement('div'); row.className='range-row';
+  const text=document.createElement('label');text.textContent=label;text.htmlFor=id;
+  const slider=document.createElement('input');Object.assign(slider,{type:'range',min,max,step,value,id:id+'-slider'});slider.setAttribute('aria-label',id+' slider');
+  const number=document.createElement('input');Object.assign(number,{type:'number',min,max,step,value,id});number.setAttribute('aria-label',id);
+  function change(source,target) {if(!Number.isFinite(source.valueAsNumber))return;source.value=Math.min(max,Math.max(min,source.valueAsNumber));target.value=source.value;onchange();}
+  slider.oninput=()=>change(slider,number);number.oninput=()=>change(number,slider);
+  row.append(text,slider,number);parent.append(row);
+}
+for(const [id,title,unit,min,max,step,values] of ranges){
+  const label=document.createElement('div');label.className='param-title';label.textContent=title+' ('+unit+')';$('range-controls').append(label);
+  for(let i=0;i<2;i++)control($('range-controls'),id+i,i?'Max':'Min',min,max,step,values[i],()=>{
+    if(num(id+0)>num(id+1))setControl(id+(1-i),num(id+i));refreshCommand();
+  });
+}
+control($('pose-controls'),'pose-tilt','Tilt',-80,90,0.5,0,()=>{state.tilt=num('pose-tilt');state.posed=true;updatePose();});
+control($('pose-controls'),'pose-drop','Drop',0,0.5,0.005,0.05,()=>{state.drop=num('pose-drop');state.posed=true;updatePose();});
+for(let i=0;i<5;i++){const label=document.createElement('label');label.textContent='Phase '+(i+1);const input=document.createElement('input');Object.assign(input,{type:'number',id:'phase'+i,min:0,max:1,step:0.05,value:[.3,.3,.2,.1,.1][i]});input.oninput=refreshCommand;label.append(input);$('phase-inputs').append(label);}
+function num(id){return Number($(id).value);}
+function setControl(id,value){$(id).value=value;const slider=$(id+'-slider');if(slider)slider.value=value;}
+function valid(){return [...document.querySelectorAll('input[type=number]')].every(e=>e.value!==''&&Number.isFinite(e.valueAsNumber)&&!e.validity.rangeUnderflow&&!e.validity.rangeOverflow);}
+function probability(){return $('use-phases').checked?num('phase'+$('phase').value):num('prob');}
+function refreshCommand(){
+  const ok=valid();$('sample').disabled=!ok;$('copy').disabled=!ok;
+  $('phase-inputs').style.opacity=$('use-phases').checked?'1':'.4';
+  $('prob-hint').textContent=ok?`Training probability: ${(100*probability()).toFixed(0)}%. `+($('mode').value==='posed'?'Ignored in posed-only preview.':'Applied on each sample.'):'Enter valid values before sampling.';
+  const fields=['tilt_range','drop_height_range','lin_vel_range','ang_vel_range'];
+  const floating=v=>Number.isInteger(v)?v.toFixed(1):String(v);
+  const pair=(key,vals)=>`'env.${key}=[${vals.map(floating).join(',')}]'`;
+  const args=['env.twofeet_airborne_reset_prob='+floating(num('prob'))];
+  args.push(pair('twofeet_airborne_reset_prob_curriculum',$('use-phases').checked?Array.from({length:5},(_,i)=>num('phase'+i)):[]));
+  ranges.forEach(([id],i)=>args.push(pair('twofeet_airborne_reset_'+fields[i],[num(id+0),num(id+1)])));
+  args.push('env.reset_root_height='+floating(num('height')),pair('flexed_initial_joint_pos_noise_range',[-num('noise'),num('noise')]),'env.reset_yaw='+floating(num('yaw')*RAD));
+  $('command').value=args.join(' ');
+}
+const uniform=(a,b)=>a+Math.random()*(b-a);
+const sampleRange=id=>uniform(num(id+0),num(id+1));
+function sample(){
+  if(!valid())return;
+  const posed=$('mode').value==='posed'||Math.random()<probability();
+  state={posed,tilt:posed?sampleRange('tilt'):90,drop:posed?sampleRange('drop'):0,
+    noise:D.joint_pose.map(()=>uniform(-num('noise'),num('noise'))),
+    linear:Array.from({length:3},()=>posed?sampleRange('lin'):uniform(...D.reset_base_lin_vel_range)),
+    angular:Array.from({length:3},()=>posed?sampleRange('ang'):uniform(...D.reset_base_ang_vel_range))};
+  sampleNumber++;updatePose();
+}
+let renderer;
+try {renderer=new THREE.WebGLRenderer({antialias:true,alpha:true});}
+catch(e){$('fatal').hidden=false;$('fatal').textContent='WebGL could not start. Enable hardware acceleration or open this file in Chrome.';throw e;}
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));renderer.outputColorSpace=THREE.SRGBColorSpace;
+renderer.setClearColor(0x11191e,1);$('stage').prepend(renderer.domElement);
+const scene=new THREE.Scene();scene.fog=new THREE.Fog(0x11191e,3,9);scene.add(new THREE.AmbientLight(0xffffff,1.6));
+const key=new THREE.DirectionalLight(0xffecd0,2.5);key.position.set(1,-2,4);scene.add(key);
+const fill=new THREE.DirectionalLight(0xb6dfff,1.5);fill.position.set(-2,2,2);scene.add(fill);
+const camera=new THREE.PerspectiveCamera(37,1,.01,50);camera.up.set(0,0,1);
+const ground=new THREE.Mesh(new THREE.PlaneGeometry(20,20),new THREE.MeshStandardMaterial({color:0x152128,roughness:1}));ground.position.z=-.002;scene.add(ground);
+const grid=new THREE.GridHelper(4,40,0x41525d,0x293b45);grid.rotation.x=Math.PI/2;scene.add(grid);
+const materials={};for(const [name,color] of Object.entries(DATA.robot.materials))materials[name]=new THREE.MeshStandardMaterial({color:new THREE.Color(...color.slice(0,3)),metalness:name.includes('metal')?.35:.05,roughness:.5});
+const meshes={};for(const [name,m] of Object.entries(DATA.robot.meshes)){const g=new THREE.BufferGeometry();g.setAttribute('position',new THREE.Float32BufferAttribute(m.vertices,3));g.setIndex(m.indices);g.computeVertexNormals();meshes[name]=g;}
+const bodies={},joints={};
+function makeBody(b,parent){
+  const group=new THREE.Group();group.name=b.name;group.position.fromArray(b.pos);parent.add(group);bodies[b.name]=group;
+  if(b.joint)joints[b.joint]={group,axis:new THREE.Vector3(...b.axis)};
+  for(const v of b.visuals)group.add(new THREE.Mesh(meshes[v.mesh],materials[v.material]));
+  b.children.forEach(child=>makeBody(child,group));return group;
+}
+const root=makeBody(DATA.robot.body,scene);
+const feet=['FL','FR','RL','RR'];
+for(const leg of feet){const dot=new THREE.Mesh(new THREE.SphereGeometry(.015,14,10),new THREE.MeshBasicMaterial({color:leg[0]==='F'?0xffa050:0x66b8ff}));bodies[leg+'_foot'].add(dot);}
+const guides=new THREE.Group();scene.add(guides);
+function line(points,color,dashed=false){const g=new THREE.BufferGeometry().setFromPoints(points);const l=new THREE.Line(g,dashed?new THREE.LineDashedMaterial({color,dashSize:.025,gapSize:.015}):new THREE.LineBasicMaterial({color}));l.computeLineDistances();guides.add(l);return l;}
+function clearGuides(){for(const item of [...guides.children]){item.traverse(x=>{x.geometry?.dispose();if(x.material)x.material.dispose();});guides.remove(item);}}
+function arrow(vector,origin,color,scale){const v=new THREE.Vector3(...vector),length=v.length();if(length<1e-6)return;guides.add(new THREE.ArrowHelper(v.normalize(),origin,length*scale,color,.035,.02));}
+const target=new THREE.Vector3(0,0,.4);let azimuth=-1.05,elevation=.25,distance=2.65;
+function render(){camera.position.set(target.x+distance*Math.cos(elevation)*Math.cos(azimuth),target.y+distance*Math.cos(elevation)*Math.sin(azimuth),target.z+distance*Math.sin(elevation));camera.lookAt(target);renderer.render(scene,camera);}
+function resize(){const w=$('stage').clientWidth,h=$('stage').clientHeight;renderer.setSize(w,h);camera.aspect=w/h;camera.updateProjectionMatrix();render();}new ResizeObserver(resize).observe($('stage'));
+let drag=null;renderer.domElement.onpointerdown=e=>{drag=[e.clientX,e.clientY];renderer.domElement.setPointerCapture(e.pointerId);};
+renderer.domElement.onpointermove=e=>{if(!drag)return;azimuth-=(e.clientX-drag[0])*.008;elevation=Math.min(1.55,Math.max(-.05,elevation+(e.clientY-drag[1])*.008));drag=[e.clientX,e.clientY];render();};
+renderer.domElement.onpointerup=renderer.domElement.onpointercancel=()=>drag=null;
+renderer.domElement.addEventListener('wheel',e=>{e.preventDefault();distance=Math.min(7,Math.max(.75,distance*Math.exp(e.deltaY*.001)));render();},{passive:false});
+function view(a,e){azimuth=a;elevation=e;render();}
+$('orbit').onclick=()=>view(-1.05,.25);$('side').onclick=()=>view(-Math.PI/2,.03);$('front').onclick=()=>view(num('yaw')*RAD,.03);$('top').onclick=()=>view(-Math.PI/2,1.55);
+function updatePose(){
+  const pitch=state.posed?Math.PI/2-state.tilt*RAD:0,yaw=num('yaw')*RAD;
+  const qYaw=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,0,1),yaw);
+  root.quaternion.copy(qYaw).multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0),-pitch));
+  root.position.set(0,0,num('height')+(state.posed?D.rear_offset*Math.sin(pitch)+state.drop:0));
+  const limit=$('limits').value==='sac'?[-35,125]:[D.joint_physical_limit_thigh[0]+D.joint_soft_limit_thigh_delta,D.joint_physical_limit_thigh[1]-D.joint_soft_limit_thigh_delta];
+  let clipped=[];const positions=D.joint_pose.map((q,i)=>{
+    const name=D.joint_names[i];let value=q+state.noise[i];
+    if(state.posed&&name.startsWith('R')&&name.includes('thigh')){const raw=value+pitch;value=Math.min(limit[1]*RAD,Math.max(limit[0]*RAD,raw));if(Math.abs(raw-value)>1e-8)clipped.push(name.slice(0,2));}
+    joints[name].group.quaternion.setFromAxisAngle(joints[name].axis,value);return value;
+  });
+  root.updateMatrixWorld(true);clearGuides();
+  const base=root.position.clone();
+  line([new THREE.Vector3(0,0,0),new THREE.Vector3(0,0,Math.max(1,base.z+.32))],0x9aadb7,true);
+  const forward=new THREE.Vector3(Math.cos(yaw),Math.sin(yaw),0);
+  const arc=[];for(let i=0;i<=40;i++){const a=state.tilt*RAD*i/40;arc.push(base.clone().addScaledVector(forward,.24*Math.sin(a)).add(new THREE.Vector3(0,0,.24*Math.cos(a))));}line(arc,0xffc56c);
+  const axis=new THREE.Vector3(1,0,0).applyQuaternion(root.quaternion);arrow(axis.toArray(),base,0xffc56c,.32);
+  arrow(state.linear,base,0x60dbc6,.8);arrow(state.angular,base,0xdb99ff,.8);
+  guides.visible=$('helpers').checked;
+  const footHeights=Object.fromEntries(feet.map(leg=>[leg,bodies[leg+'_foot'].getWorldPosition(new THREE.Vector3()).z]));
+  $('type-value').textContent=state.posed?'Posed':'Regular';$('type-value').style.color=state.posed?'#ffc56c':'#60dbc6';
+  $('tilt-value').textContent=state.tilt.toFixed(1)+'°';$('drop-value').textContent=(state.drop*100).toFixed(1)+' cm';$('height-value').textContent=base.z.toFixed(3)+' m';
+  setControl('pose-tilt',state.tilt);setControl('pose-drop',state.drop);
+  const warnings=[];if(clipped.length)warnings.push(`Rear thigh limit reached (${clipped.join(', ')}): legs cannot fully compensate for the base tilt.`);
+  if(Math.min(...Object.values(footHeights))<.0186)warnings.push('A foot is near or below the ground. This is a geometry warning, not a collision test.');
+  $('status').classList.toggle('warn',warnings.length>0);
+  $('status').textContent=warnings.length?warnings.join(' '):`Sample ${sampleNumber} · Rear foot centres: ${footHeights.RL.toFixed(3)} / ${footHeights.RR.toFixed(3)} m. Frozen starting state; no gravity or policy.`;
+  state.jointPositions=positions;state.rootPosition=base.toArray();state.rootQuaternion=[root.quaternion.w,root.quaternion.x,root.quaternion.y,root.quaternion.z];state.footHeights=footHeights;state.clipped=clipped;
+  $('state-text').textContent=`Sample ${sampleNumber}\nLinear [x,y,z] m/s: ${state.linear.map(v=>v.toFixed(3)).join(', ')}\nAngular [x,y,z] rad/s: ${state.angular.map(v=>v.toFixed(3)).join(', ')}\nJoint velocities: all zero\n`+D.joint_names.map((n,i)=>n+': '+(positions[i]/RAD).toFixed(1)+'°').join('\n');
+  render();refreshCommand();
+}
+for(const id of ['prob','phase','use-phases'])$(id).oninput=refreshCommand;
+$('mode').onchange=()=>{refreshCommand();sample();};$('sample').onclick=sample;
+for(const id of ['height','yaw','limits'])$(id).oninput=()=>{refreshCommand();if(valid())updatePose();};
+$('noise').oninput=refreshCommand;$('helpers').onchange=()=>{guides.visible=$('helpers').checked;render();};
+$('defaults').onclick=()=>{
+  for(const [id,,,,,,values] of ranges)values.forEach((v,i)=>setControl(id+i,v));
+  $('prob').value=D.twofeet_airborne_reset_prob;$('use-phases').checked=false;$('phase').value='0';
+  [.3,.3,.2,.1,.1].forEach((v,i)=>$('phase'+i).value=v);
+  $('height').value=DATA.robot.body.pos[2];$('noise').value=D.flexed_initial_joint_pos_noise_range[1];$('yaw').value=180;$('limits').value='sac';$('mode').value='posed';$('helpers').checked=true;sample();
+};
+$('copy').onclick=async()=>{try{await navigator.clipboard.writeText($('command').value);$('copy').textContent='Copied';}catch{$('command').focus();$('command').select();document.execCommand('copy');$('copy').textContent='Selected / copied';}setTimeout(()=>$('copy').textContent='Copy overrides',1500);};
+document.addEventListener('keydown',e=>{if(e.code==='Space'&&!['INPUT','TEXTAREA','SELECT','BUTTON'].includes(document.activeElement.tagName)){e.preventDefault();sample();}});
+window.poseViewer={sample,getState:()=>JSON.parse(JSON.stringify(state)),getBodyPositions:()=>Object.fromEntries(Object.entries(bodies).map(([n,b])=>[n,b.getWorldPosition(new THREE.Vector3()).toArray()])),setPose:(tilt,drop)=>{state.posed=true;state.tilt=tilt;state.drop=drop;updatePose();}};
+$('height').value=DATA.robot.body.pos[2];$('noise').value=D.flexed_initial_joint_pos_noise_range[1];
+sample();resize();
+</script>
+</body>
+</html>
