@@ -51,6 +51,8 @@ _BOUNDED_POSITIVE_REWARD_KEYS = (
     "two_feet_above_height",
     "track_base_height_exp",
 )
+# Distance along base -x from the base origin to the rear thigh joints (the rear hip pitch axis), m.
+_REAR_THIGH_JOINT_OFFSET_X = 0.1946
 
 
 def _reward_step_factor(key: str, step_dt: float) -> float:
@@ -240,8 +242,13 @@ class Solo12Env(DirectRLEnv):
                 "opposite_direction_cmd_prob must be between 0 and 1, "
                 f"got {self.cfg.opposite_direction_cmd_prob}"
             )
+        if not 0.0 <= self.cfg.twofeet_airborne_reset_prob <= 1.0:
+            raise ValueError(
+                f"twofeet_airborne_reset_prob must be between 0 and 1, got {self.cfg.twofeet_airborne_reset_prob}"
+            )
 
         self._joint_ids, _ = self._robot.find_joints(self.cfg.joint_names, preserve_order=True)
+        self._rear_thigh_joint_idx = [self.cfg.joint_names.index(name) for name in ("RL_thigh_joint", "RR_thigh_joint")]
         self._configure_joint_position_limits()
         self._base_body_ids, _ = self._contact_sensor.find_bodies("base")
         self._feet_body_ids, self._feet_body_names = self._contact_sensor.find_bodies(".*_calf")
@@ -317,6 +324,8 @@ class Solo12Env(DirectRLEnv):
         self._forbidden_feet_contact_terminated = torch.zeros(
             self.num_envs, dtype=torch.bool, device=self.device
         )
+        # True while the running episode started reared up (twofeet_airborne_reset_prob).
+        self._twofeet_airborne_start = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self._base_imu_history_len = self.cfg.base_imu_history_length if self.cfg.imu_raw_inputs else 0
         self._base_imu_history_sample_dim = self.cfg.base_imu_history_sample_dim
         self._base_imu_history = torch.zeros(
@@ -935,6 +944,15 @@ class Solo12Env(DirectRLEnv):
                 raise ValueError(
                     f"base_push_force_z_range_curriculum[{i}] must be an ordered pair or None, got {z_range}."
                 )
+        airborne_probs = self._curriculum_values(self.cfg.twofeet_airborne_reset_prob_curriculum)
+        if airborne_probs and len(airborne_probs) != phase_count:
+            raise ValueError(
+                f"twofeet_airborne_reset_prob_curriculum must be empty or have {phase_count} values, "
+                f"got {len(airborne_probs)}."
+            )
+        for i, prob in enumerate(airborne_probs):
+            if not 0.0 <= prob <= 1.0:
+                raise ValueError(f"twofeet_airborne_reset_prob_curriculum[{i}] must be between 0 and 1, got {prob}.")
 
     def _fill_uniform_range(self, tensor: torch.Tensor, value_range: tuple[float, float]):
         low, high = value_range
@@ -1226,6 +1244,10 @@ class Solo12Env(DirectRLEnv):
             "opposite_direction_cmd_prob", phase
         )
         self.cfg.front_back_asymetry = bool(self._two_feet_curriculum_value("front_back_asymetry", phase))
+        if self.cfg.twofeet_airborne_reset_prob_curriculum:
+            self.cfg.twofeet_airborne_reset_prob = float(
+                self._two_feet_curriculum_value("twofeet_airborne_reset_prob", phase)
+            )
         if self._integrated_two_feet_curriculum_enabled():
             phase_idx = self._two_feet_curriculum_phase_index(phase)
             force = self.cfg.forces_applied_to_base_curriculum_by_phase[phase_idx]
@@ -1860,7 +1882,9 @@ class Solo12Env(DirectRLEnv):
         if env_ids is None or len(env_ids) == self.num_envs:
             env_ids = self._robot._ALL_INDICES
 
-        completed_env_ids = env_ids[self.episode_length_buf[env_ids] > 0]
+        # Only episodes that started from the regular reset count for the curriculum and for the
+        # completed-episode metrics (returns, lengths, reward ratios). Posed starts are excluded.
+        completed_env_ids = env_ids[(self.episode_length_buf[env_ids] > 0) & ~self._twofeet_airborne_start[env_ids]]
         completed_episode_returns = self._episode_reward_sums[completed_env_ids]
         mean_episode_return = (
             torch.mean(completed_episode_returns).item() if len(completed_episode_returns) > 0 else 0.0
@@ -1932,6 +1956,7 @@ class Solo12Env(DirectRLEnv):
         root_velocity = torch.zeros_like(self._robot.data.default_root_state[env_ids, 7:])
         root_velocity[:, 0:3].uniform_(*self.cfg.reset_base_lin_vel_range)
         root_velocity[:, 3:6].uniform_(*self.cfg.reset_base_ang_vel_range)
+        self._apply_twofeet_airborne_reset(env_ids, yaw, root_pose, root_velocity, joint_pos)
 
         action_delays = torch.randint(
             low=self.cfg.actuation_delay_range[0],
@@ -1992,6 +2017,7 @@ class Solo12Env(DirectRLEnv):
         extras["Curriculum/opposite_direction_cmd_prob"] = self.cfg.opposite_direction_cmd_prob
         extras["Curriculum/front_back_asymetry"] = float(self.cfg.front_back_asymetry)
         extras["Curriculum/events_randomization_active"] = float(self._curriculum_event_randomization_active)
+        extras["Curriculum/twofeet_airborne_reset_prob"] = self.cfg.twofeet_airborne_reset_prob
         if self._curriculum_last_reward_ratio is not None:
             extras["Curriculum/advance_reward_ratio"] = self._curriculum_last_reward_ratio
         curriculum_idx = self.get_curriculum_global_idx()
@@ -2009,6 +2035,50 @@ class Solo12Env(DirectRLEnv):
         extras["Episode_Termination/time_out"] = torch.count_nonzero(self.reset_time_outs[env_ids]).item()
         # include logs in wandb
         self.extras["log"] = extras
+
+    def _apply_twofeet_airborne_reset(
+        self,
+        env_ids: torch.Tensor,
+        yaw: torch.Tensor,
+        root_pose: torch.Tensor,
+        root_velocity: torch.Tensor,
+        joint_pos: torch.Tensor,
+    ):
+        """Rear a random subset of the reset envs up onto their rear feet, editing the reset state in place.
+
+        The base pivots nose-up about the rear hip axis to the sampled tilt from the vertical. The rear thighs
+        turn by the same angle, so the rear legs keep their regular standing pose in the world and the rear
+        feet keep their regular reset height. Then the whole robot is lifted by the drop height.
+        """
+        self._twofeet_airborne_start[env_ids] = False
+        if self.cfg.twofeet_airborne_reset_prob <= 0.0:
+            return
+        posed = torch.nonzero(
+            torch.rand(len(env_ids), device=self.device) < self.cfg.twofeet_airborne_reset_prob
+        ).squeeze(-1)
+        count = len(posed)
+        if count == 0:
+            return
+        self._twofeet_airborne_start[env_ids[posed]] = True
+
+        tilt = torch.empty(count, device=self.device).uniform_(*self.cfg.twofeet_airborne_reset_tilt_range)
+        pitch_up = math.pi / 2 - torch.deg2rad(tilt)
+        root_pose[posed, 3:7] = math_utils.quat_from_euler_xyz(torch.zeros_like(pitch_up), -pitch_up, yaw[posed])
+        drop = torch.empty(count, device=self.device).uniform_(*self.cfg.twofeet_airborne_reset_drop_height_range)
+        root_pose[posed, 2] += _REAR_THIGH_JOINT_OFFSET_X * torch.sin(pitch_up) + drop
+
+        rear_ids = [self._joint_ids[i] for i in self._rear_thigh_joint_idx]
+        limits = self._joint_soft_pos_limits[env_ids[posed]][:, self._rear_thigh_joint_idx]
+        joint_pos[posed[:, None], rear_ids] = torch.clamp(
+            joint_pos[posed[:, None], rear_ids] + pitch_up[:, None], limits[..., 0], limits[..., 1]
+        )
+
+        root_velocity[posed, 0:3] = torch.empty(count, 3, device=self.device).uniform_(
+            *self.cfg.twofeet_airborne_reset_lin_vel_range
+        )
+        root_velocity[posed, 3:6] = torch.empty(count, 3, device=self.device).uniform_(
+            *self.cfg.twofeet_airborne_reset_ang_vel_range
+        )
 
     def _resample_commands(self, env_ids: torch.Tensor, allow_opposite: bool = True):
         commands = torch.empty((len(env_ids), 3), device=self.device)

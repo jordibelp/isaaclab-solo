@@ -507,6 +507,19 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     two_feet_joint_pos_noise_range = (-0.05, 0.05)
     two_feet_reset_base_lin_vel_range = (0.0, 0.0)
     two_feet_reset_base_ang_vel_range = (0.0, 0.0)
+    # Reference-free version of reference state initialization (like backflip_airborne_reset_prob): this
+    # fraction of resets starts reared up on the rear feet. The base pivots nose-up about the rear hip
+    # axis, and the rear thighs turn by the same angle, so the rear legs keep their regular standing pose
+    # and height. Then the whole robot is lifted by the drop height. 0 disables it.
+    twofeet_airborne_reset_prob = 0.0
+    # One probability per two-feet curriculum phase. Empty uses twofeet_airborne_reset_prob in every phase.
+    twofeet_airborne_reset_prob_curriculum = ()
+    # Base tilt from the world vertical, in degrees. 0 is nose straight up; positive leans forward,
+    # toward the front feet (60 is 30 degrees above horizontal); negative leans backward.
+    twofeet_airborne_reset_tilt_range = (-30.0, 60.0)
+    twofeet_airborne_reset_drop_height_range = (0.0, 0.1)  # rear feet above their regular reset height, m
+    twofeet_airborne_reset_lin_vel_range = (-0.1, 0.1)  # m/s, per world axis
+    twofeet_airborne_reset_ang_vel_range = (-0.1, 0.1)  # rad/s, per world axis
     # Delays the joint-position target by physics steps.
     actuation_delay_range = (0, 3)
     base_push_interval_range_s = (10.0, 15.0)
