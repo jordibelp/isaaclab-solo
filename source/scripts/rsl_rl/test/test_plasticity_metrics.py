@@ -69,21 +69,29 @@ def ppo():
         critic_hidden_dims=HIDDEN_DIMS,
     )
     optimizer = torch.optim.Adam(policy.parameters(), lr=1.0e-3)
-    return SimpleNamespace(alg=SimpleNamespace(policy=policy, optimizer=optimizer), device="cpu"), obs
+    runner = SimpleNamespace(alg=SimpleNamespace(policy=policy, optimizer=optimizer), device="cpu")
+    return _with_modes(runner, policy), obs
 
 
-def sac():
+def sac(batch_norm=False):
     obs = TensorDict({"policy": torch.randn(23, 7)}, batch_size=[23])
     groups = {"actor": ["policy"], "critic": ["policy"]}
     actor = SACActorModel(obs, groups, "actor", 3, hidden_dims=HIDDEN_DIMS, state_dependent_std=True)
-    critic = SACCriticModel(obs, groups, "critic", 1, hidden_dims=HIDDEN_DIMS, num_actions=3)
+    critic = SACCriticModel(obs, groups, "critic", 1, hidden_dims=HIDDEN_DIMS, num_actions=3, batch_norm=batch_norm)
     alg = SimpleNamespace(
         actor=actor,
         critic=critic,
         actor_optimizer=torch.optim.Adam(actor.parameters(), lr=1.0e-3),
         critic_optimizer=torch.optim.Adam(critic.parameters(), lr=1.0e-3),
     )
-    return SimpleNamespace(alg=alg, device="cpu"), obs
+    return _with_modes(SimpleNamespace(alg=alg, device="cpu"), actor, critic), obs
+
+
+def _with_modes(runner, *modules):
+    """The runners' train_mode/eval_mode switch every network, like RSL-RL's."""
+    runner.train_mode = lambda: [module.train() for module in modules]
+    runner.eval_mode = lambda: [module.eval() for module in modules]
+    return runner
 
 
 def logged(factory, parsed_args):
@@ -121,6 +129,21 @@ def test_sac_per_layer_widths_match_hidden_dims(parsed_args):
         widths = [scalars[f"Plasticity/per_layer/{net}/feature_num/layer_{i:02d}"] for i in range(NUM_HIDDEN_LAYERS)]
         assert widths == [float(dim) for dim in HIDDEN_DIMS]
         assert scalars[f"Plasticity/summary/{net}/feature_num"] == float(HIDDEN_DIMS[-1])
+
+
+def test_diagnostic_forward_leaves_batch_norm_statistics_alone(parsed_args):
+    runner, obs = sac(batch_norm=True)
+    norms = [module for module in runner.alg.critic.modules() if isinstance(module, torch.nn.BatchNorm1d)]
+    before = [(norm.running_mean.clone(), norm.num_batches_tracked.clone()) for norm in norms]
+    scalars = {}
+    runner.writer = SimpleNamespace(add_scalar=lambda key, value, step: scalars.__setitem__(key, value))
+    train._attach_plasticity_metrics_to_runner(runner, parsed_args)
+    train._log_plasticity_metrics(runner, {"it": 0, "obs": obs}, parsed_args.plasticity_metrics_interval)
+
+    assert "Plasticity/summary/critic1/dormant_tau_pct" in scalars
+    assert all(torch.equal(norm.running_mean, mean) and torch.equal(norm.num_batches_tracked, count)
+               for norm, (mean, count) in zip(norms, before))
+    assert runner.alg.critic.training and runner.alg.actor.training
 
 
 def test_ppo_groups_actor_and_critic(parsed_args):

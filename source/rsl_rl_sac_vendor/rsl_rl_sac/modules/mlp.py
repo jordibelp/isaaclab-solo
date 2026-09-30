@@ -31,6 +31,7 @@ class MLP(nn.Sequential):
         activation: str = "elu",
         layer_norm: bool = False,
         last_activation: str | None = None,
+        batch_norm: bool = False,
     ) -> None:
         """Initialize the MLP.
 
@@ -42,6 +43,8 @@ class MLP(nn.Sequential):
             activation: Activation function.
             layer_norm: Whether to apply layer normalization after hidden linear layers.
             last_activation: Activation function of the last layer. None results in a linear last layer.
+            batch_norm: Whether to apply batch normalization after hidden linear layers. It replaces layer
+                normalization when both are requested.
         """
         super().__init__()
 
@@ -53,15 +56,14 @@ class MLP(nn.Sequential):
 
         # Create layers sequentially
         layers = []
-        layers.append(nn.Linear(input_dim, hidden_dims_processed[0]))
-        if layer_norm:
-            layers.append(nn.LayerNorm(hidden_dims_processed[0]))
-        layers.append(activation_mod)
-
-        for layer_index in range(len(hidden_dims_processed) - 1):
-            layers.append(nn.Linear(hidden_dims_processed[layer_index], hidden_dims_processed[layer_index + 1]))
-            if layer_norm:
-                layers.append(nn.LayerNorm(hidden_dims_processed[layer_index + 1]))
+        for in_dim, out_dim in zip([input_dim, *hidden_dims_processed[:-1]], hidden_dims_processed):
+            # BatchNorm subtracts the batch mean, so a bias in front of it only drifts on Adam's rounding noise.
+            layers.append(nn.Linear(in_dim, out_dim, bias=not batch_norm))
+            if batch_norm:
+                # XQC (arXiv:2509.25174): running statistics decay by 0.99 per update, eps 1e-3.
+                layers.append(nn.BatchNorm1d(out_dim, momentum=0.01, eps=1e-3))
+            elif layer_norm:
+                layers.append(nn.LayerNorm(out_dim))
             layers.append(activation_mod)
 
         # Add last layer

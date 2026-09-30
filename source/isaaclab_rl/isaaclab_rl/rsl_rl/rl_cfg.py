@@ -92,6 +92,12 @@ class RslRlSacCriticModelCfg:
     activation: str = MISSING
     obs_normalization: bool = MISSING
     layer_norm: bool = False
+    batch_norm: bool = False
+    """BatchNorm instead of LayerNorm in the Q-network hidden layers, as in XQC (arXiv:2509.25174).
+
+    (s, a) and (s', a') share one forward pass, for the online and the target critics, and the actor loss
+    uses the running statistics. Overrides ``layer_norm``.
+    """
     distributional_loss: str = "mse"
     """Critic loss: "mse", scalar-target "two_hot"/"hl_gauss", distributional Bellman "c51",
     or "mse_target_norm_popart" for MSE on PopArt-normalized targets."""
@@ -358,6 +364,20 @@ class RslRlBaseRunnerCfg:
 
 
 @configclass
+class RslRlPpoCriticCfg:
+    """PPO value-network options that the Solo12 train script applies after RSL-RL builds the policy.
+
+    They live outside ``policy`` because RSL-RL passes every ``policy`` field to the policy constructor.
+    """
+
+    batch_norm: bool = False
+    """BatchNorm between each hidden Linear layer of the value network and its activation (XQC-style ablation).
+
+    PPO keeps the value network in training mode, so it always uses batch statistics, also in rollouts.
+    """
+
+
+@configclass
 class RslRlOnPolicyRunnerCfg(RslRlBaseRunnerCfg):
     """Configuration of the runner for on-policy algorithms."""
 
@@ -365,6 +385,9 @@ class RslRlOnPolicyRunnerCfg(RslRlBaseRunnerCfg):
     """The runner class name. Default is OnPolicyRunner."""
 
     local_redundancy: RslRlLocalRedundancyCfg = RslRlLocalRedundancyCfg()
+
+    critic: RslRlPpoCriticCfg = RslRlPpoCriticCfg()
+    """Extra value-network options, applied by ``source/scripts/rsl_rl/train.py``."""
 
     policy: RslRlPpoActorCriticCfg = MISSING
     """The policy configuration."""

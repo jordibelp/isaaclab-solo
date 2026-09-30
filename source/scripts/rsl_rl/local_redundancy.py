@@ -52,7 +52,14 @@ def _probe_copy(module: nn.Module, *, gaussian_inputs: bool) -> nn.Module:
             hooks = getattr(sub, name, None)
             if hooks is not None:
                 memo[id(hooks)] = OrderedDict()
-    result = copy.deepcopy(module, memo).eval().float()
+    result = copy.deepcopy(module, memo)
+    for sub in result.modules():
+        forward = sub.__dict__.get("forward")
+        if forward is not None and hasattr(forward, "_torchdynamo_orig_callable"):
+            # torch.compile(bound_module.forward) captures the live module in its closure.
+            # The copy must use its own uncompiled class method, not forward on the live model.
+            del sub.__dict__["forward"]
+    result.eval().float()
     if gaussian_inputs:
         # x ~ N(0, s^2 I) at the normalized observation boundary, BEFORE learned
         # encoders, not raw sensor noise scaled by changing running statistics.

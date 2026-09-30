@@ -25,11 +25,20 @@ def hidden_linear_layers(network: nn.Module) -> list[nn.Linear]:
 
 @torch.no_grad()
 def project_to_unit_sphere(layers: list[nn.Linear]) -> None:
-    """Rescale each unit's incoming weights and bias together to unit L2 norm."""
+    """Rescale each unit's incoming weights and bias together to unit L2 norm.
+
+    Linear layers in front of a SAC BatchNorm critic's BatchNorm have no bias, as in XQC.
+    Zero rows have no direction to project and stay zero instead of producing NaNs.
+    """
     for layer in layers:
-        norm = torch.cat((layer.weight, layer.bias.unsqueeze(1)), dim=1).norm(dim=1)
+        if layer.bias is None:
+            norm = layer.weight.norm(dim=1)
+        else:
+            norm = torch.cat((layer.weight, layer.bias.unsqueeze(1)), dim=1).norm(dim=1)
+        norm = torch.where(norm > 0, norm, torch.ones_like(norm))
         layer.weight.div_(norm.unsqueeze(1))
-        layer.bias.div_(norm)
+        if layer.bias is not None:
+            layer.bias.div_(norm)
 
 
 def attach(runner) -> dict[str, int]:

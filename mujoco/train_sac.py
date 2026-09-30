@@ -819,11 +819,15 @@ def _configure_checkpoint_models(cfg, args) -> None:
                 key=lambda item: item[0],
             )
             linear = [v for _, v in weights if v.ndim == 2]
+            # BatchNorm weights are 1-D like LayerNorm ones; only BatchNorm keeps running statistics.
+            batch_norm = any(k.startswith(prefix) and k.endswith(".running_mean") for k in state)
             cfg[name].update(
                 hidden_dims=[v.shape[0] for v in linear[:-1]],
-                layer_norm=any(v.ndim == 1 for _, v in weights),
+                layer_norm=not batch_norm and any(v.ndim == 1 for _, v in weights),
                 obs_normalization=any(k.startswith("obs_normalizer.") for k in state),
             )
+            if batch_norm:
+                cfg[name]["batch_norm"] = True
             # Shapes cannot reveal activation functions or the categorical label scheme.
             for key in ("activation", "log_std_min", "log_std_max", "distributional_loss", "hl_gauss_sigma_ratio"):
                 if key in saved_cfg.get(name, {}):

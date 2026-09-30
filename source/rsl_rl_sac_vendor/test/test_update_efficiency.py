@@ -27,7 +27,7 @@ def mirror(env=None, obs=None, actions=None):
     return obs_aug, actions_aug
 
 
-def build(monkeypatch, device="cpu", symmetry=None, critic_loss="two_hot", **algorithm):
+def build(monkeypatch, device="cpu", symmetry=None, critic_loss="two_hot", batch_norm=False, **algorithm):
     obs = TensorDict({"policy": torch.randn(NUM_ENVS, 6, device=device)}, batch_size=[NUM_ENVS], device=device)
     env = SimpleNamespace(num_actions=2, num_envs=NUM_ENVS)
     monkeypatch.setattr(SAC, "_compute_action_scaling", lambda env, device: (torch.ones(2), torch.ones(2)))
@@ -44,7 +44,7 @@ def build(monkeypatch, device="cpu", symmetry=None, critic_loss="two_hot", **alg
         actor=dict(class_name="SACActorModel", hidden_dims=[16, 16], activation="elu", obs_normalization=True),
         critic=dict(class_name="SACCriticModel", hidden_dims=[16, 16], activation="elu", obs_normalization=True,
                     layer_norm=True, distributional_loss=critic_loss, distributional_num_bins=51,
-                    distributional_symlog_limit=5.0),
+                    distributional_symlog_limit=5.0, batch_norm=batch_norm),
         algorithm=settings,
     )
     alg = SAC.construct_algorithm(obs, env, cfg, device)
@@ -138,11 +138,12 @@ def test_a_timeout_without_a_done_is_rejected_when_stored(monkeypatch):
                              {"time_outs": time_outs, "time_outs_obs": {"policy": obs["policy"]}})
 
 
-@pytest.mark.parametrize("critic_loss,q_reduction_method", [
-    ("mse", "min"), ("two_hot", "mean"), ("c51", "mean_pi_q_none")
+@pytest.mark.parametrize("critic_loss,q_reduction_method,batch_norm", [
+    ("mse", "min", False), ("two_hot", "mean", False), ("c51", "mean_pi_q_none", False),
+    ("two_hot", "mean_pi_q_none", True), ("c51", "min", True),
 ])
-def test_compiled_update_matches_eager(monkeypatch, critic_loss, q_reduction_method):
-    """Same seeds and replay give the same losses and weights, compiled or not."""
+def test_compiled_update_matches_eager(monkeypatch, critic_loss, q_reduction_method, batch_norm):
+    """Same seeds and replay give the same losses, weights and BatchNorm statistics, compiled or not."""
     pytest.importorskip("torch._inductor")
     import torch._inductor.config as inductor_config
 
@@ -151,11 +152,12 @@ def test_compiled_update_matches_eager(monkeypatch, critic_loss, q_reduction_met
     results = []
     for torch_compile in (False, True):
         torch.manual_seed(5)
-        alg = build(monkeypatch, symmetry={}, critic_loss=critic_loss,
+        alg = build(monkeypatch, symmetry={}, critic_loss=critic_loss, batch_norm=batch_norm,
                     q_reduction_method=q_reduction_method, torch_compile=torch_compile)
         torch.manual_seed(6)
         losses = [alg.update() for _ in range(3)]
-        results.append((losses, [p.detach().clone() for p in (*alg.actor.parameters(), *alg.critic.parameters())]))
+        state = (*alg.actor.parameters(), *alg.critic.parameters(), *alg.critic.buffers())
+        results.append((losses, [p.detach().clone() for p in state]))
 
     (eager_losses, eager_params), (compiled_losses, compiled_params) = results
     for eager, compiled in zip(eager_losses, compiled_losses):

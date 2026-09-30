@@ -15,6 +15,7 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 import local_redundancy as lr
+import critic_batch_norm
 import pytest
 import torch
 from rsl_rl.modules import ActorCritic
@@ -58,6 +59,17 @@ def ppo(device="cpu", *, state_dependent_std=False):
     policy.update_normalization(obs)
     policy.act(obs)  # non-leaf distribution cache, as in real training
     return SimpleNamespace(alg=SimpleNamespace(policy=policy), device=device), obs
+
+
+def test_compiled_batch_norm_probe_uses_copy_without_moving_live_statistics(cfg):
+    runner, obs = ppo()
+    critic_batch_norm.insert(runner.alg.policy.critic)
+    runner.alg.policy.critic.forward = torch.compile(runner.alg.policy.critic.forward, backend="eager")
+    norms = [m for m in runner.alg.policy.critic.modules() if isinstance(m, nn.BatchNorm1d)]
+    before = [m.running_mean.clone() for m in norms]
+    measured = lr.measure(runner, obs, cfg, 0)
+    assert math.isfinite(measured["critic"]["local_redundancy"])
+    assert all(torch.equal(old, norm.running_mean) for old, norm in zip(before, norms))
 
 
 def sac(device="cpu", *, state_dependent_std=True, distributional_loss="mse"):

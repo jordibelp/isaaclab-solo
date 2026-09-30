@@ -430,14 +430,15 @@ LORA_OBS_DIM = 6
 LORA_ACTION_DIM = 3
 
 
-def build_lora_runner(rank=4, extra_args=(), critic_loss="mse"):
+def build_lora_runner(rank=4, extra_args=(), critic_loss="mse", batch_norm=False):
     """A SAC algorithm on a fixed one-batch replay, wrapped the way ``main`` wraps it."""
     torch.manual_seed(0)
     obs = TensorDict({"policy": torch.randn(8, LORA_OBS_DIM)}, batch_size=[8])
     groups = {"actor": ["policy"], "critic": ["policy"]}
     actor = SACActorModel(obs, groups, "actor", LORA_ACTION_DIM, hidden_dims=[16, 8], obs_normalization=True)
     critic = SACCriticModel(obs, groups, "critic", 1, hidden_dims=[16, 8], num_actions=LORA_ACTION_DIM,
-                            obs_normalization=True, distributional_loss=critic_loss, distributional_num_bins=11)
+                            obs_normalization=True, distributional_loss=critic_loss, distributional_num_bins=11,
+                            batch_norm=batch_norm)
     batch = (
         obs,
         torch.randn(8, LORA_ACTION_DIM),
@@ -494,6 +495,19 @@ def test_lora_transfer_keeps_fresh_adapter_optimizer_and_restores_dense_critic()
     assert target.alg.critic_optimizer.state
     assert target.alg.alpha_optimizer.state
     target.alg.update()
+
+
+def test_lora_fine_tuning_trains_a_batch_norm_critic():
+    source, _ = build_lora_runner(rank=0, batch_norm=True)
+    source.alg.update()
+    target, args = build_lora_runner(rank=1, batch_norm=True)
+    train_sac._apply_finetuning(target, args)
+    train_sac._restore_finetuning_state(target.alg, source.alg.save(), args)
+    norms = [module for module in target.alg.critic.critic1.modules() if isinstance(module, torch.nn.BatchNorm1d)]
+    before = [norm.running_mean.clone() for norm in norms]
+    losses = target.alg.update()
+    assert norms and all(math.isfinite(losses[name]) for name in ("critic1", "critic2", "actor"))
+    assert all(not torch.equal(old, norm.running_mean) for old, norm in zip(before, norms))
 
 
 def test_explicit_temperature_and_fresh_optimizer_ablation():
@@ -812,16 +826,17 @@ def test_resolved_overrides_are_recorded_in_runner_config():
     }
 
 
+@pytest.mark.parametrize("batch_norm", [False, True])
 @pytest.mark.parametrize("critic_loss", ["mse", "two_hot", "hl_gauss"])
 @pytest.mark.parametrize("sidecar", ["json", "yaml", "none"])
-def test_checkpoint_architecture_and_loss_survive_transfer(tmp_path, critic_loss, sidecar):
+def test_checkpoint_architecture_and_loss_survive_transfer(tmp_path, critic_loss, sidecar, batch_norm):
     obs = TensorDict({"policy": torch.randn(8, LORA_OBS_DIM)}, batch_size=[8])
     groups = {"actor": ["policy"], "critic": ["policy"]}
     actor = SACActorModel(obs, groups, "actor", LORA_ACTION_DIM, hidden_dims=[32, 16], activation="swish",
                           obs_normalization=True, state_dependent_std=False)
     critic = SACCriticModel(obs, groups, "critic", 1, num_actions=LORA_ACTION_DIM, hidden_dims=[24, 12],
                            activation="swish", layer_norm=True, distributional_loss=critic_loss,
-                           distributional_num_bins=19, distributional_symlog_limit=5)
+                           distributional_num_bins=19, distributional_symlog_limit=5, batch_norm=batch_norm)
     checkpoint = tmp_path / "model.pt"
     torch.save({"actor_state_dict": actor.state_dict(), "critic_state_dict": critic.state_dict()}, checkpoint)
     saved_cfg = {"actor": {"activation": "swish"}, "critic": {"activation": "swish", "distributional_loss": critic_loss}}
@@ -838,6 +853,7 @@ def test_checkpoint_architecture_and_loss_survive_transfer(tmp_path, critic_loss
     config = runner_config(args)
     train_sac._configure_checkpoint_models(config, args)
     assert config["critic"]["distributional_loss"] == critic_loss
+    assert config["critic"].get("batch_norm", False) == batch_norm
     config["actor"].pop("class_name")
     config["critic"].pop("class_name")
     restored_actor = SACActorModel(obs, groups, "actor", LORA_ACTION_DIM, **config["actor"])

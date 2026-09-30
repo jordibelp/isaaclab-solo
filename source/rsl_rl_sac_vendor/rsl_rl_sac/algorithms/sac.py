@@ -358,8 +358,9 @@ class SAC:
             ###########################################################################
             # 1) Critic update
             with torch.no_grad():
-                targets = self._bellman_targets_fn(
-                    next_obs_batch, rewards_batch, dones_batch, bootstrap_batch, effective_n_steps
+                targets, next_actions = self._bellman_targets_fn(
+                    obs_batch, actions_batch, next_obs_batch, rewards_batch, dones_batch, bootstrap_batch,
+                    effective_n_steps,
                 )
 
             if self.critic.popart:
@@ -377,7 +378,7 @@ class SAC:
             # bookkeeping operations eager and compile the networks plus CE loss.
             loss_targets = self._critic_loss_targets(targets)
             critic1_loss, critic2_loss, output1, output2 = self._critic_losses_fn(
-                obs_batch, actions_batch, loss_targets
+                obs_batch, actions_batch, next_obs_batch, next_actions, loss_targets
             )
             if self.critic.distributional_critic_ce:
                 with torch.no_grad():
@@ -405,7 +406,16 @@ class SAC:
                 # Freeze critic parameters for actor update
                 for p in self.critic_parameters:
                     p.requires_grad_(False)
-                log_prob, q_new = self._actor_objective_fn(obs_batch)
+                # As in XQC, a BatchNorm critic scores the policy with its running statistics.
+                if self.critic.batch_norm:
+                    critic_was_training = self.critic.training
+                    self.critic.eval()
+                    try:
+                        log_prob, q_new = self._actor_objective_fn(obs_batch)
+                    finally:
+                        self.critic.train(critic_was_training)
+                else:
+                    log_prob, q_new = self._actor_objective_fn(obs_batch)
             else:
                 with torch.no_grad():
                     _, log_prob = self.actor.sample_action_logp(obs_batch)
@@ -534,24 +544,33 @@ class SAC:
 
     def _bellman_targets(
         self,
+        obs_batch: TensorDict,
+        actions_batch: torch.Tensor,
         next_obs_batch: TensorDict,
         rewards_batch: torch.Tensor,
         dones_batch: torch.Tensor,
         bootstrap_batch: torch.Tensor,
         effective_n_steps: torch.Tensor,
-    ) -> tuple[torch.Tensor, ...]:
-        """Detached Bellman targets of one mini-batch. ``update()`` calls this under ``no_grad``.
+    ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
+        """Detached Bellman targets of one mini-batch, and the sampled next actions.
 
-        Returns ``(target_q,)`` for scalar targets. For C51 it returns the two projected target
-        distributions, then the reward, discount and target probabilities of the clipped-mass log.
+        ``update()`` calls this under ``no_grad``. The targets are ``(target_q,)`` for scalar targets. For
+        C51 they are the two projected target distributions, then the reward, discount and target
+        probabilities of the clipped-mass log. ``(s, a)`` is only used by BatchNorm critics.
         """
         bootstrap_mask = bootstrap_batch + 1 - dones_batch
         new_actions, next_log_prob = self.actor.sample_action_logp(next_obs_batch)
         next_state_entropy = -self.log_alpha.exp() * next_log_prob
+        if self.critic.batch_norm:
+            (_, target_output1), (_, target_output2) = self.critic.paired_outputs(
+                (self.critic.critic1_target, self.critic.critic2_target),
+                obs_batch, actions_batch, next_obs_batch, new_actions,
+            )
+        else:
+            target_output1, target_output2 = self.critic.target_outputs(next_obs_batch, new_actions)
 
         if self.critic.distributional_loss == "c51":
             n_step_discount = torch.pow(self.gamma, effective_n_steps.to(dtype=rewards_batch.dtype))
-            target_output1, target_output2 = self.critic.target_outputs(next_obs_batch, new_actions)
             probabilities1 = target_output1.float().softmax(-1)
             probabilities2 = target_output2.float().softmax(-1)
             if self.q_reduction_method == "mean_pi_q_none":
@@ -580,9 +599,9 @@ class SAC:
                 discount,
                 target_probabilities1,
                 target_probabilities2,
-            )
+            ), new_actions
 
-        q1_target, q2_target = self.critic.evaluate_all_target_q(next_obs_batch, new_actions)
+        q1_target, q2_target = self.critic.q_from_output(target_output1), self.critic.q_from_output(target_output2)
         if self.q_reduction_method == "mean_pi_q_none":
             # No reduction: column i is critic i's own target, as in the FastSAC code.
             next_q = torch.cat((q1_target, q2_target), dim=-1)
@@ -590,7 +609,7 @@ class SAC:
             next_q = reduce_twin_q(q1_target, q2_target, self.q_reduction_method)
         q_target_next = next_q + next_state_entropy
         n_step_discount = torch.pow(self.gamma, effective_n_steps.to(dtype=q_target_next.dtype))
-        return (rewards_batch + n_step_discount * bootstrap_mask * q_target_next,)
+        return (rewards_batch + n_step_discount * bootstrap_mask * q_target_next,), new_actions
 
     def _critic_loss_targets(self, targets: tuple[torch.Tensor, ...]) -> tuple[torch.Tensor, ...]:
         """Prepare scalar-target CE labels outside the compiled network/loss graph."""
@@ -605,10 +624,23 @@ class SAC:
         return labels1, labels2
 
     def _critic_losses(
-        self, obs_batch: TensorDict, actions_batch: torch.Tensor, loss_targets: tuple[torch.Tensor, ...]
+        self,
+        obs_batch: TensorDict,
+        actions_batch: torch.Tensor,
+        next_obs_batch: TensorDict,
+        next_actions: torch.Tensor,
+        loss_targets: tuple[torch.Tensor, ...],
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Twin critic forward passes and their losses; compiled when requested."""
-        output1, output2 = self.critic.critic_outputs(obs_batch, actions_batch)
+        """Twin critic forward passes and their losses; compiled when requested.
+
+        ``(s', a')`` is only used by BatchNorm critics, which need it in the batch statistics.
+        """
+        if self.critic.batch_norm:
+            (output1, _), (output2, _) = self.critic.paired_outputs(
+                (self.critic.critic1, self.critic.critic2), obs_batch, actions_batch, next_obs_batch, next_actions
+            )
+        else:
+            output1, output2 = self.critic.critic_outputs(obs_batch, actions_batch)
         if self.critic.distributional_loss == "c51":
             critic1_loss, critic2_loss = self.critic.c51_losses(output1, output2, loss_targets[0], loss_targets[1])
         elif self.torch_compile and self.critic.distributional_loss in ("two_hot", "hl_gauss"):

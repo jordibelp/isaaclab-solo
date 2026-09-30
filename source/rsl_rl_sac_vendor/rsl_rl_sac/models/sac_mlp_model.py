@@ -315,6 +315,7 @@ class SACCriticModel(MLPModel):
         c51_v_min: float = -20.0,
         c51_v_max: float = 20.0,
         popart_beta: float = 3e-4,
+        batch_norm: bool = False,
         **kwargs,
     ) -> None:
         """Initialize the SAC critic model.
@@ -343,6 +344,8 @@ class SACCriticModel(MLPModel):
             c51_v_min: Lower C51 support bound in reward units.
             c51_v_max: Upper C51 support bound in reward units.
             popart_beta: Step size of PopArt's moving target mean and variance.
+            batch_norm: Use BatchNorm instead of LayerNorm in the Q-network hidden layers, as in XQC
+                (arXiv:2509.25174). SAC then evaluates (s, a) and (s', a') together; see :meth:`paired_outputs`.
         """
         super().__init__(
             obs,
@@ -430,9 +433,12 @@ class SACCriticModel(MLPModel):
         self.mlp = None  # type: ignore[assignment]
 
         # Twin Q-networks
+        self.batch_norm = batch_norm
+        if batch_norm and layer_norm:
+            print("SAC critic: BatchNorm replaces LayerNorm in the Q-network hidden layers.")
         head_dim = self.value_support.numel() if self.distributional_critic_ce else output_dim
-        self.critic1 = MLP(q_input_dim, head_dim, hidden_dims, activation, layer_norm=layer_norm)
-        self.critic2 = MLP(q_input_dim, head_dim, hidden_dims, activation, layer_norm=layer_norm)
+        self.critic1 = MLP(q_input_dim, head_dim, hidden_dims, activation, layer_norm=layer_norm, batch_norm=batch_norm)
+        self.critic2 = MLP(q_input_dim, head_dim, hidden_dims, activation, layer_norm=layer_norm, batch_norm=batch_norm)
         if self.distributional_critic_ce:
             # Dreamer initialization: random logits on this wide support imply enormous Q.
             for network in (self.critic1, self.critic2):
@@ -582,6 +588,26 @@ class SACCriticModel(MLPModel):
         """Raw twin-critic head outputs: scalar Q values, or categorical logits under CE."""
         latent = torch.cat([self.get_latent(obs), actions], dim=-1)
         return self.critic1(latent), self.critic2(latent)
+
+    def paired_outputs(
+        self,
+        networks: tuple[nn.Module, ...],
+        obs: TensorDict,
+        actions: torch.Tensor,
+        next_obs: TensorDict,
+        next_actions: torch.Tensor,
+    ) -> list[tuple[torch.Tensor, torch.Tensor]]:
+        """Raw head outputs of each network at (s, a) and at (s', a'), from one forward pass.
+
+        BatchNorm then normalizes both halves with the same batch statistics. This is CrossQ's joint
+        forward pass (arXiv:1902.05605), which XQC (arXiv:2509.25174) runs for the online and the target
+        critics. Separate passes would normalize the two halves differently.
+        """
+        latent = torch.cat((
+            torch.cat([self.get_latent(obs), actions], dim=-1),
+            torch.cat([self.get_latent(next_obs), next_actions], dim=-1),
+        ))
+        return [network(latent).chunk(2) for network in networks]
 
     def losses_from_outputs(
         self, output1: torch.Tensor, output2: torch.Tensor, targets: torch.Tensor

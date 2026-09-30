@@ -495,6 +495,7 @@ import gymnasium as gym
 import numpy as np
 import torch
 import wandb
+import critic_batch_norm
 from rsl_rl.networks import EmpiricalNormalization
 from rsl_rl.runners import DistillationRunner, OnPolicyRunner
 from rsl_rl_sac.algorithms import reduce_twin_q
@@ -2378,6 +2379,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     elif agent_cfg.class_name == "OnPolicyRunner":
         runner = OnPolicyRunner(vec_env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
         print(f"[INFO] Loading model checkpoint from: {resume_path}")
+        # Play never uses the value network, so match a BatchNorm one without asking for the training flag.
+        checkpoint = torch.load(resume_path, map_location="cpu", weights_only=False)
+        if critic_batch_norm.in_checkpoint(checkpoint["model_state_dict"]):
+            critic_batch_norm.insert(runner.alg.policy.critic)
         runner.load(resume_path, load_optimizer=False)
         policy = runner.get_inference_policy(device=vec_env.unwrapped.device)
     elif agent_cfg.class_name == "DistillationRunner":

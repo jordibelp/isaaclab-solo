@@ -530,6 +530,7 @@ from rsl_rl.runners import DistillationRunner, OnPolicyRunner
 from rsl_rl_sac.runners import OffPolicyRunner
 
 import local_redundancy
+import critic_batch_norm
 import plasticity_metrics
 import plasticity_mitigation
 import observation_permutation
@@ -1442,6 +1443,8 @@ def _log_plasticity_metrics(runner, locs: dict, interval: int) -> None:
         forward_fn = forward_fns.get(name)
         if obs is not None and forward_fn is not None and activation_ok.get(name, False):
             try:
+                # In eval mode a BatchNorm critic reads its running statistics instead of moving them.
+                runner.eval_mode()
                 activations = plasticity_metrics.collect_hidden_activations(
                     module, lambda: forward_fn(obs), sample_cap=sample_cap
                 )
@@ -1454,6 +1457,8 @@ def _log_plasticity_metrics(runner, locs: dict, interval: int) -> None:
                     f"({type(exc).__name__}: {exc}); weight norm and gradient kurtosis stay enabled.",
                     flush=True,
                 )
+            finally:
+                runner.train_mode()
         for key, value in summary.items():
             if value == value:  # skip NaN
                 writer.add_scalar(f"Plasticity/summary/{name}/{key}", value, it)
@@ -2606,6 +2611,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         raise ValueError("Paper-style plasticity mitigation currently supports the OnPolicyRunner / PPO path only.")
     if agent_cfg.weight_normalization and agent_cfg.class_name not in ("OnPolicyRunner", "OffPolicyRunner"):
         raise ValueError("agent.weight_normalization supports the PPO and SAC runners only.")
+    ppo_critic_batch_norm = agent_cfg.class_name == "OnPolicyRunner" and agent_cfg.critic.batch_norm
+    if ppo_critic_batch_norm and (mitigation_spec.layer_norm or args_cli.shared_networks):
+        raise ValueError(
+            "agent.critic.batch_norm needs a separate PPO value network without the LayerNorm plasticity strategies."
+        )
     if mitigation_spec.boundary_shrink_perturb and not args_cli.plasticity_loss_exp:
         raise ValueError("The shrink-perturb strategy requires --plasticity-loss-exp distribution boundaries.")
     if args_cli.run_name is not None:
@@ -2950,6 +2960,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             f"{layer_norm_result.parameter_count} affine parameters).",
             flush=True,
         )
+    if ppo_critic_batch_norm:
+        if runner.alg.policy.is_recurrent:
+            raise ValueError("agent.critic.batch_norm does not support recurrent PPO policies.")
+        # Before any checkpoint load, so a resumed run restores the BatchNorm state too.
+        batch_norm_parameters = critic_batch_norm.insert(runner.alg.policy.critic)
+        runner.alg.optimizer.param_groups[0]["params"].extend(batch_norm_parameters)
+        print(
+            f"[INFO]: PPO value network: BatchNorm before each of its {len(batch_norm_parameters) // 2} hidden "
+            "activations. It uses batch statistics in rollouts and updates.",
+            flush=True,
+        )
     if agent_cfg.weight_normalization:
         # Attach before any checkpoint load: a load then overwrites the projected fresh weights.
         projected_layers = weight_normalization.attach(runner)
@@ -3139,6 +3160,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         _THIS_DIR / "local_redundancy.py",
                         _THIS_DIR / "plasticity_mitigation.py" if mitigation_spec.name != "none" else None,
                         _THIS_DIR / "weight_normalization.py" if agent_cfg.weight_normalization else None,
+                        _THIS_DIR / "critic_batch_norm.py" if ppo_critic_batch_norm else None,
                         _THIS_DIR / "observation_permutation.py" if args_cli.plasticity_loss_exp else None,
                     ]
                     if path
