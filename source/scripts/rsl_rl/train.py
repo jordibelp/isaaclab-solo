@@ -534,6 +534,7 @@ import plasticity_metrics
 import plasticity_mitigation
 import observation_permutation
 import solo12_rnd
+import weight_normalization
 from continual_backprop import build_continual_backprop_manager, collect_actor_critic_cbp_specs
 from isaaclab.envs import DirectMARLEnv, DirectMARLEnvCfg, DirectRLEnvCfg, ManagerBasedRLEnvCfg, multi_agent_to_single_agent
 from isaaclab.utils.dict import print_dict
@@ -2603,6 +2604,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         )
     if mitigation_spec.name != "none" and agent_cfg.class_name != "OnPolicyRunner":
         raise ValueError("Paper-style plasticity mitigation currently supports the OnPolicyRunner / PPO path only.")
+    if agent_cfg.weight_normalization and agent_cfg.class_name not in ("OnPolicyRunner", "OffPolicyRunner"):
+        raise ValueError("agent.weight_normalization supports the PPO and SAC runners only.")
     if mitigation_spec.boundary_shrink_perturb and not args_cli.plasticity_loss_exp:
         raise ValueError("The shrink-perturb strategy requires --plasticity-loss-exp distribution boundaries.")
     if args_cli.run_name is not None:
@@ -2947,6 +2950,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             f"{layer_norm_result.parameter_count} affine parameters).",
             flush=True,
         )
+    if agent_cfg.weight_normalization:
+        # Attach before any checkpoint load: a load then overwrites the projected fresh weights.
+        projected_layers = weight_normalization.attach(runner)
+        print(
+            "[INFO]: Weight normalization (XQC): each hidden unit's weights and bias are projected onto the "
+            f"unit sphere after every optimizer step; hidden layers per optimizer: {projected_layers}. "
+            "Output layers stay free.",
+            flush=True,
+        )
 
     runner.add_git_repo_to_log(__file__)
     reset_all_initial_policy_state = (
@@ -3126,6 +3138,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         _THIS_DIR / "plasticity_metrics.py",
                         _THIS_DIR / "local_redundancy.py",
                         _THIS_DIR / "plasticity_mitigation.py" if mitigation_spec.name != "none" else None,
+                        _THIS_DIR / "weight_normalization.py" if agent_cfg.weight_normalization else None,
                         _THIS_DIR / "observation_permutation.py" if args_cli.plasticity_loss_exp else None,
                     ]
                     if path

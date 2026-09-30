@@ -267,6 +267,13 @@ class RslRlBaseRunnerCfg:
     adam_beta2: float = 0.999
     """PPO policy or SAC actor/critic second Adam beta coefficient. Default is 0.999."""
 
+    weight_normalization: bool = False
+    """XQC-style weight normalization (arXiv:2509.25174) for the PPO or SAC actor and critic MLPs.
+
+    After every optimizer step, each hidden unit's incoming weights and bias are projected together onto the
+    unit sphere. Output layers stay free. See ``source/scripts/rsl_rl/weight_normalization.py``.
+    """
+
     num_steps_per_env: int = MISSING
     """The number of steps per environment per update."""
 
