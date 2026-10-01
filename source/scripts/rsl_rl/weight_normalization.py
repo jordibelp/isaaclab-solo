@@ -41,20 +41,23 @@ def project_to_unit_sphere(layers: list[nn.Linear]) -> None:
             layer.bias.div_(norm)
 
 
-def attach(runner) -> dict[str, int]:
-    """Project the actor and critic hidden layers now and after each of their optimizer steps.
+def attach(runner, *, actor: bool = True, critic: bool = True) -> dict[str, int]:
+    """Project selected hidden layers now and after their optimizer steps.
 
     Returns the number of projected layers per optimizer.
     """
     alg = runner.alg
     policy = getattr(alg, "policy", None)
     if policy is not None:  # PPO: one optimizer for actor and critic
+        if not (actor and critic):
+            raise ValueError("Per-network weight_norm flags are only supported for SAC.")
         networks = {"policy": (alg.optimizer, [policy.actor, policy.critic])}
     else:  # SAC
-        networks = {
-            "actor": (alg.actor_optimizer, [alg.actor.mlp]),
-            "critic": (alg.critic_optimizer, [alg.critic.critic1, alg.critic.critic2]),
-        }
+        networks = {}
+        if actor:
+            networks["actor"] = (alg.actor_optimizer, [alg.actor.mlp])
+        if critic:
+            networks["critic"] = (alg.critic_optimizer, [alg.critic.critic1, alg.critic.critic2])
 
     counts = {}
     for name, (optimizer, modules) in networks.items():
@@ -63,7 +66,7 @@ def attach(runner) -> dict[str, int]:
         project_to_unit_sphere(layers)
         optimizer.register_step_post_hook(lambda _opt, _args, _kwargs, layers=layers: project_to_unit_sphere(layers))
         counts[name] = len(layers)
-    if policy is None:
+    if policy is None and critic:
         # The target critics start as copies of the online critics, so they must start projected too.
         alg.critic.init_target_networks()
     return counts

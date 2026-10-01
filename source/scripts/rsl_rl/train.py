@@ -2609,7 +2609,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         )
     if mitigation_spec.name != "none" and agent_cfg.class_name != "OnPolicyRunner":
         raise ValueError("Paper-style plasticity mitigation currently supports the OnPolicyRunner / PPO path only.")
-    if agent_cfg.weight_normalization and agent_cfg.class_name not in ("OnPolicyRunner", "OffPolicyRunner"):
+    sac_weight_norm = agent_cfg.class_name == "OffPolicyRunner"
+    actor_weight_norm = agent_cfg.weight_normalization
+    critic_weight_norm = agent_cfg.weight_normalization
+    if sac_weight_norm and (agent_cfg.actor.weight_norm or agent_cfg.critic.weight_norm):
+        actor_weight_norm = agent_cfg.actor.weight_norm
+        critic_weight_norm = agent_cfg.critic.weight_norm
+    if (actor_weight_norm or critic_weight_norm) and agent_cfg.class_name not in ("OnPolicyRunner", "OffPolicyRunner"):
         raise ValueError("agent.weight_normalization supports the PPO and SAC runners only.")
     ppo_critic_batch_norm = agent_cfg.class_name == "OnPolicyRunner" and agent_cfg.critic.batch_norm
     if ppo_critic_batch_norm and (mitigation_spec.layer_norm or args_cli.shared_networks):
@@ -2971,9 +2977,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             "activations. It uses batch statistics in rollouts and updates.",
             flush=True,
         )
-    if agent_cfg.weight_normalization:
+    if actor_weight_norm or critic_weight_norm:
         # Attach before any checkpoint load: a load then overwrites the projected fresh weights.
-        projected_layers = weight_normalization.attach(runner)
+        projected_layers = weight_normalization.attach(runner, actor=actor_weight_norm, critic=critic_weight_norm)
         print(
             "[INFO]: Weight normalization (XQC): each hidden unit's weights and bias are projected onto the "
             f"unit sphere after every optimizer step; hidden layers per optimizer: {projected_layers}. "
@@ -3159,7 +3165,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         _THIS_DIR / "plasticity_metrics.py",
                         _THIS_DIR / "local_redundancy.py",
                         _THIS_DIR / "plasticity_mitigation.py" if mitigation_spec.name != "none" else None,
-                        _THIS_DIR / "weight_normalization.py" if agent_cfg.weight_normalization else None,
+                        _THIS_DIR / "weight_normalization.py" if actor_weight_norm or critic_weight_norm else None,
                         _THIS_DIR / "critic_batch_norm.py" if ppo_critic_batch_norm else None,
                         _THIS_DIR / "observation_permutation.py" if args_cli.plasticity_loss_exp else None,
                     ]

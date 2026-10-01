@@ -118,6 +118,22 @@ def test_sac_keeps_hidden_units_on_unit_sphere_and_output_layers_free(monkeypatc
     assert max(layer.weight.norm(dim=1).max().item() for layer in outputs) < 0.5
 
 
+@pytest.mark.parametrize("selected", ["actor", "critic"])
+def test_sac_can_project_only_one_network(monkeypatch, selected):
+    torch.manual_seed(0)
+    alg = _sac(monkeypatch, batch_norm=True)
+    actor_layers = wn.hidden_linear_layers(alg.actor.mlp)
+    critic_layers = wn.hidden_linear_layers(alg.critic.critic1) + wn.hidden_linear_layers(alg.critic.critic2)
+    counts = wn.attach(SimpleNamespace(alg=alg), actor=selected == "actor", critic=selected == "critic")
+    assert counts == ({"actor": 2} if selected == "actor" else {"critic": 4})
+    projected, free = (actor_layers, critic_layers) if selected == "actor" else (critic_layers, actor_layers)
+    assert _unit_error(projected) < 1e-6
+    assert _unit_error(free) > 0.1
+    alg.update()
+    assert _unit_error(projected) < 1e-5
+    assert _unit_error(free) > 0.1
+
+
 def test_sac_checkpoint_restores_weights_and_keeps_projection_hooks(monkeypatch, tmp_path):
     alg = _sac(monkeypatch)
     original_keys = (alg.actor.state_dict().keys(), alg.critic.state_dict().keys())

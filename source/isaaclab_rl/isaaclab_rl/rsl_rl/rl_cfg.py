@@ -79,6 +79,8 @@ class RslRlSacActorModelCfg:
     state_dependent_std: bool = True
     """Whether the actor network outputs log standard deviation as a function of state."""
     layer_norm: bool = False
+    weight_norm: bool = False
+    """Project actor hidden units after each step. Takes precedence over the legacy global switch."""
     log_std_min: float = -20.0
     log_std_max: float = 2.0
 
@@ -98,6 +100,8 @@ class RslRlSacCriticModelCfg:
     (s, a) and (s', a') share one forward pass, for the online and the target critics, and the actor loss
     uses the running statistics. Overrides ``layer_norm``.
     """
+    weight_norm: bool = False
+    """Project critic hidden units after each step. Takes precedence over the legacy global switch."""
     distributional_loss: str = "mse"
     """Critic loss: "mse", scalar-target "two_hot"/"hl_gauss", distributional Bellman "c51",
     or "mse_target_norm_popart" for MSE on PopArt-normalized targets."""
@@ -274,10 +278,12 @@ class RslRlBaseRunnerCfg:
     """PPO policy or SAC actor/critic second Adam beta coefficient. Default is 0.999."""
 
     weight_normalization: bool = False
-    """XQC-style weight normalization (arXiv:2509.25174) for the PPO or SAC actor and critic MLPs.
+    """XQC-style weight normalization (arXiv:2509.25174) for PPO or legacy SAC commands.
 
     After every optimizer step, each hidden unit's incoming weights and bias are projected together onto the
-    unit sphere. Output layers stay free. See ``source/scripts/rsl_rl/weight_normalization.py``.
+    unit sphere. For SAC, this applies to both networks only when both per-network flags are false.
+    Set either per-network flag to select the networks explicitly. Output layers stay free.
+    See ``source/scripts/rsl_rl/weight_normalization.py``.
     """
 
     num_steps_per_env: int = MISSING
