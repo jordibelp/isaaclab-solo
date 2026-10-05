@@ -208,6 +208,10 @@ parser.add_argument(
 )
 parser.add_argument("--duration_s", type=float, default=5.0, help="How long to run the policy.")
 parser.add_argument(
+    "--bringup_clip_rad", "--bringup-clip-rad", type=float, default=0.0,
+    help="Clip q_des - q before position PD, like the hardware bring-up [rad]. 0 disables clipping.",
+)
+parser.add_argument(
     "--episode_length_s",
     type=float,
     default=40.0,
@@ -433,6 +437,8 @@ parser.add_argument(
 cli_args.add_rsl_rl_args(parser)
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
+if not math.isfinite(args_cli.bringup_clip_rad) or args_cli.bringup_clip_rad < 0.0:
+    parser.error("--bringup_clip_rad must be finite and non-negative (0 disables clipping)")
 hydra_args = _consume_record_sequence_hydra_override(args_cli, hydra_args)
 RECORD_SEQUENCE = None
 
@@ -2121,6 +2127,8 @@ class FrontFeetViewHint:
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
+    env_cfg.bringup_clip_rad = args_cli.bringup_clip_rad
+    print(f"[INFO] Bring-up position-error clipping: {env_cfg.bringup_clip_rad:g} rad (0 = disabled).", flush=True)
 
     if args_cli.seed is not None:
         agent_cfg.seed = args_cli.seed
@@ -2266,6 +2274,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     raw_env = env.unwrapped
     sequence_recorder = None
     if args_cli.record_sequence:
+        raw_env._record_bringup_errors = True
         analysis_output_root = args_cli.analysis_output_dir or os.path.join(log_dir, "analysis", "play_direct_0325_rsl")
         checkpoint_label = checkpoint_label_from_path(resume_path)
         analysis_run_name = args_cli.analysis_wandb_name or f"direct_rsl_{args_cli.task}_record_sequence"
@@ -2284,6 +2293,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 "checkpoint_label": checkpoint_label,
                 "record_sequence_total_s": record_sequence_total_s(RECORD_SEQUENCE),
                 "dt": float(dt),
+                "bringup_clip_rad": float(args_cli.bringup_clip_rad),
+                "q_error_sampling": "before the last physics substep of each policy step",
                 "args": vars(args_cli),
                 "training_wandb_run_path": training_wandb_run_path,
                 "training_actuator_stiffness_kp": training_kp,
@@ -2575,7 +2586,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 pass
 
         if sequence_recorder is not None:
-            q_desired = getattr(raw_env, "_delayed_processed_actions", None)
+            q_desired = getattr(raw_env, "_bringup_q_desired", None)
+            if q_desired is None:
+                q_desired = getattr(raw_env, "_delayed_processed_actions", None)
             if q_desired is None:
                 q_desired = getattr(raw_env, "_processed_actions", None)
             if q_desired is None:
@@ -2586,6 +2599,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 q=raw_env._robot.data.joint_pos[0, raw_env._joint_ids],
                 q_desired=q_desired[0],
                 torque=raw_env._robot.data.applied_torque[0, raw_env._joint_ids],
+                q_error_requested=raw_env._bringup_requested_error[0],
+                q_error_applied=raw_env._bringup_applied_error[0],
             )
 
         terms = _compute_reward_terms(raw_env)

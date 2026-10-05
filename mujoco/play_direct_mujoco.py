@@ -78,6 +78,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--kd", type=float, default=None,
                         help=f"PD damping (default: env.kd override, else {DEFAULT_KD:g} = Isaac play with "
                              f"--disable_training_gain_sync; training used {TRAINING_KD:g}).")
+    parser.add_argument("--bringup_clip_rad", "--bringup-clip-rad", type=float, default=0.0,
+                        help="Clip q_des - q before position PD [rad]; 0 disables clipping.")
     parser.add_argument("--camera", choices=("free", "side", "front"), default="side",
                         help="Initial viewer camera; press C in the viewer to cycle.")
     parser.add_argument("--show-viewer-ui", action="store_true",
@@ -128,7 +130,7 @@ def consume_env_overrides(unknown: list[str]) -> tuple[dict, list[str]]:
             overrides[key.removeprefix("env.")] = raw.lower() == "true"
             continue
         try:
-            if key in ("env.kp", "env.kd"):
+            if key in ("env.kp", "env.kd", "env.effort_limit_sim"):
                 overrides[key.removeprefix("env.")] = float(raw)
             elif key in _ENV_RANGE_KEYS:
                 low, high = ast.literal_eval(raw)
@@ -204,7 +206,10 @@ def quat_rotation(q_wxyz: np.ndarray) -> np.ndarray:
 
 class Solo12Mujoco:
     def __init__(self, model_path: Path, kp: float = DEFAULT_KP, kd: float = DEFAULT_KD,
-                 spawn_z: float = 0.35, env_overrides: dict | None = None):
+                 spawn_z: float = 0.35, env_overrides: dict | None = None, bringup_clip_rad: float = 0.0):
+        if not math.isfinite(bringup_clip_rad) or bringup_clip_rad < 0.0:
+            raise ValueError("bringup_clip_rad must be finite and non-negative (0 disables clipping).")
+        self.bringup_clip_rad = float(bringup_clip_rad)
         self.model = mujoco.MjModel.from_xml_path(str(model_path))
         self.data = mujoco.MjData(self.model)
         self.joint_qpos = np.array([self.model.jnt_qposadr[mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, n)] for n in JOINT_NAMES])
@@ -213,6 +218,9 @@ class Solo12Mujoco:
         # Keep legacy XML limits unless explicitly overridden. SAC's saved action
         # scaling already encodes the training soft limits; do not rescale the actor.
         overrides = env_overrides or {}
+        self.effort_limit = float(overrides.get("effort_limit_sim", EFFORT_LIMIT))
+        if not math.isfinite(self.effort_limit) or self.effort_limit <= 0.0:
+            raise ValueError("env.effort_limit_sim must be finite and positive.")
         for name, actuator_id in zip(JOINT_NAMES, self.actuator_ids):
             joint_type = name.split("_")[1]
             if overrides.get(f"use_asymmetric_{joint_type}_limits", False):
@@ -241,8 +249,8 @@ class Solo12Mujoco:
         self.model.actuator_gainprm[self.actuator_ids, 0] = self.kp
         self.model.actuator_biasprm[self.actuator_ids, 1] = -self.kp
         self.model.actuator_biasprm[self.actuator_ids, 2] = -self.kd
-        self.model.actuator_forcerange[self.actuator_ids, 0] = -EFFORT_LIMIT
-        self.model.actuator_forcerange[self.actuator_ids, 1] = EFFORT_LIMIT
+        self.model.actuator_forcerange[self.actuator_ids, 0] = -self.effort_limit
+        self.model.actuator_forcerange[self.actuator_ids, 1] = self.effort_limit
 
     def reset(self) -> None:
         mujoco.mj_resetData(self.model, self.data)
@@ -287,9 +295,15 @@ class Solo12Mujoco:
 
     def step(self, action: np.ndarray) -> None:
         self.action = np.asarray(action).copy()
-        self.data.ctrl[self.actuator_ids] = SAFE_Q + ACTION_SCALE * self.action
+        requested_target = SAFE_Q + ACTION_SCALE * self.action
+        self.data.ctrl[self.actuator_ids] = requested_target
         self._base_contact_latched = False
         for _ in range(DECIMATION):
+            if self.bringup_clip_rad > 0.0:
+                q = self.data.qpos[self.joint_qpos]
+                self.data.ctrl[self.actuator_ids] = q + np.clip(
+                    requested_target - q, -self.bringup_clip_rad, self.bringup_clip_rad
+                )
             mujoco.mj_step(self.model, self.data)
             self._base_contact_latched |= self._base_hit_ground_now()
 
@@ -641,7 +655,8 @@ def run_tracking(args, sim: Solo12Mujoco, policy: Policy, checkpoint: Path, mode
         "action_scale": ACTION_SCALE,
         "kp": sim.kp,
         "kd": sim.kd,
-        "effort_limit_nm": EFFORT_LIMIT,
+        "effort_limit_nm": sim.effort_limit,
+        "bringup_clip_rad": sim.bringup_clip_rad,
         "model_mass_kg": float(sim.model.body_mass.sum()),
         "headless": args.headless,
         "realtime": args.realtime,
@@ -721,6 +736,8 @@ def run_tracking(args, sim: Solo12Mujoco, policy: Policy, checkpoint: Path, mode
 
 def main() -> None:
     args, unknown = build_parser().parse_known_args()
+    if not math.isfinite(args.bringup_clip_rad) or args.bringup_clip_rad < 0.0:
+        raise SystemExit("--bringup_clip_rad must be finite and non-negative (0 disables clipping)")
     if args.task != "solo12-two-feet" or args.num_envs != 1:
         raise ValueError("MuJoCo sim-to-sim currently supports --task=solo12-two-feet --num_envs=1 only")
     env_overrides, ignored = consume_env_overrides(unknown)
@@ -752,8 +769,11 @@ def main() -> None:
     policy = Policy(checkpoint)
     print(f"[INFO] Loaded {policy.checkpoint_format.upper()} actor for deterministic inference (critic not used).")
     model_path = Path(__file__).with_name("solo12.xml").resolve()
-    sim = Solo12Mujoco(model_path, kp=kp, kd=kd, spawn_z=args.spawn_z, env_overrides=env_overrides)
+    sim = Solo12Mujoco(model_path, kp=kp, kd=kd, spawn_z=args.spawn_z, env_overrides=env_overrides,
+                     bringup_clip_rad=args.bringup_clip_rad)
     print(f"[INFO] MuJoCo {mujoco.__version__}; model mass={sim.model.body_mass.sum():.6f} kg")
+    print(f"[INFO] Bring-up position-error clipping: {sim.bringup_clip_rad:g} rad (0 = disabled); "
+          f"effort limit={sim.effort_limit:g} Nm.", flush=True)
     print(f"[INFO] PD gains kp={sim.kp:g} kd={sim.kd:g} "
           f"(Isaac play w/ --disable_training_gain_sync: {DEFAULT_KP:g}/{DEFAULT_KD:g}; "
           f"training run: {TRAINING_KP:g}/{TRAINING_KD:g})", flush=True)

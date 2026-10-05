@@ -211,6 +211,8 @@ class Solo12Env(DirectRLEnv):
     cfg: Solo12EnvCfg
 
     def __init__(self, cfg: Solo12EnvCfg, render_mode: str | None = None, **kwargs):
+        if not math.isfinite(cfg.bringup_clip_rad) or cfg.bringup_clip_rad < 0.0:
+            raise ValueError("bringup_clip_rad must be finite and non-negative (0 disables clipping).")
         cfg.refresh_runtime_dependent_config()
         cfg.prepare_curriculum_event_randomization()
         cfg.apply_events_randomization_setting()
@@ -1387,7 +1389,21 @@ class Solo12Env(DirectRLEnv):
         self._applied_actions = (
             self._delayed_processed_actions - self._q_offset_action_and_obs
         ) / self.cfg.action_scale
-        self._robot.set_joint_position_target(self._delayed_processed_actions, joint_ids=self._joint_ids)
+        target = self._delayed_processed_actions
+        record_errors = getattr(self, "_record_bringup_errors", False)
+        if self.cfg.bringup_clip_rad > 0.0 or record_errors:
+            q = self._robot.data.joint_pos[:, self._joint_ids]
+            requested_error = target - q
+            applied_error = requested_error
+            if self.cfg.bringup_clip_rad > 0.0:
+                applied_error = requested_error.clamp(-self.cfg.bringup_clip_rad, self.cfg.bringup_clip_rad)
+                target = q + applied_error
+            if record_errors:
+                # Keep pre-physics samples even if step() automatically resets the env afterwards.
+                self._bringup_q_desired = self._delayed_processed_actions.clone()
+                self._bringup_requested_error = requested_error.clone()
+                self._bringup_applied_error = applied_error.clone()
+        self._robot.set_joint_position_target(target, joint_ids=self._joint_ids)
 
     def step(self, action: torch.Tensor):
         """Step the env while recording base IMU history at physics rate."""

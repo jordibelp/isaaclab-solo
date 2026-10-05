@@ -382,6 +382,8 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     state_space = 0 # why is this zero? 
     kp = KP; kd = KD
     effort_limit_sim = EFFORT_LIMIT_SIM
+    # Hardware bring-up clips the position error before PD. Zero leaves targets unchanged.
+    bringup_clip_rad = 0.0
     proportion_steps = proportionHfDiscreteObstaclesTerrain; proportion_low_random_rough_terrain = proportionHfRandomUniformTerrain
     remove_root_lin_vel_b_from_obs = False
     # Selects the policy/observation layout. Supported values:
