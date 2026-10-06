@@ -865,6 +865,34 @@ def test_checkpoint_architecture_and_loss_survive_transfer(tmp_path, critic_loss
     torch.testing.assert_close(restored_critic(obs, actions=actions), critic(obs, actions=actions), rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("sidecar", ["json", "yaml", "none"])
+@pytest.mark.parametrize("symlog_limit,linear_limit,bins", [(5.0, 0.0, 199), (3.0, 0.0, 101), (3.0, 20.0, 101)])
+def test_checkpoint_support_is_reconstructed_exactly(tmp_path, sidecar, symlog_limit, linear_limit, bins):
+    obs = TensorDict({"policy": torch.randn(8, LORA_OBS_DIM)}, batch_size=[8])
+    groups = {"actor": ["policy"], "critic": ["policy"]}
+    actor = SACActorModel(obs, groups, "actor", LORA_ACTION_DIM, hidden_dims=[16, 8])
+    support_cfg = {"distributional_loss": "two_hot", "distributional_num_bins": bins,
+                   "distributional_symlog_limit": symlog_limit, "distributional_linear_limit": linear_limit}
+    critic = SACCriticModel(obs, groups, "critic", 1, num_actions=LORA_ACTION_DIM,
+                           hidden_dims=[16, 8], **support_cfg)
+    checkpoint = tmp_path / "model.pt"
+    torch.save({"actor_state_dict": actor.state_dict(), "critic_state_dict": critic.state_dict()}, checkpoint)
+    if sidecar == "json":
+        (tmp_path / "run_config.json").write_text(json.dumps({"agent": {"critic": support_cfg}}))
+    elif sidecar == "yaml":
+        import yaml
+        (tmp_path / "params").mkdir()
+        (tmp_path / "params" / "agent.yaml").write_text(yaml.safe_dump({"critic": support_cfg}))
+    args = train_sac.build_parser().parse_args([f"--checkpoint={checkpoint}"])
+    cfg = runner_config(args)
+    train_sac._configure_checkpoint_models(cfg, args)
+    cfg["critic"].pop("class_name")
+    restored = SACCriticModel(obs, groups, "critic", 1, num_actions=LORA_ACTION_DIM, **cfg["critic"])
+    # Check BEFORE load_state_dict overwrites the support: SAC.load rejects any mismatch.
+    assert torch.equal(restored.value_support, critic.value_support)
+    assert cfg["critic"].get("distributional_linear_limit", 0.0) == linear_limit
+
+
 @pytest.mark.parametrize("saved,flag,expected", [
     (None, None, "min"), ("mean", None, "mean"), ("min", None, "min"),
     ("mean", "min", "min"), (None, "mean", "mean"),

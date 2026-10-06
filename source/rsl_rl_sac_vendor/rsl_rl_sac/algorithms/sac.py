@@ -20,6 +20,7 @@ from rsl_rl_sac.storage import ReplayBuffer
 from rsl_rl_sac.utils import resolve_callable, resolve_obs_groups, resolve_optimizer
 
 Q_REDUCTION_METHODS = ("min", "mean", "mean_pi_q_none")
+Q_STAT_NAMES = ("CriticQ/q1_mean", "CriticQ/q2_mean", "CriticQ/mean", "CriticQ/reduced_mean")
 
 
 def reduce_twin_q(q1: torch.Tensor, q2: torch.Tensor, method: str) -> torch.Tensor:
@@ -311,6 +312,8 @@ class SAC:
         critic_clipped_grad_norms, actor_clipped_grad_norms = [], []
         rnd_losses, mirror_losses = [], []
         summed_dist_stats = None
+        summed_q_stats = None
+        policy_q_means = []
         use_mirror_loss = self.symmetry is not None and self.symmetry["use_mirror_loss"]
         # A mirror loss that is only logged is measured on one mini-batch every few updates.
         log_mirror_loss = (
@@ -380,6 +383,8 @@ class SAC:
             critic1_loss, critic2_loss, output1, output2 = self._critic_losses_fn(
                 obs_batch, actions_batch, next_obs_batch, next_actions, loss_targets
             )
+            q_stats = self._critic_q_stats(output1.detach(), output2.detach())
+            summed_q_stats = q_stats if summed_q_stats is None else summed_q_stats + q_stats
             if self.critic.distributional_critic_ce:
                 with torch.no_grad():
                     dist_stats = self._critic_distribution_stats(output1.detach(), output2.detach(), targets)
@@ -416,6 +421,7 @@ class SAC:
                         self.critic.train(critic_was_training)
                 else:
                     log_prob, q_new = self._actor_objective_fn(obs_batch)
+                policy_q_means.append(q_new.detach().mean())
             else:
                 with torch.no_grad():
                     _, log_prob = self.actor.sample_action_logp(obs_batch)
@@ -501,14 +507,16 @@ class SAC:
                 critic1_losses, critic2_losses, actor_losses, alpha_losses, rnd_losses, mirror_losses,
                 critic_grad_norms, actor_grad_norms, alpha_grad_norms,
                 critic_clipped_grad_norms, actor_clipped_grad_norms,
+                policy_q_means,
             )
         ]
         (
             critic1_sum, critic2_sum, actor_sum, alpha_sum, rnd_sum, mirror_sum,
             critic_grad_norm_sum, actor_grad_norm_sum, alpha_grad_norm_sum,
-            critic_clipped_grad_norm_sum, actor_clipped_grad_norm_sum, alpha,
+            critic_clipped_grad_norm_sum, actor_clipped_grad_norm_sum, policy_q_sum, alpha,
+            *q_sums,
         ) = torch.stack(
-            [*sums, self.log_alpha.detach().exp()]
+            [*sums, self.log_alpha.detach().exp(), *summed_q_stats.unbind()]
         ).tolist()
         if self.auto_alpha:
             self.alpha = alpha
@@ -519,6 +527,9 @@ class SAC:
             "actor": actor_sum / num_actor_updates,
             "alpha": alpha_sum / num_updates,
         }
+        loss_dict.update(zip(Q_STAT_NAMES, (value / num_updates for value in q_sums)))
+        if policy_q_means:
+            loss_dict["CriticQ/policy_mean"] = policy_q_sum / len(policy_q_means)
         if critic_grad_norms:
             loss_dict["Gradients/grad_norm_critic"] = critic_grad_norm_sum / len(critic_grad_norms)
             loss_dict["Gradients/clipped_grad_norm_critic"] = critic_clipped_grad_norm_sum / len(critic_grad_norms)
@@ -651,6 +662,14 @@ class SAC:
             (target_q,) = loss_targets
             critic1_loss, critic2_loss = self.critic.losses_from_outputs(output1, output2, target_q)
         return critic1_loss, critic2_loss, output1, output2
+
+    @torch.no_grad()
+    def _critic_q_stats(self, output1: torch.Tensor, output2: torch.Tensor) -> torch.Tensor:
+        """Raw Q on replay actions, decoded on the actual saved support before the update."""
+        q1 = self.critic.q_from_output(output1)
+        q2 = self.critic.q_from_output(output2)
+        return torch.stack((q1.mean(), q2.mean(), 0.5 * (q1 + q2).mean(),
+                            reduce_twin_q(q1, q2, self.q_reduction_method).mean()))
 
     def _critic_distribution_stats(
         self, output1: torch.Tensor, output2: torch.Tensor, targets: tuple[torch.Tensor, ...]

@@ -829,7 +829,8 @@ def _configure_checkpoint_models(cfg, args) -> None:
             if batch_norm:
                 cfg[name]["batch_norm"] = True
             # Shapes cannot reveal activation functions or the categorical label scheme.
-            for key in ("activation", "log_std_min", "log_std_max", "distributional_loss", "hl_gauss_sigma_ratio"):
+            for key in ("activation", "log_std_min", "log_std_max", "distributional_loss", "hl_gauss_sigma_ratio",
+                        "distributional_symlog_limit", "distributional_linear_limit"):
                 if key in saved_cfg.get(name, {}):
                     cfg[name][key] = saved_cfg[name][key]
         cfg["actor"]["state_dependent_std"] = "log_std" not in payload["actor_state_dict"]
@@ -840,7 +841,13 @@ def _configure_checkpoint_models(cfg, args) -> None:
             if cfg["critic"]["distributional_loss"] == "c51":
                 raise ValueError("MJX SAC fine-tuning does not implement C51 Bellman projection.")
             cfg["critic"]["distributional_num_bins"] = support.numel()
-            cfg["critic"]["distributional_symlog_limit"] = support[-1].log1p().item()
+            # The saved raw-unit atoms distinguish linear and symexp spacing even without a sidecar.
+            positive = torch.linspace(0, support[-1].item(), support.numel() // 2 + 1)
+            linear_support = torch.cat((-positive[1:].flip(0), positive))
+            cfg["critic"]["distributional_linear_limit"] = (
+                support[-1].item() if torch.equal(support, linear_support) else 0.0
+            )
+            cfg["critic"].setdefault("distributional_symlog_limit", support[-1].log1p().item())
         else:
             cfg["critic"]["distributional_loss"] = "mse"
         if args.critic_loss is not None and (args.critic_loss == "mse") != (support is None):
