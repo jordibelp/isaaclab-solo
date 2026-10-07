@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Solo12 · Joint lab</title>
+<style>
+:root{color-scheme:dark;--bg:#11191e;--panel:#182329;--line:#304149;--text:#e6eeed;--muted:#a0b2b6;--accent:#ffc56c;--teal:#60dbc6;--rear:#83baff}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px system-ui,sans-serif}header{height:76px;padding:14px 26px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--line)}h1{font-size:22px;letter-spacing:-.5px;margin:0}h1 span{color:var(--accent)}header p{margin:4px 0 0;color:var(--muted);font-size:12px}.tag{border:1px solid var(--line);padding:7px 11px;border-radius:20px;color:var(--teal);font-size:12px}main{display:grid;grid-template-columns:425px 1fr;height:calc(100vh - 76px)}aside{overflow:auto;padding:18px;background:var(--panel);border-right:1px solid var(--line)}section{padding-bottom:16px;margin-bottom:16px;border-bottom:1px solid var(--line)}h2{font-size:11px;text-transform:uppercase;letter-spacing:1.2px;margin:0 0 10px;color:var(--accent)}p.hint{color:var(--muted);font-size:12px;line-height:1.5;margin:8px 0}.row{display:flex;gap:7px;align-items:center;margin:8px 0;flex-wrap:wrap}.row label{flex:1}input,select,button,textarea{font:inherit;border:1px solid var(--line);color:var(--text);background:#101b20;border-radius:7px}select{padding:9px;width:100%}button{padding:8px 11px;cursor:pointer}button:hover{background:#304149}button.primary{background:var(--accent);color:#20272a;border-color:var(--accent);font-weight:700}.wide{width:100%}input[type=range]{width:100%;accent-color:var(--accent);cursor:pointer}input[type=number]{width:70px;padding:5px}input[type=checkbox]{accent-color:var(--accent)}.leg{border:1px solid var(--line);border-radius:10px;padding:11px;margin:10px 0}.leg h3{display:flex;justify-content:space-between;font-size:13px;margin:0 0 8px;color:var(--accent)}.leg.rear h3{color:var(--rear)}.leg.rear input[type=range]{accent-color:var(--rear)}.joint-row{display:grid;grid-template-columns:43px minmax(45px,1fr) 68px 27px 27px;gap:5px;align-items:center}.joint-row label{font-size:12px}.joint-row button{padding:5px 0;font-size:11px}.limits-label{margin:2px 0 9px 48px;font:10px ui-monospace,monospace;color:var(--muted)}.joint:last-child .limits-label{margin-bottom:0}.joint.warning input[type=number]{border-color:var(--accent);color:var(--accent)}.buttons{display:flex;gap:6px;flex-wrap:wrap}.buttons button{flex:1;font-size:12px}.boundary{display:grid;grid-template-columns:minmax(90px,1fr) 63px 63px 60px;gap:5px;align-items:center;font-size:11px;margin:7px 0}.boundary input{width:100%}.boundary.header{color:var(--muted)}details{margin:12px 0}summary{cursor:pointer;font-size:13px;color:var(--muted)}textarea{width:100%;resize:vertical;font:11px ui-monospace,monospace;padding:9px;line-height:1.5}#stage{position:relative;min-width:0;overflow:hidden;background:var(--bg)}canvas{display:block;touch-action:none}#stats{position:absolute;left:22px;right:22px;top:20px;display:flex;flex-wrap:wrap;gap:8px;pointer-events:none}.stat{background:#17252be8;border:1px solid var(--line);border-radius:10px;padding:9px 14px}.stat small{display:block;font-size:10px;text-transform:uppercase;letter-spacing:1px;color:var(--muted)}.stat strong{display:block;font-size:18px;margin-top:3px;font-weight:550}#view-tools{position:absolute;top:106px;left:22px;display:flex;gap:5px}#view-tools button{font-size:12px;background:#17252bdd}#legend{position:absolute;bottom:105px;left:22px;color:#b7c8cc;font-size:12px;line-height:1.8;pointer-events:none}.dot{display:inline-block;border-radius:50%;width:8px;height:8px;margin-right:5px}#status{position:absolute;bottom:40px;left:22px;right:22px;background:#17252be8;border:1px solid var(--line);border-radius:8px;padding:10px 13px;font-size:12px;line-height:1.5;pointer-events:none}#status.warn{border-color:var(--accent);color:#ffd69e}#camera-hint{position:absolute;bottom:14px;left:22px;color:var(--muted);font-size:11px}#message{color:var(--teal);min-height:18px;font-size:12px;line-height:1.5}#message.error{color:#ffab8c}#fatal{position:absolute;top:40%;left:10%;right:10%;color:#ffb391}#pose-values{font:10px ui-monospace,monospace;line-height:1.6;white-space:pre-wrap;color:var(--muted)}button:disabled{opacity:.4;cursor:not-allowed}@media(max-width:950px){main{grid-template-columns:370px 1fr}aside{padding:12px}#stats{left:12px;right:12px;gap:5px}.stat{padding:7px 9px}.stat strong{font-size:15px}#view-tools{left:12px}}@media(max-width:680px){header{padding:12px 16px}.tag{display:none}main{display:flex;flex-direction:column-reverse;height:auto}#stage{height:60vh;min-height:420px}aside{overflow:visible;border-right:0}#legend{bottom:118px}#stats{gap:5px}.stat{padding:6px 8px}.stat strong{font-size:14px}#view-tools{top:99px}#status{left:12px;right:12px;font-size:11px}}
+</style>
+<style>.joint-row input[type=number]{width:68px;padding:5px 3px;font:12px ui-monospace,monospace;appearance:textfield}.joint-row input::-webkit-inner-spin-button,.joint-row input::-webkit-outer-spin-button{appearance:none;margin:0}</style>
+</head>
+<body>
+<header><div><h1>Solo12 <span>/ Joint lab</span></h1><p>Move the joints. Inspect the limits. See the whole configuration.</p></div><span class="tag">Offline · geometry only</span></header>
+<main>
+<aside>
+<section>
+<h2>Explore a configuration</h2>
+<select id="range-mode" aria-label="Slider range"><option value="physical">Physical limits · full joint travel</option><option value="soft">Soft limits · physical limits minus margins</option></select>
+<p class="hint">Angles are absolute joint positions in degrees, not policy actions. Start with the limits from your ROS command.</p>
+<div class="buttons"><button id="safe" class="primary">Safe stand</button><button id="zero">All zero</button><button id="all-min">All min</button><button id="all-max">All max</button></div>
+</section>
+<div id="joint-controls"></div>
+<p class="hint">↓ / ↑ set that joint to its active minimum / maximum. Amber values are outside the soft range.</p>
+<section>
+<details><summary>Edit limits / paste a launch command</summary>
+<div class="row"><select id="preset" aria-label="Limit preset"><option value="command">Your ROS command</option><option value="task">Current task defaults</option><option value="custom" disabled>Custom limits</option></select></div>
+<div class="row"><input id="asymmetric-thigh" type="checkbox" checked><label for="asymmetric-thigh">Separate front / rear thighs</label></div>
+<div class="row"><input id="asymmetric-calf" type="checkbox"><label for="asymmetric-calf">Separate front / rear calves</label></div>
+<div class="boundary header"><span>Joint group</span><span>Min °</span><span>Max °</span><span>Margin °</span></div>
+<div id="limit-controls"></div><button id="apply-limits" class="wide">Apply edited limits</button>
+<p class="hint">Soft range = [physical min + margin, physical max − margin]. A smaller range clamps the current pose.</p>
+<textarea id="launch-command" rows="4" aria-label="Launch command or env overrides" placeholder="Paste your ros2 launch command or env joint-limit overrides here"></textarea>
+<button id="import-command" class="wide">Import limit overrides</button>
+<p class="hint">Reads explicit joint-limit fields and asymmetric flags only. Other fields, YAML files, and profile defaults are not loaded. Missing fields keep the current values.</p>
+<textarea id="limit-overrides" rows="3" readonly aria-label="Current joint limit overrides"></textarea>
+<button id="copy-limits" class="wide">Copy limit overrides</button>
+</details>
+<details><summary>Body position &amp; display</summary>
+<div class="row"><label for="base-height">Base height (m)</label><input id="base-height" type="number" min="0.1" max="1.5" step="0.01" value="0.35"></div>
+<div class="row"><label for="base-pitch">Nose-up pitch (°)</label><input id="base-pitch" type="number" min="-180" max="180" step="1" value="0"></div>
+<div class="row"><label for="base-yaw">Heading (°)</label><input id="base-yaw" type="number" min="-180" max="180" step="1" value="0"></div>
+<div class="row"><input id="axes" type="checkbox"><label for="axes">Show joint rotation axes</label></div>
+<div class="row"><input id="wireframe" type="checkbox"><label for="wireframe">Wireframe meshes</label></div>
+<div class="row"><input id="ground" type="checkbox" checked><label for="ground">Show ground and 10 cm grid</label></div>
+<button id="reset-body" class="wide">Reset body position</button>
+<p class="hint">The body moves independently. This does not run the two-feet reset sampler.</p>
+</details>
+<details><summary>Save / load joint positions</summary>
+<div class="row"><button id="save-pose">Save pose JSON</button><button id="load-pose">Load pose JSON</button><input id="pose-file" type="file" accept=".json,application/json" hidden></div>
+<select id="copy-units" aria-label="Copy angle units"><option value="rad">Radians · IsaacLab / ROS</option><option value="deg">Degrees · inspection</option></select>
+<button id="copy-pose" class="wide" style="margin-top:7px">Copy joint position array</button>
+<pre id="pose-values"></pre>
+<p class="hint">Order: FL, FR, RL (HL), RR (HR). Each leg: hip, thigh, calf. Saved poses include both units and the limit settings.</p>
+</details>
+<p id="message" role="status" aria-live="polite"></p>
+</section>
+<p class="hint">Uses the same robot model as the two-feet Pose Lab. This view does not test self-collisions, contacts, motor effort or hardware safety. kp, kd and torque caps do not affect this frozen geometry.</p>
+</aside>
+<div id="stage">
+<div id="stats"><div class="stat"><small>Slider range</small><strong id="mode-value">Physical</strong></div><div class="stat"><small>Soft range</small><strong id="margin-value">—</strong></div><div class="stat"><small>Base height</small><strong id="height-value">0.350 m</strong></div></div>
+<div id="view-tools"><button id="orbit">3D</button><button id="side">Side</button><button id="front">Front</button><button id="top">Top</button><button id="fit">Fit</button></div>
+<div id="legend"><span class="dot" style="background:#ffa050"></span>Front feet · FL / FR &nbsp; <span class="dot" style="background:#83baff"></span>Rear feet · RL / RR<br>Body +X = front · +Y = left · +Z = up</div>
+<div id="status">Loading robot meshes…</div><div id="camera-hint">Drag to orbit · scroll to zoom</div><div id="fatal" hidden></div>
+</div>
+</main>
+<!--
+/* THREE_LICENSE */
+-->
+<script>/* THREE_LIBRARY */</script>
+<script>
+'use strict';
+const DATA = /* MODEL_DATA */null;
+const $ = id => document.getElementById(id), RAD = Math.PI / 180;
+const names = DATA.defaults.joint_names;
+const legs = ['FL','FR','RL','RR'], types = ['hip','thigh','calf'];
+const clone = x => JSON.parse(JSON.stringify(x));
+let limits = clone(DATA.command_limits), angles = DATA.defaults.joint_pose.map(x => x / RAD);
+let mode = 'physical', bodyPose = {height:.35,pitch:0,yaw:0}, lastClamp = [];
+const controls = {}, limitRows = {};
+const limitGroups = ['hip','thigh','front_thigh','rear_thigh','calf','front_calf','rear_calf'];
+function bounds(name, kind = mode, settings = limits) {
+  const type = name.split('_')[1], region = name[0] === 'F' ? 'front' : 'rear';
+  const separate = type !== 'hip' && settings['use_asymmetric_'+type+'_limits'];
+  const pair = settings['joint_physical_limit_'+(separate ? region+'_' : '')+type];
+  const margin = kind === 'soft' ? settings['joint_soft_limit_'+type+'_delta'] : 0;
+  return [pair[0]+margin,pair[1]-margin];
+}
+function validateLimits(settings) {
+  for (const type of ['thigh','calf']) if (typeof settings['use_asymmetric_'+type+'_limits'] !== 'boolean') throw Error(type+': asymmetric flag must be a boolean.');
+  for (const group of limitGroups) {
+    const pair = settings['joint_physical_limit_'+group];
+    if (!Array.isArray(pair) || pair.length !== 2 || !pair.every(Number.isFinite) || pair[0] >= pair[1])
+      throw Error(group+': enter a finite minimum smaller than the maximum.');
+  }
+  for (const type of types) {
+    const delta = settings['joint_soft_limit_'+type+'_delta'];
+    if (!Number.isFinite(delta) || delta < 0) throw Error(type+': margin must be zero or positive.');
+  }
+  for (const name of names) {const [lo,hi] = bounds(name,'soft',settings); if (lo >= hi) throw Error(name+': margin leaves no soft range.');}
+}
+function message(text, error = false) {$('message').textContent=text;$('message').classList.toggle('error',error);}
+function guarded(fn) {try {fn();} catch(e) {message(e.message,true);}}
+function setAngles(values) {
+  if (values.length !== 12 || !values.every(Number.isFinite)) throw Error('Enter 12 finite joint angles in degrees.');
+  lastClamp=[];
+  angles=values.map((value,i)=>{const [lo,hi]=bounds(names[i]);const clipped=Math.min(hi,Math.max(lo,value));if(Math.abs(value-clipped)>1e-8)lastClamp.push(names[i]);return clipped;});
+  updatePose();
+}
+for (const leg of legs) {
+  const card=document.createElement('div');card.className='leg'+(leg[0]==='R'?' rear':'');
+  const title=document.createElement('h3');title.textContent=({FL:'Front left',FR:'Front right',RL:'Rear left',RR:'Rear right'})[leg];
+  const code=document.createElement('span');code.textContent=leg;title.append(code);card.append(title);
+  for (const type of types) {
+    const name=leg+'_'+type+'_joint', i=names.indexOf(name);
+    const wrapper=document.createElement('div');wrapper.className='joint';
+    const row=document.createElement('div');row.className='joint-row';
+    const label=document.createElement('label');label.textContent=type;label.htmlFor=name;
+    const slider=document.createElement('input');Object.assign(slider,{type:'range',id:name+'-slider',step:'0.1'});slider.setAttribute('aria-label',leg+' '+type+' slider');
+    const number=document.createElement('input');Object.assign(number,{type:'number',id:name,step:'0.1'});number.setAttribute('aria-label',leg+' '+type+' degrees');
+    const min=document.createElement('button'),max=document.createElement('button');
+    min.textContent='↓';max.textContent='↑';min.title='Set minimum';max.title='Set maximum';
+    min.setAttribute('aria-label',leg+' '+type+' minimum');max.setAttribute('aria-label',leg+' '+type+' maximum');
+    function change(input) {if(!Number.isFinite(input.valueAsNumber))return;const q=angles.slice();q[i]=input.valueAsNumber;setAngles(q);}
+    slider.oninput=()=>change(slider);number.oninput=()=>change(number);
+    min.onclick=()=>{const q=angles.slice();q[i]=bounds(name)[0];setAngles(q);};
+    max.onclick=()=>{const q=angles.slice();q[i]=bounds(name)[1];setAngles(q);};
+    row.append(label,slider,number,min,max);
+    const text=document.createElement('div');text.className='limits-label';wrapper.append(row,text);card.append(wrapper);
+    controls[name]={slider,number,text,wrapper};
+  }
+  $('joint-controls').append(card);
+}
+for (const group of limitGroups) {
+  const row=document.createElement('div');row.className='boundary';
+  const label=document.createElement('span');label.textContent=group.replace('_',' ');
+  const inputs=[0,1].map(i=>{const input=document.createElement('input');Object.assign(input,{type:'number',step:1,id:'limit-'+group+'-'+i});input.setAttribute('aria-label',group+' physical '+(i?'max':'min'));return input;});
+  const margin=document.createElement('span');margin.textContent='shared';
+  row.append(label,...inputs,margin);$('limit-controls').append(row);limitRows[group]={row,inputs};
+  if (types.includes(group)) {
+    const delta=document.createElement('input');Object.assign(delta,{type:'number',min:0,step:1,id:'margin-'+group});delta.setAttribute('aria-label',group+' soft margin');margin.replaceWith(delta);
+  }
+}
+function syncLimitEditor() {
+  $('asymmetric-thigh').checked=limits.use_asymmetric_thigh_limits;$('asymmetric-calf').checked=limits.use_asymmetric_calf_limits;
+  for (const group of limitGroups) limitRows[group].inputs.forEach((e,i)=>e.value=limits['joint_physical_limit_'+group][i]);
+  types.forEach(type=>$('margin-'+type).value=limits['joint_soft_limit_'+type+'_delta']);
+  showLimitRows();
+  $('limit-overrides').value=Object.entries(limits).map(([key,value])=>'env.'+key+'='+ (typeof value==='boolean'?(value?'True':'False'):JSON.stringify(value))).join(' ');
+}
+function showLimitRows() {
+  for (const group of limitGroups) {
+    const type=group.split('_').at(-1), separate=type!=='hip'&&$('asymmetric-'+type).checked;
+    limitRows[group].row.hidden=group.includes('_')?!separate:false;
+    limitRows[group].row.style.display=limitRows[group].row.hidden?'none':'grid';
+    limitRows[group].inputs.forEach(input=>input.disabled=!group.includes('_')&&separate);
+  }
+}
+function applyLimits(settings, preset='custom') {validateLimits(settings);limits=clone(settings);$('preset').value=preset;syncLimitEditor();setAngles(angles);}
+$('apply-limits').onclick=()=>guarded(()=>{
+  const next=clone(limits);
+  for(const group of limitGroups)next['joint_physical_limit_'+group]=limitRows[group].inputs.map(e=>e.value===''?NaN:e.valueAsNumber);
+  types.forEach(type=>next['joint_soft_limit_'+type+'_delta']=$('margin-'+type).value===''?NaN:$('margin-'+type).valueAsNumber);
+  next.use_asymmetric_thigh_limits=$('asymmetric-thigh').checked;next.use_asymmetric_calf_limits=$('asymmetric-calf').checked;
+  applyLimits(next);message('Edited limits applied.');
+});
+$('asymmetric-thigh').onchange=$('asymmetric-calf').onchange=showLimitRows;
+function importOverrides(text) {
+  const next=clone(limits), found=new Set();
+  const assignments=text.matchAll(/\benv\.([a-zA-Z0-9_]+)\s*=\s*(\[[^\]]*\]|\([^)]*\)|[^\s"']+)/g);
+  for (const [,key,raw] of assignments) {
+    if (!(key in next)) {if(key.startsWith('joint_physical_limit_')||key.startsWith('joint_soft_limit_')||key.startsWith('use_asymmetric_'))throw Error('Unknown limit field: '+key);continue;}
+    if (typeof next[key]==='boolean') {if(!/^(true|false)$/i.test(raw))throw Error(key+': use True or False.');next[key]=raw.toLowerCase()==='true';}
+    else if (Array.isArray(next[key])) {
+      if(!/^[\[(].*[\])]$/.test(raw))throw Error(key+': expected a min/max pair.');
+      next[key]=raw.slice(1,-1).split(',').map(x=>x.trim()===''?NaN:Number(x));
+    } else next[key]=Number(raw);
+    found.add(key);
+  }
+  if (!found.size) throw Error('No explicit env joint-limit overrides found.');
+  applyLimits(next);message('Imported '+found.size+' limit fields. Other launch fields were ignored.');return found.size;
+}
+$('import-command').onclick=()=>guarded(()=>importOverrides($('launch-command').value));
+$('preset').onchange=()=>guarded(()=>{applyLimits($('preset').value==='task'?DATA.task_limits:DATA.command_limits,$('preset').value);message('Limit preset applied.');});
+$('range-mode').onchange=()=>{mode=$('range-mode').value;setAngles(angles);};
+$('safe').onclick=()=>setAngles(DATA.defaults.joint_pose.map(x=>x/RAD));
+$('zero').onclick=()=>setAngles(Array(12).fill(0));
+$('all-min').onclick=()=>setAngles(names.map(n=>bounds(n)[0]));
+$('all-max').onclick=()=>setAngles(names.map(n=>bounds(n)[1]));
+
+// Reuse Pose Lab's exact mesh/link exporter and Z-up rendering conventions.
+let renderer;
+try {renderer=new THREE.WebGLRenderer({antialias:true,alpha:true});}
+catch(e){$('fatal').hidden=false;$('fatal').textContent='WebGL could not start. Enable hardware acceleration or open this file in Chrome.';throw e;}
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));renderer.outputColorSpace=THREE.SRGBColorSpace;renderer.setClearColor(0x11191e,1);$('stage').prepend(renderer.domElement);
+const scene=new THREE.Scene();scene.fog=new THREE.Fog(0x11191e,3,9);scene.add(new THREE.AmbientLight(0xffffff,1.6));
+const key=new THREE.DirectionalLight(0xffecd0,2.5);key.position.set(1,-2,4);scene.add(key);
+const fill=new THREE.DirectionalLight(0xb6dfff,1.5);fill.position.set(-2,2,2);scene.add(fill);
+const camera=new THREE.PerspectiveCamera(37,1,.01,50);camera.up.set(0,0,1);
+const ground=new THREE.Mesh(new THREE.PlaneGeometry(20,20),new THREE.MeshStandardMaterial({color:0x152128,roughness:1}));ground.position.z=-.002;scene.add(ground);
+const grid=new THREE.GridHelper(4,40,0x41525d,0x293b45);grid.rotation.x=Math.PI/2;scene.add(grid);
+const materials={};for(const [name,color] of Object.entries(DATA.robot.materials))materials[name]=new THREE.MeshStandardMaterial({color:new THREE.Color(...color.slice(0,3)),metalness:name.includes('metal')?.35:.05,roughness:.5});
+const meshes={};for(const [name,m] of Object.entries(DATA.robot.meshes)){const g=new THREE.BufferGeometry();g.setAttribute('position',new THREE.Float32BufferAttribute(m.vertices,3));g.setIndex(m.indices);g.computeVertexNormals();meshes[name]=g;}
+const bodies={},joints={},axisHelpers=[];
+function makeBody(b,parent){
+  const group=new THREE.Group();group.name=b.name;group.position.fromArray(b.pos);parent.add(group);bodies[b.name]=group;
+  if(b.joint){joints[b.joint]={group,axis:new THREE.Vector3(...b.axis)};const axis=new THREE.ArrowHelper(new THREE.Vector3(...b.axis),new THREE.Vector3(),.07,b.name.includes('hip')?0x60dbc6:0xdb99ff,.015,.008);group.add(axis);axis.visible=false;axisHelpers.push(axis);}
+  for(const v of b.visuals)group.add(new THREE.Mesh(meshes[v.mesh],materials[v.material]));
+  b.children.forEach(child=>makeBody(child,group));return group;
+}
+const root=makeBody(DATA.robot.body,scene);
+for(const leg of legs){
+  const dot=new THREE.Mesh(new THREE.SphereGeometry(.015,14,10),new THREE.MeshBasicMaterial({color:leg[0]==='F'?0xffa050:0x83baff}));bodies[leg+'_foot'].add(dot);
+  const canvas=document.createElement('canvas');canvas.width=128;canvas.height=64;const context=canvas.getContext('2d');context.fillStyle=leg[0]==='F'?'#ffc56c':'#83baff';context.font='bold 34px system-ui';context.textAlign='center';context.fillText(leg,64,43);
+  const label=new THREE.Sprite(new THREE.SpriteMaterial({map:new THREE.CanvasTexture(canvas),depthTest:false}));label.scale.set(.08,.04,1);label.position.z=-.04;bodies[leg+'_foot'].add(label);
+}
+const target=new THREE.Vector3(0,0,.27);let azimuth=-1.05,elevation=.3,distance=1.8;
+function render(){camera.position.set(target.x+distance*Math.cos(elevation)*Math.cos(azimuth),target.y+distance*Math.cos(elevation)*Math.sin(azimuth),target.z+distance*Math.sin(elevation));camera.lookAt(target);renderer.render(scene,camera);}
+function resize(){const w=$('stage').clientWidth,h=$('stage').clientHeight;renderer.setSize(w,h);camera.aspect=w/h;camera.updateProjectionMatrix();render();}new ResizeObserver(resize).observe($('stage'));
+let drag=null;renderer.domElement.onpointerdown=e=>{drag=[e.clientX,e.clientY];renderer.domElement.setPointerCapture(e.pointerId);};
+renderer.domElement.onpointermove=e=>{if(!drag)return;azimuth-=(e.clientX-drag[0])*.008;elevation=Math.min(1.55,Math.max(-1.5,elevation+(e.clientY-drag[1])*.008));drag=[e.clientX,e.clientY];render();};
+renderer.domElement.onpointerup=renderer.domElement.onpointercancel=()=>drag=null;
+renderer.domElement.addEventListener('wheel',e=>{e.preventDefault();distance=Math.min(7,Math.max(.6,distance*Math.exp(e.deltaY*.001)));render();},{passive:false});
+function view(a,e){azimuth=a;elevation=e;render();}
+$('orbit').onclick=()=>view(-1.05,.3);$('side').onclick=()=>view(bodyPose.yaw*RAD-Math.PI/2,.03);$('front').onclick=()=>view(bodyPose.yaw*RAD,.03);$('top').onclick=()=>view(-Math.PI/2,1.55);
+$('fit').onclick=()=>{const box=new THREE.Box3().setFromObject(root);box.getCenter(target);distance=Math.max(.85,box.getSize(new THREE.Vector3()).length()*1.9);render();};
+function updatePose(){
+  root.position.set(0,0,bodyPose.height);
+  root.quaternion.setFromAxisAngle(new THREE.Vector3(0,0,1),bodyPose.yaw*RAD).multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0),-bodyPose.pitch*RAD));
+  const outside=[];
+  names.forEach((name,i)=>{
+    const q=angles[i], c=controls[name], [lo,hi]=bounds(name), soft=bounds(name,'soft'),hard=bounds(name,'physical');
+    joints[name].group.quaternion.setFromAxisAngle(joints[name].axis,q*RAD);
+    for(const input of [c.slider,c.number]){input.min=lo;input.max=hi;input.value=Number(q.toFixed(4));}
+    const warn=q<soft[0]-1e-7||q>soft[1]+1e-7;if(warn)outside.push(name);c.wrapper.classList.toggle('warning',warn);
+    c.text.textContent=`Physical ${hard[0]}…${hard[1]}°  ·  Soft ${soft[0]}…${soft[1]}°`;
+  });
+  root.updateMatrixWorld(true);
+  const low=Math.min(...legs.map(leg=>bodies[leg+'_foot'].getWorldPosition(new THREE.Vector3()).z));
+  const warnings=[];
+  if(lastClamp.length)warnings.push('Clamped '+lastClamp.length+' joint(s) to the active range.');
+  if(outside.length)warnings.push(outside.length+' joint(s) outside the soft range.');
+  if(low<.0186)warnings.push('A foot reaches the ground plane.');
+  $('status').textContent=warnings.length?warnings.join(' ')+' Geometry only; no collision test.':'All joints inside the soft range. Frozen geometry; no gravity or policy.';
+  $('status').classList.toggle('warn',warnings.length>0);
+  $('mode-value').textContent=mode==='soft'?'Soft':'Physical';$('margin-value').textContent=outside.length?outside.length+' outside':'All inside';$('margin-value').style.color=outside.length?'#ffc56c':'#60dbc6';$('height-value').textContent=bodyPose.height.toFixed(3)+' m';
+  $('pose-values').textContent=names.map((n,i)=>`${n}: ${angles[i].toFixed(2)}° / ${(angles[i]*RAD).toFixed(6)} rad`).join('\n');render();
+}
+function resetBody(){bodyPose={height:DATA.robot.body.pos[2],pitch:0,yaw:0};$('base-height').value=bodyPose.height;$('base-pitch').value=0;$('base-yaw').value=0;updatePose();}
+for(const [id,key] of [['base-height','height'],['base-pitch','pitch'],['base-yaw','yaw']])$(id).oninput=()=>{if($(id).value!==''&&$(id).validity.valid){bodyPose[key]=$(id).valueAsNumber;updatePose();}};
+$('reset-body').onclick=resetBody;
+$('axes').onchange=()=>{axisHelpers.forEach(a=>a.visible=$('axes').checked);render();};
+$('wireframe').onchange=()=>{Object.values(materials).forEach(m=>m.wireframe=$('wireframe').checked);render();};
+$('ground').onchange=()=>{ground.visible=grid.visible=$('ground').checked;render();};
+async function copy(text){try{await navigator.clipboard.writeText(text);message('Copied.');}catch{const area=document.createElement('textarea');area.value=text;document.body.append(area);area.select();const ok=document.execCommand('copy');area.remove();message(ok?'Copied.':'Clipboard unavailable. Use Save pose JSON instead.',!ok);}}
+$('copy-limits').onclick=()=>copy($('limit-overrides').value);
+$('copy-pose').onclick=()=>copy(JSON.stringify(angles.map(q=>Number((q*($('copy-units').value==='rad'?RAD:1)).toFixed(8)))));
+function getState(){return {joint_names:names.slice(),joint_positions_deg:angles.slice(),joint_positions_rad:angles.map(q=>q*RAD),base_height_m:bodyPose.height,base_pitch_deg:bodyPose.pitch,base_yaw_deg:bodyPose.yaw,rootPosition:root.position.toArray(),rootQuaternion:[root.quaternion.w,root.quaternion.x,root.quaternion.y,root.quaternion.z],limits:clone(limits),range_mode:mode};}
+function loadPose(pose){
+  if(JSON.stringify(pose.joint_names)!==JSON.stringify(names))throw Error('Pose joint order must match FL, FR, RL, RR; hip, thigh, calf.');
+  if(!Array.isArray(pose.joint_positions_rad)||pose.joint_positions_rad.length!==12||!pose.joint_positions_rad.every(Number.isFinite))throw Error('Pose must contain 12 finite joint_positions_rad.');
+  const values=[pose.base_height_m,pose.base_pitch_deg,pose.base_yaw_deg];
+  if(!values.every(Number.isFinite)||values[0]<.1||values[0]>1.5||Math.abs(values[1])>180||Math.abs(values[2])>180)throw Error('Invalid body height, pitch or heading.');
+  if(!['physical','soft'].includes(pose.range_mode))throw Error('Invalid pose range mode.');validateLimits(pose.limits);
+  mode=pose.range_mode;$('range-mode').value=mode;limits=clone(pose.limits);$('preset').value='custom';syncLimitEditor();
+  bodyPose={height:values[0],pitch:values[1],yaw:values[2]};['base-height','base-pitch','base-yaw'].forEach((id,i)=>$(id).value=values[i]);
+  setAngles(pose.joint_positions_rad.map(q=>q/RAD));message('Pose loaded.');
+}
+$('save-pose').onclick=()=>{const blob=new Blob([JSON.stringify(getState(),null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='solo12-joint-pose.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);message('Pose saved in radians and degrees.');};
+$('load-pose').onclick=()=>$('pose-file').click();
+$('pose-file').onchange=async()=>{const file=$('pose-file').files[0];if(file){try{loadPose(JSON.parse(await file.text()));}catch(e){message(e.message,true);}}$('pose-file').value='';};
+window.jointViewer={getState,setAngles,applyLimits,importOverrides,loadPose,getBounds:(name,kind)=>bounds(name,kind).slice(),getBodyPositions:()=>Object.fromEntries(Object.entries(bodies).map(([n,b])=>[n,b.getWorldPosition(new THREE.Vector3()).toArray()]))};
+validateLimits(limits);syncLimitEditor();resetBody();setAngles(angles);resize();
+</script>
+</body>
+</html>
