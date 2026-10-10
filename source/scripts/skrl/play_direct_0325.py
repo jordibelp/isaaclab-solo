@@ -442,6 +442,10 @@ def _disable_training_stochasticity_for_play(env_cfg) -> list[str]:
         env_cfg.enable_observation_corruption = False
         disabled.append("observation_corruption")
 
+    if getattr(env_cfg, "noisy_actor_obs", False):
+        env_cfg.noisy_actor_obs = False
+        disabled.append("noisy_actor_obs")
+
     if hasattr(env_cfg, "reset_base_lin_vel_range"):
         env_cfg.reset_base_lin_vel_range = (0.0, 0.0)
         disabled.append("reset_base_lin_vel_range")

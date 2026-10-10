@@ -26,7 +26,9 @@ With ``env.base_obs_from_imu`` the angular velocity and gravity come from the IM
 ``env.include_lin_acc_in_imu_obs`` inserts the IMU linear acceleration (3 dims) right after the
 gravity, giving 51 or 48 dims. A 48-dim observation is therefore ambiguous, so the layout is read
 from the env config. With ``env.remove_root_lin_vel_b_from_actor_obs`` the critic also receives the
-``privileged`` group: the 3-dim base linear velocity in body frame.
+``privileged`` group: the 3-dim base linear velocity in body frame. With ``env.noisy_critic_obs=False``
+the critic instead receives a noise-free ``critic`` group with the same layout as the policy plus the
+linear velocity (unless ``env.remove_root_lin_vel_b_from_obs``).
 
 The base-IMU teacher and student RSL tasks add two more layouts:
 

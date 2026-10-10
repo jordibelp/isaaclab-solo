@@ -113,6 +113,17 @@ def test_privileged_linear_velocity_is_mirrored_with_the_policy_batch(front_back
     torch.testing.assert_close(obs_aug["policy"][2:4], symmetry.transform_policy_obs_reflect_x(policy))
 
 
+def test_noise_free_critic_group_uses_the_policy_layout_with_linear_velocity():
+    policy = torch.randn(2, 48)  # IMU gyro, gravity, acceleration; no linear velocity
+    critic = torch.randn(2, 51)  # the same terms plus the linear velocity in front
+    obs = TensorDict({"policy": policy, "critic": critic}, batch_size=[2])
+
+    obs_aug, _ = symmetry.compute_symmetric_observations_actions(env=make_env(base_obs_from_imu=True), obs=obs)
+
+    torch.testing.assert_close(obs_aug["critic"][2:], symmetry.transform_policy_obs_reflect_x(critic, include_lin_acc=True))
+    torch.testing.assert_close(obs_aug["critic"][2:, 0:3], critic[:, 0:3] * VECTOR_X)
+
+
 def test_cfg_lookup_keeps_the_previous_defaults():
     assert symmetry._uses_front_back_symmetry(SimpleNamespace()) is True
     assert symmetry._get_policy_model(SimpleNamespace()) is None

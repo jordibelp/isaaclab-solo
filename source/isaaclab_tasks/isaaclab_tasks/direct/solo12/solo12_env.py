@@ -1539,7 +1539,7 @@ class Solo12Env(DirectRLEnv):
     def _maybe_corrupt_base_imu_vectors(
         self, gyro_b: torch.Tensor, acc_b: torch.Tensor, *, ekf_processed: bool
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if not self.cfg.enable_observation_corruption or not self.cfg.noisy_imu or self._imu_noise_scale == 0.0:
+        if not self.cfg.noisy_actor_obs or not self.cfg.noisy_imu or self._imu_noise_scale == 0.0:
             return gyro_b, acc_b
 
         gyro_b = gyro_b + self._base_imu_bias[:, :3]
@@ -1557,7 +1557,7 @@ class Solo12Env(DirectRLEnv):
         return gyro_b, acc_b
 
     def _maybe_corrupt_base_imu_orientation(self, quat_w: torch.Tensor) -> torch.Tensor:
-        if not self.cfg.enable_observation_corruption or not self.cfg.noisy_imu or self._imu_noise_scale == 0.0:
+        if not self.cfg.noisy_actor_obs or not self.cfg.noisy_imu or self._imu_noise_scale == 0.0:
             return quat_w
         noise_std = torch.tensor(
             self.cfg.base_imu_orientation_noise_std_rpy, dtype=quat_w.dtype, device=quat_w.device
@@ -1571,7 +1571,7 @@ class Solo12Env(DirectRLEnv):
     def _sample_base_imu_bias(self, env_ids: torch.Tensor):
         self._base_imu_bias[env_ids] = 0.0
         self._base_imu_orientation_bias_rpy[env_ids] = 0.0
-        if not self.cfg.enable_observation_corruption or not self.cfg.noisy_imu or self._imu_noise_scale == 0.0:
+        if not self.cfg.noisy_actor_obs or not self.cfg.noisy_imu or self._imu_noise_scale == 0.0:
             return
         gyro_bias_init_std = (
             self._imu_noise_scale * self.cfg.imu_gyro_noise_scale * self.cfg.base_imu_gyro_bias_init_std
@@ -1601,7 +1601,7 @@ class Solo12Env(DirectRLEnv):
             ) * orientation_bias_std
 
     def _update_base_imu_bias_random_walk(self):
-        if not self.cfg.enable_observation_corruption or not self.cfg.noisy_imu or self._imu_noise_scale == 0.0:
+        if not self.cfg.noisy_actor_obs or not self.cfg.noisy_imu or self._imu_noise_scale == 0.0:
             return
         gyro_bias_rw_std = (
             self._imu_noise_scale * self.cfg.imu_gyro_noise_scale * self.cfg.base_imu_gyro_bias_rw_std_per_step
@@ -1658,39 +1658,56 @@ class Solo12Env(DirectRLEnv):
                 {"policy": torch.cat((policy_obs, self._commands), dim=-1)}
             )
 
+        observations = {
+            "policy": self._get_simple_mlp_obs(
+                noisy=self.cfg.noisy_actor_obs, include_lin_vel=self.cfg.actor_obs_has_lin_vel()
+            )
+        }
+        if not self.cfg.noisy_critic_obs:
+            observations["critic"] = self._get_simple_mlp_obs(
+                noisy=False, include_lin_vel=not self.cfg.remove_root_lin_vel_b_from_obs
+            )
+        elif self.cfg.has_privileged_critic_obs():
+            # Same noise model as the actor's observation.
+            observations[PRIVILEGED_OBS_GROUP] = self._maybe_corrupt(
+                self._robot.data.root_lin_vel_b, self.cfg.base_lin_vel_noise
+            )
+
+        self._previous_actions = self._actions.clone()
+        return self._with_optional_rnd_state(observations)
+
+    def _get_simple_mlp_obs(self, noisy: bool, include_lin_vel: bool) -> torch.Tensor:
+        def observe(tensor: torch.Tensor, noise_range: tuple[float, float]) -> torch.Tensor:
+            return self._maybe_corrupt(tensor, noise_range) if noisy else tensor
+
         joint_pos = self._robot.data.joint_pos[:, self._joint_ids] - self._q_offset_action_and_obs
         joint_vel = self._robot.data.joint_vel[:, self._joint_ids]
         action_obs = self._applied_actions if self.cfg.action_obs_is_last_executed else self._actions
 
         obs_terms = []
-        if self.cfg.actor_obs_has_lin_vel():
-            obs_terms.append(self._maybe_corrupt(self._robot.data.root_lin_vel_b, self.cfg.base_lin_vel_noise))
+        if include_lin_vel:
+            obs_terms.append(observe(self._robot.data.root_lin_vel_b, self.cfg.base_lin_vel_noise))
         if self.cfg.base_obs_from_imu:
-            gyro, lin_acc, gravity = self._read_base_imu_sample(corrupt=True).split(3, dim=-1)
+            gyro, lin_acc, gravity = self._read_base_imu_sample(corrupt=noisy).split(3, dim=-1)
             obs_terms.extend([gyro, gravity])
             if self.cfg.include_lin_acc_in_imu_obs:
                 obs_terms.append(lin_acc)
         else:
             obs_terms.extend(
                 [
-                    self._maybe_corrupt(self._robot.data.root_ang_vel_b, self.cfg.base_ang_vel_noise),
-                    self._maybe_corrupt(self._robot.data.projected_gravity_b, self.cfg.projected_gravity_noise),
+                    observe(self._robot.data.root_ang_vel_b, self.cfg.base_ang_vel_noise),
+                    observe(self._robot.data.projected_gravity_b, self.cfg.projected_gravity_noise),
                 ]
             )
         obs_terms.extend(
             [
                 self._commands,
-                self._maybe_corrupt(joint_pos, self.cfg.joint_pos_noise),
-                self._maybe_corrupt(joint_vel, self.cfg.joint_vel_noise),
+                observe(joint_pos, self.cfg.joint_pos_noise),
+                observe(joint_vel, self.cfg.joint_vel_noise),
                 action_obs,
             ]
         )
-        observations = {"policy": torch.cat(tuple(obs_terms), dim=-1)}
-        if self.cfg.has_privileged_critic_obs():
-            observations[PRIVILEGED_OBS_GROUP] = self._robot.data.root_lin_vel_b
-
-        self._previous_actions = self._actions.clone()
-        return self._with_optional_rnd_state(observations)
+        return torch.cat(tuple(obs_terms), dim=-1)
 
     def _with_optional_rnd_state(self, observations: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         if self.cfg.rnd_network:
@@ -2209,6 +2226,6 @@ class Solo12Env(DirectRLEnv):
         return torch.sum(excess_force, dim=1)
 
     def _maybe_corrupt(self, tensor: torch.Tensor, noise_range: tuple[float, float]) -> torch.Tensor:
-        if not self.cfg.enable_observation_corruption or noise_range[0] == noise_range[1] == 0.0:
+        if not self.cfg.noisy_actor_obs or noise_range[0] == noise_range[1] == 0.0:
             return tensor
         return tensor + torch.empty_like(tensor).uniform_(noise_range[0], noise_range[1])

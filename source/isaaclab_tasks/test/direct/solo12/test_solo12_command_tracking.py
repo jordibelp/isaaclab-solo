@@ -344,11 +344,11 @@ def test_event_randomization_can_be_disabled_independently_of_observation_corrup
 
     disabled = Solo12EnvCfg()
     disabled.include_events_randomization = False
-    disabled.enable_observation_corruption = True
+    disabled.noisy_actor_obs = True
     disabled.apply_events_randomization_setting()
 
     assert disabled.events is None
-    assert disabled.enable_observation_corruption is True
+    assert disabled.noisy_actor_obs is True
 
 
 def test_world_velocity_in_heading_frame_ignores_pitch_and_vertical_velocity():

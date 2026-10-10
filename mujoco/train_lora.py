@@ -198,8 +198,11 @@ def parse_env_overrides(tokens: list[str], base: dict | None = None) -> tuple[di
     return cfg, unsupported
 
 
-# Isaac names that differ from the MJX setting they feed.
-SOURCE_ENV_RENAMES = {"joint_pos_noise_range": "flexed_initial_joint_pos_noise_range"}
+# Isaac names that differ from the MJX setting they feed. Runs from before a rename keep the MJX name.
+SOURCE_ENV_RENAMES = {
+    "joint_pos_noise_range": "flexed_initial_joint_pos_noise_range",
+    "enable_observation_corruption": "noisy_actor_obs",
+}
 # Isaac settings this simulator has no implementation for; ``train_sac.py`` rejects them outright,
 # so they are reported instead of copied.
 SOURCE_ENV_UNAVAILABLE = ("include_events_randomization", "forces_applied_to_base_curriculum",
@@ -238,6 +241,8 @@ def source_env_overrides(path: Path, stage: int | None = None) -> tuple[dict, li
         if name in SOURCE_ENV_UNAVAILABLE:
             continue
         source = SOURCE_ENV_RENAMES.get(name, name)
+        if source not in raw and f"{source}_curriculum" not in raw and name in raw:
+            source = name
         if f"{source}_curriculum" in raw:
             value = at_stage(raw[f"{source}_curriculum"])
         elif source in raw:

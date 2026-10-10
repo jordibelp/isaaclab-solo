@@ -38,7 +38,7 @@ ROOT_LIN_VEL_OBS_DIM = 3
 IMU_LIN_ACC_OBS_DIM = 3
 BASE_OBSERVATION_SPACE = 48
 COMMAND_OBS_DIM = 3
-# Critic-only observation group (noise-free base linear velocity) used when the actor does not observe it.
+# Critic-only base linear velocity, added to the actor observation when the actor does not observe it.
 PRIVILEGED_OBS_GROUP = "privileged"
 BASE_IMU_RAW_OBS_DIM = 6
 BASE_IMU_PROJECTED_GRAVITY_OBS_DIM = 9
@@ -389,9 +389,8 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     bringup_clip_rad = 0.0
     proportion_steps = proportionHfDiscreteObstaclesTerrain; proportion_low_random_rough_terrain = proportionHfRandomUniformTerrain
     remove_root_lin_vel_b_from_obs = False
-    # simple_mlp only. Hide the base linear velocity from the actor but keep it for the critic: the env adds
-    # a noise-free "privileged" observation group that train/play route to the critic.
-    # remove_root_lin_vel_b_from_obs=True removes the velocity from both actor and critic instead.
+    # simple_mlp only. Hide the base linear velocity from the actor but keep it for the critic (see
+    # noisy_critic_obs for how the critic receives it). remove_root_lin_vel_b_from_obs=True removes it from both.
     remove_root_lin_vel_b_from_actor_obs = False
     # simple_mlp only. Take the observed base angular velocity and orientation (projected gravity) from the
     # base-IMU model below (gyro, EKF attitude, IMU noise/bias/clip, 1 cm mounting offset) instead of the
@@ -627,8 +626,12 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     track_base_height_reward_scale = 0.0
     base_height_exp_scale = 80.0
 
-    # observations noise. 
-    enable_observation_corruption = True
+    # Observation noise. noisy_actor_obs applies the sensor noise models to the actor observation: the
+    # uniform (mocap) ranges below, or the base-IMU noise/bias model, also for the base-IMU student history.
+    # noisy_critic_obs=True gives the critic the actor's observation (same noise); False gives it its own
+    # noise-free "critic" observation group, like the privileged critic of arXiv:2512.01996 (simple_mlp only).
+    noisy_actor_obs = True
+    noisy_critic_obs = True
     base_lin_vel_noise = (-0.1, 0.1)
     base_ang_vel_noise = (-0.2, 0.2)
     projected_gravity_noise = (-0.05, 0.05)
@@ -828,15 +831,33 @@ class Solo12EnvCfg(DirectRLEnvCfg):
         return not (self.remove_root_lin_vel_b_from_obs or self.remove_root_lin_vel_b_from_actor_obs)
 
     def has_privileged_critic_obs(self) -> bool:
-        """True when the critic gets the base linear velocity that the actor does not observe."""
-        return self.remove_root_lin_vel_b_from_actor_obs and not self.remove_root_lin_vel_b_from_obs
+        """True when the critic shares the actor observation and adds the linear velocity the actor lacks."""
+        return (
+            self.noisy_critic_obs
+            and self.remove_root_lin_vel_b_from_actor_obs
+            and not self.remove_root_lin_vel_b_from_obs
+        )
+
+    def critic_obs_groups(self) -> list[str] | None:
+        """Observation groups of the simple_mlp critic; None keeps the agent default (the "policy" group)."""
+        if self.policy_model != "simple_mlp":
+            return None
+        if not self.noisy_critic_obs:
+            return ["critic"]
+        if self.has_privileged_critic_obs():
+            return ["policy", PRIVILEGED_OBS_GROUP]
+        return None
 
     def refresh_observation_dimensions(self):
         """Recompute observation dimensions after Hydra overrides."""
         self.refresh_base_imu_dimensions()
-        if (self.remove_root_lin_vel_b_from_actor_obs or self.base_obs_from_imu) and self.policy_model != "simple_mlp":
+        simple_mlp_only = (
+            self.remove_root_lin_vel_b_from_actor_obs or self.base_obs_from_imu or not self.noisy_critic_obs
+        )
+        if simple_mlp_only and self.policy_model != "simple_mlp":
             raise ValueError(
-                "remove_root_lin_vel_b_from_actor_obs and base_obs_from_imu only apply to policy_model='simple_mlp'."
+                "remove_root_lin_vel_b_from_actor_obs, base_obs_from_imu and noisy_critic_obs=False only apply "
+                "to policy_model='simple_mlp'."
             )
         if self.base_obs_from_imu and (not self.imu_ekf_processed_inputs or self.use_rotMat_on_imu_encoder):
             raise ValueError(
@@ -902,15 +923,12 @@ class Solo12EnvCfg(DirectRLEnvCfg):
             self.state_space = self.teacher_critic_obs_dim
 
 
-def route_privileged_obs_to_critic(env_cfg, agent_cfg) -> None:
-    """Append the privileged observation group to the RSL-RL (PPO or SAC) critic when the env provides it."""
-    has_privileged_critic_obs = getattr(env_cfg, "has_privileged_critic_obs", None)
-    if not callable(has_privileged_critic_obs) or not has_privileged_critic_obs():
-        return
-    critic_groups = list(agent_cfg.obs_groups.get("critic", ["policy"]))
-    if PRIVILEGED_OBS_GROUP not in critic_groups:
-        critic_groups.append(PRIVILEGED_OBS_GROUP)
-    agent_cfg.obs_groups = {**agent_cfg.obs_groups, "critic": critic_groups}
+def route_critic_obs(env_cfg, agent_cfg) -> None:
+    """Point the RSL-RL (PPO or SAC) critic at the Solo12 simple_mlp critic observation groups."""
+    critic_obs_groups = getattr(env_cfg, "critic_obs_groups", None)
+    groups = critic_obs_groups() if callable(critic_obs_groups) else None
+    if groups is not None:
+        agent_cfg.obs_groups = {**agent_cfg.obs_groups, "critic": groups}
 
 
 @configclass
@@ -959,7 +977,6 @@ class Solo12TwoFeetEnvCfg(Solo12EnvCfg):
     # accepted two-feet reset profile above; no companion reset overrides are required.
     initial_position = "safe"
     track_base_height_reward_scale = 0.0
-    enable_observation_corruption = True
     tricky_terrain = False
     curriculum_profile = "two_feet_sac"
     curriculum_two_feet = True

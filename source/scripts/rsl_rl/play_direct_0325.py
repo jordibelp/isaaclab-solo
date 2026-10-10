@@ -521,7 +521,7 @@ from isaaclab_tasks.direct.solo12.agents.base_imu_actor_critic import (
     Solo12BaseImuTeacherActorCritic,
 )
 from isaaclab_tasks.direct.solo12.solo12_env import _world_velocity_in_heading_frame_xy
-from isaaclab_tasks.direct.solo12.solo12_env_cfg import route_privileged_obs_to_critic
+from isaaclab_tasks.direct.solo12.solo12_env_cfg import route_critic_obs
 
 
 @dataclass
@@ -1408,6 +1408,10 @@ def _disable_training_stochasticity_for_play(env_cfg) -> list[str]:
         env_cfg.enable_observation_corruption = False
         disabled.append("observation_corruption")
 
+    if getattr(env_cfg, "noisy_actor_obs", False):
+        env_cfg.noisy_actor_obs = False
+        disabled.append("noisy_actor_obs")
+
     if hasattr(env_cfg, "reset_base_lin_vel_range"):
         env_cfg.reset_base_lin_vel_range = (0.0, 0.0)
         disabled.append("reset_base_lin_vel_range")
@@ -2199,7 +2203,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 flush=True,
             )
     _sync_base_imu_policy_cfg_from_env_cfg(env_cfg, agent_cfg)
-    route_privileged_obs_to_critic(env_cfg, agent_cfg)
+    route_critic_obs(env_cfg, agent_cfg)
     cli_actuator_gain_overrides = _capture_cli_actuator_gain_overrides(env_cfg, hydra_args)
 
     training_wandb_run_path = None
