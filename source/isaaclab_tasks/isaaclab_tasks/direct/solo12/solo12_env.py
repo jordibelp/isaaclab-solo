@@ -20,7 +20,7 @@ from isaaclab.sensors import ContactSensor
 from isaaclab.sim import schemas as sim_schemas
 from isaaclab.utils.buffers import DelayBuffer
 
-from .solo12_env_cfg import Solo12EnvCfg
+from .solo12_env_cfg import PRIVILEGED_OBS_GROUP, Solo12EnvCfg
 
 
 _EPISODE_REWARD_KEYS = (
@@ -328,6 +328,8 @@ class Solo12Env(DirectRLEnv):
         )
         # True while the running episode started reared up (twofeet_airborne_reset_prob).
         self._twofeet_airborne_start = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        # The IMU bias states are simulated when a student history or the simple_mlp observation uses the IMU.
+        self._base_imu_enabled = self.cfg.imu_raw_inputs or self.cfg.base_obs_from_imu
         self._base_imu_history_len = self.cfg.base_imu_history_length if self.cfg.imu_raw_inputs else 0
         self._base_imu_history_sample_dim = self.cfg.base_imu_history_sample_dim
         self._base_imu_history = torch.zeros(
@@ -1462,10 +1464,13 @@ class Solo12Env(DirectRLEnv):
         return self.obs_buf, self.reward_buf, self.reset_terminated, self.reset_time_outs, self.extras
 
     def _record_base_imu_history_sample(self):
-        if not self.cfg.imu_raw_inputs or self._base_imu_history_len == 0:
+        """Advance the IMU bias random walks and, for history students, record one physics-rate sample."""
+        if not self._base_imu_enabled:
             return
 
         self._update_base_imu_bias_random_walk()
+        if self._base_imu_history_len == 0:
+            return
         sample = torch.cat(
             (
                 self._get_joint_state_obs(corrupt=True),
@@ -1658,22 +1663,34 @@ class Solo12Env(DirectRLEnv):
         action_obs = self._applied_actions if self.cfg.action_obs_is_last_executed else self._actions
 
         obs_terms = []
-        if not self.cfg.remove_root_lin_vel_b_from_obs:
+        if self.cfg.actor_obs_has_lin_vel():
             obs_terms.append(self._maybe_corrupt(self._robot.data.root_lin_vel_b, self.cfg.base_lin_vel_noise))
+        if self.cfg.base_obs_from_imu:
+            gyro, lin_acc, gravity = self._read_base_imu_sample(corrupt=True).split(3, dim=-1)
+            obs_terms.extend([gyro, gravity])
+            if self.cfg.include_lin_acc_in_imu_obs:
+                obs_terms.append(lin_acc)
+        else:
+            obs_terms.extend(
+                [
+                    self._maybe_corrupt(self._robot.data.root_ang_vel_b, self.cfg.base_ang_vel_noise),
+                    self._maybe_corrupt(self._robot.data.projected_gravity_b, self.cfg.projected_gravity_noise),
+                ]
+            )
         obs_terms.extend(
             [
-                self._maybe_corrupt(self._robot.data.root_ang_vel_b, self.cfg.base_ang_vel_noise),
-                self._maybe_corrupt(self._robot.data.projected_gravity_b, self.cfg.projected_gravity_noise),
                 self._commands,
                 self._maybe_corrupt(joint_pos, self.cfg.joint_pos_noise),
                 self._maybe_corrupt(joint_vel, self.cfg.joint_vel_noise),
                 action_obs,
             ]
         )
-        obs = torch.cat(tuple(obs_terms), dim=-1)
+        observations = {"policy": torch.cat(tuple(obs_terms), dim=-1)}
+        if self.cfg.has_privileged_critic_obs():
+            observations[PRIVILEGED_OBS_GROUP] = self._robot.data.root_lin_vel_b
 
         self._previous_actions = self._actions.clone()
-        return self._with_optional_rnd_state({"policy": obs})
+        return self._with_optional_rnd_state(observations)
 
     def _with_optional_rnd_state(self, observations: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         if self.cfg.rnd_network:
@@ -1938,7 +1955,7 @@ class Solo12Env(DirectRLEnv):
         self._processed_actions[env_ids] = 0.0
         self._delayed_processed_actions[env_ids] = 0.0
         self._applied_actions[env_ids] = 0.0
-        if self.cfg.imu_raw_inputs:
+        if self._base_imu_enabled:
             self._base_imu_history[env_ids] = 0.0
             self._sample_base_imu_bias(env_ids)
 

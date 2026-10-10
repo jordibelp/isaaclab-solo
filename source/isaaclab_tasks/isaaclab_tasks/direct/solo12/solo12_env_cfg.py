@@ -35,8 +35,11 @@ def _optional_compliant_contact_value(value: float | None) -> float | None:
 
 
 ROOT_LIN_VEL_OBS_DIM = 3
+IMU_LIN_ACC_OBS_DIM = 3
 BASE_OBSERVATION_SPACE = 48
 COMMAND_OBS_DIM = 3
+# Critic-only observation group (noise-free base linear velocity) used when the actor does not observe it.
+PRIVILEGED_OBS_GROUP = "privileged"
 BASE_IMU_RAW_OBS_DIM = 6
 BASE_IMU_PROJECTED_GRAVITY_OBS_DIM = 9
 BASE_IMU_ROTATION_MATRIX_OBS_DIM = 15
@@ -386,6 +389,16 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     bringup_clip_rad = 0.0
     proportion_steps = proportionHfDiscreteObstaclesTerrain; proportion_low_random_rough_terrain = proportionHfRandomUniformTerrain
     remove_root_lin_vel_b_from_obs = False
+    # simple_mlp only. Hide the base linear velocity from the actor but keep it for the critic: the env adds
+    # a noise-free "privileged" observation group that train/play route to the critic.
+    # remove_root_lin_vel_b_from_obs=True removes the velocity from both actor and critic instead.
+    remove_root_lin_vel_b_from_actor_obs = False
+    # simple_mlp only. Take the observed base angular velocity and orientation (projected gravity) from the
+    # base-IMU model below (gyro, EKF attitude, IMU noise/bias/clip, 1 cm mounting offset) instead of the
+    # simulator state with the uniform mocap noise. An observed linear velocity keeps the mocap noise.
+    base_obs_from_imu = False
+    # With base_obs_from_imu, also observe the IMU's gravity-free linear acceleration after the gravity.
+    include_lin_acc_in_imu_obs = True
     # Selects the policy/observation layout. Supported values:
     # - "simple_mlp": legacy flat observation.
     # - "simple_dreamer_v3": Dreamer observation layout controlled by the Dreamer runner config.
@@ -811,12 +824,28 @@ class Solo12EnvCfg(DirectRLEnvCfg):
             self.compliant_contact_damping
         )
 
+    def actor_obs_has_lin_vel(self) -> bool:
+        return not (self.remove_root_lin_vel_b_from_obs or self.remove_root_lin_vel_b_from_actor_obs)
+
+    def has_privileged_critic_obs(self) -> bool:
+        """True when the critic gets the base linear velocity that the actor does not observe."""
+        return self.remove_root_lin_vel_b_from_actor_obs and not self.remove_root_lin_vel_b_from_obs
+
     def refresh_observation_dimensions(self):
         """Recompute observation dimensions after Hydra overrides."""
         self.refresh_base_imu_dimensions()
-        legacy_obs_dim = BASE_OBSERVATION_SPACE - (
-            ROOT_LIN_VEL_OBS_DIM if self.remove_root_lin_vel_b_from_obs else 0
-        )
+        if (self.remove_root_lin_vel_b_from_actor_obs or self.base_obs_from_imu) and self.policy_model != "simple_mlp":
+            raise ValueError(
+                "remove_root_lin_vel_b_from_actor_obs and base_obs_from_imu only apply to policy_model='simple_mlp'."
+            )
+        if self.base_obs_from_imu and (not self.imu_ekf_processed_inputs or self.use_rotMat_on_imu_encoder):
+            raise ValueError(
+                "base_obs_from_imu uses the /odri/imu signals: keep imu_ekf_processed_inputs=True and "
+                "use_rotMat_on_imu_encoder=False."
+            )
+        legacy_obs_dim = BASE_OBSERVATION_SPACE - (0 if self.actor_obs_has_lin_vel() else ROOT_LIN_VEL_OBS_DIM)
+        if self.base_obs_from_imu and self.include_lin_acc_in_imu_obs:
+            legacy_obs_dim += IMU_LIN_ACC_OBS_DIM
 
         if self.policy_model == "simple_dreamer_v3":
             command_outside_observation = bool(getattr(self, "_dreamer_command_outside_observation", False))
@@ -871,6 +900,17 @@ class Solo12EnvCfg(DirectRLEnvCfg):
             self.imu_raw_inputs = True
             self.observation_space = self.teacher_critic_obs_dim + self.base_imu_history_flat_dim + COMMAND_OBS_DIM
             self.state_space = self.teacher_critic_obs_dim
+
+
+def route_privileged_obs_to_critic(env_cfg, agent_cfg) -> None:
+    """Append the privileged observation group to the RSL-RL (PPO or SAC) critic when the env provides it."""
+    has_privileged_critic_obs = getattr(env_cfg, "has_privileged_critic_obs", None)
+    if not callable(has_privileged_critic_obs) or not has_privileged_critic_obs():
+        return
+    critic_groups = list(agent_cfg.obs_groups.get("critic", ["policy"]))
+    if PRIVILEGED_OBS_GROUP not in critic_groups:
+        critic_groups.append(PRIVILEGED_OBS_GROUP)
+    agent_cfg.obs_groups = {**agent_cfg.obs_groups, "critic": critic_groups}
 
 
 @configclass

@@ -521,6 +521,7 @@ from isaaclab_tasks.direct.solo12.agents.base_imu_actor_critic import (
     Solo12BaseImuTeacherActorCritic,
 )
 from isaaclab_tasks.direct.solo12.solo12_env import _world_velocity_in_heading_frame_xy
+from isaaclab_tasks.direct.solo12.solo12_env_cfg import route_privileged_obs_to_critic
 
 
 @dataclass
@@ -2198,6 +2199,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 flush=True,
             )
     _sync_base_imu_policy_cfg_from_env_cfg(env_cfg, agent_cfg)
+    route_privileged_obs_to_critic(env_cfg, agent_cfg)
     cli_actuator_gain_overrides = _capture_cli_actuator_gain_overrides(env_cfg, hydra_args)
 
     training_wandb_run_path = None
