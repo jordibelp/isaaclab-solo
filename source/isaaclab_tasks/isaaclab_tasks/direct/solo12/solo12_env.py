@@ -344,6 +344,9 @@ class Solo12Env(DirectRLEnv):
         self._base_imu_gravity_bias_w = torch.tensor(
             self.cfg.base_imu.gravity_bias, dtype=torch.float, device=self.device
         ).unsqueeze(0)
+        self._base_imu_offset_b = torch.tensor(
+            self.cfg.base_imu.offset.pos, dtype=torch.float, device=self.device
+        ).unsqueeze(0)
         self._gravity_direction_w = torch.tensor((0.0, 0.0, -1.0), dtype=torch.float, device=self.device).unsqueeze(0)
 
     def _setup_scene(self):
@@ -1486,20 +1489,21 @@ class Solo12Env(DirectRLEnv):
         base_ang_acc_w = self._robot.data.body_com_ang_acc_w[:, base_body_id]
         base_com_acc_w = self._robot.data.body_com_lin_acc_w[:, base_body_id]
 
-        # PhysX exposes COM acceleration. Convert it to the base link origin, where the IMU is mounted.
-        com_to_link_pos_b = -self._robot.data.body_com_pos_b[:, base_body_id]
-        com_to_link_pos_w = math_utils.quat_apply(base_quat_w, com_to_link_pos_b)
-        base_link_linear_acc_w = (
+        # PhysX exposes COM acceleration. Convert it to the IMU mounting point (cfg.base_imu.offset.pos
+        # in the base link frame) with the rigid-body lever arm.
+        com_to_imu_pos_b = self._base_imu_offset_b - self._robot.data.body_com_pos_b[:, base_body_id]
+        com_to_imu_pos_w = math_utils.quat_apply(base_quat_w, com_to_imu_pos_b)
+        imu_linear_acc_w = (
             base_com_acc_w
-            + torch.linalg.cross(base_ang_acc_w, com_to_link_pos_w, dim=-1)
+            + torch.linalg.cross(base_ang_acc_w, com_to_imu_pos_w, dim=-1)
             + torch.linalg.cross(
-                base_ang_vel_w, torch.linalg.cross(base_ang_vel_w, com_to_link_pos_w, dim=-1), dim=-1
+                base_ang_vel_w, torch.linalg.cross(base_ang_vel_w, com_to_imu_pos_w, dim=-1), dim=-1
             )
         )
 
         gyro_b = math_utils.quat_apply_inverse(base_quat_w, base_ang_vel_w)
         if self.cfg.imu_ekf_processed_inputs:
-            acc_b = math_utils.quat_apply_inverse(base_quat_w, base_link_linear_acc_w)
+            acc_b = math_utils.quat_apply_inverse(base_quat_w, imu_linear_acc_w)
             ekf_quat_w = math_utils.quat_mul(self._base_imu_heading_reference, base_quat_w)
             if corrupt:
                 gyro_b, acc_b = self._maybe_corrupt_base_imu_vectors(gyro_b, acc_b, ekf_processed=True)
@@ -1510,7 +1514,7 @@ class Solo12Env(DirectRLEnv):
                 acc_b = acc_b.clamp(-self.cfg.base_imu_ekf_acc_clip, self.cfg.base_imu_ekf_acc_clip)
             return torch.cat((gyro_b, acc_b, orientation), dim=-1)
 
-        specific_force_w = base_link_linear_acc_w + self._base_imu_gravity_bias_w
+        specific_force_w = imu_linear_acc_w + self._base_imu_gravity_bias_w
         acc_b = math_utils.quat_apply_inverse(base_quat_w, specific_force_w)
         if corrupt:
             gyro_b, acc_b = self._maybe_corrupt_base_imu_vectors(gyro_b, acc_b, ekf_processed=False)

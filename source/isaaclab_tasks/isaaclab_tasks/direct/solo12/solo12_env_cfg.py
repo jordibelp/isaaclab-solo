@@ -679,10 +679,11 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     )
     base_imu: ImuCfg = ImuCfg(
         prim_path="/World/envs/env_.*/Robot/base",
-        # On the real robot the IMU is mounted 1 cm in front of the CoM. The base link frame
-        # origin nominally coincides with the CoM, so offset the sensor +1 cm along base +x
-        # (forward). The sensor accounts for the lever arm, adding the centripetal/tangential
-        # acceleration this mounting picks up under angular motion.
+        # Not spawned as a sensor: Solo12Env reads offset.pos and gravity_bias and computes the IMU
+        # signal itself. On the real robot the IMU is 1 cm in front of the base link origin, while
+        # SoloFlat.usd puts the nominal base CoM 1 cm behind it. The lever arm from the (randomized)
+        # CoM to this point adds the centripetal/tangential acceleration the IMU picks up under
+        # angular motion. Only the position is used; IMU axes are assumed parallel to the base axes.
         offset=ImuCfg.OffsetCfg(pos=(0.01, 0.0, 0.0)),
         gravity_bias=(0.0, 0.0, 9.81),
     )
