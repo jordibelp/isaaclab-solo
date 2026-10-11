@@ -50,6 +50,10 @@ class WandbSummaryWriter(SummaryWriter):
         wandb_config = {"log_dir": log_dir}
         if cfg.get("command"):
             wandb_config["command"] = cfg["command"]
+        # Keep checkpoint provenance filterable without expanding train_cfg.
+        for key in ("checkpoint_path", "checkpoint_name"):
+            if key in cfg:
+                wandb_config[key] = cfg[key]
         # Process/Slurm/GPU provenance goes to the top level so the runs table can sort and filter
         # on it, matching the fields source/scripts/rsl_rl/train.py logs.
         wandb_config.update(cfg.get("run_placement", {}))

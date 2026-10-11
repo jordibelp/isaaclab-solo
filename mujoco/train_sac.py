@@ -744,8 +744,11 @@ def _runner_config(args, schedule: dict) -> dict:
             "mirror_loss_coeff": args.symmetry_loss_coeff,
             "data_augmentation_func": solo12_symmetry.compute_symmetric_observations_actions,
         }
+    checkpoint = Path(args.checkpoint).expanduser().resolve() if args.checkpoint else None
     return {
         "class_name": "OffPolicyRunner",
+        "checkpoint_path": str(checkpoint) if checkpoint else None,
+        "checkpoint_name": checkpoint.name if checkpoint else None,
         "finetuning": _finetuning_config(args),
         "seed": args.seed,
         "device": args.device,
