@@ -38,7 +38,7 @@ def test_defaults_keep_the_noisy_mocap_observation_and_a_shared_critic():
 
     assert cfg.base_obs_from_imu is False
     assert cfg.remove_root_lin_vel_b_from_actor_obs is False
-    assert cfg.include_lin_acc_in_imu_obs is True
+    assert cfg.include_lin_acc_steps_in_imu_obs == 0
     assert cfg.noisy_actor_obs is True
     assert cfg.noisy_critic_obs is True
     assert not hasattr(cfg, "enable_observation_corruption")
@@ -52,9 +52,23 @@ def test_defaults_keep_the_noisy_mocap_observation_and_a_shared_critic():
         ({"remove_root_lin_vel_b_from_actor_obs": True}, 45, SHARED_WITH_LIN_VEL),
         ({"remove_root_lin_vel_b_from_obs": True}, 45, None),
         ({"remove_root_lin_vel_b_from_obs": True, "remove_root_lin_vel_b_from_actor_obs": True}, 45, None),
-        ({"base_obs_from_imu": True}, 51, None),
-        ({"base_obs_from_imu": True, "include_lin_acc_in_imu_obs": False}, 48, None),
-        ({"base_obs_from_imu": True, "remove_root_lin_vel_b_from_actor_obs": True}, 48, SHARED_WITH_LIN_VEL),
+        ({"base_obs_from_imu": True}, 48, None),
+        ({"base_obs_from_imu": True, "include_lin_acc_steps_in_imu_obs": 1}, 51, None),
+        ({"base_obs_from_imu": True, "remove_root_lin_vel_b_from_actor_obs": True}, 45, SHARED_WITH_LIN_VEL),
+        (
+            {"base_obs_from_imu": True, "include_lin_acc_steps_in_imu_obs": 4, "noisy_critic_obs": False},
+            60,
+            ["critic"],
+        ),
+        (
+            {
+                "base_obs_from_imu": True,
+                "include_lin_acc_steps_in_imu_obs": 4,
+                "remove_root_lin_vel_b_from_actor_obs": True,
+            },
+            57,
+            SHARED_WITH_LIN_VEL,
+        ),
         ({"noisy_critic_obs": False}, 48, ["critic"]),
         ({"noisy_critic_obs": False, "remove_root_lin_vel_b_from_actor_obs": True}, 45, ["critic"]),
         # Play turns actor noise off; the critic inputs must keep the layout the critic was trained with.
@@ -88,6 +102,15 @@ def test_actor_noise_switch_works_for_every_policy_model():
     cfg.refresh_runtime_dependent_config()
 
     assert cfg.critic_obs_groups() is None
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [{"include_lin_acc_steps_in_imu_obs": 2}, {"base_obs_from_imu": True, "include_lin_acc_steps_in_imu_obs": -1}],
+)
+def test_acceleration_steps_must_be_non_negative_and_need_the_imu(overrides):
+    with pytest.raises(ValueError, match="include_lin_acc_steps_in_imu_obs"):
+        two_feet_cfg(**overrides)
 
 
 @pytest.mark.parametrize("field, value", [("imu_ekf_processed_inputs", False), ("use_rotMat_on_imu_encoder", True)])
@@ -131,7 +154,12 @@ def test_routing_keeps_the_agent_default_for_a_shared_critic():
 # Constant "noise": every corrupted value is shifted by exactly NOISE, so tests can see which terms are noisy.
 NOISE = 5.0
 LIN_VEL, ANG_VEL, GRAVITY = [1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]
-IMU_GYRO, IMU_ACC, IMU_GRAVITY = [40.0, 50.0, 60.0], [10.0, 11.0, 12.0], [70.0, 80.0, 90.0]
+IMU_GYRO, IMU_GRAVITY = [40.0, 50.0, 60.0], [70.0, 80.0, 90.0]
+
+
+def imu_acc(steps: int) -> list[float]:
+    """Noise-free physics-rate accelerations, oldest first: [10, 11, 12], [13, 14, 15], ..."""
+    return [10.0 + value for value in range(3 * steps)]
 
 
 def make_obs_env(cfg: Solo12TwoFeetEnvCfg) -> Solo12Env:
@@ -154,8 +182,10 @@ def make_obs_env(cfg: Solo12TwoFeetEnvCfg) -> Solo12Env:
     env._actions = torch.full((1, 12), -1.0)
     env._applied_actions = env._actions
     # gyro, gravity-free acceleration, projected gravity: the order _read_base_imu_sample returns.
-    imu_sample = torch.tensor([IMU_GYRO + IMU_ACC + IMU_GRAVITY])
+    imu_sample = torch.tensor([IMU_GYRO + [-1.0, -1.0, -1.0] + IMU_GRAVITY])
     env._read_base_imu_sample = lambda corrupt: imu_sample + (NOISE if corrupt else 0.0)
+    clean_acc = torch.tensor(imu_acc(cfg.include_lin_acc_steps_in_imu_obs)).reshape(1, -1, 3)
+    env._imu_lin_acc_history = torch.stack((clean_acc + NOISE, clean_acc), dim=2)
     return env
 
 
@@ -178,21 +208,28 @@ def expected_obs(env: Solo12Env, base_terms: list[float], noisy: bool) -> torch.
     [
         ({}, LIN_VEL + ANG_VEL + GRAVITY, None, None, None),
         ({"remove_root_lin_vel_b_from_actor_obs": True}, ANG_VEL + GRAVITY, PRIVILEGED_OBS_GROUP, LIN_VEL, True),
-        ({"base_obs_from_imu": True}, LIN_VEL + IMU_GYRO + IMU_GRAVITY + IMU_ACC, None, None, None),
+        ({"base_obs_from_imu": True}, LIN_VEL + IMU_GYRO + IMU_GRAVITY, None, None, None),
         (
-            {"base_obs_from_imu": True, "remove_root_lin_vel_b_from_actor_obs": True, "noisy_critic_obs": False},
-            IMU_GYRO + IMU_GRAVITY + IMU_ACC,
-            "critic",
-            LIN_VEL + IMU_GYRO + IMU_GRAVITY + IMU_ACC,
-            False,
+            {"base_obs_from_imu": True, "include_lin_acc_steps_in_imu_obs": 1},
+            LIN_VEL + IMU_GYRO + IMU_GRAVITY + imu_acc(1),
+            None,
+            None,
+            None,
         ),
         (
             {
                 "base_obs_from_imu": True,
-                "include_lin_acc_in_imu_obs": False,
+                "include_lin_acc_steps_in_imu_obs": 4,
                 "remove_root_lin_vel_b_from_actor_obs": True,
                 "noisy_critic_obs": False,
             },
+            IMU_GYRO + IMU_GRAVITY + imu_acc(4),
+            "critic",
+            LIN_VEL + IMU_GYRO + IMU_GRAVITY + imu_acc(4),
+            False,
+        ),
+        (
+            {"base_obs_from_imu": True, "remove_root_lin_vel_b_from_actor_obs": True, "noisy_critic_obs": False},
             IMU_GYRO + IMU_GRAVITY,
             "critic",
             LIN_VEL + IMU_GYRO + IMU_GRAVITY,
@@ -248,3 +285,23 @@ def test_actor_noise_switch_also_silences_the_shared_privileged_velocity():
 
     torch.testing.assert_close(observations["policy"], expected_obs(env, ANG_VEL + GRAVITY, noisy=False))
     torch.testing.assert_close(observations[PRIVILEGED_OBS_GROUP], torch.tensor([LIN_VEL]))
+
+
+def test_each_physics_step_appends_observed_and_clean_accelerations_oldest_first():
+    cfg = two_feet_cfg(base_obs_from_imu=True, include_lin_acc_steps_in_imu_obs=3)
+    env = object.__new__(Solo12Env)
+    env._is_closed = True
+    env.cfg = cfg
+    env._base_imu_enabled = True
+    env._base_imu_history_len = 0
+    env._imu_lin_acc_history = torch.zeros(1, 3, 2, 3)
+    env._update_base_imu_bias_random_walk = lambda: None
+
+    for step in range(4):
+        sample = torch.tensor([[0.0, 0.0, 0.0] + [float(step)] * 3 + [0.0, 0.0, 0.0]])
+        env._read_base_imu_sample = lambda corrupt, sample=sample: sample + (NOISE if corrupt else 0.0)
+        env._record_base_imu_history_sample()
+
+    newest_three = torch.tensor([[1.0] * 3, [2.0] * 3, [3.0] * 3])
+    torch.testing.assert_close(env._imu_lin_acc_history[0, :, 1], newest_three)
+    torch.testing.assert_close(env._imu_lin_acc_history[0, :, 0], newest_three + NOISE)

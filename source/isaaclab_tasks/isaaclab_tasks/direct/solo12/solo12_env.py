@@ -338,6 +338,11 @@ class Solo12Env(DirectRLEnv):
             self._base_imu_history_sample_dim,
             device=self.device,
         )
+        # Physics-rate IMU accelerations for the simple_mlp observation, oldest first: [:, :, 0] as the actor
+        # observes them (IMU noise), [:, :, 1] noise-free for a privileged critic.
+        self._imu_lin_acc_history = torch.zeros(
+            self.num_envs, self.cfg.include_lin_acc_steps_in_imu_obs, 2, 3, device=self.device
+        )
         self._base_imu_bias = torch.zeros(self.num_envs, 6, device=self.device)
         self._base_imu_orientation_bias_rpy = torch.zeros(self.num_envs, 3, device=self.device)
         self._base_imu_heading_reference = torch.zeros(self.num_envs, 4, device=self.device)
@@ -1464,11 +1469,16 @@ class Solo12Env(DirectRLEnv):
         return self.obs_buf, self.reward_buf, self.reset_terminated, self.reset_time_outs, self.extras
 
     def _record_base_imu_history_sample(self):
-        """Advance the IMU bias random walks and, for history students, record one physics-rate sample."""
+        """Advance the IMU bias random walks and record the physics-rate IMU histories the observations use."""
         if not self._base_imu_enabled:
             return
 
         self._update_base_imu_bias_random_walk()
+        if self.cfg.include_lin_acc_steps_in_imu_obs > 0:
+            observed_acc = self._read_base_imu_sample(corrupt=True)[:, 3:6]
+            clean_acc = self._read_base_imu_sample(corrupt=False)[:, 3:6]
+            self._imu_lin_acc_history = torch.roll(self._imu_lin_acc_history, shifts=-1, dims=1)
+            self._imu_lin_acc_history[:, -1] = torch.stack((observed_acc, clean_acc), dim=1)
         if self._base_imu_history_len == 0:
             return
         sample = torch.cat(
@@ -1688,10 +1698,9 @@ class Solo12Env(DirectRLEnv):
         if include_lin_vel:
             obs_terms.append(observe(self._robot.data.root_lin_vel_b, self.cfg.base_lin_vel_noise))
         if self.cfg.base_obs_from_imu:
-            gyro, lin_acc, gravity = self._read_base_imu_sample(corrupt=noisy).split(3, dim=-1)
-            obs_terms.extend([gyro, gravity])
-            if self.cfg.include_lin_acc_in_imu_obs:
-                obs_terms.append(lin_acc)
+            gyro, _, gravity = self._read_base_imu_sample(corrupt=noisy).split(3, dim=-1)
+            lin_acc_history = self._imu_lin_acc_history[:, :, 0 if noisy else 1].flatten(1)
+            obs_terms.extend([gyro, gravity, lin_acc_history])
         else:
             obs_terms.extend(
                 [
@@ -1974,6 +1983,7 @@ class Solo12Env(DirectRLEnv):
         self._applied_actions[env_ids] = 0.0
         if self._base_imu_enabled:
             self._base_imu_history[env_ids] = 0.0
+            self._imu_lin_acc_history[env_ids] = 0.0
             self._sample_base_imu_bias(env_ids)
 
         self._resample_commands(env_ids, allow_opposite=False)

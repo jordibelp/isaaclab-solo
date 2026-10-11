@@ -396,8 +396,9 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     # base-IMU model below (gyro, EKF attitude, IMU noise/bias/clip, 1 cm mounting offset) instead of the
     # simulator state with the uniform mocap noise. An observed linear velocity keeps the mocap noise.
     base_obs_from_imu = False
-    # With base_obs_from_imu, also observe the IMU's gravity-free linear acceleration after the gravity.
-    include_lin_acc_in_imu_obs = True
+    # With base_obs_from_imu: number of physics-rate IMU gravity-free linear acceleration samples observed
+    # after the gravity (the current and previous physics steps, oldest first, 3 values each). 0 leaves them out.
+    include_lin_acc_steps_in_imu_obs = 0
     # Selects the policy/observation layout. Supported values:
     # - "simple_mlp": legacy flat observation.
     # - "simple_dreamer_v3": Dreamer observation layout controlled by the Dreamer runner config.
@@ -864,9 +865,12 @@ class Solo12EnvCfg(DirectRLEnvCfg):
                 "base_obs_from_imu uses the /odri/imu signals: keep imu_ekf_processed_inputs=True and "
                 "use_rotMat_on_imu_encoder=False."
             )
+        if self.include_lin_acc_steps_in_imu_obs < 0 or (
+            self.include_lin_acc_steps_in_imu_obs > 0 and not self.base_obs_from_imu
+        ):
+            raise ValueError("include_lin_acc_steps_in_imu_obs must be >= 0, and > 0 requires base_obs_from_imu=True.")
         legacy_obs_dim = BASE_OBSERVATION_SPACE - (0 if self.actor_obs_has_lin_vel() else ROOT_LIN_VEL_OBS_DIM)
-        if self.base_obs_from_imu and self.include_lin_acc_in_imu_obs:
-            legacy_obs_dim += IMU_LIN_ACC_OBS_DIM
+        legacy_obs_dim += IMU_LIN_ACC_OBS_DIM * self.include_lin_acc_steps_in_imu_obs
 
         if self.policy_model == "simple_dreamer_v3":
             command_outside_observation = bool(getattr(self, "_dreamer_command_outside_observation", False))

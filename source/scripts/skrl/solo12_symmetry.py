@@ -23,12 +23,12 @@ Without base linear velocity included (45 dims):
 - 33:45 -> previous/raw actions (12 DoF)
 
 With ``env.base_obs_from_imu`` the angular velocity and gravity come from the IMU model, and
-``env.include_lin_acc_in_imu_obs`` inserts the IMU linear acceleration (3 dims) right after the
-gravity, giving 51 or 48 dims. A 48-dim observation is therefore ambiguous, so the layout is read
-from the env config. With ``env.remove_root_lin_vel_b_from_actor_obs`` the critic also receives the
-``privileged`` group: the 3-dim base linear velocity in body frame. With ``env.noisy_critic_obs=False``
-the critic instead receives a noise-free ``critic`` group with the same layout as the policy plus the
-linear velocity (unless ``env.remove_root_lin_vel_b_from_obs``).
+``env.include_lin_acc_steps_in_imu_obs=N`` inserts N physics-rate IMU linear accelerations (3 dims
+each, oldest first) right after the gravity, giving 48+3N or 45+3N dims. Sizes are therefore
+ambiguous, so the layout is read from the env config. With ``env.remove_root_lin_vel_b_from_actor_obs``
+the critic also receives the ``privileged`` group: the 3-dim base linear velocity in body frame. With
+``env.noisy_critic_obs=False`` the critic instead receives a noise-free ``critic`` group with the same
+layout as the policy plus the linear velocity (unless ``env.remove_root_lin_vel_b_from_obs``).
 
 The base-IMU teacher and student RSL tasks add two more layouts:
 
@@ -130,7 +130,7 @@ _FRONT_BACK_FOOT_PERM = torch.tensor([2, 3, 0, 1], dtype=torch.long)
 
 
 class Solo12ObservationSlices:
-    def __init__(self, *, include_lin_vel: bool, include_lin_acc: bool = False):
+    def __init__(self, *, include_lin_vel: bool, lin_acc_steps: int = 0):
         offset = 0
         self.lin_vel = None
         if include_lin_vel:
@@ -141,9 +141,9 @@ class Solo12ObservationSlices:
         self.gravity = slice(offset, offset + 3)
         offset += 3
         self.lin_acc = None
-        if include_lin_acc:
-            self.lin_acc = slice(offset, offset + IMU_LIN_ACC_SIZE)
-            offset += IMU_LIN_ACC_SIZE
+        if lin_acc_steps > 0:
+            self.lin_acc = slice(offset, offset + IMU_LIN_ACC_SIZE * lin_acc_steps)
+            offset += IMU_LIN_ACC_SIZE * lin_acc_steps
         self.commands = slice(offset, offset + 3)
         offset += 3
         self.joint_pos = slice(offset, offset + 12)
@@ -179,12 +179,12 @@ class Solo12BaseImuTeacherObservationSlices:
         self.obs_dim = offset
 
 
-def _get_observation_slices(obs_dim: int, include_lin_acc: bool = False) -> Solo12ObservationSlices:
-    acc_dim = IMU_LIN_ACC_SIZE if include_lin_acc else 0
+def _get_observation_slices(obs_dim: int, lin_acc_steps: int = 0) -> Solo12ObservationSlices:
+    acc_dim = IMU_LIN_ACC_SIZE * lin_acc_steps
     if obs_dim == OBSERVATION_SIZE + acc_dim:
-        return Solo12ObservationSlices(include_lin_vel=True, include_lin_acc=include_lin_acc)
+        return Solo12ObservationSlices(include_lin_vel=True, lin_acc_steps=lin_acc_steps)
     if obs_dim == OBSERVATION_SIZE_WITHOUT_LIN_VEL + acc_dim:
-        return Solo12ObservationSlices(include_lin_vel=False, include_lin_acc=include_lin_acc)
+        return Solo12ObservationSlices(include_lin_vel=False, lin_acc_steps=lin_acc_steps)
     raise ValueError(
         f"Expected Solo12 policy observations with size {OBSERVATION_SIZE + acc_dim} or "
         f"{OBSERVATION_SIZE_WITHOUT_LIN_VEL + acc_dim}, got {obs_dim}"
@@ -248,8 +248,10 @@ def _uses_front_back_symmetry(env: Any) -> bool:
     return front_back_asymetry is None or not bool(front_back_asymetry)
 
 
-def _policy_obs_includes_imu_lin_acc(env: Any) -> bool:
-    return bool(_find_cfg_value(env, "base_obs_from_imu")) and bool(_find_cfg_value(env, "include_lin_acc_in_imu_obs"))
+def _policy_obs_imu_lin_acc_steps(env: Any) -> int:
+    if not _find_cfg_value(env, "base_obs_from_imu"):
+        return 0
+    return int(_find_cfg_value(env, "include_lin_acc_steps_in_imu_obs") or 0)
 
 
 _DEVICE_CONSTANTS: dict[tuple[int, torch.device], torch.Tensor] = {}
@@ -308,16 +310,16 @@ def _transform_vector_by_sign(data: torch.Tensor, sign: torch.Tensor) -> torch.T
     return data * _as_device_tensor(sign, data.device).to(dtype=data.dtype)
 
 
-def transform_policy_obs_reflect_x(obs: torch.Tensor, include_lin_acc: bool = False) -> torch.Tensor:
-    slices = _get_observation_slices(obs.shape[-1], include_lin_acc)
+def transform_policy_obs_reflect_x(obs: torch.Tensor, lin_acc_steps: int = 0) -> torch.Tensor:
+    slices = _get_observation_slices(obs.shape[-1], lin_acc_steps)
 
     obs = obs.clone()
     if slices.lin_vel is not None:
         obs[:, slices.lin_vel] *= _as_device_tensor(_VECTOR_REFLECT_X, obs.device)
     obs[:, slices.ang_vel] *= _as_device_tensor(_PSEUDOVECTOR_REFLECT_X, obs.device)
     obs[:, slices.gravity] *= _as_device_tensor(_VECTOR_REFLECT_X, obs.device)
-    if slices.lin_acc is not None:
-        obs[:, slices.lin_acc] *= _as_device_tensor(_VECTOR_REFLECT_X, obs.device)
+    if slices.lin_acc is not None:  # in place on a view: one 3-D vector per physics step
+        obs[:, slices.lin_acc].unflatten(-1, (-1, 3)).mul_(_as_device_tensor(_VECTOR_REFLECT_X, obs.device))
     obs[:, slices.commands] *= _as_device_tensor(_COMMAND_REFLECT_X, obs.device)
     obs[:, slices.joint_pos] = _transform_joint_data_left_right(obs[:, slices.joint_pos])
     obs[:, slices.joint_vel] = _transform_joint_data_left_right(obs[:, slices.joint_vel])
@@ -325,16 +327,16 @@ def transform_policy_obs_reflect_x(obs: torch.Tensor, include_lin_acc: bool = Fa
     return obs
 
 
-def transform_policy_obs_reflect_y(obs: torch.Tensor, include_lin_acc: bool = False) -> torch.Tensor:
-    slices = _get_observation_slices(obs.shape[-1], include_lin_acc)
+def transform_policy_obs_reflect_y(obs: torch.Tensor, lin_acc_steps: int = 0) -> torch.Tensor:
+    slices = _get_observation_slices(obs.shape[-1], lin_acc_steps)
 
     obs = obs.clone()
     if slices.lin_vel is not None:
         obs[:, slices.lin_vel] *= _as_device_tensor(_VECTOR_REFLECT_Y, obs.device)
     obs[:, slices.ang_vel] *= _as_device_tensor(_PSEUDOVECTOR_REFLECT_Y, obs.device)
     obs[:, slices.gravity] *= _as_device_tensor(_VECTOR_REFLECT_Y, obs.device)
-    if slices.lin_acc is not None:
-        obs[:, slices.lin_acc] *= _as_device_tensor(_VECTOR_REFLECT_Y, obs.device)
+    if slices.lin_acc is not None:  # in place on a view: one 3-D vector per physics step
+        obs[:, slices.lin_acc].unflatten(-1, (-1, 3)).mul_(_as_device_tensor(_VECTOR_REFLECT_Y, obs.device))
     obs[:, slices.commands] *= _as_device_tensor(_COMMAND_REFLECT_Y, obs.device)
     obs[:, slices.joint_pos] = _transform_joint_data_front_back(obs[:, slices.joint_pos])
     obs[:, slices.joint_vel] = _transform_joint_data_front_back(obs[:, slices.joint_vel])
@@ -342,8 +344,8 @@ def transform_policy_obs_reflect_y(obs: torch.Tensor, include_lin_acc: bool = Fa
     return obs
 
 
-def transform_policy_obs_rotate_180(obs: torch.Tensor, include_lin_acc: bool = False) -> torch.Tensor:
-    return transform_policy_obs_reflect_y(transform_policy_obs_reflect_x(obs, include_lin_acc), include_lin_acc)
+def transform_policy_obs_rotate_180(obs: torch.Tensor, lin_acc_steps: int = 0) -> torch.Tensor:
+    return transform_policy_obs_reflect_y(transform_policy_obs_reflect_x(obs, lin_acc_steps), lin_acc_steps)
 
 
 def transform_base_imu_teacher_obs_reflect_x(obs: torch.Tensor) -> torch.Tensor:
@@ -489,7 +491,7 @@ def transform_base_imu_student_obs_rotate_180(
 
 
 def _transform_obs_reflect_x(
-    obs: torch.Tensor, policy_model: str | None, history_sample_dim: int | None, include_lin_acc: bool = False
+    obs: torch.Tensor, policy_model: str | None, history_sample_dim: int | None, lin_acc_steps: int = 0
 ) -> torch.Tensor:
     if policy_model == "base_imu_teacher":
         return transform_base_imu_teacher_obs_reflect_x(obs)
@@ -506,11 +508,11 @@ def _transform_obs_reflect_x(
         BASE_IMU_TEACHER_OBSERVATION_SIZE_WITH_FOOT_HEIGHTS,
     ):
         return transform_base_imu_teacher_obs_reflect_x(obs)
-    return transform_policy_obs_reflect_x(obs, include_lin_acc)
+    return transform_policy_obs_reflect_x(obs, lin_acc_steps)
 
 
 def _transform_obs_reflect_y(
-    obs: torch.Tensor, policy_model: str | None, history_sample_dim: int | None, include_lin_acc: bool = False
+    obs: torch.Tensor, policy_model: str | None, history_sample_dim: int | None, lin_acc_steps: int = 0
 ) -> torch.Tensor:
     if policy_model == "base_imu_teacher":
         return transform_base_imu_teacher_obs_reflect_y(obs)
@@ -527,17 +529,17 @@ def _transform_obs_reflect_y(
         BASE_IMU_TEACHER_OBSERVATION_SIZE_WITH_FOOT_HEIGHTS,
     ):
         return transform_base_imu_teacher_obs_reflect_y(obs)
-    return transform_policy_obs_reflect_y(obs, include_lin_acc)
+    return transform_policy_obs_reflect_y(obs, lin_acc_steps)
 
 
 def _transform_obs_rotate_180(
-    obs: torch.Tensor, policy_model: str | None, history_sample_dim: int | None, include_lin_acc: bool = False
+    obs: torch.Tensor, policy_model: str | None, history_sample_dim: int | None, lin_acc_steps: int = 0
 ) -> torch.Tensor:
     return _transform_obs_reflect_y(
-        _transform_obs_reflect_x(obs, policy_model, history_sample_dim, include_lin_acc),
+        _transform_obs_reflect_x(obs, policy_model, history_sample_dim, lin_acc_steps),
         policy_model,
         history_sample_dim,
-        include_lin_acc,
+        lin_acc_steps,
     )
 
 
@@ -546,16 +548,16 @@ def _augment_obs_tensor(
     policy_model: str | None,
     history_sample_dim: int | None,
     use_front_back_symmetry: bool,
-    include_lin_acc: bool = False,
+    lin_acc_steps: int = 0,
 ) -> torch.Tensor:
     transforms = (
-        (obs, _transform_obs_reflect_x(obs, policy_model, history_sample_dim, include_lin_acc))
+        (obs, _transform_obs_reflect_x(obs, policy_model, history_sample_dim, lin_acc_steps))
         if not use_front_back_symmetry
         else (
             obs,
-            _transform_obs_reflect_x(obs, policy_model, history_sample_dim, include_lin_acc),
-            _transform_obs_reflect_y(obs, policy_model, history_sample_dim, include_lin_acc),
-            _transform_obs_rotate_180(obs, policy_model, history_sample_dim, include_lin_acc),
+            _transform_obs_reflect_x(obs, policy_model, history_sample_dim, lin_acc_steps),
+            _transform_obs_reflect_y(obs, policy_model, history_sample_dim, lin_acc_steps),
+            _transform_obs_rotate_180(obs, policy_model, history_sample_dim, lin_acc_steps),
         )
     )
     return torch.cat(
@@ -591,7 +593,7 @@ def _pack_policy_obs(
     policy_model: str | None,
     history_sample_dim: int | None,
     use_front_back_symmetry: bool,
-    include_lin_acc: bool = False,
+    lin_acc_steps: int = 0,
 ):
     if not was_tensordict:
         return obs_policy_aug
@@ -612,7 +614,7 @@ def _pack_policy_obs(
             data[key] = torch.cat([value] * repeat_factor, dim=0)
         elif isinstance(value, torch.Tensor) and value.ndim == 2:
             data[key] = _augment_obs_tensor(
-                value, policy_model, history_sample_dim, use_front_back_symmetry, include_lin_acc
+                value, policy_model, history_sample_dim, use_front_back_symmetry, lin_acc_steps
             )
         else:
             repeat_factor = batch_dim // value.shape[0]
@@ -634,8 +636,8 @@ def compute_symmetric_observations_actions(
 
     Args:
         env: Isaac Lab env or wrapper. Used to disambiguate legacy 48D observations from base-IMU teacher 48D observations.
-        obs: Policy observation tensor of shape ``[batch, 45/48/51]`` (see the module docstring), or base-IMU
-            student ``[batch, 549]``. A TensorDict may also carry the ``privileged`` critic group.
+        obs: Policy observation tensor of shape ``[batch, 45 + 3N or 48 + 3N]`` (see the module docstring),
+            or base-IMU student ``[batch, 549]``. A TensorDict may also carry the ``privileged`` critic group.
         actions: Action tensor of shape ``[batch, 12]``.
         obs_type: Present for API compatibility. Only ``"policy"`` is supported.
 
@@ -651,11 +653,11 @@ def compute_symmetric_observations_actions(
     policy_model = _get_policy_model(env)
     history_sample_dim = _get_base_imu_history_sample_dim(env)
     use_front_back_symmetry = _uses_front_back_symmetry(env)
-    include_lin_acc = _policy_obs_includes_imu_lin_acc(env)
+    lin_acc_steps = _policy_obs_imu_lin_acc_steps(env)
     if obs is not None:
         obs_policy, was_tensordict = _extract_policy_obs_tensor(obs, obs_type)
         obs_policy_aug = _augment_obs_tensor(
-            obs_policy, policy_model, history_sample_dim, use_front_back_symmetry, include_lin_acc
+            obs_policy, policy_model, history_sample_dim, use_front_back_symmetry, lin_acc_steps
         )
         obs_aug = _pack_policy_obs(
             obs,
@@ -665,7 +667,7 @@ def compute_symmetric_observations_actions(
             policy_model,
             history_sample_dim,
             use_front_back_symmetry,
-            include_lin_acc,
+            lin_acc_steps,
         )
 
     actions_aug = None
