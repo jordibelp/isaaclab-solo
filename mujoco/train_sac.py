@@ -161,6 +161,12 @@ def build_parser() -> argparse.ArgumentParser:
         " own setting (checkpoints that predate it used min), and to min without a checkpoint.",
     )
     p.add_argument(
+        "--torch-compile", type=_bool, default=False,
+        help="Compile the SAC target, critic loss and actor objective. Also accepts"
+        " agent.algorithm.torch_compile=True (RSL syntax). Default off; the first updates"
+        " are slower while kernels compile. MJX physics is already JIT-compiled separately.",
+    )
+    p.add_argument(
         "--offline-replay-buffer",
         default=None,
         help=(
@@ -258,6 +264,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-wandb", action="store_true")
     p.add_argument("--headless", action="store_true", help="Accepted for CLI compatibility; MJX is headless.")
     return p
+
+
+def parse_args(argv=None):
+    """Accept the RSL compile override without changing the env.* override parser."""
+    arguments = sys.argv[1:] if argv is None else argv
+    prefix = "agent.algorithm.torch_compile="
+    arguments = [
+        "--torch-compile=" + argument[len(prefix):] if argument.startswith(prefix) else argument
+        for argument in arguments
+    ]
+    return build_parser().parse_known_args(arguments)
 
 
 def _torch_from_jax(value: jax.Array, device: torch.device) -> torch.Tensor:
@@ -737,6 +754,7 @@ def _runner_config(args, schedule: dict) -> dict:
         "policy_frequency": args.actor_update_every,
         "n_steps": args.n_steps,
         "q_reduction_method": args.q_reduction_method or "min",
+        "torch_compile": args.torch_compile,
         "rnd_cfg": None,
         "symmetry_cfg": None,
     }
@@ -893,7 +911,7 @@ def _source_env_cfg(args) -> dict | None:
 
 
 def main() -> None:
-    args, unknown = build_parser().parse_known_args()
+    args, unknown = parse_args()
     if args.task != "solo12-two-feet":
         raise ValueError("mujoco/train_sac.py currently supports --task=solo12-two-feet only.")
     env_cfg, unsupported = mjx_env.parse_env_overrides(unknown, _source_env_cfg(args))
@@ -918,6 +936,10 @@ def main() -> None:
     np.random.seed(args.seed)
     cfg = _runner_config(args, schedule)
     _configure_checkpoint_models(cfg, args)
+    print(
+        f"[INFO] SAC torch.compile: {'enabled' if args.torch_compile else 'disabled'}"
+        " (MJX physics uses its own JAX JIT)."
+    )
     command = reproducible_command()
     cfg["command"] = command
     cfg["run_placement"] = _runtime_placement(args.device)

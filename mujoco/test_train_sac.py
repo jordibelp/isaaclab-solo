@@ -121,6 +121,41 @@ def runner_config(args, episode_length_s=20.0):
     return train_sac._runner_config(args, schedule)
 
 
+@pytest.mark.parametrize("arguments,enabled", [
+    ([], False),
+    (["agent.algorithm.torch_compile=True"], True),
+    (["agent.algorithm.torch_compile=False"], False),
+    (["--torch-compile=True"], True),
+    (["agent.algorithm.torch_compile=True", "--torch-compile=False"], False),
+    (["--torch-compile=False", "agent.algorithm.torch_compile=True"], True),
+])
+def test_torch_compile_option_reaches_constructed_sac(monkeypatch, arguments, enabled):
+    args, unknown = train_sac.parse_args(["--no-wandb", "--device=cpu", *arguments,
+                                          "env.kd=0.2"])
+    assert unknown == ["env.kd=0.2"]
+    cfg = runner_config(args)
+    assert cfg["algorithm"]["torch_compile"] is enabled
+    cfg["actor"]["hidden_dims"] = [16, 8]
+    cfg["critic"]["hidden_dims"] = [16, 8]
+    cfg["algorithm"]["replay_buffer_size"] = 16
+    obs = TensorDict({"policy": torch.zeros(1, 48)}, batch_size=[1])
+    env = SimpleNamespace(num_envs=1, num_actions=12, action_upper_magnitude=torch.ones(12),
+                          action_lower_magnitude=torch.ones(12))
+    monkeypatch.setattr(SAC, "_compute_action_scaling", train_sac._mjx_action_scaling)
+    compiled = []
+    monkeypatch.setattr(torch, "compile", lambda fn: compiled.append(fn.__name__) or fn)
+    alg = SAC.construct_algorithm(obs, env, cfg, "cpu")
+    assert alg.torch_compile is enabled
+    assert compiled == (["_bellman_targets", "_critic_losses", "_actor_objective"] if enabled else [])
+
+
+@pytest.mark.parametrize("value", ["", "maybe", "2"])
+def test_invalid_torch_compile_boolean_is_rejected(value):
+    with pytest.raises(SystemExit) as error:
+        train_sac.parse_args([f"agent.algorithm.torch_compile={value}"])
+    assert error.value.code == 2
+
+
 def test_runner_config_uses_paper_sac_defaults():
     args = train_sac.build_parser().parse_args(["--no-wandb"])
     cfg = runner_config(args)

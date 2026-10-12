@@ -259,12 +259,30 @@ iteration, and collection continues straight into the next episode.
 | New transitions before weight updates | 5000 | `--num-transitions-before-weight-updates` |
 | Actor update interval | Every 20 critic updates | `--actor-update-every` |
 | Online replay capacity | 500000 transitions | `--replay-buffer-size` |
+| PyTorch SAC compilation | Off | `agent.algorithm.torch_compile=True` |
 
 The authors' [Go1 online config](https://github.com/yardenas/safe-learning/blob/ffee61c6bc95555591c2ccfe67676e668784d540/ss2r/configs/experiment/go1_online.yaml)
 uses 1000-step episodes and 1250 updates. It inherits batch size 512 from
 [go1_joystick.yaml](https://github.com/yardenas/safe-learning/blob/ffee61c6bc95555591c2ccfe67676e668784d540/ss2r/configs/experiment/go1_joystick.yaml).
 Its retained-replay example sets `min_replay_size=1000`; our 5000-transition warm-up is Jordi's
 requested default, not an exact copy of that setting. Other existing SAC hyperparameters remain unchanged.
+
+### Optional PyTorch compilation
+
+Append `agent.algorithm.torch_compile=True` to the `mujoco/train_sac.py` command, just
+as in RSL training. `--torch-compile=True` is an equivalent spelling. Use `False` or
+omit the option to keep eager PyTorch execution. If you repeat the option, the last value wins.
+
+This reuses the RSL SAC implementation. It compiles the Bellman target, critic loss,
+and actor objective. Replay mixing, optimizer steps, actor-update intervals, checkpoints,
+and the training objective stay the same. It also works with LoRA or frozen networks.
+The switch appears in the saved agent configuration and W&B `train_cfg.algorithm.torch_compile`.
+It is not inherited from the source checkpoint's training configuration.
+
+The first updates take longer while PyTorch builds kernels. Judge speed after this
+warm-up. MJX physics already uses JAX JIT compilation; this switch only accelerates
+the PyTorch learning work. The full-run benefit depends on how much time the run spends
+collecting transitions versus updating networks.
 
 ### Collection and warm-up semantics
 
