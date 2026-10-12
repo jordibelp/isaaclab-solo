@@ -39,6 +39,13 @@ from mujoco import mjx
 
 from lora_ppo_cfg import DEFAULT_AGENT_CFG
 
+_SAC_VENDOR = Path(__file__).resolve().parents[1] / 'source' / 'rsl_rl_sac_vendor'
+if str(_SAC_VENDOR) not in sys.path:
+    sys.path.insert(0, str(_SAC_VENDOR))
+from rsl_rl_sac.utils.return_metrics import (
+    RETURN_METRICS_CONFIG, discounted_return_step, theoretical_return_limits,
+)
+
 
 PHYSICS_DT = 1.0 / 200.0
 DECIMATION = 4
@@ -1031,7 +1038,7 @@ def main():
     model_info=build_model(xml,float(cfg["kp"]),float(cfg["kd"]),cfg);reset_fn,step_fn=make_training_functions(model_info,cfg,args.num_envs)
     state=reset_fn(kenv)
     timestamp=datetime.now().strftime("%Y%m%d_%H%M%S")
-    config={**vars(args),"command":reproducible_command(),"checkpoint":str(checkpoint),"selected_layer_indices":selected,"lora_scale":scale,"agent":resolved_agent_config(args),"env":cfg,"jax_devices":[str(x) for x in jax.devices()],"paper":"arXiv:2603.17092"}
+    config={**vars(args),"command":reproducible_command(),"checkpoint":str(checkpoint),"selected_layer_indices":selected,"lora_scale":scale,"agent":resolved_agent_config(args),"env":cfg,"jax_devices":[str(x) for x in jax.devices()],"paper":"arXiv:2603.17092","return_metrics":RETURN_METRICS_CONFIG}
     config={k:(str(v) if isinstance(v,Path) else v) for k,v in config.items()}
     wandb_run=None
     if not args.no_wandb:
@@ -1048,9 +1055,9 @@ def main():
     optimizer=(jnp.array(0),zeros_like_tree(params),zeros_like_tree(params),jnp.asarray(args.learning_rate))
 
     @jax.jit
-    def collect(params,state,key):
+    def collect(params,state,key,return_sum,return_discount):
         def body(carry,_):
-            state,key=carry;key,ka,ks=jax.random.split(key,3)
+            state,key,return_sum,return_discount=carry;key,ka,ks=jax.random.split(key,3)
             mean=actor_mean(params,state.obs,actor,norms,scale,max_delta_lora_radians,args.clipping_includes_exploratory_noisy)
             action=mean+jnp.exp(params["log_std"])*jax.random.normal(ka,mean.shape)
             executed_action=(clip_exploratory_action(action,state.obs,actor,norms,max_delta_lora_radians)
@@ -1061,11 +1068,18 @@ def main():
             # Bootstrap timeouts (RSL-RL's ``bootstrap_on_time_outs``) so a truncated episode is
             # not scored as a failure; genuine terminations keep the hard cut.
             timeout=done&~terminated
-            reward=reward+args.gamma*critic_value(params,final_obs,critic,norms,scale)*timeout
+            final_value=critic_value(params,final_obs,critic,norms,scale)
+            return_sum,return_discount,actual_return,reward_prefix,bootstrap_tail=discounted_return_step(
+                return_sum,return_discount,reward,done,timeout,final_value,args.gamma,jnp.where)
+            reward=reward+args.gamma*final_value*timeout
             stats=(done*ep_return,done*ep_steps,done,terminated,termination_causes,
-                   reward_terms,done[:,None]*ep_reward_sums)
-            return (next_state,key),(Transition(state.obs,action,logp,reward,done,value,mean),stats)
-        return jax.lax.scan(body,(state,key),None,length=args.rollout_steps)
+                   reward_terms,done[:,None]*ep_reward_sums,
+                   jnp.where(done,actual_return,0.0),jnp.where(done,reward_prefix,0.0),
+                   jnp.where(done,bootstrap_tail,0.0),jnp.where(terminated,actual_return,0.0),
+                   jnp.where(timeout,actual_return,0.0),
+                   jnp.where(done,actual_return,jnp.inf),jnp.where(done,actual_return,-jnp.inf))
+            return (next_state,key,return_sum,return_discount),(Transition(state.obs,action,logp,reward,done,value,mean),stats)
+        return jax.lax.scan(body,(state,key,return_sum,return_discount),None,length=args.rollout_steps)
 
     def update_batch(params,opt,batch):
         obs,action,old_logp,old_mean,old_log_std,adv,returns=batch
@@ -1135,9 +1149,10 @@ def main():
     history=[];metrics_file=(output/"metrics.jsonl").open("a");rejected=0
     metric_smoother = MetricSmoother(args.metrics_smoothing_window, cfg)
     iterations=1 if args.dry_run else args.max_iterations
+    return_sum=jnp.zeros((args.num_envs,));return_discount=jnp.ones((args.num_envs,))
     for iteration in range(1,iterations+1):
         started=time.perf_counter();key,kroll,kperm=jax.random.split(key,3)
-        (state,_),(traj,stats)=collect(params,state,kroll)
+        (state,_,return_sum,return_discount),(traj,stats)=collect(params,state,kroll,return_sum,return_discount)
         batch=build_batch(params,traj,state.obs)
         params,optimizer,m=ppo_update(params,optimizer,batch,kperm)
         m=[float(x) for x in m];elapsed=time.perf_counter()-started
@@ -1163,10 +1178,25 @@ def main():
              "updates_applied_frac":m[8],"policy/action_std":float(jnp.mean(jnp.exp(params["log_std"]))),
              "throughput_steps_s":samples/elapsed,"wall_time_s":elapsed}
         log |= reward_metrics(reward_terms,completed_reward_sums,dones,cfg)
+        log |= theoretical_return_limits(cfg,args.gamma,STEP_DT)
+        log |= {'Returns/completed_episodes':dones,'Returns/terminal_episodes':terminations,
+                'Returns/truncated_episodes':timeouts,'CriticV/mean':float(jnp.mean(traj.value))}
+        positive_limit=log['Returns/theoretical_return_lim_pos']
+        if positive_limit>0:
+            log['CriticV/over_theoretical_pos']=log['CriticV/mean']/positive_limit
         if dones:
             log |= {"episode/length_s":float(ep_steps/dones)*STEP_DT,
                     "Episode_Reward/total":float(ep_return/dones),
                     "Episode/length_steps":float(ep_steps/dones),"Episode/length_seconds":float(ep_steps/dones)*STEP_DT}
+            log |= {'Returns/actual_return':float(jnp.sum(stats[7]))/dones,
+                    'Returns/reward_only_return':float(jnp.sum(stats[8]))/dones,
+                    'Returns/bootstrap_contribution':float(jnp.sum(stats[9]))/dones,
+                    'Returns/actual_return_min':float(jnp.min(stats[12])),
+                    'Returns/actual_return_max':float(jnp.max(stats[13]))}
+        if terminations:
+            log['Returns/actual_return_terminal']=float(jnp.sum(stats[10]))/terminations
+        if timeouts:
+            log['Returns/actual_return_truncated']=float(jnp.sum(stats[11]))/timeouts
         log |= metric_smoother.update(log, ep_return, ep_steps, dones, completed_reward_sums)
         history.append({k:float(v) if isinstance(v,(np.floating,float)) else int(v) for k,v in log.items()})
         print("[INFO] "+" ".join(f"{k}={v:.5g}" if isinstance(v,float) else f"{k}={v}" for k,v in log.items()),flush=True)

@@ -46,6 +46,7 @@ from rsl_rl_sac.modules import LAYER_CHOICES, apply_lora, merged_state_dict
 from rsl_rl_sac.runners import OffPolicyRunner
 from rsl_rl_sac.storage import MixedReplayBuffer, ReplayBuffer
 from rsl_rl_sac.utils import resolve_optimizer
+from rsl_rl_sac.utils.return_metrics import install_return_metrics
 
 
 def reproducible_command(argv=None):
@@ -280,6 +281,7 @@ class MjxSolo12VecEnv:
         self.max_episode_length = max(1, round(self.cfg.episode_length_s / mjx_env.STEP_DT))
         self.episode_length_buf = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self.unwrapped = self
+        self.step_dt = mjx_env.STEP_DT
         model_info = mjx_env.build_model(
             Path(__file__).with_name("solo12.xml"), float(env_cfg["kp"]), float(env_cfg["kd"]), env_cfg
         )
@@ -356,6 +358,7 @@ class MjxSolo12VecEnv:
             log["Episodes/return"] = _torch_from_jax(episode_returns, self.device)[dones_t]
             log["Episodes/length_steps"] = _torch_from_jax(episode_steps, self.device)[dones_t].float()
         extras = {
+            "terminated": terminated_t,
             "time_outs": timeout_t,
             "time_outs_obs": TensorDict(
                 {"policy": final_obs_t}, batch_size=[self.num_envs], device=self.device
@@ -973,6 +976,7 @@ def main() -> None:
         f"[INFO] Best-weight tracking: {log_dir / 'best_weights.pt'} from Train/mean_reward "
         f"(last {args.episode_log_window} completed episodes)."
     )
+    install_return_metrics(runner)
     runner.learn(num_learning_iterations=schedule["max_iterations"], init_at_random_ep_len=False)
     env.close()
 

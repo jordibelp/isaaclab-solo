@@ -167,6 +167,9 @@ class RslRlVecEnvWrapper(VecEnv):
         obs_dict, rew, terminated, truncated, extras = self._call_env(self.env.step, actions)
         # compute dones for compatibility with RSL-RL
         dones = (terminated | truncated).to(dtype=torch.long)
+        # Preserve true termination separately for diagnostics when timeout and
+        # failure happen together; a genuine failure must not receive a value tail.
+        extras["terminated"] = terminated
         # move time out information to the extras dict
         # this is only needed for infinite horizon tasks
         if not self.unwrapped.cfg.is_finite_horizon:

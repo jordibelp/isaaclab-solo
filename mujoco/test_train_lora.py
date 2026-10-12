@@ -55,6 +55,28 @@ def test_env_interactions_are_logged_per_parallel_rollout(tmp_path, monkeypatch)
     assert metrics["env_interactions"] == 6
 
 
+def test_actual_return_bootstraps_once_and_carries_across_rollouts(tmp_path, monkeypatch):
+    monkeypatch.setattr(train_lora, 'critic_value', lambda params, obs, *args: jnp.full(obs.shape[:-1], 6.0))
+    monkeypatch.setattr(sys, 'argv', [
+        'train_lora.py', '--checkpoint', str(CHECKPOINT), '--output-dir', str(tmp_path / 'runs'),
+        '--num-envs=2', '--rollout-steps=3', '--max-iterations=2', '--no-wandb',
+        '--num-minibatches=1', '--ppo-epochs=1', '--rank=0', '--gamma=0.5',
+        'env.episode_length_s=0.04',
+    ])
+    train_lora.main()
+    rows = [json.loads(line) for line in next((tmp_path / 'runs').glob('*/metrics.jsonl')).read_text().splitlines()]
+    assert len(rows) == 2
+    # Horizon 2, rollout 3: two episodes finish in the first rollout, four in the
+    # second. Every tail is gamma**2 * V = .25*6 = 1.5, never added twice.
+    assert [row['Returns/completed_episodes'] for row in rows] == [2, 4]
+    for row in rows:
+        assert row['Returns/terminal_episodes'] == 0
+        assert row['Returns/bootstrap_contribution'] == pytest.approx(1.5)
+        assert row['Returns/actual_return'] - row['Returns/reward_only_return'] == pytest.approx(1.5, abs=1e-5)
+        assert row['Returns/actual_return_truncated'] == row['Returns/actual_return']
+        assert np.isfinite(row['CriticV/over_theoretical_pos'])
+
+
 def test_agent_defaults_come_from_config_file():
     args = train_lora.build_parser().parse_args(["--checkpoint", str(CHECKPOINT)])
     assert args.learning_rate == train_lora.DEFAULT_AGENT_CFG.algorithm.learning_rate

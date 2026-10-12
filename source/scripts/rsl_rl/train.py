@@ -528,6 +528,7 @@ import gymnasium as gym
 import torch
 from rsl_rl.runners import DistillationRunner, OnPolicyRunner
 from rsl_rl_sac.runners import OffPolicyRunner
+from rsl_rl_sac.utils.return_metrics import install_return_metrics
 
 import local_redundancy
 import critic_batch_norm
@@ -3536,6 +3537,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             env.episode_length_buf = torch.randint_like(
                 env.episode_length_buf, high=int(env.max_episode_length)
             )
+        if agent_cfg.class_name in ('OnPolicyRunner', 'OffPolicyRunner'):
+            install_return_metrics(runner)
         runner.learn(num_learning_iterations=num_learning_iterations, init_at_random_ep_len=False)
     else:
         print("[INFO]: Plasticity permutation schedule is already complete; no training iterations remain.")
