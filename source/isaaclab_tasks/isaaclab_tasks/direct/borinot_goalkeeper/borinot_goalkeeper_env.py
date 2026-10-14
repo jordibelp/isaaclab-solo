@@ -1,0 +1,431 @@
+# SPDX-License-Identifier: BSD-3-Clause
+from __future__ import annotations
+
+import math
+
+import torch
+from pxr import PhysxSchema
+
+import isaaclab.sim as sim_utils
+from isaaclab.assets import Articulation, RigidObject
+from isaaclab.envs import DirectRLEnv
+from isaaclab.sensors import ContactSensor, ContactSensorCfg
+from isaaclab.utils.math import quat_apply, quat_apply_inverse
+
+from .borinot_goalkeeper_env_cfg import BorinotGoalkeeperEnvCfg
+from .paddle import attach_paddle
+from .task_math import crosses_goal, plane_progress, predict_intercept, promotion_ready, sample_shots, terminal_outcome
+
+
+class BorinotGoalkeeperEnv(DirectRLEnv):
+    """A save requires a real paddle contact and safe ball clearance.
+
+    Outcome codes: 0 ongoing, 1 base hit, 2 arm hit, 3 goal, 4 live-ball floor,
+    5 leave goal area, 6 deadline, 7 save, 8 robot collision/crash, 9 miss/escape.
+    """
+
+    cfg: BorinotGoalkeeperEnvCfg
+    contact_body_names = ("paddle", "base", "flying_arm_2__link1", "flying_arm_2__link2")
+
+    def __init__(self, cfg: BorinotGoalkeeperEnvCfg, render_mode=None, **kwargs):
+        if not 0 <= cfg.shot_level < len(cfg.shot_half_extents_yz):
+            raise ValueError("shot_level must be in [0, 3].")
+        if not 1 <= cfg.curriculum_min_episodes <= cfg.curriculum_window_episodes:
+            raise ValueError("Require 1 <= curriculum_min_episodes <= curriculum_window_episodes.")
+        if cfg.curriculum_min_steps < 1 or cfg.motor_time_constant_s <= 0:
+            raise ValueError("Curriculum dwell and motor time constant must be positive.")
+        super().__init__(cfg, render_mode, **kwargs)
+        self.joint_ids, _ = self.robot.find_joints(list(cfg.joint_names), preserve_order=True)
+        self.base_id = self.robot.find_bodies("base")[0][0]
+        self.paddle_id = self.robot.find_bodies("paddle")[0][0]
+        self._contact_ids = self.robot_contact.find_bodies(list(self.contact_body_names), preserve_order=True)[0]
+        if self.ball_contact.contact_physx_view.filter_count != 6:
+            raise RuntimeError("Expected separate paddle, base, arm1, arm2, goal, and floor contact filters.")
+
+        self._home = torch.tensor(cfg.robot_home, device=self.device)
+        self._area_min = torch.tensor(
+            [cfg.goal_area_x_m[0], cfg.goal_area_y_m[0], cfg.goal_area_z_m[0]], device=self.device
+        )
+        self._area_max = torch.tensor(
+            [cfg.goal_area_x_m[1], cfg.goal_area_y_m[1], cfg.goal_area_z_m[1]], device=self.device
+        )
+        self._x_axis = torch.tensor([1.0, 0.0, 0.0], device=self.device).expand(self.num_envs, -1)
+        self._gravity = torch.tensor([0.0, 0.0, -1.0], device=self.device).expand(self.num_envs, -1)
+        self.actions = torch.zeros(self.num_envs, 6, device=self.device)
+        self._previous_actions = torch.zeros_like(self.actions)
+        self._rate_integral = torch.zeros(self.num_envs, 3, device=self.device)
+        self._joint_scale = torch.tensor(cfg.joint_target_scale, device=self.device)
+        self._rate_scale = torch.tensor(cfg.body_rate_scale, device=self.device)
+        self._kp = torch.tensor(cfg.rate_kp, device=self.device)
+        self._ki = torch.tensor(cfg.rate_ki, device=self.device)
+
+        masses = self.robot.root_physx_view.get_masses()
+        self.robot_mass_kg = float(masses[0].sum())
+        self._hover_total = self.robot_mass_kg * 9.81
+        self._hover_per_rotor = self._hover_total / 6
+        rotor_pos = torch.tensor(cfg.rotor_pos_b, device=self.device)
+        base_com = self.robot.root_physx_view.get_coms()[0, self.base_id, :3].to(self.device)
+        rotor_pos = rotor_pos - base_com
+        self._allocation = torch.stack((torch.ones(6, device=self.device), rotor_pos[:, 1], -rotor_pos[:, 0],
+                                        torch.tensor(cfg.rotor_spin, device=self.device) * cfg.km_over_kf))
+        self._allocation_inverse = torch.linalg.pinv(self._allocation)
+        self._rotor_thrust = torch.full((self.num_envs, 6), self._hover_per_rotor, device=self.device)
+        self._motor_alpha = 1 - math.exp(-self.physics_dt / cfg.motor_time_constant_s)
+
+        self._hit = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self._clear = torch.zeros_like(self._hit)
+        self._new_hit = torch.zeros_like(self._hit)
+        self._flags = {
+            name: torch.zeros_like(self._hit) for name in ("base", "arm", "crash", "goal", "floor", "area", "miss")
+        }
+        self._center_quality = torch.zeros(self.num_envs, device=self.device)
+        self._recovery_time = torch.zeros(self.num_envs, device=self.device)
+        self._previous_paddle = torch.zeros(self.num_envs, 3, device=self.device)
+        self._old_progress_active = torch.zeros_like(self._hit)
+        self._previous_ball = torch.zeros(self.num_envs, 3, device=self.device)
+        self._outcome = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self.outcome_counts = torch.zeros(10, dtype=torch.long, device=self.device)
+        self._episode_rewards = torch.zeros(self.num_envs, device=self.device)
+        self._episode_terms = {
+            name: torch.zeros(self.num_envs, device=self.device)
+            for name in ("plane_progress", "outcome", "floor_after_save", "optional_rates", "optional_hit")
+        }
+        self._shot_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self._episode_stage = torch.full((self.num_envs,), cfg.shot_level, device=self.device, dtype=torch.long)
+        self.shot_level = cfg.shot_level
+        self._stage_start_step = 0
+        self._curriculum_window = torch.zeros(cfg.curriculum_window_episodes, device=self.device)
+        self._window_cursor = 0
+        self._stage_episodes = 0
+        # PhysX property setters use CPU buffers; retain them rather than querying every reset.
+        self._ball_masses = self.ball.root_physx_view.get_masses()
+        self._ball_inertias = self.ball.root_physx_view.get_inertias()
+        self._ball_materials = self.ball.root_physx_view.get_material_properties()
+        self._ball_parameters = torch.zeros(self.num_envs, 2, device=self.device)
+        self._physics_samples = 0
+
+    def _setup_scene(self):
+        self.robot = Articulation(self.cfg.robot)
+        stage = sim_utils.get_current_stage()
+        attach_paddle(stage, "/World/envs/env_0/Robot", self.cfg)
+        self.ball = RigidObject(self.cfg.ball)
+        ball_api = PhysxSchema.PhysxRigidBodyAPI.Apply(stage.GetPrimAtPath("/World/envs/env_0/Ball"))
+        ball_api.CreateEnableSpeculativeCCDAttr().Set(True)
+        goal_cfg = sim_utils.CuboidCfg(
+            size=self.cfg.goal_size,
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True, disable_gravity=True),
+            collision_props=sim_utils.CollisionPropertiesCfg(contact_offset=0.002, rest_offset=0.0),
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.15, 0.20, 0.28)),
+        )
+        goal_cfg.func("/World/envs/env_0/Goal", goal_cfg, translation=self.cfg.goal_center)
+        ground_cfg = sim_utils.CuboidCfg(
+            size=(self.cfg.scene.env_spacing - 0.5, self.cfg.scene.env_spacing - 0.5, 0.1),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True, disable_gravity=True),
+            collision_props=sim_utils.CollisionPropertiesCfg(contact_offset=0.002, rest_offset=0.0),
+            physics_material=sim_utils.RigidBodyMaterialCfg(restitution=0.0),
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.35, 0.35, 0.35)),
+        )
+        ground_cfg.func("/World/envs/env_0/Floor", ground_cfg, translation=(0.0, 0.0, -0.05))
+        self.scene.clone_environments(copy_from_source=False)
+        if self.device == "cpu" or not self.cfg.scene.replicate_physics:
+            self.scene.filter_collisions(global_prim_paths=[])
+        self.scene.articulations["robot"] = self.robot
+        self.scene.rigid_objects["ball"] = self.ball
+        self.ball_contact = ContactSensor(ContactSensorCfg(
+            prim_path="/World/envs/env_.*/Ball", update_period=0.0, history_length=0,
+            filter_prim_paths_expr=[f"/World/envs/env_.*/Robot/{name}" for name in self.contact_body_names]
+                                  + ["/World/envs/env_.*/Goal", "/World/envs/env_.*/Floor"],
+        ))
+        self.robot_contact = ContactSensor(ContactSensorCfg(
+            prim_path="/World/envs/env_.*/Robot/.*", update_period=0.0, history_length=0,
+        ))
+        self.scene.sensors["ball_contacts"] = self.ball_contact
+        self.scene.sensors["robot_contacts"] = self.robot_contact
+        light = sim_utils.DomeLightCfg(intensity=1800.0)
+        light.func("/World/Light", light)
+
+    def _paddle_pose(self):
+        position = self.robot.data.body_pos_w[:, self.paddle_id] - self.scene.env_origins
+        quaternion = self.robot.data.body_quat_w[:, self.paddle_id]
+        return position, quaternion, quat_apply(quaternion, self._x_axis)
+
+    def _interception(self):
+        ball_pos = self.ball.data.root_pos_w - self.scene.env_origins
+        target, time_s, valid = predict_intercept(ball_pos, self.ball.data.root_lin_vel_w, self.cfg.keeper_plane_x)
+        paddle_pos = self._paddle_pose()[0]
+        distance = torch.linalg.vector_norm(target - paddle_pos, dim=-1)
+        approaching = valid & ~self._hit
+        potential = torch.exp(-distance.square() / self.cfg.intercept_sigma_m**2) * approaching
+        return target, time_s, valid, potential
+
+    def _pre_physics_step(self, actions):
+        self.extras.pop("log", None)
+        self._shot_steps += 1
+        self._previous_actions.copy_(self.actions)
+        self.actions.copy_(actions.clamp(-1.0, 1.0))
+        self._previous_paddle.copy_(self._paddle_pose()[0])
+        ball_pos = self.ball.data.root_pos_w - self.scene.env_origins
+        self._old_progress_active.copy_(~self._hit & (self.ball.data.root_lin_vel_w[:, 0] < -0.1)
+                                       & (ball_pos[:, 0] > self.cfg.goal_center[0]))
+        self._new_hit.zero_()
+        for flag in self._flags.values():
+            flag.zero_()
+        self._physics_samples = 0
+
+    def _apply_action(self):
+        # Inspect every completed physics substep, including impacts between policy ticks.
+        if self._physics_samples:
+            self._sample_physics_events()
+        self._physics_samples += 1
+        rates = self.robot.data.root_ang_vel_b
+        error = self.actions[:, 1:4] * self._rate_scale - rates
+        self._rate_integral.add_(error * self.physics_dt).clamp_(-0.5, 0.5)
+        torque = self._kp * error + self._ki * self._rate_integral
+        collective = self._hover_total * (1 + self.cfg.collective_action_scale * self.actions[:, :1])
+        commands = torch.cat((collective, torque), dim=-1) @ self._allocation_inverse.T
+        commands.clamp_(0.0, self._hover_per_rotor * self.cfg.thrust_to_weight)
+        self._rotor_thrust.add_(self._motor_alpha * (commands - self._rotor_thrust))
+        wrench = self._rotor_thrust @ self._allocation.T
+        force = torch.zeros(self.num_envs, 1, 3, device=self.device)
+        force[:, 0, 2] = wrench[:, 0]
+        self.robot.permanent_wrench_composer.set_forces_and_torques(
+            forces=force, torques=wrench[:, None, 1:4], body_ids=[self.base_id], is_global=False,
+        )
+        targets = self.actions[:, 4:6] * self._joint_scale
+        if self.cfg.hold_arm:
+            targets = torch.zeros_like(targets)
+        self.robot.set_joint_position_target(targets, joint_ids=self.joint_ids)
+        self.robot.set_joint_velocity_target(torch.zeros_like(targets), joint_ids=self.joint_ids)
+
+    def _sample_physics_events(self):
+        position = self.ball.data.root_pos_w - self.scene.env_origins
+        velocity = self.ball.data.root_lin_vel_w
+        matrix = self.ball_contact.data.force_matrix_w[:, 0]
+        contact = torch.linalg.vector_norm(matrix, dim=-1) > self.cfg.contact_force_threshold_n
+        fresh_hit = contact[:, 0] & ~self._hit
+        paddle_pos, paddle_quat, _ = self._paddle_pose()
+        relative = quat_apply_inverse(paddle_quat, position - paddle_pos)
+        center_quality = torch.exp(-relative[:, 1:].square().sum(-1) / 0.09**2)
+        self._center_quality = torch.where(fresh_hit, center_quality, self._center_quality)
+        self._new_hit |= fresh_hit
+        self._hit |= contact[:, 0]
+        self._flags["base"] |= contact[:, 1]
+        self._flags["arm"] |= contact[:, 2:4].any(-1)
+        self._flags["goal"] |= contact[:, 4] | crosses_goal(self._previous_ball, position, self.cfg)
+        self._flags["floor"] |= (contact[:, 5] | (position[:, 2] <= self.cfg.ball_radius_m + 0.001)) & ~self._clear
+
+        # Robot net forces include legitimate paddle/ball impact. Remove the
+        # equal-and-opposite ball normal force before checking other collisions.
+        other_contact = self.robot_contact.data.net_forces_w[:, self._contact_ids] + matrix[:, :4]
+        root_pos = self.robot.data.root_pos_w - self.scene.env_origins
+        gravity_b = quat_apply_inverse(self.robot.data.root_quat_w, self._gravity)
+        self._flags["area"] |= ((root_pos < self._area_min) | (root_pos > self._area_max)).any(-1)
+        self._flags["crash"] |= (gravity_b[:, 2] > -0.5) | (
+            torch.linalg.vector_norm(other_contact, dim=-1) > 0.1
+        ).any(-1)
+
+        returned = (position[:, 0] > self.cfg.keeper_plane_x + self.cfg.clear_distance_m) & (
+            velocity[:, 0] > self.cfg.clear_speed_m_s
+        )
+        goal_front = self.cfg.goal_center[0] + self.cfg.goal_size[0] / 2 + self.cfg.ball_radius_m
+        outside = (
+            (position[:, 1] - self.cfg.goal_center[1]).abs() > self.cfg.goal_size[1] / 2 + self.cfg.ball_radius_m
+        ) | (
+            (position[:, 2] - self.cfg.goal_center[2]).abs() > self.cfg.goal_size[2] / 2 + self.cfg.ball_radius_m
+        )
+        safely_wide = (position[:, 0] < goal_front) & outside
+        landed_in_front = self._hit & self._flags["floor"] & (position[:, 0] > goal_front)
+        failed = (self._flags["base"] | self._flags["arm"] | self._flags["goal"]
+                  | (self._flags["floor"] & ~landed_in_front) | self._flags["crash"] | self._flags["area"])
+        # A paddle deflection onto the floor in front of the goal is a save, but
+        # still pays the floor penalty. No-contact floor events never earn a save.
+        self._clear |= self._hit & (returned | safely_wide | landed_in_front) & ~failed
+        escaped = (position[:, 0].abs() > 3.0) | (position[:, 1].abs() > 3.0) | (position[:, 2] > 4.5)
+        self._flags["miss"] |= escaped & ~self._clear
+        self._previous_ball.copy_(position)
+
+    def _recovery_geometry(self):
+        position = self.robot.data.root_pos_w - self.scene.env_origins
+        distance = torch.linalg.vector_norm(position - self._home, dim=-1)
+        speed = torch.linalg.vector_norm(self.robot.data.root_lin_vel_w, dim=-1)
+        angular_speed = torch.linalg.vector_norm(self.robot.data.root_ang_vel_b, dim=-1)
+        gravity_b = quat_apply_inverse(self.robot.data.root_quat_w, self._gravity)
+        tilt = torch.acos((-gravity_b[:, 2]).clamp(-1, 1))
+        joint_error = self.robot.data.joint_pos[:, self.joint_ids].abs().amax(-1)
+        stable = ((distance < self.cfg.recovery_position_tolerance_m) & (speed < self.cfg.recovery_speed_m_s)
+                  & (angular_speed < self.cfg.recovery_angular_speed_rad_s) & (tilt < self.cfg.recovery_tilt_rad)
+                  & (joint_error < self.cfg.recovery_joint_tolerance_rad))
+        score = torch.exp(-(distance / 0.35).square() - (speed / 0.5).square()
+                          - (angular_speed / 0.8).square() - (tilt / 0.35).square() - (joint_error / 0.5).square())
+        return stable, score
+
+    def _get_dones(self):
+        self._sample_physics_events()  # final physics substep of this policy transition
+        success = self._clear
+        if self.cfg.require_recovery_for_save:
+            stable = self._recovery_geometry()[0] & self._clear
+            self._recovery_time = torch.where(stable, self._recovery_time + self.step_dt, 0.0)
+            success = success & (self._recovery_time >= self.cfg.recovery_dwell_s)
+        deadline = (self._shot_steps >= self.max_episode_length) & ~success
+        self._outcome = terminal_outcome(self._flags["base"], self._flags["arm"], self._flags["crash"],
+                                        self._flags["goal"], self._flags["floor"] & ~self._clear, self._flags["area"],
+                                        self._flags["miss"], deadline, success)
+        # Three seconds is a real task deadline, not an artificial trajectory truncation.
+        return self._outcome != 0, torch.zeros_like(success)
+
+    def _get_rewards(self):
+        target = (self._interception()[0] if self.cfg.progress_use_prediction
+                  else self.ball.data.root_pos_w - self.scene.env_origins)
+        progress = plane_progress(self._previous_paddle, self._paddle_pose()[0], target, self.cfg.progress_scale)
+        progress *= self._old_progress_active
+        rate = torch.zeros_like(progress)
+        if self.cfg.intercept_reward_rate or self.cfg.align_reward_rate:
+            potential = self._interception()[3]
+            rate += self.cfg.intercept_reward_rate * potential
+            if self.cfg.align_reward_rate:
+                incoming = -self.ball.data.root_lin_vel_w
+                direction = incoming / torch.linalg.vector_norm(incoming, dim=-1, keepdim=True).clamp_min(0.1)
+                alignment = (self._paddle_pose()[2] * direction).sum(-1).square()
+                rate += self.cfg.align_reward_rate * potential * alignment
+        if self.cfg.recovery_reward_rate:
+            rate += self.cfg.recovery_reward_rate * self._recovery_geometry()[1] * self._clear
+        if self.cfg.action_rate_cost:
+            rate -= self.cfg.action_rate_cost * (self.actions - self._previous_actions).square().sum(-1)
+        if self.cfg.body_angular_velocity_cost:
+            rate -= self.cfg.body_angular_velocity_cost * self.robot.data.root_ang_vel_b.square().sum(-1)
+        if self.cfg.body_linear_velocity_cost:
+            rate -= self.cfg.body_linear_velocity_cost * self.robot.data.root_lin_vel_w.square().sum(-1)
+        if self.cfg.thrust_cost:
+            rate -= self.cfg.thrust_cost * (self._rotor_thrust / self._hover_per_rotor - 1).square().mean(-1)
+        event_values = torch.tensor([0.0, -self.cfg.goal_penalty, -self.cfg.arm_hit_penalty,
+                                     -self.cfg.goal_penalty, -self.cfg.ball_floor_penalty,
+                                     -self.cfg.leave_goal_area_penalty,
+                                     -self.cfg.deadline_penalty, self.cfg.save_bonus, -self.cfg.robot_crash_penalty,
+                                     -self.cfg.miss_penalty], device=self.device)
+        hit_bonus = (self.cfg.hit_bonus + self.cfg.centered_hit_bonus * self._center_quality)
+        hit_bonus *= self._new_hit & ((self._outcome == 0) | (self._outcome == 7))
+        floor_after_save = self._flags["floor"] & self._clear & ((self._outcome == 0) | (self._outcome == 7))
+        terms = {"plane_progress": progress, "outcome": event_values[self._outcome],
+                 "floor_after_save": -self.cfg.ball_floor_penalty * floor_after_save,
+                 "optional_rates": rate * self.step_dt, "optional_hit": hit_bonus}
+        reward = sum(terms.values())
+        self._episode_rewards += reward
+        for name, term in terms.items():
+            self._episode_terms[name] += term
+        # Copy before auto-reset so validation/evaluation sees the transition outcome.
+        self.extras["goalkeeper_outcome"] = self._outcome.clone()
+        self.extras["goalkeeper_paddle_hit"] = self._new_hit.clone()
+        self.extras["goalkeeper_had_paddle_hit"] = self._hit.clone()
+        self.extras["goalkeeper_reward_terms"] = {name: term.clone() for name, term in terms.items()}
+        return reward
+
+    def _get_observations(self):
+        root_pos = self.robot.data.root_pos_w - self.scene.env_origins
+        quaternion = self.robot.data.root_quat_w
+        paddle_pos, _, normal = self._paddle_pose()
+        ball_pos = self.ball.data.root_pos_w - self.scene.env_origins
+        target, time_s, valid, _ = self._interception()
+        common = [quat_apply_inverse(quaternion, self._home - root_pos),
+                  quaternion, self.robot.data.root_lin_vel_b,
+                  self.robot.data.root_ang_vel_b, self.robot.data.joint_pos[:, self.joint_ids] / self._joint_scale,
+                  self.robot.data.joint_vel[:, self.joint_ids] / 15.0,
+                  quat_apply_inverse(quaternion, paddle_pos - root_pos), quat_apply_inverse(quaternion, normal)]
+        ball_parts = [quat_apply_inverse(quaternion, ball_pos - root_pos),
+                      quat_apply_inverse(quaternion, self.ball.data.root_lin_vel_w - self.robot.data.root_lin_vel_w),
+                      quat_apply_inverse(quaternion, target - paddle_pos), time_s[:, None], valid[:, None].float()]
+        phase = torch.stack((self._hit.float(), self._clear.float(),
+                             self._shot_steps * self.step_dt / self.cfg.episode_length_s,
+                             self._recovery_time / self.cfg.recovery_dwell_s), dim=-1)
+        tail = [phase, self.actions, self._rotor_thrust / self._hover_per_rotor,
+                self._rate_integral, self._ball_parameters]
+        critic = torch.cat(common + ball_parts + tail, dim=-1)
+        return {"policy": critic.clone(), "critic": critic}
+
+    def _update_curriculum(self, env_ids):
+        completed = env_ids[(self._shot_steps[env_ids] > 0) & (self._outcome[env_ids] != 0)]
+        if not len(completed):
+            return
+        codes = self._outcome[completed]
+        self.outcome_counts += torch.bincount(codes, minlength=10)
+        self.extras["log"] = {"Episode/return": self._episode_rewards[completed].mean(),
+                              "Goalkeeper/cumulative_save_fraction": (
+                                  self.outcome_counts[7] / self.outcome_counts.sum().clamp_min(1)
+                              ),
+                              "Goalkeeper/paddle_contact_fraction": self._hit[completed].float().mean(),
+                              "Goalkeeper/ball_clearance_fraction": self._clear[completed].float().mean(),
+                              "Curriculum/collection_stage": self._episode_stage[completed].float().mean()}
+        self.extras["log"].update({f"Episode_Reward/{name}": value[completed].mean()
+                                  for name, value in self._episode_terms.items()})
+        eligible = completed[self._episode_stage[completed] == self.shot_level]
+        if len(eligible):
+            outcomes = (self._outcome[eligible] == 7).float()
+            self._stage_episodes += len(outcomes)
+            outcomes = outcomes[-len(self._curriculum_window):]
+            indices = (torch.arange(len(outcomes), device=self.device) + self._window_cursor) % len(
+                self._curriculum_window
+            )
+            self._curriculum_window[indices] = outcomes
+            self._window_cursor = (self._window_cursor + len(outcomes)) % len(self._curriculum_window)
+            retained = min(self._stage_episodes, len(self._curriculum_window))
+            rate = self._curriculum_window.sum() / retained
+            self.extras["log"].update({"Curriculum/decision_stage": self.shot_level,
+                                      "Curriculum/stage_pure_save_fraction": rate,
+                                      "Curriculum/window_completed_episodes": retained,
+                                      "Curriculum/age_policy_steps": self.common_step_counter - self._stage_start_step})
+            if self.shot_level < len(self.cfg.shot_half_extents_yz) - 1 and promotion_ready(
+                self.common_step_counter - self._stage_start_step, self._stage_episodes, float(rate), self.cfg
+            ):
+                self.shot_level += 1
+                self._stage_start_step = self.common_step_counter
+                self._curriculum_window.zero_()
+                self._window_cursor = 0
+                self._stage_episodes = 0
+        self.extras["log"]["Curriculum/selected_stage"] = self.shot_level
+
+    def _reset_idx(self, env_ids):
+        if env_ids is None:
+            env_ids = self.robot._ALL_INDICES
+        self._update_curriculum(env_ids)
+        super()._reset_idx(env_ids)
+        n = len(env_ids)
+        root = self.robot.data.default_root_state[env_ids].clone()
+        root[:, :3] = self._home + self.scene.env_origins[env_ids]
+        root[:, :2] += (2 * torch.rand(n, 2, device=self.device) - 1) * self.cfg.reset_xy_noise_m
+        root[:, 2] += (2 * torch.rand(n, device=self.device) - 1) * self.cfg.reset_z_noise_m
+        root[:, 3:7] = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device)
+        root[:, 7:] = 0.0
+        self.robot.write_root_state_to_sim(root, env_ids)
+        self.robot.write_joint_state_to_sim(
+            self.robot.data.default_joint_pos[env_ids],
+            torch.zeros_like(self.robot.data.default_joint_vel[env_ids]), env_ids=env_ids,
+        )
+        position, velocity, _, _ = sample_shots(n, self.device, self.cfg, self.shot_level)
+        ball_state = self.ball.data.default_root_state[env_ids].clone()
+        ball_state[:, :3] = position + self.scene.env_origins[env_ids]
+        ball_state[:, 7:10] = velocity
+        ball_state[:, 10:] = 0.0
+        self.ball.write_root_state_to_sim(ball_state, env_ids)
+        self._previous_ball[env_ids] = position
+        ids_cpu = env_ids.cpu()
+        masses = torch.empty(n).uniform_(*self.cfg.ball_mass_range_kg)
+        self._ball_masses[ids_cpu, 0] = masses
+        self._ball_inertias[ids_cpu] = (
+            torch.eye(3).reshape(1, 9) * (0.4 * masses * self.cfg.ball_radius_m**2)[:, None]
+        )
+        self._ball_materials[ids_cpu, :, 2] = torch.empty(n, 1).uniform_(*self.cfg.ball_restitution_range)
+        self._ball_parameters[env_ids, 0] = masses.to(self.device)
+        self._ball_parameters[env_ids, 1] = self._ball_materials[ids_cpu, 0, 2].to(self.device)
+        self.ball.root_physx_view.set_masses(self._ball_masses, ids_cpu)
+        self.ball.root_physx_view.set_inertias(self._ball_inertias, ids_cpu)
+        self.ball.root_physx_view.set_material_properties(self._ball_materials, ids_cpu)
+        for buffer in (self.actions, self._previous_actions, self._rate_integral, self._recovery_time,
+                       self._hit, self._clear, self._new_hit, self._center_quality, self._outcome,
+                       self._episode_rewards,
+                       self._shot_steps):
+            buffer[env_ids] = 0
+        for flag in self._flags.values():
+            flag[env_ids] = False
+        for value in self._episode_terms.values():
+            value[env_ids] = 0
+        self._rotor_thrust[env_ids] = self._hover_per_rotor
+        self._episode_stage[env_ids] = self.shot_level
