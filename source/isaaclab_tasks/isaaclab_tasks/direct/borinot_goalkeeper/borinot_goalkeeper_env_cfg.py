@@ -107,7 +107,10 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     rotor_pos_b = ((0.20, 0.00, 0.00), (0.10, 0.17, 0.00), (-0.10, 0.17, 0.00),
                    (-0.20, 0.00, 0.00), (-0.10, -0.17, 0.00), (0.10, -0.17, 0.00))
     rotor_spin = (-1.0, 1.0, -1.0, 1.0, -1.0, 1.0)
-    km_over_kf = 6.991478005829954e-08 / 4.138394792004922e-06
+    kf = 4.138394792004922e-06
+    km = 6.991478005829954e-08
+    p_el_motor_efficiency = 0.95
+    km_over_kf = km / kf
 
     contact_force_threshold_n = 0.05
     clear_distance_m = 0.25
@@ -149,3 +152,6 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     body_angular_velocity_cost = 0.0
     body_linear_velocity_cost = 0.0
     thrust_cost = 0.0
+    # Subtract power_cost * mean total power [W] over the last action interval.
+    # Unlike optional rate terms, this mean-power penalty is NOT multiplied by dt.
+    power_cost = 0.0

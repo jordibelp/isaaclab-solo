@@ -95,7 +95,7 @@ class BorinotEnv(DirectRLEnv):
       - Rotor wrench application (6 rotors) + 2 leg joint torques
       - Command schedule (vx, vy, wz) updated every cmd_period_s
       - MuJoCo-like observation (z, R, body-frame v/omega, q/dq, prev_action, cmd)
-      - Reward: velocity/yaw tracking + action/energy/omega penalties + collision penalty
+      - Reward: velocity/yaw tracking + action/power/omega penalties + collision penalty
       - Termination: timeout, undesired contacts, z crash, optional y deviation
     """
 
@@ -107,8 +107,6 @@ class BorinotEnv(DirectRLEnv):
         self._leg_dof_ids, _ = self.robot.find_joints(list(self.cfg.leg_joint_names))
         self._base_body_id, _ = self.robot.find_bodies(self.cfg.base_body_name)
         self._ee_body_id, _ = self.robot.find_bodies(self.cfg.ee_body_name)
-
-        self.cfg.rwd_w_energy = self.cfg.rwd_w_energy_base * self.cfg.mult_energy_cost
 
         self._dt_physics = float(self.cfg.sim.dt)
         self._dt_control = self._dt_physics * self.cfg.decimation
@@ -129,6 +127,9 @@ class BorinotEnv(DirectRLEnv):
 
         self._thrusts = torch.zeros((self.num_envs, 6), dtype=torch.float32, device=self.device)
         self._leg_torques = torch.zeros((self.num_envs, len(self._leg_dof_ids)), dtype=torch.float32, device=self.device)
+        self._power_sum_w = torch.zeros((self.num_envs, 2), device=self.device)  # rotor electrical, arm mechanical
+        self._power_samples = 0
+        self._physics_samples = 0
 
         # For ddq finite-difference 
         self._joint_vel_prev = torch.zeros((self.num_envs, len(self._leg_dof_ids)), dtype=torch.float32, device=self.device)
@@ -296,6 +297,9 @@ class BorinotEnv(DirectRLEnv):
         # _pre_physics_step is called ONCE per env step before stepping physics, then _map_actions is called each demination step, finally _get_rewards/_get_dones is called once at the end. 
         self.actions = actions.clamp(-1.0, 1.0)
         self._cmd_step.copy_(self._cmd)
+        self._power_sum_w.zero_()
+        self._power_samples = 0
+        self._physics_samples = 0
 
         # reset buffers for joint contact overload
         self._step_max_leg_joint_load.zero_()
@@ -378,6 +382,9 @@ class BorinotEnv(DirectRLEnv):
         return thrusts, leg_torques
 
     def _apply_action(self) -> None:
+        # Sample the completed substep before replacing its thrust and torque.
+        self._sample_power()
+        self._physics_samples += 1
         thrusts, leg_torques = self._map_actions() if not self.cfg.des_joint_out else (self._map_actions_angle_des(), None)
 
 
@@ -413,8 +420,20 @@ class BorinotEnv(DirectRLEnv):
         self.robot.write_data_to_sim()
 
         # applied_torque: approximation of the torque applied in the physics sim (pd controller)
-        self.leg_torques = self.robot.data.applied_torque[:, self._leg_dof_ids] if self.cfg.des_joint_out else leg_torques
+        self._leg_torques.copy_(self.robot.data.applied_torque[:, self._leg_dof_ids]
+                               if self.cfg.des_joint_out else leg_torques)
         self._thrusts = thrusts
+
+    def _sample_power(self) -> None:
+        """Accumulate one completed physics substep; repeated reward reads are harmless."""
+        if self._power_samples == self._physics_samples:
+            return
+        omega = torch.sqrt(self._thrusts.clamp_min(0.0) / self._kf)
+        self._power_sum_w[:, 0] += (self._km * omega**3).sum(-1) / self.cfg.p_el_motor_efficiency
+        # Absolute mechanical work: no regeneration or arm electrical-loss model.
+        dq = self.robot.data.joint_vel[:, self._leg_dof_ids]
+        self._power_sum_w[:, 1] += (self._leg_torques * dq).abs().sum(-1)
+        self._power_samples += 1
 
 
     def _update_j_force_overload(self): 
@@ -505,6 +524,9 @@ class BorinotEnv(DirectRLEnv):
         return base_contact, other_contact
 
     def _get_rewards(self) -> torch.Tensor:
+        self._sample_power()  # final completed substep, before automatic resets
+        mean_power_w = self._power_sum_w / self.cfg.decimation
+        power_pen = self.cfg.power_cost * mean_power_w.sum(-1)
 
         def func_vel_err(err: torch.Tensor, sigma):
             absn = torch.linalg.norm(err, dim=-1)  # shape: (...)
@@ -565,15 +587,7 @@ class BorinotEnv(DirectRLEnv):
         # Omega XY penalty (body frame roll/pitch rates)
         omega_xy_pen = self.cfg.rwd_w_penalize_omega * torch.sum(w_b[:, 0:2] ** 2, dim=1)
 
-        omega = torch.sqrt(torch.clamp(self._thrusts, min=0.0) / self._kf)
-        rotor_power = 1/self.cfg.p_el_motor_efficiency * torch.sum(self._km  * omega**3, dim=1)
-
-        # Leg power ~ sum(|tau * dq|)
         dq = self.robot.data.joint_vel[:, self._leg_dof_ids]
-        leg_power = torch.sum(torch.abs(self._leg_torques * dq), dim=1)
-
-        energy = (rotor_power + leg_power) * self._dt_physics
-        energy_pen = self.cfg.rwd_w_energy * energy
 
         # ddq penalty (finite difference)
         ddq_pen = self.cfg.rwd_w_ddq * torch.sum(self._joint_acc**2, dim=1)
@@ -585,12 +599,20 @@ class BorinotEnv(DirectRLEnv):
         coll_pen = self.cfg.rwd_w_collide_penalty * neg_rwd_indicator.float()
         # reaction_torque_pen = self.cfg.rwd_joint_torque_above_lim * self._joint_torque_overload.float()
 
-        reward = self.cfg.rwd_w_task * r_task - r_delta_action - r_contact_force_delta - energy_pen - omega_xy_pen - dq_penalty - ddq_pen - coll_pen - r_excess_torque  - r_contact_force_excess
+        reward = self.cfg.rwd_w_task * r_task - r_delta_action - r_contact_force_delta - power_pen - omega_xy_pen - dq_penalty - ddq_pen - coll_pen - r_excess_torque  - r_contact_force_excess
         
         self._last_actions = self.actions.clone()
         log = {}
         log["rewards/r_task"] = r_task.mean()
-        log['rewards/r_energy'] = energy_pen.mean()
+        log['rewards/r_power'] = power_pen.mean()
+        log['Power/rotor_electrical_mean_w'] = mean_power_w[:, 0].mean()
+        log['Power/arm_mechanical_mean_w'] = mean_power_w[:, 1].mean()
+        log['Power/total_estimate_mean_w'] = mean_power_w.sum(-1).mean()
+        self.extras['power_mean_w'] = {
+            'rotor_electrical': mean_power_w[:, 0].clone(),
+            'arm_mechanical': mean_power_w[:, 1].clone(),
+            'total_estimate': mean_power_w.sum(-1),
+        }
         log["rewards/r_delta_action"] = r_delta_action.mean()
         log["rewards/r_contact_force_excess"] = r_contact_force_excess.mean()
         log["overload/j2_torque_abs_mean"] = self._step_max_leg_joint_load[:, 1].mean()
@@ -682,6 +704,7 @@ class BorinotEnv(DirectRLEnv):
         self._last_actions[env_ids_t] = 0.0
         self._thrusts[env_ids_t] = 0.0
         self._leg_torques[env_ids_t] = 0.0
+        self._power_sum_w[env_ids_t] = 0.0
         self._joint_vel_prev[env_ids_t] = 0.0
         self._joint_acc[env_ids_t] = 0.0
 

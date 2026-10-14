@@ -65,9 +65,9 @@ class BorinotEnvCfg(DirectRLEnvCfg):
     only_feet_contact_penalized: bool = False
     lineal_cf_penalty: bool = True
     lineal_cf_slope: float = 1/50
-    mult_energy_cost = 11.0
-    rwd_w_energy_base: float = 0.045
-    rwd_w_energy = rwd_w_energy_base
+    # Subtract power_cost * mean total power [W] over the last action interval.
+    # Replaces the old rwd_w_energy_base / mult_energy_cost energy penalty.
+    power_cost: float = 0.0
     reset_on_overload: bool = False
 
     rwd_w_action_delta: float = 0.001

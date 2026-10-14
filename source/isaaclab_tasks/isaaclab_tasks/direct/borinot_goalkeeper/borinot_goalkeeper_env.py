@@ -71,6 +71,8 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         self._allocation_inverse = torch.linalg.pinv(self._allocation)
         self._rotor_thrust = torch.full((self.num_envs, 6), self._hover_per_rotor, device=self.device)
         self._motor_alpha = 1 - math.exp(-self.physics_dt / cfg.motor_time_constant_s)
+        self._power_sum_w = torch.zeros((self.num_envs, 2), device=self.device)  # rotor electrical, arm mechanical
+        self._power_samples = 0
 
         self._hit = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self._clear = torch.zeros_like(self._hit)
@@ -88,7 +90,7 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         self._episode_rewards = torch.zeros(self.num_envs, device=self.device)
         self._episode_terms = {
             name: torch.zeros(self.num_envs, device=self.device)
-            for name in ("plane_progress", "outcome", "floor_after_save", "optional_rates", "optional_hit")
+            for name in ("plane_progress", "outcome", "floor_after_save", "optional_rates", "optional_hit", "power")
         }
         self._shot_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self._episode_stage = torch.full((self.num_envs,), cfg.shot_level, device=self.device, dtype=torch.long)
@@ -171,8 +173,11 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         for flag in self._flags.values():
             flag.zero_()
         self._physics_samples = 0
+        self._power_sum_w.zero_()
+        self._power_samples = 0
 
     def _apply_action(self):
+        self._sample_power()
         # Inspect every completed physics substep, including impacts between policy ticks.
         if self._physics_samples:
             self._sample_physics_events()
@@ -196,6 +201,18 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
             targets = torch.zeros_like(targets)
         self.robot.set_joint_position_target(targets, joint_ids=self.joint_ids)
         self.robot.set_joint_velocity_target(torch.zeros_like(targets), joint_ids=self.joint_ids)
+
+    def _sample_power(self):
+        """Sample completed substeps using lagged thrust and the applied PD torque estimate."""
+        if self._power_samples == self._physics_samples:
+            return
+        omega = torch.sqrt(self._rotor_thrust.clamp_min(0.0) / self.cfg.kf)
+        self._power_sum_w[:, 0] += (self.cfg.km * omega**3).sum(-1) / self.cfg.p_el_motor_efficiency
+        # Implicit-actuator effort is a clipped PD estimate, not measured PhysX torque.
+        torque = self.robot.data.applied_torque[:, self.joint_ids]
+        dq = self.robot.data.joint_vel[:, self.joint_ids]
+        self._power_sum_w[:, 1] += (torque * dq).abs().sum(-1)
+        self._power_samples += 1
 
     def _sample_physics_events(self):
         position = self.ball.data.root_pos_w - self.scene.env_origins
@@ -274,6 +291,8 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         return self._outcome != 0, torch.zeros_like(success)
 
     def _get_rewards(self):
+        self._sample_power()  # final completed substep, before automatic resets
+        mean_power_w = self._power_sum_w / self.cfg.decimation
         target = (self._interception()[0] if self.cfg.progress_use_prediction
                   else self.ball.data.root_pos_w - self.scene.env_origins)
         progress = plane_progress(self._previous_paddle, self._paddle_pose()[0], target, self.cfg.progress_scale)
@@ -307,7 +326,8 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         floor_after_save = self._flags["floor"] & self._clear & ((self._outcome == 0) | (self._outcome == 7))
         terms = {"plane_progress": progress, "outcome": event_values[self._outcome],
                  "floor_after_save": -self.cfg.ball_floor_penalty * floor_after_save,
-                 "optional_rates": rate * self.step_dt, "optional_hit": hit_bonus}
+                 "optional_rates": rate * self.step_dt, "optional_hit": hit_bonus,
+                 "power": -self.cfg.power_cost * mean_power_w.sum(-1)}
         reward = sum(terms.values())
         self._episode_rewards += reward
         for name, term in terms.items():
@@ -317,6 +337,16 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         self.extras["goalkeeper_paddle_hit"] = self._new_hit.clone()
         self.extras["goalkeeper_had_paddle_hit"] = self._hit.clone()
         self.extras["goalkeeper_reward_terms"] = {name: term.clone() for name, term in terms.items()}
+        self.extras["power_mean_w"] = {
+            "rotor_electrical": mean_power_w[:, 0].clone(),
+            "arm_mechanical": mean_power_w[:, 1].clone(),
+            "total_estimate": mean_power_w.sum(-1),
+        }
+        self.extras.setdefault("log", {}).update({
+            "Power/rotor_electrical_mean_w": mean_power_w[:, 0].mean(),
+            "Power/arm_mechanical_mean_w": mean_power_w[:, 1].mean(),
+            "Power/total_estimate_mean_w": mean_power_w.sum(-1).mean(),
+        })
         return reward
 
     def _get_observations(self):
@@ -347,13 +377,13 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
             return
         codes = self._outcome[completed]
         self.outcome_counts += torch.bincount(codes, minlength=10)
-        self.extras["log"] = {"Episode/return": self._episode_rewards[completed].mean(),
+        self.extras.setdefault("log", {}).update({"Episode/return": self._episode_rewards[completed].mean(),
                               "Goalkeeper/cumulative_save_fraction": (
                                   self.outcome_counts[7] / self.outcome_counts.sum().clamp_min(1)
                               ),
                               "Goalkeeper/paddle_contact_fraction": self._hit[completed].float().mean(),
                               "Goalkeeper/ball_clearance_fraction": self._clear[completed].float().mean(),
-                              "Curriculum/collection_stage": self._episode_stage[completed].float().mean()}
+                              "Curriculum/collection_stage": self._episode_stage[completed].float().mean()})
         self.extras["log"].update({f"Episode_Reward/{name}": value[completed].mean()
                                   for name, value in self._episode_terms.items()})
         eligible = completed[self._episode_stage[completed] == self.shot_level]
@@ -428,4 +458,5 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         for value in self._episode_terms.values():
             value[env_ids] = 0
         self._rotor_thrust[env_ids] = self._hover_per_rotor
+        self._power_sum_w[env_ids] = 0.0
         self._episode_stage[env_ids] = self.shot_level
