@@ -100,7 +100,7 @@ Every reward weight uses `rwd_scale_*`. The code adds `scale * signal`: **negati
 
 Here, **racket** and **paddle** mean the same separate rigid body. A **live shot** is a ball that has not yet met the safe-clearance conditions. A paddle touch alone does not make the ball safe.
 
-The tables below give the shipped values in the committed config. **Current local tuning on 2026-10-14 differs:** `rwd_scale_energy=-0.0001`, `arm_copper_loss_coefficient=6.888`, and `robot_home=(0.0, 0.0, 0.5)`. Energy is therefore enabled in the current working file. Its home height is also below the allowed minimum of 0.55 m; see the area explanation below. This documentation update does not change those settings. Hydra overrides can change them again at launch.
+The tables below give the shipped values in the committed config. **Current local tuning on 2026-10-14 differs:** `rwd_scale_energy=-0.0001`, `arm_copper_loss_coefficient=6.888`, `clear_speed_m_s=0.2`, and `robot_home=(0.0, 0.0, 0.5)`. Energy is therefore enabled in the current working file. Its home height is also below the allowed minimum of 0.55 m; see the area explanation below. These locally tuned values are preserved. Hydra overrides can change them again at launch.
 
 ### How one policy step gets its reward
 
@@ -198,7 +198,7 @@ Both spawn and reset use `robot_home_quat` in wxyz order. Reset position is `rob
 Two independent detectors share this reward scale:
 
 - **Robot contact:** on the base, either arm link, or paddle, we remove the ball's equal-and-opposite filtered normal force from the robot's net contact force. A remaining force magnitude above **0.1 N** on any of these bodies sets the contact-crash flag. This distinguishes a legal ball/paddle impact from a robot hitting the floor or another scene surface. The 0.1 N limit is literal in the code.
-- **Tilt:** the base's up axis tilts from world vertical by more than `robot_tilt_threshold_rad`, **60 degrees** by default. This does not require a collision. Pure yaw does not trigger this test.
+- **Tilt:** the base's up axis tilts from world vertical by more than `robot_tilt_threshold_degs`, **70 degrees** by default. This setting is in degrees; the detector converts it internally with `math.radians()` before taking the cosine. At 69 degrees the tilt detector does not fire; at 71 degrees it does. This does not require a collision. Pure yaw does not trigger this test. For example, append `env.robot_tilt_threshold_degs=70.0` to a launch command. The old `robot_tilt_threshold_rad` field is no longer used.
 
 `reset_robot_on_robot_crash=True` ends the episode for the contact detector. `reset_robot_on_tilt_threshold=True` ends it for the tilt detector. Setting either to `False` disables **only that detector's reset**, not its reward or the other detector. A persistent violation can therefore receive −1 in every action interval. If both detectors fire in one interval, they still select one crash outcome, not two penalties.
 
@@ -208,7 +208,7 @@ Other endings, such as a goal, leaving the box, or the deadline, still reset the
 
 A save first requires a real PhysX **paddle contact** above 0.05 N. Proximity alone is insufficient. After that contact, one of these conditions must confirm that the ball is clear:
 
-1. **Returned toward the shooter:** ball center `x > keeper_plane_x + clear_distance_m`, currently about **0.2197 m**, and x velocity `> clear_speed_m_s=0.3 m/s`. Here `clear_distance_m=0.25 m` is measured from the defense plane, not from the goal.
+1. **Returned toward the shooter:** ball center `x > keeper_plane_x + clear_distance_m`, currently about **0.2197 m**, and x velocity `> clear_speed_m_s` (0.3 m/s shipped; 0.2 m/s in your current local tuning). Here `clear_distance_m=0.25 m` is measured from the defense plane, not from the goal.
 2. **Deflected outside the goal:** ball center `x < −0.40 m` and outside the radius-expanded goal bounds in **either** y or z. The checks are `abs(y-goal_center.y) > goal_size.y/2 + ball_radius_m` or the equivalent z test. At the shipped dimensions, these are `abs(y) > 1.23 m` or `abs(z-1.2) > 1.23 m`.
 3. **Deflected onto the floor in front of the goal:** a live-floor event after the paddle hit, with ball center `x > −0.40 m`. This keeps the separate floor cost described above.
 

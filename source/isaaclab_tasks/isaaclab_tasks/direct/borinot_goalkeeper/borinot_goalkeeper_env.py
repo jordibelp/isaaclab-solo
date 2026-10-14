@@ -242,7 +242,7 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         root_pos = self.robot.data.root_pos_w - self.scene.env_origins
         gravity_b = quat_apply_inverse(self.robot.data.root_quat_w, self._gravity)
         self._flags["area"] |= ((root_pos < self._area_min) | (root_pos > self._area_max)).any(-1)
-        self._flags["tilt"] |= gravity_b[:, 2] > -math.cos(self.cfg.robot_tilt_threshold_rad)
+        self._flags["tilt"] |= gravity_b[:, 2] > -math.cos(math.radians(self.cfg.robot_tilt_threshold_degs))
         self._flags["crash"] |= (
             torch.linalg.vector_norm(other_contact, dim=-1) > 0.1
         ).any(-1)

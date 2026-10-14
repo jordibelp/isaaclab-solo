@@ -146,7 +146,7 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     rwd_scale_robot_crash = -1.0  # non-ball robot contact or excessive tilt; independent of reset flags
     reset_robot_on_robot_crash = True
     reset_robot_on_tilt_threshold = True
-    robot_tilt_threshold_rad = 1.0471975511965976  # 60 degrees
+    robot_tilt_threshold_degs = 70.0  # degrees from world vertical; converted internally for the cosine test
 
     # Optional additions: disabled by default. Enable explicitly for an ablation.
     rwd_scale_intercept = 0.0

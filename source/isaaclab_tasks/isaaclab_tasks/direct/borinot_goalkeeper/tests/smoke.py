@@ -213,9 +213,10 @@ try:
     cfg.reset_robot_on_robot_crash = cfg.reset_robot_on_tilt_threshold = True
     env._area_min.copy_(saved_min)
 
-    original_threshold = cfg.robot_tilt_threshold_rad
-    for threshold_deg, tilt_deg, expected in ((60, 45, False), (60, 75, True), (20, 30, True)):
-        cfg.robot_tilt_threshold_rad = threshold_deg * torch.pi / 180
+    original_threshold = cfg.robot_tilt_threshold_degs
+    for threshold_deg, tilt_deg, expected in ((60.0, 45, False), (60.0, 75, True), (20.0, 30, True),
+                                             (70.0, 69, False), (70.0, 71, True)):
+        cfg.robot_tilt_threshold_degs = threshold_deg
         env.reset()
         state = env.robot.data.root_state_w.clone()
         half_angle = torch.tensor(tilt_deg * torch.pi / 360, device=env.device)
@@ -229,7 +230,7 @@ try:
         check(f"tilt_{tilt_deg}_threshold_{threshold_deg}_detection",
               bool((info["goalkeeper_tilt_threshold"] == expected).all())
               and not bool(info["goalkeeper_robot_contact_crash"].any()))
-    cfg.robot_tilt_threshold_rad = original_threshold
+    cfg.robot_tilt_threshold_degs = original_threshold
 
     env.reset()
     state = env.robot.data.root_state_w.clone()

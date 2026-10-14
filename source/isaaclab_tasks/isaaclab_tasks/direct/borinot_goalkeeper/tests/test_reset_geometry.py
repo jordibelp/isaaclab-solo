@@ -3,6 +3,7 @@
 import ast
 import importlib.util
 import json
+import math
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -75,6 +76,39 @@ def test_neutral_shot_target_matches_aligned_paddle_at_reference_height():
     root = frame([0, 0, 1.5], q[[1, 2, 3, 0]])
     position = (root @ poses["flying_arm_2__link2"] @ np.r_[cfg["paddle_offset_ee"], 1])[:3]
     np.testing.assert_allclose(position, [cfg["keeper_plane_x"], *cfg["target_center_yz"]], atol=1e-6)
+
+
+@pytest.mark.parametrize("threshold_deg,roll_deg,pitch_deg,yaw_deg,expected", [
+    (70.0, 0.0, 0.0, 150.0, False),  # yaw alone is not tilt
+    (70.0, 69.0, 0.0, 0.0, False),
+    (70.0, 71.0, 0.0, 0.0, True),
+    (70.0, 0.0, 69.0, 150.0, False),
+    (70.0, 0.0, 71.0, 150.0, True),
+    (60.0, 65.0, 0.0, 0.0, True),
+    (70.0, 65.0, 0.0, 0.0, False),  # changing degrees must change detection
+    (20.0, 30.0, 0.0, 0.0, True),
+    (100.0, 110.0, 0.0, 0.0, True),
+])
+def test_physics_tilt_detector_accepts_degrees(threshold_deg, roll_deg, pitch_deg, yaw_deg, expected):
+    tree = ast.parse((FOLDER / "borinot_goalkeeper_env.py").read_text())
+    method = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+                  and n.name == "_sample_physics_events")
+    detector = next(n for n in method.body if isinstance(n, ast.AugAssign)
+                    and isinstance(n.target, ast.Subscript)
+                    and isinstance(n.target.slice, ast.Constant) and n.target.slice.value == "tilt")
+    rotation = Rotation.from_euler("xyz", [roll_deg, pitch_deg, yaw_deg], degrees=True)
+    gravity_b = torch.tensor(rotation.inv().apply([0.0, 0.0, -1.0])[None], dtype=torch.float64)
+    env = SimpleNamespace(cfg=SimpleNamespace(robot_tilt_threshold_degs=threshold_deg),
+                          _flags={"tilt": torch.zeros(1, dtype=torch.bool)})
+    namespace = {"self": env, "math": math, "gravity_b": gravity_b}
+    # Execute the actual detector, without importing or launching Isaac Sim.
+    exec(compile(ast.Module(body=[detector], type_ignores=[]), "actual_tilt_detector", "exec"), namespace)
+    assert env._flags["tilt"].item() == expected
+    # Once detected, a violation stays latched for the rest of the action interval.
+    env._flags["tilt"].fill_(True)
+    gravity_b[0] = torch.tensor([0.0, 0.0, -1.0])
+    exec(compile(ast.Module(body=[detector], type_ignores=[]), "actual_tilt_detector", "exec"), namespace)
+    assert env._flags["tilt"].item()
 
 
 @pytest.mark.parametrize("reset_contact,reset_tilt", [(False, False), (False, True), (True, False), (True, True)])
