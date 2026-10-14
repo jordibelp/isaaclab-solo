@@ -36,6 +36,8 @@ if args.task == "borinot":
 else:
     from isaaclab_tasks.direct.borinot_goalkeeper.borinot_goalkeeper_env_cfg import BorinotGoalkeeperEnvCfg
     cfg = BorinotGoalkeeperEnvCfg()
+    cfg.control_mode = "PI_rotors_PD_joint_pos_control"
+    cfg.physics_hz, cfg.policy_hz = 240, 60  # original power-regression fixture
     task_id = "Borinot-Goalkeeper-Direct-v0"
     cfg.curriculum = False
     cfg.reset_xy_noise_m = cfg.reset_z_noise_m = 0.0

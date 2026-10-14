@@ -88,7 +88,7 @@ The ball has a 30 mm radius. Each reset samples mass uniformly from 20–50 g an
 
 When mass changes, the code also changes the sphere's inertia using `I = 0.4 * mass * radius²`. The property setters change the active PhysX model, not just USD metadata. Validation reads those properties back.
 
-Physics runs at 240 Hz. The policy runs at 60 Hz. Contacts are inspected after **every physics substep**, not only after policy steps. A ball-source contact sensor has separate filters for the paddle, base, upper arm, lower arm, goal, and floor. Each environment has its own floor and goal, including at large environment counts.
+Physics defaults to 200 Hz. The policy defaults to 100 Hz. Both rates are configurable; see section 3. Contacts are inspected after **every physics substep**, not only after policy steps. A ball-source contact sensor has separate filters for the paddle, base, upper arm, lower arm, goal, and floor. Each environment has its own floor and goal, including at large environment counts.
 
 GPU PhysX does not support ordinary swept CCD in this runtime. The task uses speculative CCD and a swept geometric goal-plane check. These do not establish accurate real impact dynamics. Smaller physics steps and contact-parameter sensitivity tests are still needed before hardware transfer.
 
@@ -104,7 +104,7 @@ The tables below give the shipped values in the committed config. **Current loca
 
 ### How one policy step gets its reward
 
-Physics runs at 240 Hz. One policy action lasts four physics steps, so `step_dt=1/60 s`. We check contact and safety events after every physics step. An event remains recorded until the end of that action interval, even if the contact has already ended. Paddle-hit and safe-clearance history remain recorded until the episode resets.
+With the default 200 Hz physics and 100 Hz policy, one action lasts two physics steps and `step_dt=0.01 s`. We check contact and safety events after every physics step. An event remains recorded until the end of that action interval, even if the contact has already ended. Paddle-hit and safe-clearance history remain recorded until the episode resets.
 
 At the end of the interval, we select an outcome, calculate the reward, and then reset any finished environment. The total reward is:
 
@@ -173,7 +173,7 @@ For example, a ball at y = 3.1 m without verified clearance receives −1 and en
 
 ### `rwd_scale_deadline`: the shot clock expires
 
-Each reset starts a separate shot clock at zero. It advances once per policy action. The limit is `ceil(episode_length_s / step_dt)`: **180 actions = 3.0 s** with the shipped timing. It is independent of the runner's randomized initial episode-length counter.
+Each reset starts a separate shot clock at zero. It advances once per policy action. The limit is `ceil(episode_length_s / step_dt)`: **300 actions = 3.0 s** with the default 100 Hz policy. It is independent of the runner's randomized initial episode-length counter.
 
 If the shot reaches that limit without a confirmed save, it receives the deadline outcome, unless a higher-priority failure occurred. For example, a touched but still unresolved ball inside the tracking bounds at 3 s receives −1. With recovery required, safe ball clearance without completing the recovery dwell by 3 s also receives −1.
 
@@ -268,9 +268,81 @@ env.rwd_scale_progress=1.0 env.rwd_scale_save=1.5 env.rwd_scale_goal=-1.0 env.rw
 
 Use floats such as `1.0` for float config fields. The defaults are starting values, not an optimized recipe. To discourage arm blocking more strongly, make `rwd_scale_ball_arm_collision` more negative. To recover the shipped reward from the current locally tuned energy setting, also pass `env.rwd_scale_energy=0.0`.
 
-## 3. Action and observation contract
+## 3. Select control mode, timing, and joint actuator settings
 
-The six actions are clipped to `[-1, 1]`:
+Use `env.control_mode` as a Hydra override on the training or playback command. Names are case-sensitive. The default is `thrust_and_torque_control`.
+
+| `env.control_mode` | Policy actions | Actor / critic values |
+|---|---:|---:|
+| `thrust_and_torque_control` | 6 individual thrusts + 2 joint torques: **8** | **57** each |
+| `thrust_and_PD_joint_pos_control` | 6 individual thrusts + 2 desired joint angles: **8** | **57** each |
+| `PI_rotors_PD_joint_pos_control` | Collective thrust + 3 body rates + 2 desired joint angles: **6** | **55** each |
+
+Append one of these selectors to the training command:
+
+```bash
+env.control_mode=thrust_and_torque_control
+```
+
+```bash
+env.control_mode=thrust_and_PD_joint_pos_control
+```
+
+```bash
+env.control_mode=PI_rotors_PD_joint_pos_control
+```
+
+### Physics and policy frequency
+
+Defaults are **200 Hz physics / 100 Hz policy**, in every mode. These are independent of the control-mode choice:
+
+```bash
+env.physics_hz=200 env.policy_hz=100
+```
+
+The physics frequency must be an integer multiple of the policy frequency. At 200/100 Hz, each action spans two physics steps. For the former PI timing, use:
+
+```bash
+env.control_mode=PI_rotors_PD_joint_pos_control env.physics_hz=240 env.policy_hz=60
+```
+
+The task resolves `sim.dt=1/physics_hz`, `decimation=physics_hz/policy_hz`, render interval, and action/observation dimensions after Hydra overrides and before creating the simulator. Use these frequency selectors rather than overriding the derived `env.sim.dt` or `env.decimation`; the selectors take precedence. Invalid names or frequency ratios fail before environment construction. Rates are integer config fields; write `200`, not `200.0`.
+
+Changing rates also changes the number of actions in a shot. The three-second deadline becomes 300 actions at 100 Hz or 180 at 60 Hz. Contact detection and power sampling still run after every physics substep. Rate rewards use the resolved policy timestep. `curriculum_min_steps` still counts policy steps, so its physical dwell changes with policy frequency. No reward scales or PPO discount settings are automatically retuned.
+
+### Direct rotor modes: a and b
+
+All policy actions are clipped to `[-1, 1]`. Actions 0–5 independently request thrust from rotors 0–5:
+
+```text
+requested rotor thrust = hover_per_rotor * (1 + rotor_action_scale * action)
+hover_per_rotor = simulated robot mass * 9.81 / 6
+```
+
+With `rotor_action_scale=1.0` and `thrust_to_weight=2.0`, action −1 requests zero thrust, action 0 requests nominal per-rotor hover thrust, and action +1 requests twice that thrust. Commands are clipped to `[0, thrust_to_weight * hover_per_rotor]`. Unlike the old locomotion run's below-hover cap, this default provides nominal flight thrust reserve.
+
+There is **no body-rate PI feedback** in either direct mode. The rotor geometry maps the individual forces to the resulting base force and torque. The physical response still uses a first-order thrust filter with `motor_time_constant_s=0.04`. Zero thrust actions request nominal hover thrust, but do not stabilize position or attitude on their own. These are simulator assumptions, not calibrated ESC or motor limits.
+
+In mode **a**, actions 6–7 request shoulder and elbow torques:
+
+```text
+joint torque target = effort_lim_sim * action
+```
+
+The default range is ±2.7 N·m per joint. Joint drive stiffness and damping are both zero: no position PD is added to the policy torque.
+
+In mode **b**, actions 6–7 request two scalar joint angles:
+
+```text
+shoulder angle target = 1.1 * action[6] rad
+elbow angle target = 1.4 * action[7] rad
+```
+
+These are absolute targets relative to joint zero, not increments. The ranges are ±63.0 degrees and ±80.2 degrees. Implicit joint PD follows them with zero desired joint velocity and zero feedforward effort. Unlike the old locomotion interface, two desired angles use two policy outputs, not four atan2 inputs.
+
+### PI rotor mode: c
+
+This keeps the previous action mapping:
 
 | Index | Meaning |
 |---:|---|
@@ -278,13 +350,27 @@ The six actions are clipped to `[-1, 1]`:
 | 1–3 | Body-rate targets, scaled by `(2.0, 2.0, 1.5)` rad/s |
 | 4–5 | Shoulder and elbow angle targets, scaled by `(1.1, 1.4)` rad |
 
-A 240 Hz body-rate PI controller converts rate errors into torques. A six-rotor allocation matrix converts collective thrust and torque into rotor thrusts. Rotor thrust is nonnegative and limited to twice the nominal per-rotor hover thrust. A first-order filter uses a 40 ms time constant. These are simulator assumptions, not calibrated ESC or motor limits.
+At each physics step, the PI controller computes rate error, updates its bounded integral, and requests base torque. A six-rotor allocation matrix converts collective thrust and torque into individual thrust commands. The same thrust clipping and motor-response filter apply. The limb uses the same PD settings as mode b. The PI gains remain `rate_kp` and `rate_ki`; they do not affect modes a or b.
 
-The arm uses implicit joint PD, with stiffness 35, damping 0.6, effort limit 2.7 N·m, and velocity limit 15 rad/s. This policy interface differs from the existing task's ten raw rotor/angle actions. Old locomotion checkpoints are not compatible.
+### Solo-style joint actuator
 
-The actor and critic each receive **55 values**. These contain the home-position error, full root quaternion, base linear and angular velocities, joint positions and velocities, relative paddle position and normal, relative ball position and velocity, the predicted intercept and its time/validity, shot phase and elapsed time, current actions, rotor thrust state, controller integral, and the sampled ball mass/restitution.
+Every mode uses `ImplicitActuatorCfg`, with **armature 0.00036207**, joint friction 0.0, default velocity limit **100 rad/s**, and default effort limit **2.7 N·m**. Armature represents the motor/gear inertia reflected at the joint. The armature matches the Solo actuator configuration, because Borinot uses Solo joint motors.
 
-The predicted intercept is available as privileged information. It does not replace the current-ball target in the default progress reward. All coordinates remove the clone's world offset. The finite shot clock is independent of the generic runner's randomized initial episode-length counter.
+Configure limits and the position-mode PD gains through Hydra:
+
+```bash
+env.effort_lim_sim=2.7 env.velocity_lim_sim=100.0 env.joint_stiffness=35.0 env.joint_damping=0.6
+```
+
+These four fields are floats. The task refreshes limits and gains on the existing actuator before spawn, without replacing its friction or armature settings. Torque mode ignores the PD gains unless `hold_arm=True`. In every mode, `hold_arm=True` means neutral-position PD and zero feedforward torque; it is **not** a mechanically welded limb.
+
+### Observation and checkpoint contract
+
+Actor and critic each receive the same 49 shared values plus the current policy actions: 57 values in direct modes or 55 in PI mode. Shared values include the home-position error, full root quaternion, base linear and angular velocities, joint positions and velocities, relative paddle position and normal, relative ball position and velocity, predicted intercept/time/validity, shot phase/time, rotor thrust state, controller integral, and sampled ball mass/restitution. The three PI-integral entries remain zero in direct modes. Joint velocity is divided by `velocity_lim_sim`.
+
+The predicted intercept is privileged information. It does not replace the current-ball target in the default progress reward. All coordinates remove the clone's world offset. The finite shot clock is independent of the generic runner's randomized initial episode-length counter.
+
+Always match the control mode, rates, action scales, and actuator settings when loading a checkpoint. Direct and PI checkpoints have different shapes. Modes a and b have equal shapes but different action meanings; do not interchange their checkpoints merely because loading succeeds. Older PI checkpoints also used a different joint-velocity normalization, velocity limit, and armature. Existing locomotion checkpoints are not compatible with these goalkeeper observations.
 
 ## 4. Difficulty and curriculum
 
@@ -300,7 +386,7 @@ Every shot is ballistic and aimed at the defense plane. Tests check that unblock
 These are uniform target offsets around the configured center. Level 0 is intentionally easy: neutral hovering can cover its small spread. It checks geometry and flight stability, not agile goalkeeping.
 The sampling checks prove that throws threaten the goal, not that Borinot can reach every throw. Some fast, wide level-3 shots may be dynamically unreachable. Check that limit before interpreting a learning plateau. The two arm joints mainly move the tip in the body's x–z plane; sideways coverage also needs aircraft motion or reorientation.
 
-Automatic promotion uses the last up-to-2048 completed episodes from the current level. It requires at least 1024 completed episodes, a save fraction strictly above 0.7, and 3000 policy steps at that level. The latter is **50 simulated seconds per environment**. More environments increase sample count, not elapsed simulated time.
+Automatic promotion uses the last up-to-2048 completed episodes from the current level. It requires at least 1024 completed episodes, a save fraction strictly above 0.7, and 3000 policy steps at that level. The latter is **30 simulated seconds per environment at 100 Hz**, or 50 seconds at 60 Hz. More environments increase sample count, not elapsed simulated time.
 
 A shot keeps its starting level until it ends. Older-level endings are excluded from the new level's decision window. Promotion clears that window. An empty batch cannot promote. General outcome counts still include every completed shot.
 
@@ -338,7 +424,7 @@ K = exp(-(d_3d / intercept_sigma_m)²)
 intercept reward = rwd_scale_intercept * K * step_dt
 ```
 
-`K` is set to zero unless the prediction is valid and the ball has **not yet touched the paddle**. These conditions are evaluated at the end of the interval. The shipped width is `intercept_sigma_m=0.30 m`. At d = 0, K = 1; at d = 0.30 m, K is about 0.368. If the scale is 0.1, a perfect match contributes `0.1/60`, about +0.00167 per action, not +0.1 per action. It rewards being close even without motion, so it is different from signed progress. It does not itself prove contact or a save.
+`K` is set to zero unless the prediction is valid and the ball has **not yet touched the paddle**. These conditions are evaluated at the end of the interval. The shipped width is `intercept_sigma_m=0.30 m`. At d = 0, K = 1; at d = 0.30 m, K is about 0.368. If the scale is 0.1, a perfect match contributes `0.1/100 = +0.001` per action at the default 100 Hz, not +0.1 per action. It rewards being close even without motion, so it is different from signed progress. It does not itself prove contact or a save.
 
 ### `rwd_scale_alignment`: orient the paddle face toward the incoming ball
 
@@ -377,7 +463,7 @@ This is a boolean, not a reward scale. It is `False` by default. Setting it to `
 | Tilt from world vertical | < 0.35 rad, about 20 degrees | `recovery_tilt_rad` |
 | Largest absolute arm joint angle from zero | < 0.5 rad | `recovery_joint_tolerance_rad` |
 
-The conditions must hold at consecutive policy-step checks for `recovery_dwell_s=0.25 s`, or 15 actions at 60 Hz. The timer is zero before clearance and resets to zero if any check fails. It measures return toward neutral arm angles, not toward the previous action's targets. There is no separate yaw-angle recovery test. Safety and the three-second deadline remain active during recovery.
+The conditions must hold at consecutive policy-step checks for `recovery_dwell_s=0.25 s`, or 25 actions at the default 100 Hz (15 at 60 Hz). The timer is zero before clearance and resets to zero if any check fails. It measures return toward neutral arm angles, not toward the previous action's targets. There is no separate yaw-angle recovery test. Safety and the three-second deadline remain active during recovery.
 
 This gate works even with `rwd_scale_recovery=0.0`. Conversely, enabling the recovery reward below does not turn on the gate. With the default gate off, the episode ends at clearance, so there is no multi-step post-clearance recovery period.
 
@@ -406,18 +492,18 @@ A regularizer discourages unwanted motion or control changes. Each signal below 
 
 | Config field | Raw signal; contribution is `scale * signal * step_dt` | What it discourages |
 |---|---|---|
-| `rwd_scale_action_rate` | `sum((current_action - previous_action)²)` over all six clipped policy actions | Abrupt action changes. This is a step-to-step difference, **not divided by dt**. The previous action is zero after reset. |
+| `rwd_scale_action_rate` | `sum((current_action - previous_action)²)` over all clipped policy actions (eight in direct modes, six in PI mode) | Abrupt action changes. This is a step-to-step difference, **not divided by dt**. The previous action is zero after reset. |
 | `rwd_scale_body_angular_velocity` | `sum(base_angular_velocity_body_frame²)`, in (rad/s)² | Fast base rotation. All three axes count, including yaw. |
 | `rwd_scale_body_linear_velocity` | `sum(base_linear_velocity_world_frame²)`, in (m/s)² | Fast aircraft translation in any direction. |
 | `rwd_scale_thrust` | `mean((applied_rotor_thrust / nominal_hover_thrust_per_rotor - 1)²)` over six rotors | Thrust departing from its nominal hover allocation. Applied thrust includes motor lag. |
 
-For example, changing just one clipped action by 0.2 gives an action-rate signal of 0.04. With scale −0.1, its contribution is `−0.1 * 0.04 / 60`, about −0.0000667. The action-rate signal still includes the two arm outputs when `hold_arm=True`, although those outputs are ignored by the arm controller.
+For example, changing just one clipped action by 0.2 gives an action-rate signal of 0.04. With scale −0.1, its contribution is `−0.1 * 0.04 / 100 = −0.00004` at the default 100 Hz. The action-rate signal still includes the two arm outputs when `hold_arm=True`, although those outputs are ignored by the arm controller.
 
 The thrust signal is zero at nominal hover thrust. It is **not a physical power estimate**: hovering consumes power but pays no thrust regularizer. It also penalizes reducing thrust below nominal hover, not only increasing it above hover.
 
 ### `rwd_scale_energy`: mean mechanical plus dissipative power
 
-Despite its name, this term uses **mean power in watts**, not integrated energy in joules. We sample all four completed physics steps, including the final step before an automatic reset:
+Despite its name, this term uses **mean power in watts**, not integrated energy in joules. We sample every completed physics step (two per action by default), including the final step before an automatic reset:
 
 ```text
 energy reward = rwd_scale_energy * mean_over_physics_steps(P_total)
@@ -518,7 +604,7 @@ TensorBoard logs episode reward components, cumulative save fraction, contact/cl
 Run tensor-only tests without launching Isaac Sim:
 
 ```bash
-python -m pytest -q --import-mode=importlib --rootdir=source/isaaclab_tasks/isaaclab_tasks/direct/borinot_goalkeeper/tests --confcutdir=source/isaaclab_tasks/isaaclab_tasks/direct/borinot_goalkeeper/tests source/isaaclab_tasks/isaaclab_tasks/direct/borinot_goalkeeper/tests/test_task_math.py source/isaaclab_tasks/isaaclab_tasks/direct/borinot_goalkeeper/tests/test_power.py source/isaaclab_tasks/isaaclab_tasks/direct/borinot_goalkeeper/tests/test_rewards.py source/isaaclab_tasks/isaaclab_tasks/direct/borinot_goalkeeper/tests/test_reset_geometry.py
+python -m pytest -q --import-mode=importlib --rootdir=source/isaaclab_tasks/isaaclab_tasks/direct/borinot_goalkeeper/tests --confcutdir=source/isaaclab_tasks/isaaclab_tasks/direct/borinot_goalkeeper/tests source/isaaclab_tasks/isaaclab_tasks/direct/borinot_goalkeeper/tests/test_task_math.py source/isaaclab_tasks/isaaclab_tasks/direct/borinot_goalkeeper/tests/test_power.py source/isaaclab_tasks/isaaclab_tasks/direct/borinot_goalkeeper/tests/test_rewards.py source/isaaclab_tasks/isaaclab_tasks/direct/borinot_goalkeeper/tests/test_reset_geometry.py source/isaaclab_tasks/isaaclab_tasks/direct/borinot_goalkeeper/tests/test_control.py
 ```
 
 Run the GPU environment check:
@@ -527,7 +613,15 @@ Run the GPU environment check:
 ./isaaclab.sh -p source/isaaclab_tasks/isaaclab_tasks/direct/borinot_goalkeeper/tests/smoke.py --headless --num-envs 16 --steps 180 --output /tmp/borinot_goalkeeper_validation.json '--kit_args=--/UJITSO/geometry=false --/UJITSO/textures=false --/UJITSO/materials=false'
 ```
 
-The checks cover ballistic goal-threatening shots, progress geometry, actual paddle/base/arm/goal/floor contacts, reward scales, full observations, mass/inertia/material readback, partial resets, finite rollouts, and curriculum boundaries. They also check the corrected paddle plane at bent-arm poses, both crash-reset switches independently, and the configurable tilt threshold. The physics check uses a known 1.5 m home-height baseline, not a locally tuned lower home. Earlier short PPO training verified the registered task/agent path. These checks do not show learned agility, convergence, hardware transfer, or ten-thousand-environment throughput.
+That contact-regression script explicitly selects PI mode at 240/60 Hz to retain its original test conditions. For a control-mode check using real Hydra overrides, run:
+
+```bash
+./isaaclab.sh -p source/isaaclab_tasks/isaaclab_tasks/direct/borinot_goalkeeper/tests/control_smoke.py --headless --output /tmp/borinot_goalkeeper_control.json env.control_mode=thrust_and_torque_control env.physics_hz=200 env.policy_hz=100 env.effort_lim_sim=2.7 '--kit_args=--/UJITSO/geometry=false --/UJITSO/textures=false --/UJITSO/materials=false'
+```
+
+The checks cover ballistic goal-threatening shots, progress geometry, actual paddle/base/arm/goal/floor contacts, reward scales, full observations, mass/inertia/material readback, partial resets, finite rollouts, and curriculum boundaries. They also check the corrected paddle plane at bent-arm poses, both crash-reset switches independently, and the configurable tilt threshold. The physics checks use a known 1.5 m home-height baseline, not the locally tuned lower home.
+
+Control-variant validation passed 113 CPU tests and 304 simulator checks. The simulator checks cover all three modes, actuator property readback, 200/100 and 240/60 Hz timing, a held arm at 400/100 Hz, and the original contact regression. Each mode completed two PPO updates through the registered training entry point with 32 environments and 32 rollout steps, then reloaded its checkpoint for finite inference. These checks establish integration, not learned agility, convergence, hardware transfer, or ten-thousand-environment throughput.
 
 Local validation uses Isaac Sim 5.1.0, Torch 2.7.0+cu128, RSL-RL 3.1.2, and the RTX 5070 Laptop GPU. The older simulator on IRICluster needs its own launch check after you pull the code.
 
@@ -550,5 +644,7 @@ To follow the reward in code, read these methods in order:
 - `tests/test_rewards.py`: the actual reward method on controlled tensors; signed scales, event amounts, dt handling, and floor-save addition.
 - `tests/test_power.py`: physics-rate sampling, power model, and signed power reward.
 - `tests/test_reset_geometry.py`: signed crash/reset behavior and USD-derived arm/paddle frames.
-- `tests/smoke.py`: real GPU physics and reset checks.
+- `tests/test_control.py`: mode mapping, PI isolation, motor response, limits, and frequency validation.
+- `tests/control_smoke.py`: real Hydra selectors, PhysX actuator property readback, power sampling, and reset checks.
+- `tests/smoke.py`: original PI/240 Hz/60 Hz contact-regression fixture and reset checks.
 - `tests/checkpoint_smoke.py`: finite deterministic inference after reloading a PPO checkpoint.

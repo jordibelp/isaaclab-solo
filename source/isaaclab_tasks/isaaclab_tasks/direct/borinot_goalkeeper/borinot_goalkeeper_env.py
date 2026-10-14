@@ -28,6 +28,7 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
     contact_body_names = ("paddle", "base", "flying_arm_2__link1", "flying_arm_2__link2")
 
     def __init__(self, cfg: BorinotGoalkeeperEnvCfg, render_mode=None, **kwargs):
+        cfg.configure_control()
         if not 0 <= cfg.shot_level < len(cfg.shot_half_extents_yz):
             raise ValueError("shot_level must be in [0, 3].")
         if not 1 <= cfg.curriculum_min_episodes <= cfg.curriculum_window_episodes:
@@ -51,7 +52,7 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         )
         self._x_axis = torch.tensor([1.0, 0.0, 0.0], device=self.device).expand(self.num_envs, -1)
         self._gravity = torch.tensor([0.0, 0.0, -1.0], device=self.device).expand(self.num_envs, -1)
-        self.actions = torch.zeros(self.num_envs, 6, device=self.device)
+        self.actions = torch.zeros(self.num_envs, cfg.action_space, device=self.device)
         self._previous_actions = torch.zeros_like(self.actions)
         self._rate_integral = torch.zeros(self.num_envs, 3, device=self.device)
         self._joint_scale = torch.tensor(cfg.joint_target_scale, device=self.device)
@@ -183,12 +184,15 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         if self._physics_samples:
             self._sample_physics_events()
         self._physics_samples += 1
-        rates = self.robot.data.root_ang_vel_b
-        error = self.actions[:, 1:4] * self._rate_scale - rates
-        self._rate_integral.add_(error * self.physics_dt).clamp_(-0.5, 0.5)
-        torque = self._kp * error + self._ki * self._rate_integral
-        collective = self._hover_total * (1 + self.cfg.collective_action_scale * self.actions[:, :1])
-        commands = torch.cat((collective, torque), dim=-1) @ self._allocation_inverse.T
+        if self.cfg.control_mode == "PI_rotors_PD_joint_pos_control":
+            rates = self.robot.data.root_ang_vel_b
+            error = self.actions[:, 1:4] * self._rate_scale - rates
+            self._rate_integral.add_(error * self.physics_dt).clamp_(-0.5, 0.5)
+            torque = self._kp * error + self._ki * self._rate_integral
+            collective = self._hover_total * (1 + self.cfg.collective_action_scale * self.actions[:, :1])
+            commands = torch.cat((collective, torque), dim=-1) @ self._allocation_inverse.T
+        else:
+            commands = self._hover_per_rotor * (1 + self.cfg.rotor_action_scale * self.actions[:, :6])
         commands.clamp_(0.0, self._hover_per_rotor * self.cfg.thrust_to_weight)
         self._rotor_thrust.add_(self._motor_alpha * (commands - self._rotor_thrust))
         wrench = self._rotor_thrust @ self._allocation.T
@@ -197,11 +201,15 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         self.robot.permanent_wrench_composer.set_forces_and_torques(
             forces=force, torques=wrench[:, None, 1:4], body_ids=[self.base_id], is_global=False,
         )
-        targets = self.actions[:, 4:6] * self._joint_scale
-        if self.cfg.hold_arm:
-            targets = torch.zeros_like(targets)
-        self.robot.set_joint_position_target(targets, joint_ids=self.joint_ids)
-        self.robot.set_joint_velocity_target(torch.zeros_like(targets), joint_ids=self.joint_ids)
+        if self.cfg.control_mode == "thrust_and_torque_control" and not self.cfg.hold_arm:
+            self.robot.set_joint_effort_target(self.actions[:, 6:8] * self.cfg.effort_lim_sim, joint_ids=self.joint_ids)
+        else:
+            targets = self.actions[:, -2:] * self._joint_scale
+            if self.cfg.hold_arm:
+                targets = torch.zeros_like(targets)
+            self.robot.set_joint_position_target(targets, joint_ids=self.joint_ids)
+            self.robot.set_joint_velocity_target(torch.zeros_like(targets), joint_ids=self.joint_ids)
+            self.robot.set_joint_effort_target(torch.zeros_like(targets), joint_ids=self.joint_ids)
 
     def _sample_power(self):
         """Sample completed substeps using lagged thrust and the applied PD torque estimate."""
@@ -374,7 +382,7 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         common = [quat_apply_inverse(quaternion, self._home - root_pos),
                   quaternion, self.robot.data.root_lin_vel_b,
                   self.robot.data.root_ang_vel_b, self.robot.data.joint_pos[:, self.joint_ids] / self._joint_scale,
-                  self.robot.data.joint_vel[:, self.joint_ids] / 15.0,
+                  self.robot.data.joint_vel[:, self.joint_ids] / self.cfg.velocity_lim_sim,
                   quat_apply_inverse(quaternion, paddle_pos - root_pos), quat_apply_inverse(quaternion, normal)]
         ball_parts = [quat_apply_inverse(quaternion, ball_pos - root_pos),
                       quat_apply_inverse(quaternion, self.ball.data.root_lin_vel_w - self.robot.data.root_lin_vel_w),
@@ -449,6 +457,11 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
             self.robot.data.default_joint_pos[env_ids],
             torch.zeros_like(self.robot.data.default_joint_vel[env_ids]), env_ids=env_ids,
         )
+        joint_zero = torch.zeros(n, len(self.joint_ids), device=self.device)
+        self.robot.set_joint_position_target(
+            self.robot.data.default_joint_pos[env_ids][:, self.joint_ids], joint_ids=self.joint_ids, env_ids=env_ids)
+        self.robot.set_joint_velocity_target(joint_zero, joint_ids=self.joint_ids, env_ids=env_ids)
+        self.robot.set_joint_effort_target(joint_zero, joint_ids=self.joint_ids, env_ids=env_ids)
         position, velocity, _, _ = sample_shots(n, self.device, self.cfg, self.shot_level)
         ball_state = self.ball.data.default_root_state[env_ids].clone()
         ball_state[:, :3] = position + self.scene.env_origins[env_ids]

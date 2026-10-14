@@ -20,6 +20,8 @@ import isaaclab_tasks
 from isaaclab_tasks.direct.borinot_goalkeeper.borinot_goalkeeper_env_cfg import BorinotGoalkeeperEnvCfg
 
 cfg = BorinotGoalkeeperEnvCfg()
+cfg.control_mode = "PI_rotors_PD_joint_pos_control"
+cfg.physics_hz, cfg.policy_hz = 240, 60  # preserve the original contact-test baseline
 cfg.scene.num_envs = args.num_envs
 cfg.sim.device = args.device
 cfg.curriculum = False

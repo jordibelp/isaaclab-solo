@@ -10,6 +10,9 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--checkpoint", type=Path, required=True)
 parser.add_argument("--output", type=Path, required=True)
 parser.add_argument("--steps", type=int, default=120)
+parser.add_argument("--control-mode", default="thrust_and_torque_control")
+parser.add_argument("--physics-hz", type=int, default=200)
+parser.add_argument("--policy-hz", type=int, default=100)
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 app = AppLauncher(args).app
@@ -24,6 +27,8 @@ from isaaclab_tasks.direct.borinot_goalkeeper.agents.rsl_rl_ppo_cfg import Borin
 from isaaclab_tasks.direct.borinot_goalkeeper.borinot_goalkeeper_env_cfg import BorinotGoalkeeperEnvCfg
 
 cfg = BorinotGoalkeeperEnvCfg()
+cfg.control_mode = args.control_mode
+cfg.physics_hz, cfg.policy_hz = args.physics_hz, args.policy_hz
 cfg.scene.num_envs = 16
 cfg.sim.device = args.device
 cfg.seed = 42
@@ -41,14 +46,16 @@ try:
     with torch.inference_mode():
         for _ in range(args.steps):
             actions = policy(obs)
-            assert actions.shape == (16, 6) and torch.isfinite(actions).all()
+            assert actions.shape == (16, cfg.action_space) and torch.isfinite(actions).all()
             max_action = max(max_action, float(actions.abs().max()))
             obs, reward, done, info = env.step(actions)
             assert torch.isfinite(reward).all() and torch.isfinite(obs["policy"]).all()
             codes = info["goalkeeper_outcome"]
             counts += torch.bincount(codes[codes != 0], minlength=10)
     report = {"passed": True, "steps": args.steps, "num_envs": 16,
-              "observation_dimension": 55, "action_dimension": 6, "max_raw_action": max_action,
+              "observation_dimension": cfg.observation_space, "action_dimension": cfg.action_space,
+              "control_mode": cfg.control_mode, "physics_hz": cfg.physics_hz, "policy_hz": cfg.policy_hz,
+              "max_raw_action": max_action,
               "outcomes": counts.tolist(), "checkpoint_name": args.checkpoint.name,
               "checkpoint_path": str(args.checkpoint.resolve())}
     args.output.parent.mkdir(parents=True, exist_ok=True)

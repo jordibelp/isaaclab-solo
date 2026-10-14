@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: BSD-3-Clause
+import math
 from pathlib import Path
 
 import isaaclab.sim as sim_utils
@@ -12,14 +13,17 @@ from isaaclab.utils import configclass
 
 @configclass
 class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
-    decimation = 4
+    control_mode = "thrust_and_torque_control"
+    physics_hz = 200
+    policy_hz = 100
+    decimation = 2  # derived from physics_hz / policy_hz after Hydra overrides
     episode_length_s = 3.0
     is_finite_horizon = True
-    action_space = 6  # collective thrust, body rates xyz, shoulder/elbow position targets
-    observation_space = 55
-    state_space = 55
+    action_space = 8  # derived: 8 for direct thrust modes, 6 for PI
+    observation_space = 57  # derived: 49 shared values plus the current actions
+    state_space = 57
     sim = sim_utils.SimulationCfg(
-        dt=1 / 240,
+        dt=1 / 200,
         render_interval=decimation,
         physx=sim_utils.PhysxCfg(),
     )
@@ -28,6 +32,10 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
 
     robot_home = (0.0, 0.0, 0.5)
     robot_home_quat = (0.7071067811865476, 0.0, 0.0, -0.7071067811865476)  # wxyz; -90 deg yaw
+    effort_lim_sim = 2.7  # N*m; also maps unit torque actions to joint efforts
+    velocity_lim_sim = 100.0  # rad/s
+    joint_stiffness = 35.0  # N*m/rad; disabled in torque mode unless hold_arm=True
+    joint_damping = 0.6  # N*m*s/rad; disabled in torque mode unless hold_arm=True
     robot = ArticulationCfg(
         prim_path="/World/envs/env_.*/Robot",
         spawn=sim_utils.UsdFileCfg(
@@ -47,7 +55,8 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
         ),
         actuators={"arm": ImplicitActuatorCfg(
             joint_names_expr=["flying_arm_2__j_bl_link1", "flying_arm_2__j_link1_link2"],
-            stiffness=35.0, damping=0.6, effort_limit_sim=2.7, velocity_limit_sim=15.0,
+            stiffness=0.0, damping=0.0, effort_limit_sim=effort_lim_sim,
+            velocity_limit_sim=velocity_lim_sim, friction=0.0, armature=0.00036207,
         )},
     )
     joint_names = ("flying_arm_2__j_bl_link1", "flying_arm_2__j_link1_link2")
@@ -97,10 +106,11 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     curriculum = True
     curriculum_window_episodes = 2048
     curriculum_min_episodes = 1024
-    curriculum_min_steps = 3000  # 50 simulated seconds per environment, NOT 3000 aggregate env transitions
+    curriculum_min_steps = 3000  # 30 s at 100 Hz (50 s at 60 Hz), per environment, not aggregate transitions
     curriculum_success_threshold = 0.7
 
     thrust_to_weight = 2.0  # assumed thrust reserve; needs hardware identification
+    rotor_action_scale = 1.0  # direct modes: hover_per_rotor * (1 + scale * action)
     collective_action_scale = 0.7
     body_rate_scale = (2.0, 2.0, 1.5)
     rate_kp = (0.35, 0.35, 0.15)
@@ -165,3 +175,32 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     # Nominal Solo joint copper loss: c * joint_torque**2 [W], c in W/(N*m)^2.
     # Rounded from (3/2)*R_phase/(G*Kt)^2, R_phase=0.2324751 ohm, G=9, Kt=0.025 N*m/A.
     arm_copper_loss_coefficient = 6.888
+
+    def __post_init__(self):
+        self.configure_control()
+
+    def configure_control(self):
+        """Refresh derived settings before simulator/space creation, including after Hydra."""
+        modes = ("thrust_and_torque_control", "thrust_and_PD_joint_pos_control", "PI_rotors_PD_joint_pos_control")
+        if self.control_mode not in modes:
+            raise ValueError(f"Unknown control_mode {self.control_mode!r}; choose one of {modes}.")
+        if self.physics_hz <= 0 or self.policy_hz <= 0:
+            raise ValueError("physics_hz and policy_hz must be positive.")
+        ratio = self.physics_hz / self.policy_hz
+        if ratio < 1 or not math.isclose(ratio, round(ratio), rel_tol=1e-9, abs_tol=1e-9):
+            raise ValueError("physics_hz must be an integer multiple of policy_hz.")
+        if self.effort_lim_sim <= 0 or self.velocity_lim_sim <= 0:
+            raise ValueError("effort_lim_sim and velocity_lim_sim must be positive.")
+        self.decimation = round(ratio)
+        self.sim.dt = 1 / self.physics_hz
+        self.sim.render_interval = self.decimation
+        self.action_space = 6 if self.control_mode == modes[2] else 8
+        self.observation_space = self.state_space = 49 + self.action_space
+        actuator = self.robot.actuators["arm"]
+        use_pd = self.control_mode != modes[0] or self.hold_arm
+        actuator.stiffness = self.joint_stiffness if use_pd else 0.0
+        actuator.damping = self.joint_damping if use_pd else 0.0
+        actuator.effort_limit_sim = self.effort_lim_sim
+        actuator.velocity_limit_sim = self.velocity_lim_sim
+        # Keep only the non-deprecated limits, including when reusing a config instance.
+        actuator.effort_limit = actuator.velocity_limit = None
