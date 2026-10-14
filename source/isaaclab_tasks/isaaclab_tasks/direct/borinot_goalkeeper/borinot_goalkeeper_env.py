@@ -342,11 +342,6 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
             "arm_mechanical": mean_power_w[:, 1].clone(),
             "total_estimate": mean_power_w.sum(-1),
         }
-        self.extras.setdefault("log", {}).update({
-            "Power/rotor_electrical_mean_w": mean_power_w[:, 0].mean(),
-            "Power/arm_mechanical_mean_w": mean_power_w[:, 1].mean(),
-            "Power/total_estimate_mean_w": mean_power_w.sum(-1).mean(),
-        })
         return reward
 
     def _get_observations(self):
@@ -377,13 +372,17 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
             return
         codes = self._outcome[completed]
         self.outcome_counts += torch.bincount(codes, minlength=10)
-        self.extras.setdefault("log", {}).update({"Episode/return": self._episode_rewards[completed].mean(),
+        self.extras["log"] = {"Episode/return": self._episode_rewards[completed].mean(),
                               "Goalkeeper/cumulative_save_fraction": (
                                   self.outcome_counts[7] / self.outcome_counts.sum().clamp_min(1)
                               ),
                               "Goalkeeper/paddle_contact_fraction": self._hit[completed].float().mean(),
                               "Goalkeeper/ball_clearance_fraction": self._clear[completed].float().mean(),
-                              "Curriculum/collection_stage": self._episode_stage[completed].float().mean()})
+                              "Curriculum/collection_stage": self._episode_stage[completed].float().mean()}
+        # RSL selects log keys from the first packet: preserve episode-only packets.
+        # Per-environment interval means remain available on every step in extras.
+        self.extras["log"].update({f"Power/{name}_mean_w": value.mean()
+                                  for name, value in self.extras["power_mean_w"].items()})
         self.extras["log"].update({f"Episode_Reward/{name}": value[completed].mean()
                                   for name, value in self._episode_terms.items()})
         eligible = completed[self._episode_stage[completed] == self.shot_level]

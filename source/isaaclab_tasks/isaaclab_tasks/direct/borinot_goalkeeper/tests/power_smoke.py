@@ -92,8 +92,11 @@ def step_and_check(actions):
     else:
         torch.testing.assert_close(info["log"]["rewards/r_power"].double(),
                                    expected_penalty.mean(), atol=1e-5, rtol=1e-5)
-    for name in ("rotor_electrical", "arm_mechanical", "total_estimate"):
-        check("numeric_power_logging", f"Power/{name}_mean_w" in info["log"])
+    if args.task == "borinot" or bool((terminated | truncated).any()):
+        for name in ("rotor_electrical", "arm_mechanical", "total_estimate"):
+            check("numeric_power_logging", f"Power/{name}_mean_w" in info["log"])
+    elif args.task == "goalkeeper":
+        check("preserves_episode_only_log_packets", "log" not in info)
     report["intervals"].append({"weight": cfg.power_cost,
                                 "substep_power_w": torch.stack(samples).cpu().tolist(),
                                 "mean_power_w": actual.cpu().tolist()})
