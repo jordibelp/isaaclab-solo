@@ -128,33 +128,35 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     reset_xy_noise_m = 0.015
     reset_z_noise_m = 0.015
 
-    # Rate rewards/costs are multiplied by policy dt. Event rewards are paid once.
+    # Every reward adds rwd_scale_* * its signal: negative scales penalize, positive scales reward.
+    # Rate terms use policy dt; events are paid once; mean-power energy uses no extra dt.
     # Main reward: Jordi's goal-parallel signed distance progress and shot outcomes.
-    progress_scale = 0.5  # reward per metre of reduced yz distance
+    rwd_scale_progress = 0.5  # reward per metre of reduced yz distance
     progress_use_prediction = False  # optional: use predicted intercept rather than current ball yz
-    save_bonus = 1.0
-    goal_penalty = 1.0  # also used for ball/base collision, by design
-    arm_hit_penalty = 0.25
-    leave_goal_area_penalty = 1.0
-    ball_floor_penalty = 0.25
-    miss_penalty = 1.0
-    deadline_penalty = 1.0
-    robot_crash_penalty = 1.0
+    rwd_scale_save = 1.0
+    rwd_scale_goal = -1.0  # ball crosses/hits the goal
+    rwd_scale_base_collision = -1.0  # ball hits the base; independent of the goal
+    rwd_scale_arm_collision = -0.25
+    rwd_scale_leave_goal_area = -1.0
+    rwd_scale_ball_floor = -0.25
+    rwd_scale_miss = -1.0
+    rwd_scale_deadline = -1.0
+    rwd_scale_robot_crash = -1.0  # non-ball robot contact or tilt > 60 degrees
 
     # Optional additions: disabled by default. Enable explicitly for an ablation.
-    intercept_reward_rate = 0.0
-    align_reward_rate = 0.0
-    recovery_reward_rate = 0.0
+    rwd_scale_intercept = 0.0
+    rwd_scale_alignment = 0.0
+    rwd_scale_recovery = 0.0
     intercept_sigma_m = 0.30
-    hit_bonus = 0.0
-    centered_hit_bonus = 0.0
-    action_rate_cost = 0.0
-    body_angular_velocity_cost = 0.0
-    body_linear_velocity_cost = 0.0
-    thrust_cost = 0.0
-    # Add energy_reward_scale * mean(mechanical + dissipative power) [W].
+    rwd_scale_hit = 0.0
+    rwd_scale_centered_hit = 0.0
+    rwd_scale_action_rate = -0.0
+    rwd_scale_body_angular_velocity = -0.0
+    rwd_scale_body_linear_velocity = -0.0
+    rwd_scale_thrust = -0.0
+    # Add rwd_scale_energy * mean(mechanical + dissipative power) [W].
     # Negative scales penalize consumption; no additional dt multiplier.
-    energy_reward_scale = 0.0
+    rwd_scale_energy = 0.0
     # Nominal Solo joint copper loss: c * joint_torque**2 [W], c in W/(N*m)^2.
     # Rounded from (3/2)*R_phase/(G*Kt)^2, R_phase=0.2324751 ohm, G=9, Kt=0.025 N*m/A.
     arm_copper_loss_coefficient = 7.0

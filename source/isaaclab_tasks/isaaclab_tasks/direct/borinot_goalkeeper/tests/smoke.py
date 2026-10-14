@@ -25,6 +25,9 @@ cfg.sim.device = args.device
 cfg.curriculum = False
 cfg.seed = 42
 cfg.reset_xy_noise_m = cfg.reset_z_noise_m = 0.0
+cfg.robot_home = (0.0, 0.0, 1.5)  # known in-area baseline; do not rewrite local config tuning
+cfg.robot.init_state.pos = cfg.robot_home
+cfg.rwd_scale_energy = 0.0
 env = gym.make("Borinot-Goalkeeper-Direct-v0", cfg=cfg).unwrapped
 report = {"checks": [], "robot_mass_kg": env.robot_mass_kg, "physics_dt_s": env.physics_dt,
           "policy_dt_s": env.step_dt, "body_names": env.robot.body_names}
@@ -116,17 +119,29 @@ try:
         check(f"outcome_{expected_code}_penalty", penalty_correct)
         return int(found.sum())
 
+    # Deliberately distinct values prove goal, ball/base hit, and robot crash are decoupled.
+    cfg.rwd_scale_base_collision = -2.0
+    cfg.rwd_scale_goal = -3.0
+    cfg.rwd_scale_robot_crash = -4.0
     base_hits = shoot_at(lambda: env.robot.data.root_pos_w - env.scene.env_origins
-                         + torch.tensor([.38, 0.0, 0.0], device=env.device), 1, -1.0)
+                         + torch.tensor([.38, 0.0, 0.0], device=env.device), 1, cfg.rwd_scale_base_collision)
     check("base_hit_attribution", base_hits > 0, base_hits)
     arm1_id = env.robot.find_bodies("flying_arm_2__link1")[0][0]
     arm_hits = shoot_at(lambda: env.robot.data.body_com_pos_w[:, arm1_id] - env.scene.env_origins
-                        + torch.tensor([.22, 0.0, 0.0], device=env.device), 2, -.25)
+                        + torch.tensor([.22, 0.0, 0.0], device=env.device), 2, cfg.rwd_scale_arm_collision)
     check("arm_hit_attribution", arm_hits > 0, arm_hits)
-    goals = shoot_at(lambda: torch.tensor([-.20, .85, 1.0], device=env.device).expand(args.num_envs, -1), 3, -1.0)
+    goals = shoot_at(lambda: torch.tensor([-.20, .85, 1.0], device=env.device).expand(args.num_envs, -1), 3, cfg.rwd_scale_goal)
     check("physical_goal_attribution", goals == args.num_envs, goals)
-    floors = shoot_at(lambda: torch.tensor([1.0, .8, .04], device=env.device).expand(args.num_envs, -1), 4, -.25, 0.0)
+    floors = shoot_at(lambda: torch.tensor([1.0, .8, .04], device=env.device).expand(args.num_envs, -1), 4, cfg.rwd_scale_ball_floor, 0.0)
     check("live_ball_floor_attribution", floors == args.num_envs, floors)
+
+    env.reset()
+    tilted = env.robot.data.root_state_w.clone()
+    tilted[:, 3:7] = torch.tensor([2**-.5, 2**-.5, 0., 0.], device=env.device)
+    env.robot.write_root_state_to_sim(tilted)
+    _, _, _, _, info = env.step(actions)
+    check("tilt_crash_is_distinct_from_ball_base_hit", bool((info["goalkeeper_outcome"] == 8).all()))
+    check("independent_robot_crash_scale", bool((info["goalkeeper_reward_terms"]["outcome"] == cfg.rwd_scale_robot_crash).all()))
 
     env.reset()
     state = env.robot.data.root_state_w.clone()

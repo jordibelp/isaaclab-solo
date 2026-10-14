@@ -300,39 +300,39 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         mean_power_w = self._power_sum_w / self.cfg.decimation
         target = (self._interception()[0] if self.cfg.progress_use_prediction
                   else self.ball.data.root_pos_w - self.scene.env_origins)
-        progress = plane_progress(self._previous_paddle, self._paddle_pose()[0], target, self.cfg.progress_scale)
+        progress = plane_progress(self._previous_paddle, self._paddle_pose()[0], target, self.cfg.rwd_scale_progress)
         progress *= self._old_progress_active
         rate = torch.zeros_like(progress)
-        if self.cfg.intercept_reward_rate or self.cfg.align_reward_rate:
+        if self.cfg.rwd_scale_intercept or self.cfg.rwd_scale_alignment:
             potential = self._interception()[3]
-            rate += self.cfg.intercept_reward_rate * potential
-            if self.cfg.align_reward_rate:
+            rate += self.cfg.rwd_scale_intercept * potential
+            if self.cfg.rwd_scale_alignment:
                 incoming = -self.ball.data.root_lin_vel_w
                 direction = incoming / torch.linalg.vector_norm(incoming, dim=-1, keepdim=True).clamp_min(0.1)
                 alignment = (self._paddle_pose()[2] * direction).sum(-1).square()
-                rate += self.cfg.align_reward_rate * potential * alignment
-        if self.cfg.recovery_reward_rate:
-            rate += self.cfg.recovery_reward_rate * self._recovery_geometry()[1] * self._clear
-        if self.cfg.action_rate_cost:
-            rate -= self.cfg.action_rate_cost * (self.actions - self._previous_actions).square().sum(-1)
-        if self.cfg.body_angular_velocity_cost:
-            rate -= self.cfg.body_angular_velocity_cost * self.robot.data.root_ang_vel_b.square().sum(-1)
-        if self.cfg.body_linear_velocity_cost:
-            rate -= self.cfg.body_linear_velocity_cost * self.robot.data.root_lin_vel_w.square().sum(-1)
-        if self.cfg.thrust_cost:
-            rate -= self.cfg.thrust_cost * (self._rotor_thrust / self._hover_per_rotor - 1).square().mean(-1)
-        event_values = torch.tensor([0.0, -self.cfg.goal_penalty, -self.cfg.arm_hit_penalty,
-                                     -self.cfg.goal_penalty, -self.cfg.ball_floor_penalty,
-                                     -self.cfg.leave_goal_area_penalty,
-                                     -self.cfg.deadline_penalty, self.cfg.save_bonus, -self.cfg.robot_crash_penalty,
-                                     -self.cfg.miss_penalty], device=self.device)
-        hit_bonus = (self.cfg.hit_bonus + self.cfg.centered_hit_bonus * self._center_quality)
-        hit_bonus *= self._new_hit & ((self._outcome == 0) | (self._outcome == 7))
+                rate += self.cfg.rwd_scale_alignment * potential * alignment
+        if self.cfg.rwd_scale_recovery:
+            rate += self.cfg.rwd_scale_recovery * self._recovery_geometry()[1] * self._clear
+        if self.cfg.rwd_scale_action_rate:
+            rate += self.cfg.rwd_scale_action_rate * (self.actions - self._previous_actions).square().sum(-1)
+        if self.cfg.rwd_scale_body_angular_velocity:
+            rate += self.cfg.rwd_scale_body_angular_velocity * self.robot.data.root_ang_vel_b.square().sum(-1)
+        if self.cfg.rwd_scale_body_linear_velocity:
+            rate += self.cfg.rwd_scale_body_linear_velocity * self.robot.data.root_lin_vel_w.square().sum(-1)
+        if self.cfg.rwd_scale_thrust:
+            rate += self.cfg.rwd_scale_thrust * (self._rotor_thrust / self._hover_per_rotor - 1).square().mean(-1)
+        event_values = torch.tensor([0.0, self.cfg.rwd_scale_base_collision, self.cfg.rwd_scale_arm_collision,
+                                     self.cfg.rwd_scale_goal, self.cfg.rwd_scale_ball_floor,
+                                     self.cfg.rwd_scale_leave_goal_area,
+                                     self.cfg.rwd_scale_deadline, self.cfg.rwd_scale_save, self.cfg.rwd_scale_robot_crash,
+                                     self.cfg.rwd_scale_miss], device=self.device)
+        hit_reward = (self.cfg.rwd_scale_hit + self.cfg.rwd_scale_centered_hit * self._center_quality)
+        hit_reward *= self._new_hit & ((self._outcome == 0) | (self._outcome == 7))
         floor_after_save = self._flags["floor"] & self._clear & ((self._outcome == 0) | (self._outcome == 7))
         terms = {"plane_progress": progress, "outcome": event_values[self._outcome],
-                 "floor_after_save": -self.cfg.ball_floor_penalty * floor_after_save,
-                 "optional_rates": rate * self.step_dt, "optional_hit": hit_bonus,
-                 "energy": self.cfg.energy_reward_scale * mean_power_w.sum(-1)}
+                 "floor_after_save": self.cfg.rwd_scale_ball_floor * floor_after_save,
+                 "optional_rates": rate * self.step_dt, "optional_hit": hit_reward,
+                 "energy": self.cfg.rwd_scale_energy * mean_power_w.sum(-1)}
         reward = sum(terms.values())
         self._episode_rewards += reward
         for name, term in terms.items():

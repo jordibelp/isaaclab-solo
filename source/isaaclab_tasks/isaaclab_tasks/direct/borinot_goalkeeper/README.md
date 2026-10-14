@@ -95,18 +95,20 @@ There is no ball drag, wind, racket compliance, or camera latency model yet.
 
 ## 2. Your default reward
 
-All penalty settings below are **positive magnitudes**; the code subtracts them.
+Every reward weight uses `rwd_scale_*`. The code adds `scale * signal`: **negative scales penalize**, and **positive scales reward**. The scale holds the sign; there is no separate minus sign for costs.
 
 | Event or term | Default contribution | Config field |
 |---|---:|---|
-| Ball scores a goal | −1 | `goal_penalty=1.0` |
-| Ball hits the base | −1, deliberately tied to the goal penalty | `goal_penalty=1.0` |
-| Ball hits the upper or lower arm | −0.25 | `arm_hit_penalty=0.25` |
-| Base leaves the allowed goal area | −1 | `leave_goal_area_penalty=1.0` |
-| Racket prevents a goal | +1, once | `save_bonus=1.0` |
-| Ball touches the floor while the shot is live | −0.25, once | `ball_floor_penalty=0.25` |
-| Robot crashes, shot escapes unresolved, or the deadline expires | −1 | `robot_crash_penalty`, `miss_penalty`, `deadline_penalty` |
-| Signed racket progress in y–z | `0.5 * (d_before − d_after)` | `progress_scale=0.5` |
+| Ball scores a goal | −1 | `rwd_scale_goal=-1.0` |
+| Ball hits the base | −1, independent of the goal scale | `rwd_scale_base_collision=-1.0` |
+| Ball hits the upper or lower arm | −0.25 | `rwd_scale_arm_collision=-0.25` |
+| Base leaves the allowed goal area | −1 | `rwd_scale_leave_goal_area=-1.0` |
+| Racket prevents a goal | +1, once | `rwd_scale_save=1.0` |
+| Ball touches the floor while the shot is live | −0.25, once | `rwd_scale_ball_floor=-0.25` |
+| Robot crashes, shot escapes unresolved, or the deadline expires | −1 | `rwd_scale_robot_crash`, `rwd_scale_miss`, `rwd_scale_deadline` |
+| Signed racket progress in y–z | `0.5 * (d_before − d_after)` | `rwd_scale_progress=0.5` |
+
+A ball hitting the base uses `rwd_scale_base_collision`. It is not a robot crash. `rwd_scale_robot_crash` applies to robot contact not accounted for by ball contact, or tilt beyond 60 degrees. The contact check removes the ball normal-force contribution first. Goal, ball/base collision, and robot crash have independent scales. Existing outcome priority still selects one terminal event.
 
 The event contributions are not multiplied by dt. Progress is a displacement, so it is not multiplied by dt either. Optional rate rewards are multiplied by the policy duration, 1/60 s.
 
@@ -117,7 +119,7 @@ Within each transition, we project the current ball target and the racket positi
 ```text
 d_before = distance(previous racket yz, current ball yz)
 d_after  = distance(current racket yz, current ball yz)
-progress = progress_scale * (d_before - d_after)
+progress = rwd_scale_progress * (d_before - d_after)
 ```
 
 For example, reducing distance from 0.30 m to 0.20 m earns `0.5 * 0.10 = +0.05`. Moving away earns a negative value. Changing only x earns zero. A stationary racket earns zero even when the ball moves.
@@ -156,10 +158,10 @@ Tune `goal_area_x_m`, `goal_area_y_m`, and `goal_area_z_m`. The constraints do n
 For example, append these overrides to the training command:
 
 ```bash
-env.progress_scale=1.0 env.save_bonus=1.5 env.goal_penalty=1.0 env.arm_hit_penalty=0.4 env.leave_goal_area_penalty=1.0 env.ball_floor_penalty=0.25
+env.rwd_scale_progress=1.0 env.rwd_scale_save=1.5 env.rwd_scale_goal=-1.0 env.rwd_scale_base_collision=-1.0 env.rwd_scale_arm_collision=-0.4 env.rwd_scale_leave_goal_area=-1.0 env.rwd_scale_ball_floor=-0.25
 ```
 
-Use floats such as `1.0` for float config fields. The defaults are starting values, not an optimized reward recipe. If the agent chooses arm hits to avoid a goal, increase `arm_hit_penalty` while keeping it below the base-hit penalty.
+Use floats such as `1.0` for float config fields. The defaults are starting values, not an optimized reward recipe. If the agent chooses arm hits to avoid a goal, make `rwd_scale_arm_collision` more negative while keeping its magnitude smaller than `rwd_scale_base_collision`.
 
 ## 3. Action and observation contract
 
@@ -210,17 +212,20 @@ Checkpoint resume restores the policy and optimizer, but the standard runner doe
 These are separate experiments, not the main reward:
 
 - `progress_use_prediction=True`: measure progress toward the ball's predicted defense-plane intersection rather than its current projected position.
-- `intercept_reward_rate>0`: reward staying near the predicted intercept. The kernel is `exp(-(distance / intercept_sigma_m)²)`.
-- `align_reward_rate>0`: add squared paddle-normal alignment with the incoming ball direction, weighted by the interception kernel.
-- `hit_bonus>0`, `centered_hit_bonus>0`: pay a first-hit bonus, optionally larger near the paddle center. A later goal still remains a failure.
+- `rwd_scale_intercept>0`: reward staying near the predicted intercept. The kernel is `exp(-(distance / intercept_sigma_m)²)`.
+- `rwd_scale_alignment>0`: add squared paddle-normal alignment with the incoming ball direction, weighted by the interception kernel.
+- `rwd_scale_hit>0`, `rwd_scale_centered_hit>0`: pay a first-hit bonus, optionally larger near the paddle center. A later goal still remains a failure.
 - `require_recovery_for_save=True`: delay the save bonus until the robot holds the recovery conditions for 0.25 s.
-- `recovery_reward_rate>0`: give a smooth post-clearance reward for returning near home with low velocity, tilt, and joint displacement.
-- `action_rate_cost`, `body_angular_velocity_cost`, `body_linear_velocity_cost`, `thrust_cost`: small regularization costs. All start at zero.
+- `rwd_scale_recovery>0`: give a smooth post-clearance reward for returning near home with low velocity, tilt, and joint displacement.
+- `rwd_scale_action_rate`, `rwd_scale_body_angular_velocity`, `rwd_scale_body_linear_velocity`, `rwd_scale_thrust`: regularization terms. Use negative scales to penalize their signals. Their shipped defaults are zero.
+- `rwd_scale_energy`: mean mechanical plus dissipative power over the action interval. Physics-rate samples include the final substep before reset. This term has no extra dt multiplier. The arm uses signed torque × joint velocity plus `arm_copper_loss_coefficient * sum(torque²)`. The rotor keeps its existing motor-efficiency model. The shipped scale is zero; use a negative value to penalize estimated electrical input. The copper coefficient is a physical model parameter, not a reward scale.
+
+For example: `env.rwd_scale_energy=-0.0001`. These `rwd_scale_*` names replace the older mixed names; old Hydra/config field names are not aliases.
 
 For a recovery experiment, append:
 
 ```bash
-env.require_recovery_for_save=True env.recovery_reward_rate=0.1
+env.require_recovery_for_save=True env.rwd_scale_recovery=0.1
 ```
 
 The recovery gate uses position error below 0.35 m, speed below 0.5 m/s, angular speed below 0.8 rad/s, tilt below 0.35 rad, and joint displacement below 0.5 rad. All thresholds are configurable. The gate resets whenever a condition fails. It does not enforce yaw recovery separately.

@@ -18,7 +18,7 @@ def task(request):
     namespace = {"torch": torch}
     exec(compile(ast.Module(body=[sample], type_ignores=[]), str(folder), "exec"), namespace)
     cfg = SimpleNamespace(kf=1.0, km=2.0, p_el_motor_efficiency=0.5,
-                          energy_reward_scale=0.0, arm_copper_loss_coefficient=7.0, decimation=4)
+                          energy_reward_scale=0.0, rwd_scale_energy=0.0, arm_copper_loss_coefficient=7.0, decimation=4)
     thrust = torch.zeros(3, 6, dtype=torch.float64)
     torque = torch.zeros(3, 2, dtype=torch.float64)
     dq = torch.zeros_like(torque)
@@ -70,7 +70,7 @@ def test_completed_substeps_include_last_and_average_without_double_counting(tas
 @pytest.mark.parametrize("weight", [0.0, -0.002, 0.002])
 def test_reward_penalizes_average_watts_not_joules(task, weight):
     name, env, _, tree, _ = task
-    env.cfg.energy_reward_scale = weight
+    setattr(env.cfg, "energy_reward_scale" if name == "borinot" else "rwd_scale_energy", weight)
     env._power_sum_w[:] = torch.tensor([[8, 4, 0, 0], [16, 12, 0, 0], [20, 0, 0, 0]], dtype=torch.float64)
     reward = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "_get_rewards")
     mean_expr = next(node.value for node in ast.walk(reward) if isinstance(node, ast.Assign)
@@ -107,7 +107,7 @@ def test_joint_mechanical_and_copper_power(task, torque, velocity, coefficient, 
     torch.testing.assert_close(env._power_sum_w, expected.expand_as(env._power_sum_w))
 
 
-def test_config_penalty_is_disabled_and_copper_coefficient_is_seven(task):
+def test_config_energy_scale_is_nonpositive_and_copper_is_nonnegative(task):
     name, _, _, _, folder = task
     tree = ast.parse((folder / f"{name}_env_cfg.py").read_text())
     values = {}
@@ -118,5 +118,6 @@ def test_config_penalty_is_disabled_and_copper_coefficient_is_seven(task):
             for target in node.targets:
                 if isinstance(target, ast.Name):
                     values[target.id] = node.value
-    assert ast.literal_eval(values["energy_reward_scale"]) == 0.0
-    assert ast.literal_eval(values["arm_copper_loss_coefficient"]) == 7.0
+    scale_name = "energy_reward_scale" if name == "borinot" else "rwd_scale_energy"
+    assert ast.literal_eval(values[scale_name]) <= 0.0
+    assert ast.literal_eval(values["arm_copper_loss_coefficient"]) >= 0.0

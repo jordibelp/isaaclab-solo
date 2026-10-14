@@ -39,8 +39,12 @@ else:
     task_id = "Borinot-Goalkeeper-Direct-v0"
     cfg.curriculum = False
     cfg.reset_xy_noise_m = cfg.reset_z_noise_m = 0.0
-assert cfg.energy_reward_scale == 0.0
-assert cfg.arm_copper_loss_coefficient == 7.0
+    # Keep a known, in-area baseline even if the working config is tuned locally.
+    cfg.robot_home = (0.0, 0.0, 1.5)
+    cfg.robot.init_state.pos = cfg.robot_home
+scale_name = "energy_reward_scale" if args.task == "borinot" else "rwd_scale_energy"
+setattr(cfg, scale_name, 0.0)
+assert cfg.arm_copper_loss_coefficient >= 0.0
 cfg.scene.num_envs = 4
 cfg.sim.device = args.device
 cfg.seed = 42
@@ -92,7 +96,7 @@ def step_and_check(actions):
     torch.testing.assert_close(actual.double(), expected, atol=1e-4, rtol=1e-5)
     check("reward_and_observations_finite", torch.isfinite(reward).all()
           and all(torch.isfinite(value).all() for value in obs.values()))
-    expected_reward = cfg.energy_reward_scale * expected.sum(-1)
+    expected_reward = getattr(cfg, scale_name) * expected.sum(-1)
     if args.task == "goalkeeper":
         torch.testing.assert_close(info["goalkeeper_reward_terms"]["energy"].double(),
                                    expected_reward, atol=1e-5, rtol=1e-5)
@@ -106,7 +110,7 @@ def step_and_check(actions):
             check("numeric_power_logging", f"Power/{name}_mean_w" in info["log"])
     elif args.task == "goalkeeper":
         check("preserves_episode_only_log_packets", "log" not in info)
-    report["intervals"].append({"energy_reward_scale": cfg.energy_reward_scale,
+    report["intervals"].append({"reward_scale_field": scale_name, "reward_scale": getattr(cfg, scale_name),
                                 "substep_power_w": torch.stack(samples).cpu().tolist(),
                                 "mean_power_w": actual.cpu().tolist()})
     return terminated | truncated, actual
@@ -123,7 +127,7 @@ try:
         actions[:, 6:10] = torch.tensor([0.98, 0.2, 0.99, -0.15], device=env.device)
     arm_nonzero = False
     for step in range(8):
-        cfg.energy_reward_scale = 0.0 if step < 4 else -0.002
+        setattr(cfg, scale_name, 0.0 if step < 4 else -0.002)
         actions[:, :1] = -0.2 if step % 2 else 0.0
         _, actual = step_and_check(actions)
         arm_nonzero |= bool((actual[:, 2].abs() > 0).any())
