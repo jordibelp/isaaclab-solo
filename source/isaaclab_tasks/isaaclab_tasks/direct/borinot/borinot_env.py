@@ -566,7 +566,7 @@ class BorinotEnv(DirectRLEnv):
         omega_xy_pen = self.cfg.rwd_w_penalize_omega * torch.sum(w_b[:, 0:2] ** 2, dim=1)
 
         omega = torch.sqrt(torch.clamp(self._thrusts, min=0.0) / self._kf)
-        rotor_power = 1/self.cfg.p_el_motor_efficiency * torch.sum(self._km  * omega**(3/2), dim=1)
+        rotor_power = 1/self.cfg.p_el_motor_efficiency * torch.sum(self._km  * omega**3, dim=1)
 
         # Leg power ~ sum(|tau * dq|)
         dq = self.robot.data.joint_vel[:, self._leg_dof_ids]
