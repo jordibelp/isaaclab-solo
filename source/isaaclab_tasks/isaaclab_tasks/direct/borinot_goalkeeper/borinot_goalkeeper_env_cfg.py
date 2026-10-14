@@ -26,7 +26,7 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     scene = InteractiveSceneCfg(num_envs=2048, env_spacing=7.0, replicate_physics=True)
     viewer = ViewerCfg(eye=(4.0, 4.0, 2.7), lookat=(0.3, 0.0, 1.2))
 
-    robot_home = (0.0, 0.0, 1.5)
+    robot_home = (0.0, 0.0, 0.5)
     robot_home_quat = (0.7071067811865476, 0.0, 0.0, -0.7071067811865476)  # wxyz; -90 deg yaw
     robot = ArticulationCfg(
         prim_path="/World/envs/env_.*/Robot",
@@ -116,7 +116,7 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
 
     contact_force_threshold_n = 0.05
     clear_distance_m = 0.25
-    clear_speed_m_s = 0.3
+    clear_speed_m_s = 0.2
     recovery_dwell_s = 0.25
     recovery_position_tolerance_m = 0.35
     recovery_speed_m_s = 0.5
@@ -141,7 +141,7 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     rwd_scale_ball_arm_collision = -0.25
     rwd_scale_leave_goal_area = -1.0
     rwd_scale_ball_floor = -0.25  # live floor event or a deflected ball landing in front of goal
-    rwd_scale_miss = -1.0
+    rwd_scale_miss = -1.0 # Ball is not cleared and goes outside the region, might handle weird racket contacts
     rwd_scale_deadline = -1.0
     rwd_scale_robot_crash = -1.0  # non-ball robot contact or excessive tilt; independent of reset flags
     reset_robot_on_robot_crash = True
@@ -161,7 +161,7 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     rwd_scale_thrust = -0.0
     # Add rwd_scale_energy * mean(mechanical + dissipative power) [W].
     # Negative scales penalize consumption; no additional dt multiplier.
-    rwd_scale_energy = 0.0
+    rwd_scale_energy = -0.0001
     # Nominal Solo joint copper loss: c * joint_torque**2 [W], c in W/(N*m)^2.
     # Rounded from (3/2)*R_phase/(G*Kt)^2, R_phase=0.2324751 ohm, G=9, Kt=0.025 N*m/A.
-    arm_copper_loss_coefficient = 7.0
+    arm_copper_loss_coefficient = 6.888
