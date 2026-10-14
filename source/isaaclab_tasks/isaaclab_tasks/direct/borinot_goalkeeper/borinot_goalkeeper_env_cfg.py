@@ -152,6 +152,9 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     body_angular_velocity_cost = 0.0
     body_linear_velocity_cost = 0.0
     thrust_cost = 0.0
-    # Subtract power_cost * mean total power [W] over the last action interval.
-    # Unlike optional rate terms, this mean-power penalty is NOT multiplied by dt.
-    power_cost = 0.0
+    # Add energy_reward_scale * mean(mechanical + dissipative power) [W].
+    # Negative scales penalize consumption; no additional dt multiplier.
+    energy_reward_scale = 0.0
+    # Nominal Solo joint copper loss: c * joint_torque**2 [W], c in W/(N*m)^2.
+    # Rounded from (3/2)*R_phase/(G*Kt)^2, R_phase=0.2324751 ohm, G=9, Kt=0.025 N*m/A.
+    arm_copper_loss_coefficient = 7.0

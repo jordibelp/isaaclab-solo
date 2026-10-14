@@ -65,9 +65,12 @@ class BorinotEnvCfg(DirectRLEnvCfg):
     only_feet_contact_penalized: bool = False
     lineal_cf_penalty: bool = True
     lineal_cf_slope: float = 1/50
-    # Subtract power_cost * mean total power [W] over the last action interval.
-    # Replaces the old rwd_w_energy_base / mult_energy_cost energy penalty.
-    power_cost: float = 0.0
+    # Add energy_reward_scale * mean(mechanical + dissipative power) [W].
+    # Negative scales penalize consumption; no additional dt multiplier.
+    energy_reward_scale: float = 0.0
+    # Nominal Solo joint copper loss: c * joint_torque**2 [W], c in W/(N*m)^2.
+    # Rounded from (3/2)*R_phase/(G*Kt)^2, R_phase=0.2324751 ohm, G=9, Kt=0.025 N*m/A.
+    arm_copper_loss_coefficient: float = 7.0
     reset_on_overload: bool = False
 
     rwd_w_action_delta: float = 0.001

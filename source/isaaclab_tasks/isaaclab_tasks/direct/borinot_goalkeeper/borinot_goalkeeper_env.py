@@ -71,7 +71,8 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         self._allocation_inverse = torch.linalg.pinv(self._allocation)
         self._rotor_thrust = torch.full((self.num_envs, 6), self._hover_per_rotor, device=self.device)
         self._motor_alpha = 1 - math.exp(-self.physics_dt / cfg.motor_time_constant_s)
-        self._power_sum_w = torch.zeros((self.num_envs, 2), device=self.device)  # rotor electrical, arm mechanical
+        # Columns: rotor mechanical, rotor dissipative, arm mechanical, arm copper loss.
+        self._power_sum_w = torch.zeros((self.num_envs, 4), device=self.device)
         self._power_samples = 0
 
         self._hit = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
@@ -90,7 +91,7 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         self._episode_rewards = torch.zeros(self.num_envs, device=self.device)
         self._episode_terms = {
             name: torch.zeros(self.num_envs, device=self.device)
-            for name in ("plane_progress", "outcome", "floor_after_save", "optional_rates", "optional_hit", "power")
+            for name in ("plane_progress", "outcome", "floor_after_save", "optional_rates", "optional_hit", "energy")
         }
         self._shot_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self._episode_stage = torch.full((self.num_envs,), cfg.shot_level, device=self.device, dtype=torch.long)
@@ -207,11 +208,15 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         if self._power_samples == self._physics_samples:
             return
         omega = torch.sqrt(self._rotor_thrust.clamp_min(0.0) / self.cfg.kf)
-        self._power_sum_w[:, 0] += (self.cfg.km * omega**3).sum(-1) / self.cfg.p_el_motor_efficiency
+        rotor_mechanical_w = (self.cfg.km * omega**3).sum(-1)
+        self._power_sum_w[:, 0] += rotor_mechanical_w
+        self._power_sum_w[:, 1] += rotor_mechanical_w * (1.0 / self.cfg.p_el_motor_efficiency - 1.0)
         # Implicit-actuator effort is a clipped PD estimate, not measured PhysX torque.
         torque = self.robot.data.applied_torque[:, self.joint_ids]
         dq = self.robot.data.joint_vel[:, self.joint_ids]
-        self._power_sum_w[:, 1] += (torque * dq).abs().sum(-1)
+        # Signed joint power; negative values represent ideal regenerative transfer.
+        self._power_sum_w[:, 2] += (torque * dq).sum(-1)
+        self._power_sum_w[:, 3] += self.cfg.arm_copper_loss_coefficient * torque.square().sum(-1)
         self._power_samples += 1
 
     def _sample_physics_events(self):
@@ -327,7 +332,7 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         terms = {"plane_progress": progress, "outcome": event_values[self._outcome],
                  "floor_after_save": -self.cfg.ball_floor_penalty * floor_after_save,
                  "optional_rates": rate * self.step_dt, "optional_hit": hit_bonus,
-                 "power": -self.cfg.power_cost * mean_power_w.sum(-1)}
+                 "energy": self.cfg.energy_reward_scale * mean_power_w.sum(-1)}
         reward = sum(terms.values())
         self._episode_rewards += reward
         for name, term in terms.items():
@@ -338,8 +343,13 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         self.extras["goalkeeper_had_paddle_hit"] = self._hit.clone()
         self.extras["goalkeeper_reward_terms"] = {name: term.clone() for name, term in terms.items()}
         self.extras["power_mean_w"] = {
-            "rotor_electrical": mean_power_w[:, 0].clone(),
-            "arm_mechanical": mean_power_w[:, 1].clone(),
+            "rotor_mechanical": mean_power_w[:, 0].clone(),
+            "rotor_dissipative": mean_power_w[:, 1].clone(),
+            "rotor_electrical": mean_power_w[:, :2].sum(-1),
+            "arm_mechanical": mean_power_w[:, 2].clone(),
+            "arm_copper_loss": mean_power_w[:, 3].clone(),
+            "mechanical": mean_power_w[:, 0] + mean_power_w[:, 2],
+            "dissipative": mean_power_w[:, 1] + mean_power_w[:, 3],
             "total_estimate": mean_power_w.sum(-1),
         }
         return reward

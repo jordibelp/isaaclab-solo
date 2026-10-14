@@ -127,7 +127,8 @@ class BorinotEnv(DirectRLEnv):
 
         self._thrusts = torch.zeros((self.num_envs, 6), dtype=torch.float32, device=self.device)
         self._leg_torques = torch.zeros((self.num_envs, len(self._leg_dof_ids)), dtype=torch.float32, device=self.device)
-        self._power_sum_w = torch.zeros((self.num_envs, 2), device=self.device)  # rotor electrical, arm mechanical
+        # Columns: rotor mechanical, rotor dissipative, arm mechanical, arm copper loss.
+        self._power_sum_w = torch.zeros((self.num_envs, 4), device=self.device)
         self._power_samples = 0
         self._physics_samples = 0
 
@@ -429,10 +430,13 @@ class BorinotEnv(DirectRLEnv):
         if self._power_samples == self._physics_samples:
             return
         omega = torch.sqrt(self._thrusts.clamp_min(0.0) / self._kf)
-        self._power_sum_w[:, 0] += (self._km * omega**3).sum(-1) / self.cfg.p_el_motor_efficiency
-        # Absolute mechanical work: no regeneration or arm electrical-loss model.
+        rotor_mechanical_w = (self._km * omega**3).sum(-1)
+        self._power_sum_w[:, 0] += rotor_mechanical_w
+        self._power_sum_w[:, 1] += rotor_mechanical_w * (1.0 / self.cfg.p_el_motor_efficiency - 1.0)
+        # Signed joint power; negative values represent ideal regenerative transfer.
         dq = self.robot.data.joint_vel[:, self._leg_dof_ids]
-        self._power_sum_w[:, 1] += (self._leg_torques * dq).abs().sum(-1)
+        self._power_sum_w[:, 2] += (self._leg_torques * dq).sum(-1)
+        self._power_sum_w[:, 3] += self.cfg.arm_copper_loss_coefficient * self._leg_torques.square().sum(-1)
         self._power_samples += 1
 
 
@@ -526,7 +530,7 @@ class BorinotEnv(DirectRLEnv):
     def _get_rewards(self) -> torch.Tensor:
         self._sample_power()  # final completed substep, before automatic resets
         mean_power_w = self._power_sum_w / self.cfg.decimation
-        power_pen = self.cfg.power_cost * mean_power_w.sum(-1)
+        energy_reward = self.cfg.energy_reward_scale * mean_power_w.sum(-1)
 
         def func_vel_err(err: torch.Tensor, sigma):
             absn = torch.linalg.norm(err, dim=-1)  # shape: (...)
@@ -599,20 +603,24 @@ class BorinotEnv(DirectRLEnv):
         coll_pen = self.cfg.rwd_w_collide_penalty * neg_rwd_indicator.float()
         # reaction_torque_pen = self.cfg.rwd_joint_torque_above_lim * self._joint_torque_overload.float()
 
-        reward = self.cfg.rwd_w_task * r_task - r_delta_action - r_contact_force_delta - power_pen - omega_xy_pen - dq_penalty - ddq_pen - coll_pen - r_excess_torque  - r_contact_force_excess
+        reward = self.cfg.rwd_w_task * r_task - r_delta_action - r_contact_force_delta + energy_reward - omega_xy_pen - dq_penalty - ddq_pen - coll_pen - r_excess_torque  - r_contact_force_excess
         
         self._last_actions = self.actions.clone()
         log = {}
         log["rewards/r_task"] = r_task.mean()
-        log['rewards/r_power'] = power_pen.mean()
-        log['Power/rotor_electrical_mean_w'] = mean_power_w[:, 0].mean()
-        log['Power/arm_mechanical_mean_w'] = mean_power_w[:, 1].mean()
-        log['Power/total_estimate_mean_w'] = mean_power_w.sum(-1).mean()
+        log['rewards/r_energy'] = energy_reward.mean()
         self.extras['power_mean_w'] = {
-            'rotor_electrical': mean_power_w[:, 0].clone(),
-            'arm_mechanical': mean_power_w[:, 1].clone(),
+            'rotor_mechanical': mean_power_w[:, 0].clone(),
+            'rotor_dissipative': mean_power_w[:, 1].clone(),
+            'rotor_electrical': mean_power_w[:, :2].sum(-1),
+            'arm_mechanical': mean_power_w[:, 2].clone(),
+            'arm_copper_loss': mean_power_w[:, 3].clone(),
+            'mechanical': mean_power_w[:, 0] + mean_power_w[:, 2],
+            'dissipative': mean_power_w[:, 1] + mean_power_w[:, 3],
             'total_estimate': mean_power_w.sum(-1),
         }
+        log.update({f'Power/{name}_mean_w': value.mean()
+                    for name, value in self.extras['power_mean_w'].items()})
         log["rewards/r_delta_action"] = r_delta_action.mean()
         log["rewards/r_contact_force_excess"] = r_contact_force_excess.mean()
         log["overload/j2_torque_abs_mean"] = self._step_max_leg_joint_load[:, 1].mean()
