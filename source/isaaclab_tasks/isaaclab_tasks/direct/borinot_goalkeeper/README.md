@@ -39,10 +39,12 @@ The earlier control checks used local TensorBoard only. The PPO recipe checks al
 
 ### Play a checkpoint
 
+Use the dedicated goalkeeper player. The Solo12-specific `source/scripts/rsl_rl/play_direct_0325.py` is not compatible with this task. See [playback and camera guide](PLAY.md) for the first trained checkpoint command, camera views, and evaluation settings.
+
 Replace `/absolute/path/model_N.pt` with your actual checkpoint:
 
 ```bash
-./isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/play.py --task Borinot-Goalkeeper-Direct-v0 --num_envs 1 --checkpoint /absolute/path/model_N.pt env.curriculum=False env.shot_level=1
+./isaaclab.sh -p source/scripts/rsl_rl/play_borinot_goalkeeper.py --num_envs 1 --checkpoint /absolute/path/model_N.pt 'env.robot_home=[0.0,0.0,1.5]' env.shot_level=0
 ```
 
 The play command uses the current source configuration, not an automatic reconstruction of an old run. Match the training options and network sizes when comparing policies. Playback and the checkpoint smoke script load policy weights without restoring optimizer state, so the shared AdamW training checkpoints do not conflict with the playback runner's default Adam groups.
