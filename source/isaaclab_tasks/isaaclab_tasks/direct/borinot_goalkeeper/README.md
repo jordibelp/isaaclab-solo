@@ -94,61 +94,94 @@ GPU PhysX does not support ordinary swept CCD in this runtime. The task uses spe
 
 There is no ball drag, wind, racket compliance, or camera latency model yet.
 
-## 2. Your default reward
+## 2. Reward and episode endings, term by term
 
-Every reward weight uses `rwd_scale_*`. The code adds `scale * signal`: **negative scales penalize**, and **positive scales reward**. The scale holds the sign; there is no separate minus sign for costs.
+Every reward weight uses `rwd_scale_*`. The code adds `scale * signal`: **negative scales penalize**, and **positive scales reward**. Setting a scale to zero removes that reward contribution. It does **not** disable the event detector or its episode reset.
 
-| Event or term | Default contribution | Config field |
-|---|---:|---|
-| Ball scores a goal | −1 | `rwd_scale_goal=-1.0` |
-| Ball hits the base | −1, independent of the goal scale | `rwd_scale_ball_base_collision=-1.0` |
-| Ball hits the upper or lower arm | −0.25 | `rwd_scale_ball_arm_collision=-0.25` |
-| Base leaves the allowed goal area | −1 | `rwd_scale_leave_goal_area=-1.0` |
-| Racket prevents a goal | +1, once | `rwd_scale_save=1.0` |
-| Ball touches the floor while the shot is live | −0.25, once | `rwd_scale_ball_floor=-0.25` |
-| Robot crashes, shot escapes unresolved, or the deadline expires | −1 | `rwd_scale_robot_crash`, `rwd_scale_miss`, `rwd_scale_deadline` |
-| Signed racket progress in y–z | `0.5 * (d_before − d_after)` | `rwd_scale_progress=0.5` |
+Here, **racket** and **paddle** mean the same separate rigid body. A **live shot** is a ball that has not yet met the safe-clearance conditions. A paddle touch alone does not make the ball safe.
 
-A ball hitting the base uses `rwd_scale_ball_base_collision`. It is not a robot crash. `rwd_scale_robot_crash` applies to robot contact not accounted for by ball contact, or tilt beyond `robot_tilt_threshold_rad` (60 degrees by default). The contact check removes the ball normal-force contribution first. Goal, ball/base collision, and robot crash have independent scales. Existing outcome priority still selects one reward event.
+The tables below give the shipped values in the committed config. **Current local tuning on 2026-10-14 differs:** `rwd_scale_energy=-0.0001`, `arm_copper_loss_coefficient=6.888`, and `robot_home=(0.0, 0.0, 0.5)`. Energy is therefore enabled in the current working file. Its home height is also below the allowed minimum of 0.55 m; see the area explanation below. This documentation update does not change those settings. Hydra overrides can change them again at launch.
 
-`reset_robot_on_robot_crash=True` ends the episode after non-ball robot contact. `reset_robot_on_tilt_threshold=True` ends it after excessive tilt. These switches work independently. Setting one to `False` disables only that reset, not the crash reward. A persistent violation can therefore incur the crash reward in each action interval. Other endings, including leaving the allowed area and the shot deadline, still reset the environment. Per-step `goalkeeper_robot_contact_crash` and `goalkeeper_tilt_threshold` identify the two detected causes before automatic reset.
+### How one policy step gets its reward
 
-Both initial spawn and every reset use `robot_home_quat` in wxyz order. The scene inspector reads the same quaternion. The fixed shot center remains at the reference height; lowering `robot_home` does not lower the ball targets or the allowed base-height range.
+Physics runs at 240 Hz. One policy action lasts four physics steps, so `step_dt=1/60 s`. We check contact and safety events after every physics step. An event remains recorded until the end of that action interval, even if the contact has already ended. Paddle-hit and safe-clearance history remain recorded until the episode resets.
 
-The event contributions are not multiplied by dt. Progress is a displacement, so it is not multiplied by dt either. Optional rate rewards are multiplied by the policy duration, 1/60 s.
-
-### What exactly is d?
-
-Within each transition, we project the current ball target and the racket positions onto y–z. We measure the previous and current racket positions against the **same target**. This matches the structure of the Solo12 race gate-progress reward.
+At the end of the interval, we select an outcome, calculate the reward, and then reset any finished environment. The total reward is:
 
 ```text
-d_before = distance(previous racket yz, current ball yz)
-d_after  = distance(current racket yz, current ball yz)
-progress = rwd_scale_progress * (d_before - d_after)
+reward = plane_progress + outcome + floor_after_save
+         + optional_rates + optional_hit + energy
 ```
 
-For example, reducing distance from 0.30 m to 0.20 m earns `0.5 * 0.10 = +0.05`. Moving away earns a negative value. Changing only x earns zero. A stationary racket earns zero even when the ball moves.
+`outcome` contains **one** selected event reward, not the sum of all detected failures. The other five components are added separately. Progress, event rewards, first-hit bonuses, and the mean-power term have **no extra dt multiplier**. Only `optional_rates` is multiplied by `step_dt`. Sections 2 and 5 define every signal in this sum.
 
-Progress is active while the ball is incoming and before the first paddle hit. We do not carry a distance difference across resets. This is a practical moving-target shaping reward. It is **not** a claim of guaranteed policy invariance.
+### Main reward scales
 
-### What counts as a save?
+| Config field | Shipped scale | Signal and usual episode effect |
+|---|---:|---|
+| `rwd_scale_goal` | −1.0 | Ball contacts or crosses the goal surface. Ends the episode. |
+| `rwd_scale_ball_base_collision` | −1.0 | Ball contacts the aircraft base. Ends the episode. |
+| `rwd_scale_ball_arm_collision` | −0.25 | Ball contacts either arm link, rather than only the paddle. Ends the episode. |
+| `rwd_scale_leave_goal_area` | −1.0 | Base origin leaves the allowed box. Ends the episode. |
+| `rwd_scale_save` | +1.0 | A paddle hit is followed by verified safe clearance, plus recovery if requested. Ends the episode. |
+| `rwd_scale_ball_floor` | −0.25 | Ball touches the floor while live. Usually ends the episode; a valid floor save is the exception. |
+| `rwd_scale_miss` | −1.0 | An unresolved ball leaves the tracking bounds. Ends the episode. |
+| `rwd_scale_deadline` | −1.0 | Shot time runs out without a confirmed save. Ends the episode. |
+| `rwd_scale_robot_crash` | −1.0 | Non-ball robot contact or excessive tilt. Reset depends on two independent switches. |
+| `rwd_scale_progress` | +0.5 | Signed reduction in paddle-to-target y–z distance, in metres. Does not end the episode. |
 
-A save must include a PhysX paddle contact. Proximity alone is insufficient. No base or arm hit is allowed. The robot must remain inside the allowed area and avoid a crash.
-After that contact, one of these outcomes confirms a save:
+Each selected event has signal 1, so its contribution is exactly its scale. For example, a selected arm collision contributes −0.25, not −0.25 per second. With the default reset switches, event penalties end the episode and are paid on that final transition. Crash penalties can repeat if you disable their resets.
 
-1. The ball moves back toward the shooter and passes 0.25 m in front of the defense plane, with x velocity above 0.3 m/s.
-2. The ball passes the goal plane outside the goal surface, including its radius.
-3. The ball lands on the floor **in front of the goal** after the paddle deflects it.
+### `rwd_scale_goal`: the ball scores
 
-The third outcome earns +1 and still pays the −0.25 floor penalty. Its event subtotal is **+0.75**, before signed progress. A floor contact without a paddle hit earns no save. Once a ball is safely cleared, later out-of-play floor contacts do not incur another penalty.
+A goal is detected in either of two ways:
 
-A paddle touch followed by a goal is a failure. Any failure overrides a save in the same transition. We use one failure reward label, so a simultaneous base hit and goal do not produce two −1 event penalties. Signed progress remains a separate term.
+- The ball's filtered contact force against the goal exceeds `contact_force_threshold_n=0.05 N`.
+- The ball crosses the front goal plane toward negative x and overlaps the goal in both y and z. The crossing test checks the path between consecutive physics samples, so it can detect a fast ball that crosses between them.
 
-The default ends the episode when the shot outcome is confirmed. It does not require post-save recovery. The three-second limit is a real task deadline, not a trajectory truncation; PPO does not bootstrap across it.
+The crossing plane is `goal_center.x + goal_size.x/2 + ball_radius_m`, currently **x = −0.40 m**. This is the plane reached by the ball's center when its leading edge reaches the goal front. The y–z overlap includes the 0.03 m ball radius; an edge-overlapping ball still counts as a goal. A prior paddle touch does not cancel a later goal. A goal is a failed save and ends the episode.
 
-### Allowed goal area
+### `rwd_scale_ball_base_collision` and `rwd_scale_ball_arm_collision`: forbidden ball contacts
 
-The area is defined by the **base origin**, relative to its environment:
+These use the same 0.05 N filtered ball-contact threshold. A base hit means contact with `base`. An arm hit means contact with `flying_arm_2__link1` or `flying_arm_2__link2`. Both end the episode, even if the collision stops the ball from scoring.
+
+The attached paddle is a separate body and is the only legal hitting surface. The original distal-link mesh remains collidable and counts as an **arm**, not as the paddle. A paddle touch and an arm touch in the same interval still constitute an arm-hit failure. These penalties have independent scales; changing the goal scale does not change them.
+
+### `rwd_scale_ball_floor`: ball-to-floor contact, with or without a paddle hit
+
+This term is **not** a penalty for hitting the ball twice. It concerns the **ball touching the floor**. We detect it when the filtered ball/floor force exceeds 0.05 N, or when the ball center has `z <= ball_radius_m + 0.001` (currently **0.031 m**).
+
+There are three important cases:
+
+1. **No paddle hit, then floor:** this is a live-floor failure. It receives −0.25 and ends the episode. It earns no save bonus.
+2. **Paddle hit, then floor while still unresolved:** if the ball lands with its center **in front of the goal plane** (`x > −0.40 m`) and no safety/forbidden-contact failure prevents clearance, it qualifies as a save. With default recovery off, it receives +1 for the save **and** −0.25 for the floor: **+0.75** before other terms. An unresolved floor landing that does not qualify receives the floor failure instead.
+3. **Ball already safely cleared, then floor in a later interval:** the floor detector ignores that out-of-play contact. There is no new floor penalty. With recovery off, the episode has already ended anyway.
+
+In case 2, the floor cost is logged as `floor_after_save`, rather than replacing the save in `outcome`. If clearance is confirmed in an interval that has already recorded a live-floor contact, that floor cost is still paid in the interval. With recovery required, it can be paid while recovery is pending (`outcome=0`), with the save bonus paid later. It is not paid again after clearance. Higher-priority failures suppress this separate floor-after-save reward component; see the priority list below.
+
+### `rwd_scale_miss`: unresolved ball escapes the tracking region
+
+The exact escape test uses the ball center in environment-local coordinates:
+
+```text
+abs(ball.x) > 3.0 m, OR abs(ball.y) > 3.0 m, OR ball.z > 4.5 m
+```
+
+If any bound is exceeded **before safe clearance**, the miss flag is set. There is no separate lower-z escape bound; floor detection handles low balls. These escape limits are literal values in `_sample_physics_events()`, not config fields.
+
+For example, a ball at y = 3.1 m without verified clearance receives −1 and ends the episode, unless another failure has higher priority. A ball at that same position after a valid paddle clearance does not incur a miss penalty. A ball passing beside the goal **without touching the paddle** is not automatically a save: it stays unresolved until a floor event, escape, or deadline ends the shot. Thus `miss` means an out-of-bounds unresolved shot, not every unsuccessful interception.
+
+### `rwd_scale_deadline`: the shot clock expires
+
+Each reset starts a separate shot clock at zero. It advances once per policy action. The limit is `ceil(episode_length_s / step_dt)`: **180 actions = 3.0 s** with the shipped timing. It is independent of the runner's randomized initial episode-length counter.
+
+If the shot reaches that limit without a confirmed save, it receives the deadline outcome, unless a higher-priority failure occurred. For example, a touched but still unresolved ball inside the tracking bounds at 3 s receives −1. With recovery required, safe ball clearance without completing the recovery dwell by 3 s also receives −1.
+
+A save completed on the last allowed action does not receive the deadline penalty. The deadline is a **real task failure**, not just a cut in a longer trajectory: `terminated=True`, with no timeout truncation or PPO timeout bootstrap. To change its time, tune `episode_length_s`, not `rwd_scale_deadline`. To change only its reward amount, tune the scale. Setting that scale to zero still ends the episode at the deadline.
+
+### `rwd_scale_leave_goal_area`: the aircraft base leaves its box
+
+The test uses the **base origin**, not the paddle position or the outer edges of the robot. Coordinates remove the environment's world offset. The allowed inclusive bounds are:
 
 ```text
 x: [-0.08, 0.90] m
@@ -156,17 +189,84 @@ y: [-1.20, 1.20] m
 z: [ 0.55, 2.60] m
 ```
 
-Tune `goal_area_x_m`, `goal_area_y_m`, and `goal_area_z_m`. The constraints do not require every point on the racket to stay inside that box.
+Any sampled base coordinate strictly below its minimum or above its maximum sets the area flag, even if the base returns inside before the policy interval ends. The selected area outcome costs −1 and ends the episode. Tune `goal_area_x_m`, `goal_area_y_m`, and `goal_area_z_m` to change the box. The racket may extend outside it without causing this particular penalty.
+
+Both spawn and reset use `robot_home_quat` in wxyz order. Reset position is `robot_home`, plus noise of up to 0.015 m on each axis. Changing home does **not** move the allowed box or the fixed ball-target center. In the current locally tuned file, home z = 0.5 m gives reset z in [0.485, 0.515] m, all below the allowed minimum. This can trigger an area failure immediately, without the robot first moving away from home. The committed 1.5 m reference home does not have this mismatch.
+
+### `rwd_scale_robot_crash`: non-ball contact or excessive tilt
+
+Two independent detectors share this reward scale:
+
+- **Robot contact:** on the base, either arm link, or paddle, we remove the ball's equal-and-opposite filtered normal force from the robot's net contact force. A remaining force magnitude above **0.1 N** on any of these bodies sets the contact-crash flag. This distinguishes a legal ball/paddle impact from a robot hitting the floor or another scene surface. The 0.1 N limit is literal in the code.
+- **Tilt:** the base's up axis tilts from world vertical by more than `robot_tilt_threshold_rad`, **60 degrees** by default. This does not require a collision. Pure yaw does not trigger this test.
+
+`reset_robot_on_robot_crash=True` ends the episode for the contact detector. `reset_robot_on_tilt_threshold=True` ends it for the tilt detector. Setting either to `False` disables **only that detector's reset**, not its reward or the other detector. A persistent violation can therefore receive −1 in every action interval. If both detectors fire in one interval, they still select one crash outcome, not two penalties.
+
+Other endings, such as a goal, leaving the box, or the deadline, still reset the episode. Contact/tilt violations also prevent new safe-clearance confirmation even when their resets are disabled. Extras `goalkeeper_robot_contact_crash` and `goalkeeper_tilt_threshold` expose the two causes separately.
+
+### `rwd_scale_save`: contact plus safe clearance, not contact alone
+
+A save first requires a real PhysX **paddle contact** above 0.05 N. Proximity alone is insufficient. After that contact, one of these conditions must confirm that the ball is clear:
+
+1. **Returned toward the shooter:** ball center `x > keeper_plane_x + clear_distance_m`, currently about **0.2197 m**, and x velocity `> clear_speed_m_s=0.3 m/s`. Here `clear_distance_m=0.25 m` is measured from the defense plane, not from the goal.
+2. **Deflected outside the goal:** ball center `x < −0.40 m` and outside the radius-expanded goal bounds in **either** y or z. The checks are `abs(y-goal_center.y) > goal_size.y/2 + ball_radius_m` or the equivalent z test. At the shipped dimensions, these are `abs(y) > 1.23 m` or `abs(z-1.2) > 1.23 m`.
+3. **Deflected onto the floor in front of the goal:** a live-floor event after the paddle hit, with ball center `x > −0.40 m`. This keeps the separate floor cost described above.
+
+New clearance is rejected if the interval contains a base/arm hit, goal, nonqualifying floor event, robot contact crash, excessive tilt, or leaving the area. Contact and clearance may occur in the same policy interval or in different intervals. Clearance stays recorded once confirmed.
+
+With `require_recovery_for_save=False`, clearance is enough for success: +1 and an episode ending. With it set to `True`, the robot must also complete the recovery dwell described in section 5 before the deadline. A paddle touch followed by a goal **before clearance** is a failure. The default does not continue simulating the ball after a confirmed save, so it does not evaluate later play or long-term robot stability.
+
+### `rwd_scale_progress`: bring the paddle closer in the goal-parallel plane
+
+We use only y and z, ignoring depth x. At the end of an action interval, we measure the previous and current paddle centers against the **same current ball target**:
+
+```text
+d_before = distance(previous paddle yz, current ball yz)
+d_after  = distance(current paddle yz, current ball yz)
+progress = rwd_scale_progress * (d_before - d_after)
+```
+
+Distances are Euclidean distances in metres. Reducing distance from 0.30 m to 0.20 m earns `0.5 * 0.10 = +0.05`. Moving away by 0.10 m earns −0.05. Changing only x earns zero. A stationary paddle earns zero even when the ball moves, because both distances use the same target.
+
+The active mask is taken **at the start** of the interval. It requires no previous paddle hit, ball x velocity `< −0.1 m/s`, and ball x `> goal_center.x` (−0.45 m). This means progress can still be paid in the interval containing the first hit or a terminal failure. It stops in following intervals after the first paddle hit. Resets start a new distance comparison; there is no progress jump between episodes.
+
+`progress_use_prediction=True` replaces the current-ball target with its ballistic defense-plane prediction. It does not change the y–z-only distance or this start-of-interval mask. Unlike the optional intercept kernel, progress has no extra prediction-validity mask. This is practical moving-target shaping, not a guarantee of policy invariance.
+
+### If several events happen together: exact priority
+
+The selected `outcome` uses this order, from **highest to lowest** priority:
+
+```text
+base hit > goal > robot crash/tilt > leave area > arm hit
+         > live-floor failure > miss/escape > deadline > save > ongoing
+```
+
+For example, a simultaneous base hit and goal selects only the base penalty. A simultaneous arm hit and goal selects only the goal penalty. A floor failure at the deadline selects only the floor penalty. A detected failure suppresses a save bonus in the same interval.
+
+This priority selects the **reward label**. Episode ending is checked separately against all active ending conditions. With crash resets disabled, for example, crash can be the selected reward while a simultaneous deadline still ends the episode. A valid floor save is not a live-floor failure; its floor cost is the separate `floor_after_save` addition. Progress, enabled rate terms, and energy can also contribute on a failure transition.
+
+| Example with shipped scales | Event subtotal, before progress/rates/energy |
+|---|---:|
+| Paddle hit, then safely returned toward shooter | +1.00 |
+| Paddle hit, then valid floor save | +0.75 |
+| Floor while unresolved, no paddle hit | −0.25 |
+| Paddle touch, then goal before clearance | −1.00 |
+| Ball stops scoring because it hits an arm | −0.25 |
+| Simultaneous base hit and goal | −1.00, not −2.00 |
+| Unresolved escape beyond y = 3 m | −1.00 |
+| Unresolved shot still inside tracking bounds at 3 s | −1.00 |
+
+Optional hit rewards paid in an **earlier** interval are not refunded if the ball later scores. Section 5 explains their same-interval failure mask. The examples above have those optional hit scales at zero.
 
 ### Tune the main reward
 
-For example, append these overrides to the training command:
+Append float overrides to the training command, for example:
 
 ```bash
-env.rwd_scale_progress=1.0 env.rwd_scale_save=1.5 env.rwd_scale_goal=-1.0 env.rwd_scale_ball_base_collision=-1.0 env.rwd_scale_ball_arm_collision=-0.4 env.rwd_scale_leave_goal_area=-1.0 env.rwd_scale_ball_floor=-0.25
+env.rwd_scale_progress=1.0 env.rwd_scale_save=1.5 env.rwd_scale_goal=-1.0 env.rwd_scale_ball_base_collision=-1.0 env.rwd_scale_ball_arm_collision=-0.4 env.rwd_scale_leave_goal_area=-1.0 env.rwd_scale_ball_floor=-0.25 env.rwd_scale_miss=-1.0 env.rwd_scale_deadline=-1.0
 ```
 
-Use floats such as `1.0` for float config fields. The defaults are starting values, not an optimized reward recipe. If the agent chooses arm hits to avoid a goal, make `rwd_scale_ball_arm_collision` more negative while keeping its magnitude smaller than `rwd_scale_ball_base_collision`.
+Use floats such as `1.0` for float config fields. The defaults are starting values, not an optimized recipe. To discourage arm blocking more strongly, make `rwd_scale_ball_arm_collision` more negative. To recover the shipped reward from the current locally tuned energy setting, also pass `env.rwd_scale_energy=0.0`.
 
 ## 3. Action and observation contract
 
@@ -214,18 +314,85 @@ Checkpoint resume restores the policy and optimizer, but the standard runner doe
 
 ## 5. Optional additions — off by default
 
-These are separate experiments, not the main reward:
+All ten optional scales ship as zero. They are separate experiments, not required parts of the main objective. Your current local file enables energy only, as noted in section 2. A **dense** reward means feedback on many policy steps, rather than just at a shot outcome.
 
-- `progress_use_prediction=True`: measure progress toward the ball's predicted defense-plane intersection rather than its current projected position.
-- `rwd_scale_intercept>0`: reward staying near the predicted intercept. The kernel is `exp(-(distance / intercept_sigma_m)²)`.
-- `rwd_scale_alignment>0`: add squared paddle-normal alignment with the incoming ball direction, weighted by the interception kernel.
-- `rwd_scale_hit>0`, `rwd_scale_centered_hit>0`: pay a first-hit bonus, optionally larger near the paddle center. A later goal still remains a failure.
-- `require_recovery_for_save=True`: delay the save bonus until the robot holds the recovery conditions for 0.25 s.
-- `rwd_scale_recovery>0`: give a smooth post-clearance reward for returning near home with low velocity, tilt, and joint displacement.
-- `rwd_scale_action_rate`, `rwd_scale_body_angular_velocity`, `rwd_scale_body_linear_velocity`, `rwd_scale_thrust`: regularization terms. Use negative scales to penalize their signals. Their shipped defaults are zero.
-- `rwd_scale_energy`: mean mechanical plus dissipative power over the action interval. Physics-rate samples include the final substep before reset. This term has no extra dt multiplier. The arm uses signed torque × joint velocity plus `arm_copper_loss_coefficient * sum(torque²)`. The rotor keeps its existing motor-efficiency model. The shipped scale is zero; use a negative value to penalize estimated electrical input. The copper coefficient is a physical model parameter, not a reward scale.
+### `progress_use_prediction`: change the progress target, not its scale
 
-For example: `env.rwd_scale_energy=-0.0001`. These `rwd_scale_*` names replace the older mixed names; old Hydra/config field names are not aliases.
+This switch is `False` by default. Setting it to `True` makes progress aim at the ball's predicted intersection with `keeper_plane_x`, rather than its current position. The prediction assumes gravity of 9.81 m/s² and no drag or future collisions:
+
+```text
+t = (keeper_plane_x - ball.x) / ball.vx
+target = ball.position + ball.velocity * t
+target.z -= 0.5 * 9.81 * t²
+```
+
+The helper reports a valid prediction only when `ball.vx < −0.1 m/s`, the ball is in front of the defense plane, and its time to that plane lies in [0, 1] s. It clamps the returned prediction time to [0, 1] s; the denominator is bounded at −0.1 m/s to avoid a near-zero division. Progress uses the returned target even when the validity flag is false. The two optional rewards below do respect that flag.
+
+### `rwd_scale_intercept`: stay near the predicted interception point
+
+This adds a positive rate reward when the paddle center is near the predicted ball center. Unlike progress, it measures **full 3D distance**, including x:
+
+```text
+d_3d = distance(current paddle center, predicted ball center)
+K = exp(-(d_3d / intercept_sigma_m)²)
+intercept reward = rwd_scale_intercept * K * step_dt
+```
+
+`K` is set to zero unless the prediction is valid and the ball has **not yet touched the paddle**. These conditions are evaluated at the end of the interval. The shipped width is `intercept_sigma_m=0.30 m`. At d = 0, K = 1; at d = 0.30 m, K is about 0.368. If the scale is 0.1, a perfect match contributes `0.1/60`, about +0.00167 per action, not +0.1 per action. It rewards being close even without motion, so it is different from signed progress. It does not itself prove contact or a save.
+
+### `rwd_scale_alignment`: orient the paddle face toward the incoming ball
+
+This uses the same valid, pre-hit kernel `K`, then multiplies it by a squared dot product:
+
+```text
+direction = -ball.velocity / max(norm(ball.velocity), 0.1 m/s)
+A = dot(paddle face normal, direction)²
+alignment reward = rwd_scale_alignment * K * A * step_dt
+```
+
+The face normal is the paddle's local +x axis rotated into world coordinates. At normal shot speeds, A is 1 for a face perpendicular to the flight direction, and 0 for a face edge-on to it. Squaring means the normal and its opposite get the same value: this term does not choose a front versus back face. Below 0.1 m/s, the bounded denominator reduces the magnitude of A. The kernel prevents a distant but well-oriented paddle from getting the full reward.
+
+### `rwd_scale_hit` and `rwd_scale_centered_hit`: reward the first paddle touch
+
+These are **event bonuses**, not rates. They are paid only on the first detected paddle hit of an episode, and only if the selected outcome in that interval is ongoing (0) or save (7):
+
+```text
+Q = exp(-(u² + v²) / (0.09 m)²)
+first-hit reward = rwd_scale_hit + rwd_scale_centered_hit * Q
+```
+
+`u` and `v` are the ball center's offsets along the paddle face, in the paddle's own coordinates, at first contact. Paddle thickness/depth is ignored. Q is 1 at the center and decreases toward the edges. The 0.09 m width is fixed in `_sample_physics_events()`; it is not `intercept_sigma_m`.
+
+For example, with hit scale 0.1 and centered-hit scale 0.2, a centered first contact earns +0.3. A second paddle contact earns no new bonus. A first paddle hit accompanied by a selected arm/base/goal/safety/deadline/miss failure earns neither bonus. **A bonus already paid on an earlier interval is not taken back if the ball later scores.** These terms encourage contact discovery, not verified saves, so keep them separate from `rwd_scale_save`.
+
+### `require_recovery_for_save`: an optional success gate
+
+This is a boolean, not a reward scale. It is `False` by default. Setting it to `True` keeps the shot running after clearance and withholds the save bonus until the robot passes all five checks:
+
+| Quantity | Required value at each policy-step check | Config field |
+|---|---:|---|
+| 3D base distance from `robot_home` | < 0.35 m | `recovery_position_tolerance_m` |
+| Base linear speed | < 0.5 m/s | `recovery_speed_m_s` |
+| Base angular speed | < 0.8 rad/s | `recovery_angular_speed_rad_s` |
+| Tilt from world vertical | < 0.35 rad, about 20 degrees | `recovery_tilt_rad` |
+| Largest absolute arm joint angle from zero | < 0.5 rad | `recovery_joint_tolerance_rad` |
+
+The conditions must hold at consecutive policy-step checks for `recovery_dwell_s=0.25 s`, or 15 actions at 60 Hz. The timer is zero before clearance and resets to zero if any check fails. It measures return toward neutral arm angles, not toward the previous action's targets. There is no separate yaw-angle recovery test. Safety and the three-second deadline remain active during recovery.
+
+This gate works even with `rwd_scale_recovery=0.0`. Conversely, enabling the recovery reward below does not turn on the gate. With the default gate off, the episode ends at clearance, so there is no multi-step post-clearance recovery period.
+
+### `rwd_scale_recovery`: smooth feedback after clearance
+
+This adds a rate reward after the ball is safely cleared. It does not require the hard recovery checks to be satisfied:
+
+```text
+S = exp(-(distance_home / 0.35 m)² - (linear_speed / 0.5 m/s)²
+        - (angular_speed / 0.8 rad/s)² - (tilt / 0.35 rad)²
+        - (largest_absolute_joint_angle / 0.5 rad)²)
+recovery reward = rwd_scale_recovery * S * step_dt, only after clearance
+```
+
+S is 1 at a stationary, level, neutral-arm home state and decreases as any error grows. **These five widths are fixed in `_recovery_geometry()`**. Changing the configurable gate thresholds above does not change this smooth score. With recovery required, it can guide the robot over several post-clearance steps. Without the gate, it can contribute on the clearance/terminal step only.
 
 For a recovery experiment, append:
 
@@ -233,9 +400,53 @@ For a recovery experiment, append:
 env.require_recovery_for_save=True env.rwd_scale_recovery=0.1
 ```
 
-The recovery gate uses position error below 0.35 m, speed below 0.5 m/s, angular speed below 0.8 rad/s, tilt below 0.35 rad, and joint displacement below 0.5 rad. All thresholds are configurable. The gate resets whenever a condition fails. It does not enforce yaw recovery separately.
+### Motion and control regularizers
+
+A regularizer discourages unwanted motion or control changes. Each signal below is nonnegative. Use a **negative** scale to penalize it. These terms are evaluated at the end of every action interval, including terminal intervals, and are not limited to the incoming-ball phase.
+
+| Config field | Raw signal; contribution is `scale * signal * step_dt` | What it discourages |
+|---|---|---|
+| `rwd_scale_action_rate` | `sum((current_action - previous_action)²)` over all six clipped policy actions | Abrupt action changes. This is a step-to-step difference, **not divided by dt**. The previous action is zero after reset. |
+| `rwd_scale_body_angular_velocity` | `sum(base_angular_velocity_body_frame²)`, in (rad/s)² | Fast base rotation. All three axes count, including yaw. |
+| `rwd_scale_body_linear_velocity` | `sum(base_linear_velocity_world_frame²)`, in (m/s)² | Fast aircraft translation in any direction. |
+| `rwd_scale_thrust` | `mean((applied_rotor_thrust / nominal_hover_thrust_per_rotor - 1)²)` over six rotors | Thrust departing from its nominal hover allocation. Applied thrust includes motor lag. |
+
+For example, changing just one clipped action by 0.2 gives an action-rate signal of 0.04. With scale −0.1, its contribution is `−0.1 * 0.04 / 60`, about −0.0000667. The action-rate signal still includes the two arm outputs when `hold_arm=True`, although those outputs are ignored by the arm controller.
+
+The thrust signal is zero at nominal hover thrust. It is **not a physical power estimate**: hovering consumes power but pays no thrust regularizer. It also penalizes reducing thrust below nominal hover, not only increasing it above hover.
+
+### `rwd_scale_energy`: mean mechanical plus dissipative power
+
+Despite its name, this term uses **mean power in watts**, not integrated energy in joules. We sample all four completed physics steps, including the final step before an automatic reset:
+
+```text
+energy reward = rwd_scale_energy * mean_over_physics_steps(P_total)
+P_total = P_rotor_mechanical + P_rotor_dissipative
+          + P_arm_mechanical + P_arm_copper_loss
+```
+
+There is **no extra `step_dt` multiplier**. At a mean estimate of 500 W, your local scale −0.0001 contributes −0.05 per policy action. Setting the scale to 0.0 disables this reward without disabling the power measurements.
+
+For each physics sample, the model is:
+
+```text
+rotor_speed_i = sqrt(applied_thrust_i / kf)
+P_rotor_mechanical = sum(km * rotor_speed_i³)              # six rotors
+P_rotor_dissipative = P_rotor_mechanical * (1/efficiency - 1)
+P_arm_mechanical = sum(joint_torque_j * joint_velocity_j)  # two joints
+P_arm_copper_loss = arm_copper_loss_coefficient * sum(joint_torque_j²)
+```
+
+`efficiency` is `p_el_motor_efficiency=0.95`. Thus total rotor power equals rotor mechanical power divided by 0.95. Applied thrust includes the motor's first-order lag, rather than using the raw commanded thrust. Joint torque is `robot.data.applied_torque`: a clipped implicit-actuator PD estimate, **not measured PhysX drive torque**.
+
+Joint mechanical power is signed. Driving with the motion adds power; braking against the motion subtracts it. Copper loss is nonnegative, including when holding a stationary joint under torque. The coefficient has units W/(N·m)²: it ships as 7.0 and is 6.888 in your locally tuned file. `kf`, `km`, efficiency, and the copper coefficient describe the **physical estimate**; they are not reward scales.
+
+The net estimate is not clamped to zero. Strong braking can make it negative, in which case a negative energy scale produces a positive reward. This represents ideal regenerative transfer in the model, not verified battery-energy recovery on Borinot. The combined power model is an estimate, not measured electrical consumption.
+
+### Keep ablations easy to interpret
 
 Start each ablation from the same main reward and change one addition. With ±1 event rewards, do not copy large dense reward weights from another paper without rescaling them.
+These `rwd_scale_*` names replace the older mixed names; old Hydra/config field names are not aliases.
 
 ## 6. Literature and hypotheses
 
@@ -274,6 +485,34 @@ If flight stability is the main obstacle, pretrain hovering or reuse a flight co
 
 `goalkeeper_outcome` in step extras records the selected reward outcome before automatic reset. With either crash-reset switch disabled, outcome 8 can be nonterminal; use `terminated` to identify actual endings. `goalkeeper_had_paddle_hit`, `goalkeeper_robot_contact_crash`, `goalkeeper_tilt_threshold`, and `goalkeeper_reward_terms` support attribution checks. `outcome_counts` pools completed episodes, not means of unequal reset-batch success rates.
 
+| Outcome code | Meaning | Scale used by the `outcome` component |
+|---:|---|---|
+| 0 | Ongoing; no selected event | None, contribution 0 |
+| 1 | Ball/base collision | `rwd_scale_ball_base_collision` |
+| 2 | Ball/arm collision | `rwd_scale_ball_arm_collision` |
+| 3 | Goal | `rwd_scale_goal` |
+| 4 | Live-floor failure | `rwd_scale_ball_floor` |
+| 5 | Base outside goal area | `rwd_scale_leave_goal_area` |
+| 6 | Deadline | `rwd_scale_deadline` |
+| 7 | Confirmed save | `rwd_scale_save` |
+| 8 | Robot contact crash or excessive tilt | `rwd_scale_robot_crash` |
+| 9 | Unresolved miss/escape | `rwd_scale_miss` |
+
+These numbers are labels, **not** their priority order. Use the priority list in section 2. A valid floor save has code 7 (or code 0 while recovery is pending), not code 4.
+
+`goalkeeper_reward_terms` provides the six already-scaled components that sum to the actual reward:
+
+| Component | Contents |
+|---|---|
+| `plane_progress` | Signed y–z distance progress |
+| `outcome` | The selected event's scale from the table above |
+| `floor_after_save` | Floor scale when a live-floor event accompanies valid clearance and no selected failure |
+| `optional_rates` | Intercept, alignment, recovery, and four regularizers, all multiplied by `step_dt` |
+| `optional_hit` | First-hit and centered-first-hit bonuses |
+| `energy` | Energy scale times mean total power in watts, without dt |
+
+`goalkeeper_paddle_hit` is the **first** paddle-hit flag for this interval. `goalkeeper_had_paddle_hit` records whether a hit has occurred anywhere in the current episode. They do not by themselves establish a save. `power_mean_w` contains the named mechanical, dissipative, and total mean-power estimates even when the energy scale is zero.
+
 TensorBoard logs episode reward components, cumulative save fraction, contact/clearance fractions, collection/decision/selected difficulty, stage age, and the stage-pure window. The standard RSL logger averages these sampled summaries within a rollout. For exact evaluation counts, collect the terminal outcome codes directly. A displayed cumulative save fraction is not a fresh held-out evaluation.
 
 Run tensor-only tests without launching Isaac Sim:
@@ -294,12 +533,22 @@ Local validation uses Isaac Sim 5.1.0, Torch 2.7.0+cu128, RSL-RL 3.1.2, and the 
 
 ## Files
 
+To follow the reward in code, read these methods in order:
+
+1. `_pre_physics_step()`: save previous paddle/actions, set the progress mask, and clear interval flags.
+2. `_sample_physics_events()`: detect contacts, safety violations, ball clearance, and escape on completed physics steps.
+3. `_get_dones()` and `task_math.terminal_outcome()`: apply recovery/deadline logic, select the event label, and decide whether to reset.
+4. `_get_rewards()`: add the six components defined above. `_sample_power()` supplies its physics-rate power average; `_interception()` and `_recovery_geometry()` supply optional shaping signals.
+5. `_reset_idx()`: sample a new shot and reset that environment's hit/clearance history, shot clock, previous actions, and power buffers.
+
 - `borinot_goalkeeper_env_cfg.py`: geometry, reward weights, limits, and difficulty settings.
 - `borinot_goalkeeper_env.py`: control, observations, contacts, rewards, resets, and curriculum.
 - `paddle.py`: task-local paddle attachment and shaft mass/inertia override.
 - `task_math.py`: ballistic sampling, goal crossings, plane progress, and outcome priority.
 - `agents/rsl_rl_ppo_cfg.py`: PPO networks and optimizer settings.
 - `tests/test_task_math.py`: simulator-independent checks.
+- `tests/test_rewards.py`: the actual reward method on controlled tensors; signed scales, event amounts, dt handling, and floor-save addition.
+- `tests/test_power.py`: physics-rate sampling, power model, and signed power reward.
 - `tests/test_reset_geometry.py`: signed crash/reset behavior and USD-derived arm/paddle frames.
 - `tests/smoke.py`: real GPU physics and reset checks.
 - `tests/checkpoint_smoke.py`: finite deterministic inference after reloading a PPO checkpoint.
