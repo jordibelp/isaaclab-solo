@@ -43,9 +43,9 @@ class BorinotEnvCfg(DirectRLEnvCfg):
     )
 
 
-    usd_path = str(Path(__file__).resolve().parents[5] / "isaaclab_assets/data/Robots/Borinot/borinotFlat.usd")
+    usd_path = str(Path(__file__).resolve().parents[4] / "isaaclab_assets/data/Robots/Borinot/borinotFlat.usd")
     ground_usd_path = str(
-        Path(__file__).resolve().parents[5]
+        Path(__file__).resolve().parents[4]
         / "borinotIsaacLab/isaacsim_assets/Assets/Isaac/5.1/Isaac/Environments/Grid/default_environment.usd"
     )
     static_friction = 1.2

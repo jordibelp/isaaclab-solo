@@ -9,7 +9,7 @@ We start with privileged simulator information. Both the actor and critic receiv
 
 The default reward follows Jordi's requested approach. Goal and base hits cost −1. Arm hits cost −0.25. Leaving the goal area costs −1. Moving the racket closer to the ball in the goal-parallel plane earns signed progress. A verified racket save earns +1. Additional shaping and the recovery requirement are off by default.
 
-Use **PPO** first. We can change the algorithm later without changing what counts as a goal or save.
+Use **PPO** first. Both Borinot tasks now share the Solo-style PPO recipe: 24 rollout steps, four minibatches, five epochs, `[512, 256, 128]` networks, AdamW, and gamma 0.99. See [PPO training guide](../borinot/PPO_TRAINING.md) for the complete cluster commands and available flags. SAC remains future work.
 
 ### Activate the local environment
 
@@ -22,7 +22,7 @@ cd /home/jordibelp/IsaacLab && source /home/jordibelp/miniconda3/etc/profile.d/c
 ### Train on the laptop
 
 ```bash
-./isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/train.py --task Borinot-Goalkeeper-Direct-v0 --num_envs 512 --max_iterations 3000 --headless --logger tensorboard '--kit_args=--/UJITSO/geometry=false --/UJITSO/textures=false --/UJITSO/materials=false'
+./isaaclab.sh -p source/scripts/rsl_rl/train.py --task Borinot-Goalkeeper-Direct-v0 --num_envs 512 --max_iterations 10000 --headless --logger tensorboard '--kit_args=--/UJITSO/geometry=false --/UJITSO/textures=false --/UJITSO/materials=false'
 ```
 
 The task's default environment count is 2048. The command starts smaller on the laptop's 8 GB GPU. Increase it after checking memory use.
@@ -34,8 +34,8 @@ On IRICluster, activate its `isaaclab` conda environment first. After you have p
 
 ### Optional W&B logging
 
-Replace `--logger tensorboard` with `--logger wandb --log_project_name borinot-goalkeeper`.
-The verification runs use local TensorBoard only. No W&B run was created for them.
+Replace `--logger tensorboard` with `--logger wandb --log_project_name borinotIsaacLab`.
+The earlier control checks used local TensorBoard only. The PPO recipe checks also exercise offline W&B, which does not upload a run.
 
 ### Play a checkpoint
 
@@ -45,7 +45,7 @@ Replace `/absolute/path/model_N.pt` with your actual checkpoint:
 ./isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/play.py --task Borinot-Goalkeeper-Direct-v0 --num_envs 1 --checkpoint /absolute/path/model_N.pt env.curriculum=False env.shot_level=1
 ```
 
-The play command uses the current source configuration, not an automatic reconstruction of an old run. Match the training options when comparing policies.
+The play command uses the current source configuration, not an automatic reconstruction of an old run. Match the training options and network sizes when comparing policies. Playback and the checkpoint smoke script load policy weights without restoring optimizer state, so the shared AdamW training checkpoints do not conflict with the playback runner's default Adam groups.
 
 ## 1. Scene and physical model
 
@@ -621,7 +621,7 @@ That contact-regression script explicitly selects PI mode at 240/60 Hz to retain
 
 The checks cover ballistic goal-threatening shots, progress geometry, actual paddle/base/arm/goal/floor contacts, reward scales, full observations, mass/inertia/material readback, partial resets, finite rollouts, and curriculum boundaries. They also check the corrected paddle plane at bent-arm poses, both crash-reset switches independently, and the configurable tilt threshold. The physics checks use a known 1.5 m home-height baseline, not the locally tuned lower home.
 
-Control-variant validation passed 113 CPU tests and 304 simulator checks. The simulator checks cover all three modes, actuator property readback, 200/100 and 240/60 Hz timing, a held arm at 400/100 Hz, and the original contact regression. Each mode completed two PPO updates through the registered training entry point with 32 environments and 32 rollout steps, then reloaded its checkpoint for finite inference. These checks establish integration, not learned agility, convergence, hardware transfer, or ten-thousand-environment throughput.
+Control-variant validation passed 113 CPU tests and 304 simulator checks. The simulator checks cover all three modes, actuator property readback, 200/100 and 240/60 Hz timing, a held arm at 400/100 Hz, and the original contact regression. Those original control-interface checks completed two PPO updates per mode with 32 environments and 32 rollout steps, then reloaded each checkpoint for finite inference. The new shared PPO recipe uses 24 rollout steps; its separate verification is described in the linked PPO training guide. These checks establish integration, not learned agility, convergence, hardware transfer, or ten-thousand-environment throughput.
 
 Local validation uses Isaac Sim 5.1.0, Torch 2.7.0+cu128, RSL-RL 3.1.2, and the RTX 5070 Laptop GPU. The older simulator on IRICluster needs its own launch check after you pull the code.
 

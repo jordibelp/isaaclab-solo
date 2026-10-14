@@ -74,17 +74,21 @@ def _wandb_snapshot(
     if params_dir.exists():
         art.add_dir(str(params_dir))  # env.yaml, agent.yaml, etc.
 
-    files_to_snapshot: list[str] = []
+    files_to_snapshot: dict[str, str] = {}
     for file_path in [env_cfg_py, env_py, *(extra_files or [])]:
-        if file_path and Path(file_path).exists() and file_path not in files_to_snapshot:
-            files_to_snapshot.append(file_path)
-            art.add_file(file_path)
+        if file_path and Path(file_path).exists() and file_path not in files_to_snapshot.values():
+            source = Path(file_path)
+            name = source.name
+            if name in files_to_snapshot:
+                name = "__".join(source.parts[-4:])  # keep inherited configs with the same basename
+            files_to_snapshot[name] = file_path
+            art.add_file(file_path, name=name)
 
     # (optional) also add a copy under log_dir for local reproducibility
     snap_dir = Path(log_dir) / "code_snapshot"
     snap_dir.mkdir(parents=True, exist_ok=True)
-    for file_path in files_to_snapshot:
-        shutil.copy2(file_path, snap_dir / Path(file_path).name)
+    for name, file_path in files_to_snapshot.items():
+        shutil.copy2(file_path, snap_dir / name)
 
     run.log_artifact(art)
 

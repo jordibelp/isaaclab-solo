@@ -3162,6 +3162,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     path
                     for path in [
                         agent_cfg_py,
+                        *[inspect.getsourcefile(base) for base in type(agent_cfg).__mro__
+                          if base.__module__.startswith("isaaclab_tasks.")],
+                        inspect.getsourcefile(type(runner.alg)),
                         symmetry_py,
                         __file__,
                         _THIS_DIR / "continual_backprop.py",
