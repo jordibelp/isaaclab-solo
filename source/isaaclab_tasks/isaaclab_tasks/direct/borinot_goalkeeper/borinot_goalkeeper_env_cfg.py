@@ -27,6 +27,7 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     viewer = ViewerCfg(eye=(4.0, 4.0, 2.7), lookat=(0.3, 0.0, 1.2))
 
     robot_home = (0.0, 0.0, 1.5)
+    robot_home_quat = (0.7071067811865476, 0.0, 0.0, -0.7071067811865476)  # wxyz; -90 deg yaw
     robot = ArticulationCfg(
         prim_path="/World/envs/env_.*/Robot",
         spawn=sim_utils.UsdFileCfg(
@@ -41,6 +42,7 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
         ),
         init_state=ArticulationCfg.InitialStateCfg(
             pos=robot_home,
+            rot=robot_home_quat,  # arm sweep lies in the goal's Y-Z plane
             joint_pos={"flying_arm_2__j_bl_link1": 0.0, "flying_arm_2__j_link1_link2": 0.0},
         ),
         actuators={"arm": ImplicitActuatorCfg(
@@ -56,11 +58,11 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     shaft_mass_kg = 0.015
     paddle_mass_kg = 0.100
     paddle_size = (0.012, 0.24, 0.24)  # thickness along +x; broad face is yz
-    paddle_offset_ee = (-0.05, -0.16, -0.021)  # face sits 5 cm ahead of the old tip geometry
-    paddle_quat_ee = (0.0, 0.0, -0.7071067811865476, -0.7071067811865476)
+    paddle_offset_ee = (0.0, -0.16, 0.029)  # 5 cm standoff along the arm-plane normal (+EE z)
+    paddle_quat_ee = (0.7071067811865476, 0.0, -0.7071067811865476, 0.0)  # local +x normal -> EE +z
     # Neutral FK from the USD joint frames, not the file's authored preview pose.
-    keeper_plane_x = 0.1147006
-    target_center_yz = (-0.0803284, 1.1292502)
+    keeper_plane_x = -0.0303288
+    target_center_yz = (-0.0647006, 1.1292502)  # neutral paddle at the reference home height of 1.5 m
 
     ball_radius_m = 0.03
     ball_mass_range_kg = (0.020, 0.050)
@@ -135,13 +137,16 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     progress_use_prediction = False  # optional: use predicted intercept rather than current ball yz
     rwd_scale_save = 1.0
     rwd_scale_goal = -1.0  # ball crosses/hits the goal
-    rwd_scale_base_collision = -1.0  # ball hits the base; independent of the goal
-    rwd_scale_arm_collision = -0.25
+    rwd_scale_ball_base_collision = -1.0  # ball hits the base; independent of the goal
+    rwd_scale_ball_arm_collision = -0.25
     rwd_scale_leave_goal_area = -1.0
-    rwd_scale_ball_floor = -0.25
+    rwd_scale_ball_floor = -0.25  # live floor event or a deflected ball landing in front of goal
     rwd_scale_miss = -1.0
     rwd_scale_deadline = -1.0
-    rwd_scale_robot_crash = -1.0  # non-ball robot contact or tilt > 60 degrees
+    rwd_scale_robot_crash = -1.0  # non-ball robot contact or excessive tilt; independent of reset flags
+    reset_robot_on_robot_crash = True
+    reset_robot_on_tilt_threshold = True
+    robot_tilt_threshold_rad = 1.0471975511965976  # 60 degrees
 
     # Optional additions: disabled by default. Enable explicitly for an ablation.
     rwd_scale_intercept = 0.0

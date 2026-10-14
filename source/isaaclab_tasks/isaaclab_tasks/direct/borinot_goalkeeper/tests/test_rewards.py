@@ -55,7 +55,7 @@ def make_env():
         actions=torch.full((n, 6), .1), _previous_actions=torch.zeros(n, 6),
         _rotor_thrust=torch.full((n, 6), 2.), _hover_per_rotor=1.,
         _outcome=torch.arange(n), _center_quality=torch.full((n,), .5),
-        _new_hit=torch.zeros(n, dtype=torch.bool), _flags={"floor": torch.zeros(n, dtype=torch.bool)},
+        _new_hit=torch.zeros(n, dtype=torch.bool), _flags={name: torch.zeros(n, dtype=torch.bool) for name in ("floor", "crash", "tilt")},
         _episode_rewards=zero.clone(), _episode_terms={
             name: zero.clone() for name in ("plane_progress", "outcome", "floor_after_save", "optional_rates", "optional_hit", "energy")
         }, extras={},
@@ -73,7 +73,7 @@ def test_all_reward_fields_use_signed_scale_names():
             for target in n.targets:
                 if isinstance(target, ast.Name):
                     assert not target.id.endswith(("_penalty", "_bonus", "_cost", "_reward_scale", "_reward_rate"))
-    for name in ("goal", "base_collision", "arm_collision", "ball_floor", "robot_crash", "leave_goal_area", "miss", "deadline"):
+    for name in ("goal", "ball_base_collision", "ball_arm_collision", "ball_floor", "robot_crash", "leave_goal_area", "miss", "deadline"):
         assert scales[f"rwd_scale_{name}"] < 0
     assert scales["rwd_scale_save"] > 0
 
@@ -90,7 +90,7 @@ def test_original_event_rewards_are_preserved():
 def test_goal_base_and_crash_scales_are_independent():
     env = make_env()
     env.cfg.rwd_scale_goal = -3.0
-    env.cfg.rwd_scale_base_collision = -2.0
+    env.cfg.rwd_scale_ball_base_collision = -2.0
     env.cfg.rwd_scale_robot_crash = -4.0
     reward = get_rewards(env)
     torch.testing.assert_close(reward, torch.tensor([0., -2., 0., -3., 0., 0., 0., 0., -4., 0.]))

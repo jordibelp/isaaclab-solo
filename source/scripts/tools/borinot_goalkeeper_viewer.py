@@ -15,7 +15,7 @@ REPO = HERE.parents[2]
 ASSETS = HERE / "borinot_goalkeeper_viewer"
 CONFIG = REPO / "source/isaaclab_tasks/isaaclab_tasks/direct/borinot_goalkeeper/borinot_goalkeeper_env_cfg.py"
 FIELDS = (
-    "robot_home", "joint_names", "joint_target_scale", "paddle_size", "paddle_offset_ee", "paddle_quat_ee",
+    "robot_home", "robot_home_quat", "joint_names", "joint_target_scale", "paddle_size", "paddle_offset_ee", "paddle_quat_ee",
     "keeper_plane_x", "target_center_yz", "ball_radius_m", "goal_center", "goal_size", "launch_x_range",
     "launch_z", "launch_y_noise", "shot_half_extents_yz", "shot_flight_time_ranges_s", "shot_level",
     "goal_area_x_m", "goal_area_y_m", "goal_area_z_m", "reset_xy_noise_m", "reset_z_noise_m",

@@ -56,7 +56,8 @@ The local environment uses these coordinates:
 - **z:** height above the floor.
 - The goal is a solid rectangular surface centered at x = −0.45 m. Its width and height are 2.4 m.
 - Borinot starts with its base at `(0, 0, 1.5)` m.
-- The neutral racket center is approximately `(0.1147, −0.0803, 1.1293)` m.
+- At the reference home height of 1.5 m, the neutral racket center is approximately `(−0.0303, −0.0647, 1.1293)` m.
+- The body starts at −90° yaw. The arm swings in the goal's Y–Z plane, and the paddle's broad face is parallel to that plane. Both joints can move the paddle across the goal without turning it edge-on to an incoming ball.
 - The progress plane is y–z, parallel to the goal. Forward motion along x alone earns no progress.
 
 ```mermaid
@@ -75,7 +76,7 @@ The robot comes from:
 ### Paddle and mass
 
 The original USD has a 115 g distal link. We model it as a 15 g shaft plus a separate 100 g paddle. This is a prototype interpretation of the existing tip ballast, not a measured separation of the physical parts.
-The paddle is a rigid cuboid: 12 mm thick, 240 mm wide, and 240 mm high. A fixed joint connects it to the distal link. Its face sits 50 mm ahead of the old tip geometry so that the shaft does not hide the hitting surface.
+The paddle is a rigid cuboid: 12 mm thick, 240 mm wide, and 240 mm high. A fixed joint connects it to the distal link. Its center has a 50 mm standoff from the old tip center along the arm-plane normal, toward the incoming ball. The local mount rotates the paddle's +X normal onto the distal link's +Z axis. The root yaw then maps this normal onto world +X. The original USD is unchanged.
 
 The task changes mass, center of mass, and inertia in the spawned USD layer only. It never saves over the original file. The shaft inertia uses a simple 160 mm rod approximation. PhysX computes the paddle inertia from its cuboid geometry and mass. Total robot mass remains **2.910538 kg** in the simulator.
 
@@ -100,15 +101,19 @@ Every reward weight uses `rwd_scale_*`. The code adds `scale * signal`: **negati
 | Event or term | Default contribution | Config field |
 |---|---:|---|
 | Ball scores a goal | −1 | `rwd_scale_goal=-1.0` |
-| Ball hits the base | −1, independent of the goal scale | `rwd_scale_base_collision=-1.0` |
-| Ball hits the upper or lower arm | −0.25 | `rwd_scale_arm_collision=-0.25` |
+| Ball hits the base | −1, independent of the goal scale | `rwd_scale_ball_base_collision=-1.0` |
+| Ball hits the upper or lower arm | −0.25 | `rwd_scale_ball_arm_collision=-0.25` |
 | Base leaves the allowed goal area | −1 | `rwd_scale_leave_goal_area=-1.0` |
 | Racket prevents a goal | +1, once | `rwd_scale_save=1.0` |
 | Ball touches the floor while the shot is live | −0.25, once | `rwd_scale_ball_floor=-0.25` |
 | Robot crashes, shot escapes unresolved, or the deadline expires | −1 | `rwd_scale_robot_crash`, `rwd_scale_miss`, `rwd_scale_deadline` |
 | Signed racket progress in y–z | `0.5 * (d_before − d_after)` | `rwd_scale_progress=0.5` |
 
-A ball hitting the base uses `rwd_scale_base_collision`. It is not a robot crash. `rwd_scale_robot_crash` applies to robot contact not accounted for by ball contact, or tilt beyond 60 degrees. The contact check removes the ball normal-force contribution first. Goal, ball/base collision, and robot crash have independent scales. Existing outcome priority still selects one terminal event.
+A ball hitting the base uses `rwd_scale_ball_base_collision`. It is not a robot crash. `rwd_scale_robot_crash` applies to robot contact not accounted for by ball contact, or tilt beyond `robot_tilt_threshold_rad` (60 degrees by default). The contact check removes the ball normal-force contribution first. Goal, ball/base collision, and robot crash have independent scales. Existing outcome priority still selects one reward event.
+
+`reset_robot_on_robot_crash=True` ends the episode after non-ball robot contact. `reset_robot_on_tilt_threshold=True` ends it after excessive tilt. These switches work independently. Setting one to `False` disables only that reset, not the crash reward. A persistent violation can therefore incur the crash reward in each action interval. Other endings, including leaving the allowed area and the shot deadline, still reset the environment. Per-step `goalkeeper_robot_contact_crash` and `goalkeeper_tilt_threshold` identify the two detected causes before automatic reset.
+
+Both initial spawn and every reset use `robot_home_quat` in wxyz order. The scene inspector reads the same quaternion. The fixed shot center remains at the reference height; lowering `robot_home` does not lower the ball targets or the allowed base-height range.
 
 The event contributions are not multiplied by dt. Progress is a displacement, so it is not multiplied by dt either. Optional rate rewards are multiplied by the policy duration, 1/60 s.
 
@@ -137,7 +142,7 @@ After that contact, one of these outcomes confirms a save:
 
 The third outcome earns +1 and still pays the −0.25 floor penalty. Its event subtotal is **+0.75**, before signed progress. A floor contact without a paddle hit earns no save. Once a ball is safely cleared, later out-of-play floor contacts do not incur another penalty.
 
-A paddle touch followed by a goal is a failure. Any failure overrides a save in the same transition. We use one terminal failure label, so a simultaneous base hit and goal do not produce two −1 terminal penalties. Signed progress remains a separate term.
+A paddle touch followed by a goal is a failure. Any failure overrides a save in the same transition. We use one failure reward label, so a simultaneous base hit and goal do not produce two −1 event penalties. Signed progress remains a separate term.
 
 The default ends the episode when the shot outcome is confirmed. It does not require post-save recovery. The three-second limit is a real task deadline, not a trajectory truncation; PPO does not bootstrap across it.
 
@@ -158,10 +163,10 @@ Tune `goal_area_x_m`, `goal_area_y_m`, and `goal_area_z_m`. The constraints do n
 For example, append these overrides to the training command:
 
 ```bash
-env.rwd_scale_progress=1.0 env.rwd_scale_save=1.5 env.rwd_scale_goal=-1.0 env.rwd_scale_base_collision=-1.0 env.rwd_scale_arm_collision=-0.4 env.rwd_scale_leave_goal_area=-1.0 env.rwd_scale_ball_floor=-0.25
+env.rwd_scale_progress=1.0 env.rwd_scale_save=1.5 env.rwd_scale_goal=-1.0 env.rwd_scale_ball_base_collision=-1.0 env.rwd_scale_ball_arm_collision=-0.4 env.rwd_scale_leave_goal_area=-1.0 env.rwd_scale_ball_floor=-0.25
 ```
 
-Use floats such as `1.0` for float config fields. The defaults are starting values, not an optimized reward recipe. If the agent chooses arm hits to avoid a goal, make `rwd_scale_arm_collision` more negative while keeping its magnitude smaller than `rwd_scale_base_collision`.
+Use floats such as `1.0` for float config fields. The defaults are starting values, not an optimized reward recipe. If the agent chooses arm hits to avoid a goal, make `rwd_scale_ball_arm_collision` more negative while keeping its magnitude smaller than `rwd_scale_ball_base_collision`.
 
 ## 3. Action and observation contract
 
@@ -267,14 +272,14 @@ If flight stability is the main obstacle, pretrain hovering or reuse a flight co
 
 ## 7. Logging, verification, and limits
 
-`goalkeeper_outcome` in step extras records the terminal outcome before automatic reset. `goalkeeper_had_paddle_hit` and `goalkeeper_reward_terms` support attribution checks. `outcome_counts` pools completed episodes, not means of unequal reset-batch success rates.
+`goalkeeper_outcome` in step extras records the selected reward outcome before automatic reset. With either crash-reset switch disabled, outcome 8 can be nonterminal; use `terminated` to identify actual endings. `goalkeeper_had_paddle_hit`, `goalkeeper_robot_contact_crash`, `goalkeeper_tilt_threshold`, and `goalkeeper_reward_terms` support attribution checks. `outcome_counts` pools completed episodes, not means of unequal reset-batch success rates.
 
 TensorBoard logs episode reward components, cumulative save fraction, contact/clearance fractions, collection/decision/selected difficulty, stage age, and the stage-pure window. The standard RSL logger averages these sampled summaries within a rollout. For exact evaluation counts, collect the terminal outcome codes directly. A displayed cumulative save fraction is not a fresh held-out evaluation.
 
 Run tensor-only tests without launching Isaac Sim:
 
 ```bash
-python -m pytest -q --import-mode=importlib --rootdir=source/isaaclab_tasks/isaaclab_tasks/direct/borinot_goalkeeper/tests --confcutdir=source/isaaclab_tasks/isaaclab_tasks/direct/borinot_goalkeeper/tests source/isaaclab_tasks/isaaclab_tasks/direct/borinot_goalkeeper/tests/test_task_math.py
+python -m pytest -q --import-mode=importlib --rootdir=source/isaaclab_tasks/isaaclab_tasks/direct/borinot_goalkeeper/tests --confcutdir=source/isaaclab_tasks/isaaclab_tasks/direct/borinot_goalkeeper/tests source/isaaclab_tasks/isaaclab_tasks/direct/borinot_goalkeeper/tests/test_task_math.py source/isaaclab_tasks/isaaclab_tasks/direct/borinot_goalkeeper/tests/test_power.py source/isaaclab_tasks/isaaclab_tasks/direct/borinot_goalkeeper/tests/test_rewards.py source/isaaclab_tasks/isaaclab_tasks/direct/borinot_goalkeeper/tests/test_reset_geometry.py
 ```
 
 Run the GPU environment check:
@@ -283,7 +288,7 @@ Run the GPU environment check:
 ./isaaclab.sh -p source/isaaclab_tasks/isaaclab_tasks/direct/borinot_goalkeeper/tests/smoke.py --headless --num-envs 16 --steps 180 --output /tmp/borinot_goalkeeper_validation.json '--kit_args=--/UJITSO/geometry=false --/UJITSO/textures=false --/UJITSO/materials=false'
 ```
 
-The checks cover ballistic goal-threatening shots, progress geometry, actual paddle/base/arm/goal/floor contacts, reward scales, full observations, mass/inertia/material readback, partial resets, finite rollouts, and curriculum boundaries. Short PPO training verifies the registered task/agent path. These checks do not show learned agility, convergence, hardware transfer, GUI rendering, or ten-thousand-environment throughput.
+The checks cover ballistic goal-threatening shots, progress geometry, actual paddle/base/arm/goal/floor contacts, reward scales, full observations, mass/inertia/material readback, partial resets, finite rollouts, and curriculum boundaries. They also check the corrected paddle plane at bent-arm poses, both crash-reset switches independently, and the configurable tilt threshold. The physics check uses a known 1.5 m home-height baseline, not a locally tuned lower home. Earlier short PPO training verified the registered task/agent path. These checks do not show learned agility, convergence, hardware transfer, or ten-thousand-environment throughput.
 
 Local validation uses Isaac Sim 5.1.0, Torch 2.7.0+cu128, RSL-RL 3.1.2, and the RTX 5070 Laptop GPU. The older simulator on IRICluster needs its own launch check after you pull the code.
 
@@ -295,5 +300,6 @@ Local validation uses Isaac Sim 5.1.0, Torch 2.7.0+cu128, RSL-RL 3.1.2, and the 
 - `task_math.py`: ballistic sampling, goal crossings, plane progress, and outcome priority.
 - `agents/rsl_rl_ppo_cfg.py`: PPO networks and optimizer settings.
 - `tests/test_task_math.py`: simulator-independent checks.
+- `tests/test_reset_geometry.py`: signed crash/reset behavior and USD-derived arm/paddle frames.
 - `tests/smoke.py`: real GPU physics and reset checks.
 - `tests/checkpoint_smoke.py`: finite deterministic inference after reloading a PPO checkpoint.

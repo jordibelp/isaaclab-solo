@@ -50,11 +50,13 @@ try:
     check("mass_preserved", abs(env.robot_mass_kg - 2.910538) < 1e-4)
     masses = env.robot.root_physx_view.get_masses()[0]
     check("paddle_mass", abs(float(masses[env.paddle_id]) - .100) < 1e-5)
+    torch.testing.assert_close(env.robot.data.root_quat_w,
+        torch.tensor(cfg.robot_home_quat, device=env.device).expand(args.num_envs, -1), atol=1e-6, rtol=0)
+    check("reset_uses_goal_parallel_home_orientation", True)
     actions = torch.zeros(args.num_envs, 6, device=env.device)
     outcomes = torch.zeros(10, dtype=torch.long, device=env.device)
     max_contact = torch.zeros(6, device=env.device)
     save_contact_valid = True
-    floor_save_seen = False
     optional_rewards_off = True
     for step in range(args.steps):
         obs, reward, terminated, truncated, info = env.step(actions)
@@ -64,7 +66,6 @@ try:
             check("finite_rollout", False, step)
         codes = info["goalkeeper_outcome"]
         save_contact_valid &= bool(info["goalkeeper_had_paddle_hit"][codes == 7].all())
-        floor_save_seen |= bool(((codes == 7) & (info["goalkeeper_reward_terms"]["floor_after_save"] == -.25)).any())
         optional_rewards_off &= bool((info["goalkeeper_reward_terms"]["optional_rates"] == 0).all())
         optional_rewards_off &= bool((info["goalkeeper_reward_terms"]["optional_hit"] == 0).all())
         outcomes += torch.bincount(codes[codes != 0], minlength=10)
@@ -74,8 +75,22 @@ try:
     check("physical_paddle_contacts", bool(max_contact[0] > .05), max_contact.tolist())
     check("baseline_can_save", bool(outcomes[7] > 0), outcomes.tolist())
     check("save_requires_physical_paddle_hit", save_contact_valid)
-    check("floor_save_still_pays_floor_penalty", floor_save_seen)
+    # Correcting the paddle changes the rebound. Do not require a random floor save.
     check("additional_rewards_disabled_by_default", optional_rewards_off)
+
+    # Real articulated poses: changing either joint must keep the face in Y-Z.
+    from isaaclab.utils.math import quat_mul
+    for shoulder, elbow in ((0., 0.), (-.8, 1.1), (.7, -.9)):
+        env.reset()
+        joint_position = env.robot.data.default_joint_pos.clone()
+        joint_position[:, env.joint_ids] = torch.tensor([shoulder, elbow], device=env.device)
+        env.robot.write_joint_state_to_sim(joint_position, torch.zeros_like(joint_position))
+        joint_actions = actions.clone()
+        joint_actions[:, 4:6] = torch.tensor([shoulder, elbow], device=env.device) / env._joint_scale
+        env.step(joint_actions)
+        normal = env._paddle_pose()[2]
+        check(f"paddle_parallel_to_goal_{shoulder}_{elbow}", bool((normal[:, 0] > .9999).all()), normal.cpu().tolist())
+    env.reset()
 
     # A partial reset must not change the other robot/ball states or erase their actuators.
     env.reset()
@@ -120,15 +135,17 @@ try:
         return int(found.sum())
 
     # Deliberately distinct values prove goal, ball/base hit, and robot crash are decoupled.
-    cfg.rwd_scale_base_collision = -2.0
+    cfg.rwd_scale_ball_base_collision = -2.0
     cfg.rwd_scale_goal = -3.0
     cfg.rwd_scale_robot_crash = -4.0
     base_hits = shoot_at(lambda: env.robot.data.root_pos_w - env.scene.env_origins
-                         + torch.tensor([.38, 0.0, 0.0], device=env.device), 1, cfg.rwd_scale_base_collision)
+                         + torch.tensor([.38, 0.0, 0.0], device=env.device), 1, cfg.rwd_scale_ball_base_collision)
     check("base_hit_attribution", base_hits > 0, base_hits)
     arm1_id = env.robot.find_bodies("flying_arm_2__link1")[0][0]
+    # With the new yaw, a shot at the upper-link COM hits a landing ski first.
+    # Aim below that ski and above the paddle's top edge to expose the arm.
     arm_hits = shoot_at(lambda: env.robot.data.body_com_pos_w[:, arm1_id] - env.scene.env_origins
-                        + torch.tensor([.22, 0.0, 0.0], device=env.device), 2, cfg.rwd_scale_arm_collision)
+                        + torch.tensor([.22, 0.0, -.065], device=env.device), 2, cfg.rwd_scale_ball_arm_collision)
     check("arm_hit_attribution", arm_hits > 0, arm_hits)
     goals = shoot_at(lambda: torch.tensor([-.20, .85, 1.0], device=env.device).expand(args.num_envs, -1), 3, cfg.rwd_scale_goal)
     check("physical_goal_attribution", goals == args.num_envs, goals)
@@ -142,6 +159,77 @@ try:
     _, _, _, _, info = env.step(actions)
     check("tilt_crash_is_distinct_from_ball_base_hit", bool((info["goalkeeper_outcome"] == 8).all()))
     check("independent_robot_crash_scale", bool((info["goalkeeper_reward_terms"]["outcome"] == cfg.rwd_scale_robot_crash).all()))
+
+    # A low, real paddle impact followed by floor contact in the same interval.
+    saved_min = env._area_min.clone()
+    env._area_min[2] = 0.0
+    env.reset()
+    low_root = env.robot.data.root_state_w.clone()
+    low_root[:, 2] = env.scene.env_origins[:, 2] + .52
+    env.robot.write_root_state_to_sim(low_root)
+    env.step(actions)
+    low_ball = env.ball.data.default_root_state.clone()
+    low_ball[:, :3] = env._paddle_pose()[0] + env.scene.env_origins
+    low_ball[:, :3] += torch.tensor([.045, 0., -.095], device=env.device)
+    low_ball[:, 7:10] = torch.tensor([-3., 0., -2.], device=env.device)
+    low_ball[:, 10:] = 0.
+    env.ball.write_root_state_to_sim(low_ball)
+    env._previous_ball.copy_(low_ball[:, :3] - env.scene.env_origins)
+    _, _, _, _, info = env.step(actions)
+    check("floor_save_still_pays_floor_penalty", bool(((info["goalkeeper_outcome"] == 7)
+          & info["goalkeeper_had_paddle_hit"]
+          & (info["goalkeeper_reward_terms"]["floor_after_save"] == cfg.rwd_scale_ball_floor)).any()))
+    env._area_min.copy_(saved_min)
+
+    # Contact and tilt reset switches must work independently in real physics.
+    saved_min = env._area_min.clone()
+    env._area_min[2] = -1.0  # isolate crash handling from the independent allowed-height termination
+    for reset_contact in (False, True):
+        for reset_tilt in (False, True):
+            cfg.reset_robot_on_robot_crash = reset_contact
+            cfg.reset_robot_on_tilt_threshold = reset_tilt
+            for event in ("contact", "tilt"):
+                env.reset()
+                state = env.robot.data.root_state_w.clone()
+                if event == "contact":
+                    state[:, 2] = env.scene.env_origins[:, 2] + .025
+                    folded = env.robot.data.default_joint_pos.clone()
+                    folded[:, env.joint_ids] = torch.tensor([1.4, 1.57], device=env.device)
+                    env.robot.write_joint_state_to_sim(folded, torch.zeros_like(folded))
+                else:
+                    roll = torch.tensor([2**-.5, 2**-.5, 0., 0.], device=env.device).expand(args.num_envs, -1)
+                    state[:, 3:7] = quat_mul(state[:, 3:7], roll)
+                env.robot.write_root_state_to_sim(state)
+                _, _, terminated, _, info = env.step(actions)
+                expected = reset_contact if event == "contact" else reset_tilt
+                check(f"{event}_reset_contact_{reset_contact}_tilt_{reset_tilt}",
+                      bool((terminated == expected).all()))
+                check(f"{event}_penalty_contact_{reset_contact}_tilt_{reset_tilt}",
+                      bool((info["goalkeeper_outcome"] == 8).all())
+                      and bool((info["goalkeeper_reward_terms"]["outcome"] == cfg.rwd_scale_robot_crash).all()))
+                check(f"{event}_detected_independently_contact_{reset_contact}_tilt_{reset_tilt}",
+                      bool(info["goalkeeper_robot_contact_crash"].all()) == (event == "contact")
+                      and bool(info["goalkeeper_tilt_threshold"].all()) == (event == "tilt"))
+    cfg.reset_robot_on_robot_crash = cfg.reset_robot_on_tilt_threshold = True
+    env._area_min.copy_(saved_min)
+
+    original_threshold = cfg.robot_tilt_threshold_rad
+    for threshold_deg, tilt_deg, expected in ((60, 45, False), (60, 75, True), (20, 30, True)):
+        cfg.robot_tilt_threshold_rad = threshold_deg * torch.pi / 180
+        env.reset()
+        state = env.robot.data.root_state_w.clone()
+        half_angle = torch.tensor(tilt_deg * torch.pi / 360, device=env.device)
+        roll = torch.zeros(args.num_envs, 4, device=env.device)
+        roll[:, 0] = half_angle.cos()
+        roll[:, 1] = half_angle.sin()
+        state[:, 3:7] = quat_mul(state[:, 3:7], roll)
+        env.robot.write_root_state_to_sim(state)
+        _, _, terminated, _, info = env.step(actions)
+        check(f"tilt_{tilt_deg}_threshold_{threshold_deg}_reset", bool((terminated == expected).all()))
+        check(f"tilt_{tilt_deg}_threshold_{threshold_deg}_detection",
+              bool((info["goalkeeper_tilt_threshold"] == expected).all())
+              and not bool(info["goalkeeper_robot_contact_crash"].any()))
+    cfg.robot_tilt_threshold_rad = original_threshold
 
     env.reset()
     state = env.robot.data.root_state_w.clone()

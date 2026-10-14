@@ -79,7 +79,7 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         self._clear = torch.zeros_like(self._hit)
         self._new_hit = torch.zeros_like(self._hit)
         self._flags = {
-            name: torch.zeros_like(self._hit) for name in ("base", "arm", "crash", "goal", "floor", "area", "miss")
+            name: torch.zeros_like(self._hit) for name in ("base", "arm", "crash", "tilt", "goal", "floor", "area", "miss")
         }
         self._center_quality = torch.zeros(self.num_envs, device=self.device)
         self._recovery_time = torch.zeros(self.num_envs, device=self.device)
@@ -242,7 +242,8 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         root_pos = self.robot.data.root_pos_w - self.scene.env_origins
         gravity_b = quat_apply_inverse(self.robot.data.root_quat_w, self._gravity)
         self._flags["area"] |= ((root_pos < self._area_min) | (root_pos > self._area_max)).any(-1)
-        self._flags["crash"] |= (gravity_b[:, 2] > -0.5) | (
+        self._flags["tilt"] |= gravity_b[:, 2] > -math.cos(self.cfg.robot_tilt_threshold_rad)
+        self._flags["crash"] |= (
             torch.linalg.vector_norm(other_contact, dim=-1) > 0.1
         ).any(-1)
 
@@ -258,7 +259,8 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         safely_wide = (position[:, 0] < goal_front) & outside
         landed_in_front = self._hit & self._flags["floor"] & (position[:, 0] > goal_front)
         failed = (self._flags["base"] | self._flags["arm"] | self._flags["goal"]
-                  | (self._flags["floor"] & ~landed_in_front) | self._flags["crash"] | self._flags["area"])
+                  | (self._flags["floor"] & ~landed_in_front) | self._flags["crash"]
+                  | self._flags["tilt"] | self._flags["area"])
         # A paddle deflection onto the floor in front of the goal is a save, but
         # still pays the floor penalty. No-contact floor events never earn a save.
         self._clear |= self._hit & (returned | safely_wide | landed_in_front) & ~failed
@@ -289,11 +291,18 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
             self._recovery_time = torch.where(stable, self._recovery_time + self.step_dt, 0.0)
             success = success & (self._recovery_time >= self.cfg.recovery_dwell_s)
         deadline = (self._shot_steps >= self.max_episode_length) & ~success
-        self._outcome = terminal_outcome(self._flags["base"], self._flags["arm"], self._flags["crash"],
-                                        self._flags["goal"], self._flags["floor"] & ~self._clear, self._flags["area"],
+        live_floor = self._flags["floor"] & ~self._clear
+        crash = self._flags["crash"] | self._flags["tilt"]
+        self._outcome = terminal_outcome(self._flags["base"], self._flags["arm"], crash,
+                                        self._flags["goal"], live_floor, self._flags["area"],
                                         self._flags["miss"], deadline, success)
+        reset_crash = ((self._flags["crash"] & self.cfg.reset_robot_on_robot_crash)
+                       | (self._flags["tilt"] & self.cfg.reset_robot_on_tilt_threshold))
+        # Reset switches do not disable rewards or unrelated terminal events.
+        terminated = (reset_crash | self._flags["base"] | self._flags["arm"] | self._flags["goal"]
+                      | live_floor | self._flags["area"] | self._flags["miss"] | deadline | success)
         # Three seconds is a real task deadline, not an artificial trajectory truncation.
-        return self._outcome != 0, torch.zeros_like(success)
+        return terminated, torch.zeros_like(success)
 
     def _get_rewards(self):
         self._sample_power()  # final completed substep, before automatic resets
@@ -321,7 +330,7 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
             rate += self.cfg.rwd_scale_body_linear_velocity * self.robot.data.root_lin_vel_w.square().sum(-1)
         if self.cfg.rwd_scale_thrust:
             rate += self.cfg.rwd_scale_thrust * (self._rotor_thrust / self._hover_per_rotor - 1).square().mean(-1)
-        event_values = torch.tensor([0.0, self.cfg.rwd_scale_base_collision, self.cfg.rwd_scale_arm_collision,
+        event_values = torch.tensor([0.0, self.cfg.rwd_scale_ball_base_collision, self.cfg.rwd_scale_ball_arm_collision,
                                      self.cfg.rwd_scale_goal, self.cfg.rwd_scale_ball_floor,
                                      self.cfg.rwd_scale_leave_goal_area,
                                      self.cfg.rwd_scale_deadline, self.cfg.rwd_scale_save, self.cfg.rwd_scale_robot_crash,
@@ -341,6 +350,8 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         self.extras["goalkeeper_outcome"] = self._outcome.clone()
         self.extras["goalkeeper_paddle_hit"] = self._new_hit.clone()
         self.extras["goalkeeper_had_paddle_hit"] = self._hit.clone()
+        self.extras["goalkeeper_robot_contact_crash"] = self._flags["crash"].clone()
+        self.extras["goalkeeper_tilt_threshold"] = self._flags["tilt"].clone()
         self.extras["goalkeeper_reward_terms"] = {name: term.clone() for name, term in terms.items()}
         self.extras["power_mean_w"] = {
             "rotor_mechanical": mean_power_w[:, 0].clone(),
@@ -431,7 +442,7 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         root[:, :3] = self._home + self.scene.env_origins[env_ids]
         root[:, :2] += (2 * torch.rand(n, 2, device=self.device) - 1) * self.cfg.reset_xy_noise_m
         root[:, 2] += (2 * torch.rand(n, device=self.device) - 1) * self.cfg.reset_z_noise_m
-        root[:, 3:7] = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device)
+        root[:, 3:7] = torch.tensor(self.cfg.robot_home_quat, device=self.device)
         root[:, 7:] = 0.0
         self.robot.write_root_state_to_sim(root, env_ids)
         self.robot.write_joint_state_to_sim(
