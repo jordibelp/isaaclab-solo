@@ -398,6 +398,14 @@ env.curriculum=False env.shot_level=2
 
 Checkpoint resume restores the policy and optimizer, but the standard runner does not save this environment's curriculum window or active level. Set `env.shot_level=N` explicitly when resuming a later level. The dwell and evidence window restart. Do not infer restored curriculum state from the checkpoint iteration number.
 
+### Best checkpoint per level
+
+`source/scripts/rsl_rl/train.py` keeps one best checkpoint per shot level in the run folder: `best_model_curriculum_idx_0.pt` to `best_model_curriculum_idx_3.pt`. "Best" means the highest `Train/mean_reward`. This is the mean return of the last 100 finished episodes. `best_model.pt` is a copy of the most recently improved level best. Each file stores its level, iteration, and score in the checkpoint `infos`.
+
+A promotion does not end the shots already in flight. For a few iterations, the finished episodes still come from the old, easier level. Their return must not count as the new level's score. The environment therefore counts the newest finished episodes that started at the current level (`curriculum_stage_pure_episodes`). The script skips a level's best-checkpoint update until this count covers the whole 100-episode reward buffer. In a local check, this skipped two or three iterations after each promotion. Without the skip, a level-2 score would have become the level-3 best.
+
+With `env.curriculum=False`, the file is named after the fixed `env.shot_level`.
+
 ## 5. Optional additions — off by default
 
 All ten optional scales ship as zero. They are separate experiments, not required parts of the main objective. Your current local file enables energy only, as noted in section 2. A **dense** reward means feedback on many policy steps, rather than just at a shot outcome.
@@ -604,7 +612,7 @@ TensorBoard logs episode reward components, cumulative save fraction, contact/cl
 Run tensor-only tests without launching Isaac Sim:
 
 ```bash
-python -m pytest -q --import-mode=importlib --rootdir=source/isaaclab_tasks/isaaclab_tasks/direct/borinot_goalkeeper/tests --confcutdir=source/isaaclab_tasks/isaaclab_tasks/direct/borinot_goalkeeper/tests source/isaaclab_tasks/isaaclab_tasks/direct/borinot_goalkeeper/tests/test_task_math.py source/isaaclab_tasks/isaaclab_tasks/direct/borinot_goalkeeper/tests/test_power.py source/isaaclab_tasks/isaaclab_tasks/direct/borinot_goalkeeper/tests/test_rewards.py source/isaaclab_tasks/isaaclab_tasks/direct/borinot_goalkeeper/tests/test_reset_geometry.py source/isaaclab_tasks/isaaclab_tasks/direct/borinot_goalkeeper/tests/test_control.py
+python -m pytest -q --import-mode=importlib --rootdir=source/isaaclab_tasks/isaaclab_tasks/direct/borinot_goalkeeper/tests --confcutdir=source/isaaclab_tasks/isaaclab_tasks/direct/borinot_goalkeeper/tests source/isaaclab_tasks/isaaclab_tasks/direct/borinot_goalkeeper/tests/test_task_math.py source/isaaclab_tasks/isaaclab_tasks/direct/borinot_goalkeeper/tests/test_power.py source/isaaclab_tasks/isaaclab_tasks/direct/borinot_goalkeeper/tests/test_rewards.py source/isaaclab_tasks/isaaclab_tasks/direct/borinot_goalkeeper/tests/test_reset_geometry.py source/isaaclab_tasks/isaaclab_tasks/direct/borinot_goalkeeper/tests/test_control.py source/isaaclab_tasks/isaaclab_tasks/direct/borinot_goalkeeper/tests/test_curriculum_checkpoint.py
 ```
 
 Run the GPU environment check:
@@ -645,6 +653,7 @@ To follow the reward in code, read these methods in order:
 - `tests/test_power.py`: physics-rate sampling, power model, and signed power reward.
 - `tests/test_reset_geometry.py`: signed crash/reset behavior and USD-derived arm/paddle frames.
 - `tests/test_control.py`: mode mapping, PI isolation, motor response, limits, and frequency validation.
+- `tests/test_curriculum_checkpoint.py`: the stage-pure episode count that gates each level's best checkpoint.
 - `tests/control_smoke.py`: real Hydra selectors, PhysX actuator property readback, power sampling, and reset checks.
 - `tests/smoke.py`: original PI/240 Hz/60 Hz contact-regression fixture and reset checks.
 - `tests/checkpoint_smoke.py`: finite deterministic inference after reloading a PPO checkpoint.

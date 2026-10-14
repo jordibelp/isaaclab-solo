@@ -262,9 +262,12 @@ try:
     env.common_step_counter = 10
     env._update_curriculum(ids)
     check("curriculum_dwell_boundary_at", env.shot_level == 1 and env._stage_episodes == 0)
+    check("curriculum_checkpoint_stage_restarts",
+          env.get_curriculum_global_idx() == 1 and env.curriculum_stage_pure_episodes == 0)
     env.common_step_counter = 100
     env._update_curriculum(ids)  # these episodes still belong to stage zero
     check("curriculum_excludes_old_stage", env.shot_level == 1 and env._stage_episodes == 0)
+    check("curriculum_checkpoint_ignores_old_stage", env.curriculum_stage_pure_episodes == 0)
     env._outcome[ids] = 0
     env._update_curriculum(ids)
     check("curriculum_no_promotion_without_endings", env.shot_level == 1)

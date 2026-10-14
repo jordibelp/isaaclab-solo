@@ -3334,6 +3334,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     f"{last_curriculum_stage} -> {curriculum_stage}; resetting best-model tracking for the new stage."
                 )
             last_curriculum_stage = curriculum_stage
+            # Right after a promotion the buffer still holds returns from the previous stage;
+            # they must not become the new stage's best.
+            stage_pure_episodes = getattr(raw_env, "curriculum_stage_pure_episodes", None)
+            if stage_pure_episodes is not None and stage_pure_episodes < len(rewbuffer):
+                return
             previous_best_reward = best_mean_reward_by_curriculum_stage.get(curriculum_stage, float("-inf"))
 
         if mean_reward <= previous_best_reward:

@@ -101,6 +101,9 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         self._curriculum_window = torch.zeros(cfg.curriculum_window_episodes, device=self.device)
         self._window_cursor = 0
         self._stage_episodes = 0
+        # Newest consecutive completed episodes that started at the current level. Training only
+        # scores a stage's best checkpoint once the whole reward buffer comes from that stage.
+        self.curriculum_stage_pure_episodes = 0
         # PhysX property setters use CPU buffers; retain them rather than querying every reset.
         self._ball_masses = self.ball.root_physx_view.get_masses()
         self._ball_inertias = self.ball.root_physx_view.get_inertias()
@@ -414,7 +417,13 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
                                   for name, value in self.extras["power_mean_w"].items()})
         self.extras["log"].update({f"Episode_Reward/{name}": value[completed].mean()
                                   for name, value in self._episode_terms.items()})
-        eligible = completed[self._episode_stage[completed] == self.shot_level]
+        current = self._episode_stage[completed] == self.shot_level
+        eligible = completed[current]
+        stale = (~current).nonzero()
+        if len(stale):
+            self.curriculum_stage_pure_episodes = len(completed) - 1 - stale[-1].item()
+        else:
+            self.curriculum_stage_pure_episodes += len(completed)
         if len(eligible):
             outcomes = (self._outcome[eligible] == 7).float()
             self._stage_episodes += len(outcomes)
@@ -438,7 +447,12 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
                 self._curriculum_window.zero_()
                 self._window_cursor = 0
                 self._stage_episodes = 0
+                self.curriculum_stage_pure_episodes = 0
         self.extras["log"]["Curriculum/selected_stage"] = self.shot_level
+
+    def get_curriculum_global_idx(self) -> int:
+        """Shot level; train.py keeps one best_model_curriculum_idx_<level>.pt per level."""
+        return self.shot_level
 
     def _reset_idx(self, env_ids):
         if env_ids is None:
