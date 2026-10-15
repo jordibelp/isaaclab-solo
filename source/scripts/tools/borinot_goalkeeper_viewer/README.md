@@ -2,6 +2,10 @@
 
 This is a lightweight 3D scene inspector. It runs in your browser. You do not need Isaac Sim, a conda environment, training, or a policy checkpoint.
 
+## Collision inspection
+
+The viewer now also shows all USD arm/base collision hulls and the task paddle. Its self-collision panel names geometric overlaps and distinguishes eligible pairs from ignored parent–child pairs. For actual contact forces and joint motion, use the isolated IsaacLab bench. See [collision findings and launch commands](COLLISIONS.md).
+
 ## Start
 
 Run from any directory:
@@ -26,7 +30,7 @@ systemctl --user stop borinot-goalkeeper-viewer.service
 - Use Goal front, Side and Top for scale comparisons. These use an orthographic camera: distance does not change the apparent size. The 3D view uses normal perspective.
 - Click the scene, then use arrow keys to move Y/Z. Page Up/Down move X. The increment is 2 cm, or 10 cm with Shift.
 - Restore config pose returns to the configured home position, `robot_home_quat` orientation, and joint pose. Put paddle at shot aim centre translates the robot so the current paddle centre matches the fixed shot target centre. It does not solve for a flight or arm motion.
-- Toggle the allowed base-position box, shot aim region, goal transparency, dimensions, and extra USD collision shapes.
+- Toggle the allowed base-position box, shot aim region, goal transparency, dimensions, and all collision hulls.
 - New shot samples one of the task's four launch levels. Play and the time slider show a gravity-only flight path. The ball passes through the robot. This is not contact simulation or a save prediction.
 
 All controls change the preview only. They never write to the task config.
@@ -51,7 +55,7 @@ python3 /home/jordibelp/IsaacLab/source/scripts/tools/borinot_goalkeeper_viewer.
 
 Double-click that HTML file. It contains the meshes, config snapshot, pinned local Three.js r160 and its MIT license. It needs no server or network. An exported HTML file does not refresh when you edit the config. Export it again to update it.
 
-The normal launcher uses only Python's standard library. It checks the source USD hash against the cached geometry. If the USD changes, it stops rather than displaying old geometry. To refresh the cache, use a Python environment with `usd-core` and run:
+The normal launcher uses only Python's standard library. It checks the source USD hash against the cached geometry. If the USD changes, it stops rather than displaying old geometry. To refresh the cache, use a Python environment with `usd-core`, NumPy and SciPy and run:
 
 ```bash
 python3 /home/jordibelp/IsaacLab/source/scripts/tools/borinot_goalkeeper_viewer/export_robot.py
@@ -59,7 +63,7 @@ python3 /home/jordibelp/IsaacLab/source/scripts/tools/borinot_goalkeeper_viewer/
 
 This refresh uses the [OpenUSD joint frames](https://openusd.org/release/api/class_usd_physics_revolute_joint.html) and mesh data. The browser renderer uses [Three.js BufferGeometry](https://threejs.org/docs/#api/en/core/BufferGeometry). It does not start Isaac Sim.
 
-This viewer does not simulate thrust, gravity on Borinot, collisions, reward, curriculum promotion or policy behaviour. Use Isaac Sim when those dynamics matter. For comparing geometry and moving the robot around, this viewer is enough.
+This viewer does not simulate thrust, gravity on Borinot, collision response, reward, curriculum promotion or policy behaviour. Use Isaac Sim when those dynamics matter. For comparing geometry and moving the robot around, this viewer is enough.
 
 ## Verification
 

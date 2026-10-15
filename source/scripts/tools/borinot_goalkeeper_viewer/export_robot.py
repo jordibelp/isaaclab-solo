@@ -10,6 +10,8 @@ from pathlib import Path
 import sys
 
 from pxr import Usd, UsdGeom, UsdPhysics, UsdShade
+import numpy as np
+from scipy.spatial import ConvexHull
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from borinot_goalkeeper_viewer import task_defaults
@@ -31,6 +33,21 @@ def quaternion(value):
     return [*map(float, value.GetImaginary()), float(value.GetReal())]
 
 
+def collision_hull(points):
+    """Small convex polyhedron for overlap inspection, not a PhysX cooked mesh."""
+    hull = ConvexHull(np.asarray(points))
+    ids = list(hull.vertices)
+    remap = {old: new for new, old in enumerate(ids)}
+    faces = [[remap[int(i)] for i in face] for face in hull.simplices]
+    edge_faces = {}
+    for index, face in enumerate(faces):
+        for i in range(3):
+            edge_faces.setdefault(tuple(sorted((face[i], face[(i+1)%3]))), []).append(index)
+    edges = [list(edge) for edge, adjacent in edge_faces.items()
+             if len(adjacent) != 2 or np.dot(hull.equations[adjacent[0], :3], hull.equations[adjacent[1], :3]) < 1-1e-6]
+    return {"vertices": hull.points[ids].tolist(), "faces": faces, "edges": edges}
+
+
 def export_model():
     asset = Path(task_defaults()["usd_path"])
     stage = Usd.Stage.Open(str(asset))
@@ -40,6 +57,7 @@ def export_model():
     bodies = {str(p.GetPath()): {"name": p.GetName(), "meshes": [], "colliders": []}
               for p in stage.Traverse() if p.HasAPI(UsdPhysics.RigidBodyAPI)}
     joints = []
+    collision_shapes = []
     for prim in stage.Traverse():
         if prim.IsA(UsdPhysics.Joint):
             joint = UsdPhysics.Joint(prim)
@@ -62,6 +80,27 @@ def export_model():
         body = bodies[str(ancestor.GetPath())]
         local = cache.ComputeRelativeTransform(prim, ancestor)[0]
         item = {"name": str(prim.GetPath()), "matrix": matrix(local)}
+        if prim.HasAPI(UsdPhysics.CollisionAPI) and UsdPhysics.CollisionAPI(prim).GetCollisionEnabledAttr().Get():
+            if prim.IsA(UsdGeom.Mesh):
+                points = UsdGeom.Mesh(prim).GetPointsAttr().Get()
+                approximation = UsdPhysics.MeshCollisionAPI(prim).GetApproximationAttr().Get()
+                if approximation != "convexHull":
+                    raise ValueError(f"Unsupported collision mesh approximation: {approximation}")
+            elif prim.IsA(UsdGeom.Cube):
+                size = UsdGeom.Cube(prim).GetSizeAttr().Get() / 2
+                points = [(x*size, y*size, z*size) for x in (-1, 1) for y in (-1, 1) for z in (-1, 1)]
+            elif prim.IsA(UsdGeom.Cylinder):
+                cylinder = UsdGeom.Cylinder(prim)
+                if cylinder.GetAxisAttr().Get() != "Z":
+                    raise ValueError("Collision cylinder exporter expects Z axis")
+                radius, half_height = cylinder.GetRadiusAttr().Get(), cylinder.GetHeightAttr().Get()/2
+                points = [(radius*np.cos(a), radius*np.sin(a), z) for z in (-half_height, half_height)
+                          for a in np.linspace(0, 2*np.pi, 64, endpoint=False)]
+            else:
+                raise ValueError(f"Unsupported collider: {prim.GetPath()}")
+            collision_shapes.append({"name": prim.GetName(), "path": str(prim.GetPath()), "body": body["name"],
+                                     "type": prim.GetTypeName(), "matrix": matrix(local),
+                                     **collision_hull(points)})
         if not prim.IsA(UsdGeom.Mesh):
             item["type"] = prim.GetTypeName()
             for name in ("size", "height", "radius", "axis"):
@@ -94,7 +133,8 @@ def export_model():
         item.update(vertices=encoded((x for p in points for x in p), "f"), indices=encoded(indices, "I"),
                     color=color, vertex_count=len(points), triangle_count=len(indices) // 3)
         body["meshes"].append(item)
-    return {"usd_sha256": hashlib.sha256(asset.read_bytes()).hexdigest(), "bodies": list(bodies.values()), "joints": joints}
+    return {"usd_sha256": hashlib.sha256(asset.read_bytes()).hexdigest(), "bodies": list(bodies.values()),
+            "joints": joints, "collision_shapes": collision_shapes}
 
 
 if __name__ == "__main__":
