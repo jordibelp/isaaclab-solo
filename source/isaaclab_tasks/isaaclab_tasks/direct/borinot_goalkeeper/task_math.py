@@ -112,5 +112,22 @@ def terminal_outcome(base_hit, arm_hit, robot_crash, goal, floor, left_area, mis
 
 def promotion_ready(age_steps, completed, window_rate, cfg):
     return (cfg.curriculum and age_steps >= cfg.curriculum_min_steps
-            and completed >= cfg.curriculum_min_episodes
+            and completed >= cfg.curriculum_min_shots
             and window_rate > cfg.curriculum_success_threshold)
+
+
+def validate_shot_schedule(cfg):
+    if cfg.shot_resampling_mode not in ("launch", "resolution"):
+        raise ValueError("shot_resampling_mode must be 'launch' or 'resolution'.")
+    lo, hi = cfg.shot_resampling_time_range_s
+    if not (math.isfinite(lo) and math.isfinite(hi) and 0 <= lo <= hi):
+        raise ValueError("shot_resampling_time_range_s requires finite 0 <= min <= max.")
+    if not all(math.isfinite(v) and v > 0 for v in (cfg.episode_length_s, cfg.shot_timeout_s)):
+        raise ValueError("Episode duration and shot timeout must be finite and positive.")
+    if not all(math.isfinite(v) for v in cfg.ball_park_position) or cfg.ball_park_position[2] >= -.1-cfg.ball_radius_m:
+        raise ValueError("ball_park_position must be finite and fully below the local floor.")
+
+
+def sample_shot_delay_steps(n, device, cfg, step_dt):
+    seconds = torch.empty(n, device=device).uniform_(*cfg.shot_resampling_time_range_s)
+    return torch.ceil(seconds / step_dt).long()

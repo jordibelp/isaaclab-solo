@@ -53,7 +53,7 @@ def test_self_collision_selector_overrides_spawn_settings_after_hydra(enabled):
 
 
 @pytest.mark.parametrize("mode,actions,observations,kp,kd", [
-    (MODES[0], 8, 62, 0.0, 0.0), (MODES[1], 8, 62, 35.0, 0.6), (MODES[2], 6, 60, 35.0, 0.6),
+    (MODES[0], 8, 65, 0.0, 0.0), (MODES[1], 8, 65, 35.0, 0.6), (MODES[2], 6, 63, 35.0, 0.6),
 ])
 def test_resolver_updates_spaces_timing_and_existing_actuator(mode, actions, observations, kp, kd):
     cfg = config()
@@ -77,7 +77,7 @@ def test_frequency_overrides(physics, policy, decimation):
     method("borinot_goalkeeper_env_cfg.py", "configure_control")(cfg)
     assert cfg.decimation == decimation
     assert math.isclose(cfg.sim.dt * cfg.decimation, 1 / policy)
-    assert math.ceil(cfg.episode_length_s / (cfg.sim.dt * cfg.decimation)) == 3 * policy
+    assert math.ceil(cfg.episode_length_s / (cfg.sim.dt * cfg.decimation)) == 20 * policy
 
 
 @pytest.mark.parametrize("field,value", [

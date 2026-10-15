@@ -39,7 +39,7 @@ def make_env():
     normal = xyz.clone()
     normal[:, 0] = 1.0
     cfg = SimpleNamespace(**{name: 0.0 for name in config_scales()}, decimation=4,
-                          progress_use_prediction=False)
+                          progress_use_prediction=False, shot_resampling_mode="launch")
     return SimpleNamespace(
         cfg=cfg, device="cpu", step_dt=1/60, _sample_power=lambda: None,
         _power_sum_w=torch.tensor([4., 8., 12., 16.]).repeat(n, 1),
@@ -51,6 +51,8 @@ def make_env():
         _interception=lambda: (target, zero, zero.bool(), torch.full((n,), .4)),
         _recovery_geometry=lambda: (torch.ones(n, dtype=torch.bool), torch.full((n,), .6)),
         _old_progress_active=torch.ones(n, dtype=torch.bool),
+        _ball_active=torch.ones(n, dtype=torch.bool), _shot_stage=torch.zeros(n,dtype=torch.long),
+        _record_shots=lambda ids: None, _park_ball=lambda ids: None,
         _clear=torch.ones(n, dtype=torch.bool), _hit=torch.ones(n, dtype=torch.bool),
         actions=torch.full((n, 6), .1), _previous_actions=torch.zeros(n, 6),
         _rotor_thrust=torch.full((n, 6), 2.), _hover_per_rotor=1.,

@@ -18,11 +18,15 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     physics_hz = 200
     policy_hz = 100
     decimation = 2  # derived from physics_hz / policy_hz after Hydra overrides
-    episode_length_s = 3.0
-    is_finite_horizon = True
+    episode_length_s = 20.0
+    is_finite_horizon = False  # artificial collection limit; bootstrap the pre-reset state
+    shot_timeout_s = 3.0  # unresolved ball ends this shot, not the robot episode
+    shot_resampling_time_range_s = (2.0, 3.0)
+    shot_resampling_mode = "launch"  # "launch": launch-to-launch; "resolution": delay after each result
+    ball_park_position = (0.0, 0.0, -2.0)  # inactive ball is removed below the local floor
     action_space = 8  # derived: 8 for direct thrust modes, 6 for PI
-    observation_space = 62  # derived: 54 shared values plus the current actions
-    state_space = 62
+    observation_space = 65  # derived: 57 shared values plus the current actions
+    state_space = 65
     sim = sim_utils.SimulationCfg(
         dt=1 / 200,
         render_interval=decimation,
@@ -109,8 +113,8 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     shot_flight_time_ranges_s = ((0.42, 0.50), (0.35, 0.50), (0.30, 0.46), (0.25, 0.42))
     shot_level = 0
     curriculum = True
-    curriculum_window_episodes = 2048
-    curriculum_min_episodes = 1024
+    curriculum_window_shots = 2048
+    curriculum_min_shots = 1024
     curriculum_min_steps = 3000  # 30 s at 100 Hz (50 s at 60 Hz), per environment, not aggregate transitions
     curriculum_success_threshold = 0.7
 
@@ -164,9 +168,11 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     rwd_scale_ball_floor = -0.25  # live floor event or a deflected ball landing in front of goal
     rwd_scale_miss = -1.0 # Ball is not cleared and goes outside the region, might handle weird racket contacts
     rwd_scale_deadline = -1.0
-    rwd_scale_robot_crash = -1.0  # non-ball robot contact or excessive tilt; independent of reset flags
+    rwd_scale_robot_crash = -1.0  # non-ball contact on robot_crash_body_names or excessive tilt; independent of reset flags
     reset_robot_on_robot_crash = True
     reset_robot_on_tilt_threshold = True
+    robot_crash_body_names = ("base",)  # non-ball normal contact on these bodies is fatal
+    robot_crash_force_threshold_n = 0.1
     robot_tilt_threshold_degs = 70.0  # degrees from world vertical; converted internally for the cosine test
 
     # Optional additions: disabled by default. Enable explicitly for an ablation.
@@ -207,7 +213,7 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
         self.sim.dt = 1 / self.physics_hz
         self.sim.render_interval = self.decimation
         self.action_space = 6 if self.control_mode == modes[2] else 8
-        self.observation_space = self.state_space = 54 + self.action_space
+        self.observation_space = self.state_space = 57 + self.action_space
         actuator = self.robot.actuators["arm"]
         use_pd = self.control_mode != modes[0] or self.hold_arm
         actuator.stiffness = self.joint_stiffness if use_pd else 0.0

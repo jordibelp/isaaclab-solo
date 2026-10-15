@@ -46,8 +46,8 @@ def check(name, condition, detail=None):
 
 try:
     obs, _ = env.reset()
-    check("observation_contract", obs["policy"].shape == (args.num_envs, 60)
-          and obs["critic"].shape == (args.num_envs, 60))
+    check("observation_contract", obs["policy"].shape == (args.num_envs, 63)
+          and obs["critic"].shape == (args.num_envs, 63))
     check("finite_reset", all(torch.isfinite(value).all().item() for value in obs.values()))
     check("mass_preserved", abs(env.robot_mass_kg - 2.910538) < 1e-4)
     masses = env.robot.root_physx_view.get_masses()[0]
@@ -246,31 +246,32 @@ try:
     # Stage-pure count aggregation, just-before/at dwell, and exclusion of older episodes.
     env.reset()
     env.cfg.curriculum = True
-    env.cfg.curriculum_min_episodes = 4
+    env.cfg.curriculum_min_shots = 4
     env.cfg.curriculum_min_steps = 10
     env.shot_level = 0
     env._stage_start_step = 0
-    env._stage_episodes = 0
+    env._stage_shots = 0
     env._curriculum_window.zero_()
     env._window_cursor = 0
     ids = torch.arange(4, device=env.device)
     env._shot_steps[ids] = 1
     env._episode_stage[ids] = 0
+    env._shot_stage[ids] = 0
     env._outcome[ids] = 7
     env.common_step_counter = 9
-    env._update_curriculum(ids)
+    env._record_shots(ids)
     check("curriculum_dwell_boundary_before", env.shot_level == 0)
     env.common_step_counter = 10
-    env._update_curriculum(ids)
-    check("curriculum_dwell_boundary_at", env.shot_level == 1 and env._stage_episodes == 0)
+    env._record_shots(ids)
+    check("curriculum_dwell_boundary_at", env.shot_level == 1 and env._stage_shots == 0)
     check("curriculum_checkpoint_stage_restarts",
           env.get_curriculum_global_idx() == 1 and env.curriculum_stage_pure_episodes == 0)
     env.common_step_counter = 100
-    env._update_curriculum(ids)  # these episodes still belong to stage zero
-    check("curriculum_excludes_old_stage", env.shot_level == 1 and env._stage_episodes == 0)
+    env._record_shots(ids)  # these episodes still belong to stage zero
+    check("curriculum_excludes_old_stage", env.shot_level == 1 and env._stage_shots == 0)
     check("curriculum_checkpoint_ignores_old_stage", env.curriculum_stage_pure_episodes == 0)
     env._outcome[ids] = 0
-    env._update_curriculum(ids)
+    env._record_shots(ids)
     check("curriculum_no_promotion_without_endings", env.shot_level == 1)
     report["outcome_counts"] = env.outcome_counts.tolist()
     report["passed"] = all(row["passed"] for row in report["checks"])

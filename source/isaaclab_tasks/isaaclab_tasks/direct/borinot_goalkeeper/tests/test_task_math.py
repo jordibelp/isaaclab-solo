@@ -20,7 +20,7 @@ def cfg():
         shot_flight_time_ranges_s=((0.42, 0.50), (0.35, 0.50), (0.30, 0.46), (0.25, 0.42)),
         launch_x_range=(1.9, 2.1), launch_z=1.55, launch_y_noise=0.15,
         goal_center=(-0.45, 0.0, 1.2), goal_size=(0.04, 2.4, 2.4), ball_radius_m=0.03,
-        curriculum=True, curriculum_min_steps=3000, curriculum_min_episodes=1024,
+        curriculum=True, curriculum_min_steps=3000, curriculum_min_shots=1024,
         curriculum_success_threshold=0.7,
     )
 

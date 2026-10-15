@@ -18,23 +18,27 @@ task_math = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(task_math)
 tree = ast.parse((folder / "borinot_goalkeeper_env.py").read_text())
 methods = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
-           and n.name in ("_update_curriculum", "get_curriculum_global_idx")]
+           and n.name in ("_update_curriculum", "_record_shots", "get_curriculum_global_idx")]
 namespace = {"torch": torch, "promotion_ready": task_math.promotion_ready}
 exec(compile(ast.Module(body=methods, type_ignores=[]), str(folder), "exec"), namespace)
 update_curriculum = namespace["_update_curriculum"]
+record_shots = namespace["_record_shots"]
 get_curriculum_global_idx = namespace["get_curriculum_global_idx"]
 
 
 def make_env(n=8, promote=False):
     cfg = SimpleNamespace(
         shot_half_extents_yz=((0.045, 0.045), (0.20, 0.12), (0.40, 0.22), (0.65, 0.32)),
-        curriculum=promote, curriculum_min_steps=1, curriculum_min_episodes=1, curriculum_success_threshold=0.0,
+        curriculum=promote, curriculum_min_steps=1, curriculum_min_shots=1, curriculum_success_threshold=0.0,
     )
     return SimpleNamespace(
         cfg=cfg, device="cpu", extras={"power_mean_w": {}}, common_step_counter=10,
-        shot_level=0, _stage_start_step=0, _stage_episodes=0, _window_cursor=0,
+        shot_level=0, _stage_start_step=0, _stage_shots=0, _window_cursor=0,step_dt=.01,
         _curriculum_window=torch.zeros(16), outcome_counts=torch.zeros(10, dtype=torch.long),
         _shot_steps=torch.ones(n, dtype=torch.long), _outcome=torch.full((n,), 7),
+        _episode_steps=torch.ones(n,dtype=torch.long), _episode_shots=torch.zeros(n,dtype=torch.long),
+        _episode_saves=torch.zeros(n,dtype=torch.long), _episode_paddle_hits=torch.zeros(n,dtype=torch.long),
+        _shot_stage=torch.zeros(n,dtype=torch.long),
         _episode_stage=torch.zeros(n, dtype=torch.long), _episode_rewards=torch.zeros(n),
         _hit=torch.ones(n, dtype=torch.bool), _clear=torch.ones(n, dtype=torch.bool),
         _episode_terms={"outcome": torch.zeros(n)}, curriculum_stage_pure_episodes=0,
@@ -51,10 +55,11 @@ def test_current_level_endings_accumulate_across_batches():
 
 def test_promotion_restarts_count_and_reports_new_level():
     env = make_env(promote=True)
-    update_curriculum(env, torch.arange(4))
+    record_shots(env, torch.arange(4))
     assert env.shot_level == 1
     assert get_curriculum_global_idx(env) == 1
     assert env.curriculum_stage_pure_episodes == 0
+    assert env._episode_shots.tolist() == [1,1,1,1,0,0,0,0]
 
 
 def test_only_newest_endings_after_last_older_level_episode_count():
@@ -81,9 +86,24 @@ def test_older_level_ending_last_gives_zero():
 def test_resets_without_an_ending_do_not_change_count():
     env = make_env()
     env.curriculum_stage_pure_episodes = 5
-    env._outcome[:] = 0
-    update_curriculum(env, torch.arange(4))
-    env._outcome[:] = 7
-    env._shot_steps[:] = 0
+    env._episode_steps[:] = 0
     update_curriculum(env, torch.arange(4))
     assert env.curriculum_stage_pure_episodes == 5
+
+
+def test_old_stage_shots_do_not_fill_new_stage_window_or_change_episode_purity():
+    env = make_env()
+    env.shot_level = 1
+    env.curriculum_stage_pure_episodes = 12
+    record_shots(env, torch.arange(8))
+    assert env._stage_shots == 0
+    assert env.curriculum_stage_pure_episodes == 12
+    assert env.outcome_counts[7] == 8
+
+
+def test_shot_counts_cannot_unlock_episode_return_checkpoint_gate():
+    env = make_env()
+    for _ in range(25):
+        record_shots(env, torch.arange(8))
+    assert env._stage_shots == 200
+    assert env.curriculum_stage_pure_episodes == 0

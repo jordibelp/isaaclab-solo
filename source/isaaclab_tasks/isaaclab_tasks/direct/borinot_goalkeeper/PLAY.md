@@ -4,7 +4,7 @@ Use the dedicated RSL-RL player. `play_direct_0325.py` is a Solo12 player. It ex
 
 ## Play a current checkpoint
 
-Current goalkeeper policies use a flattened 3×3 rotation matrix: 62 observations in direct control modes or 60 in PI mode. Use a checkpoint trained with this observation layout. Older quaternion-input weights do not load directly.
+Current goalkeeper policies use a flattened 3×3 rotation matrix: 65 observations in direct control modes or 63 in PI mode. Use a checkpoint trained with this observation layout. Older quaternion-input weights do not load directly.
 
 Activate the local environment once:
 
@@ -15,7 +15,7 @@ cd /home/jordibelp/IsaacLab && source /home/jordibelp/miniconda3/etc/profile.d/c
 Then run:
 
 ```bash
-./isaaclab.sh -p source/scripts/rsl_rl/play_borinot_goalkeeper.py --checkpoint /absolute/path/new_rotation_matrix_checkpoint.pt --num_envs 1 --duration_s 2000 env.control_mode=thrust_and_torque_control env.physics_hz=200 env.policy_hz=100 'env.robot_home=[0.0,0.0,1.5]' env.rwd_scale_energy=0.0
+./isaaclab.sh -p source/scripts/rsl_rl/play_borinot_goalkeeper.py --checkpoint /absolute/path/new_continuous_checkpoint.pt --num_envs 1 --duration_s 2000 env.control_mode=thrust_and_torque_control env.physics_hz=200 env.policy_hz=100 'env.robot_home=[0.0,0.0,1.5]' env.rwd_scale_energy=0.0
 ```
 
 The task and agent default to `Borinot-Goalkeeper-Direct-v0` and `rsl_rl_cfg_entry_point`. There is no Solo12 `--task` flag to keep. The checkpoint path is storage only; the source code comes from the canonical `IsaacLab` checkout.
@@ -39,7 +39,7 @@ The views are anchored to environment 0, not the robot's yaw. The camera does no
 
 - The policy uses deterministic inference, with action clipping from the registered agent config.
 - Playback defaults to `env.curriculum=False`. Shot difficulty therefore stays fixed. The default shot level is 0; add `env.shot_level=1`, `2`, or `3` to test wider/faster shots. Add `env.curriculum=True` only if you want progression during play.
-- `--duration_s` measures simulated time. It does not change the task's three-second shot deadline or terminal resets. Each completed shot resets automatically.
+- `--duration_s` measures total playback time. A robot episode lasts 20 seconds by default and contains multiple shots. Saves and ball failures recycle only the ball. Safety failures reset the robot. Tune `env.episode_length_s`, `env.shot_timeout_s`, `env.shot_resampling_time_range_s` and `env.shot_resampling_mode` to change timing. The player counts all resolved shots, not only robot resets.
 - Playback is paced in real time when possible. Add `--no-real-time` for unpaced headless checks. Rendering may make playback slower than real time; no physics steps are skipped.
 - Compilation and local-redundancy diagnostics default off for inference. Explicit Hydra overrides still work.
 - The runner does not restore optimizer state, train, export policies, or upload a W&B run.

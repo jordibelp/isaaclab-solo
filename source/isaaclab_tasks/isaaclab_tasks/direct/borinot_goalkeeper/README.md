@@ -7,9 +7,37 @@ Date: 2026-10-14. Task ID: `Borinot-Goalkeeper-Direct-v0`.
 This is a separate task. It does not change the existing Borinot locomotion task or the source USD.
 We start with privileged simulator information. Both the actor and critic receive true robot state, ball position and velocity, and the sampled ball mass and restitution. There is no camera or state estimator yet.
 
-The default reward follows Jordi's requested approach. Goal and base hits cost −1. Arm hits cost −0.25. Leaving the goal area costs −1. Moving the racket closer to the ball in the goal-parallel plane earns signed progress. A verified racket save earns +1. Additional shaping and the recovery requirement are off by default.
+Episodes now contain a continuous sequence of single-ball shots. A save or failed interception does not reset Borinot. Only configured base crashes, excessive tilt, leaving the allowed area, and the episode time limit reset the robot. The default reward follows Jordi's requested approach. Goal and base hits cost −1. Arm hits cost −0.25. Leaving the goal area costs −1. Moving the racket closer to the ball in the goal-parallel plane earns signed progress. A verified racket save earns +1. Additional shaping and the recovery requirement are off by default.
 
 Use **PPO** first. Both Borinot tasks now share the Solo-style PPO recipe: 24 rollout steps, four minibatches, five epochs, `[512, 256, 128]` networks, AdamW, and gamma 0.99. See [PPO training guide](../borinot/PPO_TRAINING.md) for the complete cluster commands and available flags. SAC remains future work.
+
+### Continuous episode and shot timing
+
+```python
+episode_length_s = 20.0
+is_finite_horizon = False
+shot_timeout_s = 3.0
+shot_resampling_time_range_s = (2.0, 3.0)
+shot_resampling_mode = "launch"
+ball_park_position = (0.0, 0.0, -2.0)
+robot_crash_body_names = ("base",)
+robot_crash_force_threshold_n = 0.1
+reset_robot_on_robot_crash = True
+reset_robot_on_tilt_threshold = True
+robot_tilt_threshold_degs = 70.0
+```
+
+The first ball launches when the robot episode resets. Each following interval is sampled independently for each environment. In **launch** mode, the interval runs from the previous launch: the default requests a new ball every 2–3 seconds. If the previous shot is still active at that time, the environment waits. It never replaces an unresolved ball just because the timer expired.
+
+In **resolution** mode, the sampled delay starts after the previous shot ends. For near-immediate successive shots, use `env.shot_resampling_mode=resolution 'env.shot_resampling_time_range_s=[0.05,0.20]'`. A fixed interval is allowed by setting min=max. A zero delay is also allowed; the next ball still starts no earlier than the next policy action after the old shot ended.
+
+There is exactly **one physical ball per environment**. A completed shot is scored once, marked inactive and moved below the local floor. The same ball body is reused on the next launch, with new mass/restitution. Inactive balls cannot score contacts, goals, floor events or misses. Their ball-related observations are zero. We do not create a second airborne ball. `ball_park_position` must put the whole sphere below the floor.
+
+A save, ball/base hit, ball/arm hit, goal, ball-floor failure, miss or shot timeout ends **only the current shot**. The configured reward or penalty is paid once. The robot keeps its position, orientation, velocities, joint state, actions, motor thrust state and PI integral. It continues balancing and paying any enabled rate/energy terms while waiting. Optional recovery shaping can continue after a save until the next launch.
+
+By default, a crash means non-ball normal contact on the **base**, above `robot_crash_force_threshold_n`. Arm/paddle ground contacts do not by themselves trigger that detector. To include them, add their names to `robot_crash_body_names`: `base`, `paddle`, `flying_arm_2__link1`, `flying_arm_2__link2`. Ball-to-base and ball-to-arm impacts remain nonterminal shot failures. The contact and tilt reset switches are independent; leaving the goal area always terminates.
+
+The private episode clock runs for 20 seconds across all shots and waiting periods. It is independent of RSL's randomized warm-start episode counter. This is an artificial collection limit by default: it returns a time-limit truncation and preserves the final observation for PPO bootstrapping. A safety failure returns a true termination. Set `is_finite_horizon=True` only if the time limit should instead be a true finite-horizon terminal state. A time limit alone has no extra shot-deadline penalty.
 
 ### Activate the local environment
 
@@ -106,9 +134,9 @@ The top-level `enabled_self_collisions=False` keeps the previous default. Overri
 
 With self-collisions ON, eligible nonadjacent robot links can collide. Parent–child pairs remain filtered by PhysX. The task's robot-contact crash detector can terminate these episodes; the existing `reset_robot_on_robot_crash` option controls that termination separately. Enabling this flag does not change the source USD, masses, actuator settings or observation sizes. The browser self-collision switch remains preview-only, but its initial value reads this top-level config field.
 
-Use `source/scripts/rsl_rl/play_borinot_goalkeeper.py`, not the Solo12 player, for goalkeeper weights. The checkpoint `1014_ii4tbx06_model_4690.pt` has 57-input actor/normalizer tensors; current direct-mode observations have 62 values after the rotation-matrix update. It cannot load unchanged on current code. Use a matching 62-input checkpoint or the older matching code. This collision option does not convert checkpoint inputs.
+Use `source/scripts/rsl_rl/play_borinot_goalkeeper.py`, not the Solo12 player, for goalkeeper weights. The checkpoint `1014_ii4tbx06_model_4690.pt` has 57-input actor/normalizer tensors; current direct-mode observations have 65 values after the matrix and continuous-shot updates. It cannot load unchanged on current code. Use a matching 65-input checkpoint or the older matching code. This collision option does not convert checkpoint inputs.
 
-The ball has a 30 mm radius. Each reset samples mass uniformly from 20–50 g and restitution from 0.35–0.65. Restitution means how strongly the ball rebounds. We use the `max` material combination rule with a zero-restitution paddle, so the sampled ball value sets the ball–paddle restitution.
+The ball has a 30 mm radius. Each ball launch samples mass uniformly from 20–50 g and restitution from 0.35–0.65. Restitution means how strongly the ball rebounds. We use the `max` material combination rule with a zero-restitution paddle, so the sampled ball value sets the ball–paddle restitution.
 
 When mass changes, the code also changes the sphere's inertia using `I = 0.4 * mass * radius²`. The property setters change the active PhysX model, not just USD metadata. Validation reads those properties back.
 
@@ -128,9 +156,9 @@ The tables below give the shipped values in the committed config. Current local 
 
 ### How one policy step gets its reward
 
-With the default 200 Hz physics and 100 Hz policy, one action lasts two physics steps and `step_dt=0.01 s`. We check contact and safety events after every physics step. An event remains recorded until the end of that action interval, even if the contact has already ended. Paddle-hit and safe-clearance history remain recorded until the episode resets.
+With the default 200 Hz physics and 100 Hz policy, one action lasts two physics steps and `step_dt=0.01 s`. We check contact and safety events after every physics step. An event remains recorded until the end of that action interval, even if the contact has already ended. Paddle-hit and safe-clearance history remain recorded until the next shot launches. The independent episode clock continues across launches.
 
-At the end of the interval, we select an outcome, calculate the reward, and then reset any finished environment. The total reward is:
+At the end of the interval, we select an outcome and calculate the reward. A resolved ball is removed and waits for relaunch. Only a safety ending or the episode time limit resets the robot. The total reward is:
 
 ```text
 reward = plane_progress + outcome + floor_after_save
@@ -143,18 +171,18 @@ reward = plane_progress + outcome + floor_after_save
 
 | Config field | Shipped scale | Signal and usual episode effect |
 |---|---:|---|
-| `rwd_scale_goal` | −1.0 | Ball contacts or crosses the goal surface. Ends the episode. |
-| `rwd_scale_ball_base_collision` | −1.0 | Ball contacts the aircraft base. Ends the episode. |
-| `rwd_scale_ball_arm_collision` | −0.25 | Ball contacts either arm link, rather than only the paddle. Ends the episode. |
+| `rwd_scale_goal` | −1.0 | Ball contacts or crosses the goal surface. Ends this shot; episode continues. |
+| `rwd_scale_ball_base_collision` | −1.0 | Ball contacts the aircraft base. Ends this shot; episode continues. |
+| `rwd_scale_ball_arm_collision` | −0.25 | Ball contacts either arm link, rather than only the paddle. Ends this shot; episode continues. |
 | `rwd_scale_leave_goal_area` | −1.0 | Base origin leaves the allowed box. Ends the episode. |
-| `rwd_scale_save` | +1.0 | A paddle hit is followed by verified safe clearance, plus recovery if requested. Ends the episode. |
-| `rwd_scale_ball_floor` | −0.25 | Ball touches the floor while live. Usually ends the episode; a valid floor save is the exception. |
-| `rwd_scale_miss` | −1.0 | An unresolved ball leaves the tracking bounds. Ends the episode. |
-| `rwd_scale_deadline` | −1.0 | Shot time runs out without a confirmed save. Ends the episode. |
-| `rwd_scale_robot_crash` | −1.0 | Non-ball robot contact or excessive tilt. Reset depends on two independent switches. |
+| `rwd_scale_save` | +1.0 | A paddle hit is followed by verified safe clearance, plus recovery if requested. Ends this shot; episode continues. |
+| `rwd_scale_ball_floor` | −0.25 | Live-floor shot failure, or a separate floor cost on a valid floor save. Episode continues. |
+| `rwd_scale_miss` | −1.0 | An unresolved ball leaves the tracking bounds. Ends this shot; episode continues. |
+| `rwd_scale_deadline` | −1.0 | Shot time runs out without a confirmed save. Ends this shot; episode continues. |
+| `rwd_scale_robot_crash` | −1.0 | Non-ball contact on configured crash bodies or excessive tilt. Reset uses two independent switches. |
 | `rwd_scale_progress` | +0.5 | Signed reduction in paddle-to-target y–z distance, in metres. Does not end the episode. |
 
-Each selected event has signal 1, so its contribution is exactly its scale. For example, a selected arm collision contributes −0.25, not −0.25 per second. With the default reset switches, event penalties end the episode and are paid on that final transition. Crash penalties can repeat if you disable their resets.
+Each selected event has signal 1, so its contribution is exactly its scale. For example, a selected arm collision contributes −0.25, not −0.25 per second. Ball-result penalties are paid once per resolved shot without ending the episode. Safety penalties are paid on the failure transition. Crash penalties can repeat if you disable their resets.
 
 ### `rwd_scale_goal`: the ball scores
 
@@ -163,11 +191,11 @@ A goal is detected in either of two ways:
 - The ball's filtered contact force against the goal exceeds `contact_force_threshold_n=0.05 N`.
 - The ball crosses the front goal plane toward negative x and overlaps the goal in both y and z. The crossing test checks the path between consecutive physics samples, so it can detect a fast ball that crosses between them.
 
-The crossing plane is `goal_center.x + goal_size.x/2 + ball_radius_m`, currently **x = −0.40 m**. This is the plane reached by the ball's center when its leading edge reaches the goal front. The y–z overlap includes the 0.03 m ball radius; an edge-overlapping ball still counts as a goal. A prior paddle touch does not cancel a later goal. A goal is a failed save and ends the episode.
+The crossing plane is `goal_center.x + goal_size.x/2 + ball_radius_m`, currently **x = −0.40 m**. This is the plane reached by the ball's center when its leading edge reaches the goal front. The y–z overlap includes the 0.03 m ball radius; an edge-overlapping ball still counts as a goal. A prior paddle touch does not cancel a later goal. A goal is a failed save and ends the shot, not the episode.
 
 ### `rwd_scale_ball_base_collision` and `rwd_scale_ball_arm_collision`: forbidden ball contacts
 
-These use the same 0.05 N filtered ball-contact threshold. A base hit means contact with `base`. An arm hit means contact with `flying_arm_2__link1` or `flying_arm_2__link2`. Both end the episode, even if the collision stops the ball from scoring.
+These use the same 0.05 N filtered ball-contact threshold. A base hit means contact with `base`. An arm hit means contact with `flying_arm_2__link1` or `flying_arm_2__link2`. Both end this shot with their penalty, even if the collision stops the ball from scoring. Neither resets the robot.
 
 The attached paddle is a separate body and is the only legal hitting surface. The original distal-link mesh remains collidable and counts as an **arm**, not as the paddle. A paddle touch and an arm touch in the same interval still constitute an arm-hit failure. These penalties have independent scales; changing the goal scale does not change them.
 
@@ -177,9 +205,9 @@ This term is **not** a penalty for hitting the ball twice. It concerns the **bal
 
 There are three important cases:
 
-1. **No paddle hit, then floor:** this is a live-floor failure. It receives −0.25 and ends the episode. It earns no save bonus.
+1. **No paddle hit, then floor:** this is a live-floor failure. It receives −0.25 and ends the shot; the episode continues. It earns no save bonus.
 2. **Paddle hit, then floor while still unresolved:** if the ball lands with its center **in front of the goal plane** (`x > −0.40 m`) and no safety/forbidden-contact failure prevents clearance, it qualifies as a save. With default recovery off, it receives +1 for the save **and** −0.25 for the floor: **+0.75** before other terms. An unresolved floor landing that does not qualify receives the floor failure instead.
-3. **Ball already safely cleared, then floor in a later interval:** the floor detector ignores that out-of-play contact. There is no new floor penalty. With recovery off, the episode has already ended anyway.
+3. **Ball already safely cleared, then floor in a later interval:** the floor detector ignores that out-of-play contact. There is no new floor penalty. With recovery off, the ball has already been removed; the robot episode continues.
 
 In case 2, the floor cost is logged as `floor_after_save`, rather than replacing the save in `outcome`. If clearance is confirmed in an interval that has already recorded a live-floor contact, that floor cost is still paid in the interval. With recovery required, it can be paid while recovery is pending (`outcome=0`), with the save bonus paid later. It is not paid again after clearance. Higher-priority failures suppress this separate floor-after-save reward component; see the priority list below.
 
@@ -193,15 +221,15 @@ abs(ball.x) > 3.0 m, OR abs(ball.y) > 3.0 m, OR ball.z > 4.5 m
 
 If any bound is exceeded **before safe clearance**, the miss flag is set. There is no separate lower-z escape bound; floor detection handles low balls. These escape limits are literal values in `_sample_physics_events()`, not config fields.
 
-For example, a ball at y = 3.1 m without verified clearance receives −1 and ends the episode, unless another failure has higher priority. A ball at that same position after a valid paddle clearance does not incur a miss penalty. A ball passing beside the goal **without touching the paddle** is not automatically a save: it stays unresolved until a floor event, escape, or deadline ends the shot. Thus `miss` means an out-of-bounds unresolved shot, not every unsuccessful interception.
+For example, a ball at y = 3.1 m without verified clearance receives −1 and ends the shot, unless another failure has higher priority. A ball at that same position after a valid paddle clearance does not incur a miss penalty. A ball passing beside the goal **without touching the paddle** is not automatically a save: it stays unresolved until a floor event, escape, or deadline ends the shot. Thus `miss` means an out-of-bounds unresolved shot, not every unsuccessful interception.
 
 ### `rwd_scale_deadline`: the shot clock expires
 
-Each reset starts a separate shot clock at zero. It advances once per policy action. The limit is `ceil(episode_length_s / step_dt)`: **300 actions = 3.0 s** with the default 100 Hz policy. It is independent of the runner's randomized initial episode-length counter.
+Each launch resets only the shot clock. It advances while that ball is active. The limit is `shot_timeout_s`, default 3.0 seconds: 300 actions at 100 Hz or 180 at 60 Hz. It is separate from the 20-second robot episode clock.
 
-If the shot reaches that limit without a confirmed save, it receives the deadline outcome, unless a higher-priority failure occurred. For example, a touched but still unresolved ball inside the tracking bounds at 3 s receives −1. With recovery required, safe ball clearance without completing the recovery dwell by 3 s also receives −1.
+An unresolved shot at that limit receives the deadline outcome and its signed scale, unless a higher-priority event wins. A confirmed save on the last allowed action wins over timeout. With recovery required, clearance without the requested recovery dwell by the shot deadline is still a timed-out shot.
 
-A save completed on the last allowed action does not receive the deadline penalty. The deadline is a **real task failure**, not just a cut in a longer trajectory: `terminated=True`, with no timeout truncation or PPO timeout bootstrap. To change its time, tune `episode_length_s`, not `rwd_scale_deadline`. To change only its reward amount, tune the scale. Setting that scale to zero still ends the episode at the deadline.
+A shot deadline **does not terminate or truncate the robot episode**. It removes that ball and schedules another. Tune `shot_timeout_s` for this deadline and `episode_length_s` for the full episode. Setting `rwd_scale_deadline=0.0` removes only the penalty, not shot recycling.
 
 ### `rwd_scale_leave_goal_area`: the aircraft base leaves its box
 
@@ -221,12 +249,12 @@ Both spawn and reset use `robot_home_quat` in wxyz order. Early phases start at 
 
 Two independent detectors share this reward scale:
 
-- **Robot contact:** on the base, either arm link, or paddle, we remove the ball's equal-and-opposite filtered normal force from the robot's net contact force. A remaining force magnitude above **0.1 N** on any of these bodies sets the contact-crash flag. This distinguishes a legal ball/paddle impact from a robot hitting the floor or another scene surface. The 0.1 N limit is literal in the code.
+- **Base contact:** we remove the ball's equal-and-opposite filtered normal force from the robot's net normal contact force. We inspect only `robot_crash_body_names`, default `("base",)`. A remaining magnitude above `robot_crash_force_threshold_n=0.1` N sets the crash flag. This separates a ball/base impact from a base crash against the scene. Other body names can be added explicitly.
 - **Tilt:** the base's up axis tilts from world vertical by more than `robot_tilt_threshold_degs`, **70 degrees** by default. This setting is in degrees; the detector converts it internally with `math.radians()` before taking the cosine. At 69 degrees the tilt detector does not fire; at 71 degrees it does. This does not require a collision. Pure yaw does not trigger this test. For example, append `env.robot_tilt_threshold_degs=70.0` to a launch command. The old `robot_tilt_threshold_rad` field is no longer used.
 
 `reset_robot_on_robot_crash=True` ends the episode for the contact detector. `reset_robot_on_tilt_threshold=True` ends it for the tilt detector. Setting either to `False` disables **only that detector's reset**, not its reward or the other detector. A persistent violation can therefore receive −1 in every action interval. If both detectors fire in one interval, they still select one crash outcome, not two penalties.
 
-Other endings, such as a goal, leaving the box, or the deadline, still reset the episode. Contact/tilt violations also prevent new safe-clearance confirmation even when their resets are disabled. Extras `goalkeeper_robot_contact_crash` and `goalkeeper_tilt_threshold` expose the two causes separately.
+Leaving the box still terminates the episode. Ball goals and shot deadlines do not. Contact/tilt violations also prevent new safe-clearance confirmation even when their resets are disabled. Extras `goalkeeper_robot_contact_crash` and `goalkeeper_tilt_threshold` expose the two causes separately.
 
 ### `rwd_scale_save`: contact plus safe clearance, not contact alone
 
@@ -238,7 +266,7 @@ A save first requires a real PhysX **paddle contact** above 0.05 N. Proximity al
 
 New clearance is rejected if the interval contains a base/arm hit, goal, nonqualifying floor event, robot contact crash, excessive tilt, or leaving the area. Contact and clearance may occur in the same policy interval or in different intervals. Clearance stays recorded once confirmed.
 
-With `require_recovery_for_save=False`, clearance is enough for success: +1 and an episode ending. With it set to `True`, the robot must also complete the recovery dwell described in section 5 before the deadline. A paddle touch followed by a goal **before clearance** is a failure. The default does not continue simulating the ball after a confirmed save, so it does not evaluate later play or long-term robot stability.
+With `require_recovery_for_save=False`, clearance is enough for a one-shot success reward of +1. The episode continues. With it set to `True`, the robot must also complete the recovery dwell described in section 5 before the deadline. A paddle touch followed by a goal **before clearance** is a failure. The resolved ball is removed, but the robot continues with its post-impact motion and later shots. This lets the policy learn to remain stable after saving.
 
 ### `rwd_scale_progress`: bring the paddle closer in the goal-parallel plane
 
@@ -252,7 +280,7 @@ progress = rwd_scale_progress * (d_before - d_after)
 
 Distances are Euclidean distances in metres. Reducing distance from 0.30 m to 0.20 m earns `0.5 * 0.10 = +0.05`. Moving away by 0.10 m earns −0.05. Changing only x earns zero. A stationary paddle earns zero even when the ball moves, because both distances use the same target.
 
-The active mask is taken **at the start** of the interval. It requires no previous paddle hit, ball x velocity `< −0.1 m/s`, and ball x `> goal_center.x` (−0.45 m). This means progress can still be paid in the interval containing the first hit or a terminal failure. It stops in following intervals after the first paddle hit. Resets start a new distance comparison; there is no progress jump between episodes.
+The active mask is taken **at the start** of the interval. It requires an active ball, no previous paddle hit, ball x velocity `< −0.1 m/s`, and ball x `> goal_center.x` (−0.45 m). This means progress can still be paid in the interval containing the first hit or a terminal failure. It stops in following intervals after the first paddle hit. Each launch starts a new distance comparison; there is no progress jump from teleporting the ball or robot.
 
 `progress_use_prediction=True` replaces the current-ball target with its ballistic defense-plane prediction. It does not change the y–z-only distance or this start-of-interval mask. Unlike the optional intercept kernel, progress has no extra prediction-validity mask. This is practical moving-target shaping, not a guarantee of policy invariance.
 
@@ -267,7 +295,7 @@ base hit > goal > robot crash/tilt > leave area > arm hit
 
 For example, a simultaneous base hit and goal selects only the base penalty. A simultaneous arm hit and goal selects only the goal penalty. A floor failure at the deadline selects only the floor penalty. A detected failure suppresses a save bonus in the same interval.
 
-This priority selects the **reward label**. Episode ending is checked separately against all active ending conditions. With crash resets disabled, for example, crash can be the selected reward while a simultaneous deadline still ends the episode. A valid floor save is not a live-floor failure; its floor cost is the separate `floor_after_save` addition. Progress, enabled rate terms, and energy can also contribute on a failure transition.
+This priority selects the **reward label**. Episode ending is checked separately against all active ending conditions. With crash resets disabled, a crash can be the selected reward while a simultaneous area violation still ends the episode. A shot deadline alone never ends it. A valid floor save is not a live-floor failure; its floor cost is the separate `floor_after_save` addition. Progress, enabled rate terms, and energy can also contribute on a failure transition.
 
 | Example with shipped scales | Event subtotal, before progress/rates/energy |
 |---|---:|
@@ -298,9 +326,9 @@ Use `env.control_mode` as a Hydra override on the training or playback command. 
 
 | `env.control_mode` | Policy actions | Actor / critic values |
 |---|---:|---:|
-| `thrust_and_torque_control` | 6 individual thrusts + 2 joint torques: **8** | **62** each |
-| `thrust_and_PD_joint_pos_control` | 6 individual thrusts + 2 desired joint angles: **8** | **62** each |
-| `PI_rotors_PD_joint_pos_control` | Collective thrust + 3 body rates + 2 desired joint angles: **6** | **60** each |
+| `thrust_and_torque_control` | 6 individual thrusts + 2 joint torques: **8** | **65** each |
+| `thrust_and_PD_joint_pos_control` | 6 individual thrusts + 2 desired joint angles: **8** | **65** each |
+| `PI_rotors_PD_joint_pos_control` | Collective thrust + 3 body rates + 2 desired joint angles: **6** | **63** each |
 
 Append one of these selectors to the training command:
 
@@ -390,11 +418,11 @@ These four fields are floats. The task refreshes limits and gains on the existin
 
 ### Observation and checkpoint contract
 
-Actor and critic each receive the same 54 shared values plus the current policy actions: 62 values in direct modes or 60 in PI mode. Shared values include the home-position error, full root rotation matrix, base linear and angular velocities, joint positions and velocities, relative paddle position and normal, relative ball position and velocity, predicted intercept/time/validity, shot phase/time, rotor thrust state, controller integral, and sampled ball mass/restitution. The three PI-integral entries remain zero in direct modes. Joint velocity is divided by `velocity_lim_sim`.
+Actor and critic each receive the same 57 shared values plus the current policy actions: 65 values in direct modes or 63 in PI mode. Shared values include the home-position error, full root rotation matrix, base linear and angular velocities, joint positions and velocities, relative paddle position and normal, relative ball position and velocity, predicted intercept/time/validity, shot phase/time, ball-active flag, next-launch countdown, episode progress, rotor thrust state, controller integral, and sampled ball mass/restitution. The three PI-integral entries remain zero in direct modes. Joint velocity is divided by `velocity_lim_sim`.
 
 Orientation occupies indices `3:12` (zero-based). It is the base-to-world 3×3 rotation matrix, flattened row by row: `[R00, R01, R02, R10, R11, R12, R20, R21, R22]`. We convert the simulator's `(w, x, y, z)` quaternion with `matrix_from_quat`; internal vector transforms still use that quaternion. The observation is identical for `q` and `-q`. This follows the continuity motivation in [Zhou et al., On the Continuity of Rotation Representations in Neural Networks](https://arxiv.org/abs/1812.07035); we use the requested full 9D matrix, not their compact 6D representation.
 
-**Checkpoint change (2026-10-15):** older goalkeeper checkpoints use a 4D quaternion and have 57 inputs in direct modes or 55 in PI mode. They cannot load directly into this 62/60-input environment. Train a new policy with the matrix observations, or use matching older code in a separate checkout to replay old weights. Changing the declared observation size alone does not make old weights compatible.
+**Checkpoint change:** continuous shots add three phase values: ball active, normalized remaining launch delay, and normalized episode time. Direct-mode inputs are now 65; PI inputs are 63. Earlier 62/60-input matrix checkpoints and 57/55-input quaternion checkpoints do not load unchanged. Train a new policy. Ball-related values at indices `28:39` are zero while the ball is inactive. The three new phase values are at indices `43:46`, before the action history. Shot age uses `shot_timeout_s`; episode progress uses `episode_length_s`.
 
 The predicted intercept is privileged information. It does not replace the current-ball target in the default progress reward. All coordinates remove the clone's world offset. The finite shot clock is independent of the generic runner's randomized initial episode-length counter.
 
@@ -414,7 +442,7 @@ Every shot is ballistic and aimed at the defense plane. The original four levels
 These are uniform target offsets around the configured center. Level 0 is intentionally easy: neutral hovering can cover its small spread. It checks geometry and flight stability, not agile goalkeeping.
 The sampling checks prove that throws threaten the goal, not that Borinot can reach every throw. Some fast, wide level-3 shots may be dynamically unreachable. Check that limit before interpreting a learning plateau. The two arm joints mainly move the tip in the body's x–z plane; sideways coverage also needs aircraft motion or reorientation.
 
-Automatic promotion uses the last up-to-2048 completed episodes from the current level. It requires at least 1024 completed episodes, a save fraction strictly above 0.7, and 3000 policy steps at that level. The latter is **30 simulated seconds per environment at 100 Hz**, or 50 seconds at 60 Hz. More environments increase sample count, not elapsed simulated time.
+Automatic promotion uses the last up-to-2048 completed shots from the current level (`curriculum_window_shots`). It requires at least 1024 completed shots (`curriculum_min_shots`), a save fraction strictly above 0.7, and 3000 policy steps at that level. The latter is **30 simulated seconds per environment at 100 Hz**, or 50 seconds at 60 Hz. More environments increase sample count, not elapsed simulated time. The old `curriculum_window_episodes` and `curriculum_min_episodes` fields are replaced by `curriculum_window_shots` and `curriculum_min_shots`; update launch overrides that used those names. Best-checkpoint eligibility still counts full episodes, not shots.
 
 A shot keeps its starting level until it ends. Older-level endings are excluded from the new level's decision window. Promotion clears that window. An empty batch cannot promote. General outcome counts still include every completed shot.
 
@@ -452,7 +480,7 @@ The grid uses the active `shot_level` even when `curriculum=False`. For example,
 
 With the grid enabled, the environment validates the centre, all grid points and the full noise ranges against `goal_area_*_m` before simulator construction. Invalid combinations raise a clear error; they are not clipped into duplicate edge positions. This is a base-position check, not a collision-clearance or reachability guarantee. The centre height is now **1.5 m**, replacing the previous 0.5 m source value, which was below the allowed minimum and left no space for a lower row.
 
-Promotion happens before a reset samples its next start. Episodes already running keep their current pose and stage. Only the selected reset environments change; partial resets leave other robot poses, balls and spawn indices alone. Normal automatic resets use the same sampler. This keeps the existing stage-pure best-checkpoint gate aligned with both shot difficulty and spawn difficulty.
+Promotion happens before a reset samples its next start. Episodes already running keep their pose. New balls use the newly selected shot level; an old in-flight ball keeps its own launch stage. The spawn grid changes only at the next full robot reset. Only the selected reset environments change; partial resets leave other robot poses, balls and spawn indices alone. Normal automatic resets use the same sampler. This keeps the existing stage-pure best-checkpoint gate aligned with both shot difficulty and spawn difficulty.
 
 The browser viewer shows the available base-origin crosses for the selected phase. Its **Inspect location** dropdown moves the robot without noise; **Sample robot reset** includes noise. Both restore the configured body orientation and joint pose. They change the preview only. See the [viewer guide](../../../../scripts/tools/borinot_goalkeeper_viewer/README.md).
 
@@ -506,7 +534,7 @@ The face normal is the paddle's local +x axis rotated into world coordinates. At
 
 ### `rwd_scale_hit` and `rwd_scale_centered_hit`: reward the first paddle touch
 
-These are **event bonuses**, not rates. They are paid only on the first detected paddle hit of an episode, and only if the selected outcome in that interval is ongoing (0) or save (7):
+These are **event bonuses**, not rates. They are paid only on the first detected paddle hit of a shot, and only if the selected outcome in that interval is ongoing (0) or save (7):
 
 ```text
 sigma = 0.75 * paddle_diameter_m / 2
@@ -532,7 +560,7 @@ This is a boolean, not a reward scale. It is `False` by default. Setting it to `
 
 The conditions must hold at consecutive policy-step checks for `recovery_dwell_s=0.25 s`, or 25 actions at the default 100 Hz (15 at 60 Hz). The timer is zero before clearance and resets to zero if any check fails. It measures return toward neutral arm angles, not toward the previous action's targets. There is no separate yaw-angle recovery test. Safety and the three-second deadline remain active during recovery.
 
-This gate works even with `rwd_scale_recovery=0.0`. Conversely, enabling the recovery reward below does not turn on the gate. With the default gate off, the episode ends at clearance, so there is no multi-step post-clearance recovery period.
+This gate works even with `rwd_scale_recovery=0.0`. Conversely, enabling the recovery reward below does not turn on the gate. With the default gate off, clearance resolves and removes the ball. The robot keeps balancing during the wait and the rest of the episode. Recovery shaping, if enabled, can remain active until the next launch.
 
 ### `rwd_scale_recovery`: smooth feedback after clearance
 
@@ -625,7 +653,7 @@ Compare active and held-arm policies on the same recorded, held-out throws at fi
 
 **Second hypothesis:** predicted-intercept progress helps with short flight times. Compare only `progress_use_prediction=False/True`, with every other reward weight unchanged. Better return alone is not enough: check held-out save fraction and forbidden contacts.
 
-**Third hypothesis:** requiring recovery reduces successful-but-unstable saves. Compare recovery off/on and report both save fraction and a common post-impact stability test. The current default ends at the save, so that common post-impact evaluation needs an extended rollout; it is not supplied by the default episode outcome.
+**Third hypothesis:** requiring recovery reduces successful-but-unstable saves. Compare recovery off/on and report both save fraction and a common post-impact stability test. The continuous default already keeps the robot moving after a save. Report post-impact stability and safety failures separately from shot-save fraction.
 
 The ball is light relative to the full aircraft, although substantial relative to the paddle. Do not claim this is already a comparable-mass aerial impact benchmark. Goalkeeping and aerial contact RL both have precedents. A publication claim needs a measured advantage and a careful novelty check, including the unresolved aerial-catching leads in yesterday's review.
 
@@ -644,7 +672,7 @@ Reproduce the simulator reset checks from the activated local IsaacLab environme
 ./isaaclab.sh -p source/isaaclab_tasks/isaaclab_tasks/direct/borinot_goalkeeper/tests/spawn_smoke.py --headless --num-envs 64 --output /tmp/goalkeeper-spawns.json env.enabled_self_collisions=True '--kit_args=--/UJITSO/geometry=false --/UJITSO/textures=false --/UJITSO/materials=false'
 ```
 
-`goalkeeper_outcome` in step extras records the selected reward outcome before automatic reset. With either crash-reset switch disabled, outcome 8 can be nonterminal; use `terminated` to identify actual endings. `goalkeeper_had_paddle_hit`, `goalkeeper_robot_contact_crash`, `goalkeeper_tilt_threshold`, and `goalkeeper_reward_terms` support attribution checks. `outcome_counts` pools completed episodes, not means of unequal reset-batch success rates.
+`goalkeeper_outcome` in step extras records the selected reward outcome before automatic reset. With either crash-reset switch disabled, outcome 8 can be nonterminal; use `terminated` to identify actual endings. `goalkeeper_had_paddle_hit`, `goalkeeper_robot_contact_crash`, `goalkeeper_tilt_threshold`, and `goalkeeper_reward_terms` support attribution checks. `outcome_counts` pools resolved shots. `goalkeeper_shot_finished` marks exactly which transition resolved an active ball; safety failures while waiting are not extra shots.
 
 | Outcome code | Meaning | Scale used by the `outcome` component |
 |---:|---|---|
@@ -672,9 +700,9 @@ These numbers are labels, **not** their priority order. Use the priority list in
 | `optional_hit` | First-hit and centered-first-hit bonuses |
 | `energy` | Energy scale times mean total power in watts, without dt |
 
-`goalkeeper_paddle_hit` is the **first** paddle-hit flag for this interval. `goalkeeper_had_paddle_hit` records whether a hit has occurred anywhere in the current episode. They do not by themselves establish a save. `power_mean_w` contains the named mechanical, dissipative, and total mean-power estimates even when the energy scale is zero.
+`goalkeeper_shot_stage` records the stage at the current ball launch. `goalkeeper_shot_finished` is true for exactly one transition per resolved ball. `goalkeeper_paddle_hit` is the **first** paddle-hit flag for this interval. `goalkeeper_had_paddle_hit` records whether a hit has occurred anywhere in the current shot. They do not by themselves establish a save. `power_mean_w` contains the named mechanical, dissipative, and total mean-power estimates even when the energy scale is zero.
 
-TensorBoard logs episode reward components, cumulative save fraction, contact/clearance fractions, collection/decision/selected difficulty, stage age, and the stage-pure window. The standard RSL logger averages these sampled summaries within a rollout. For exact evaluation counts, collect the terminal outcome codes directly. A displayed cumulative save fraction is not a fresh held-out evaluation.
+TensorBoard logs full-episode returns, shots, saves and duration, reward components, cumulative shot-save fraction, contact/clearance fractions, collection/selected difficulty, stage age, and the stage-pure shot window. Episode logs are emitted only when a robot episode ends, not when an individual ball ends. The standard RSL logger averages these sampled summaries within a rollout. For exact shot counts, select outcome codes with `goalkeeper_shot_finished`, not the robot done flag. A displayed cumulative save fraction is not a fresh held-out evaluation.
 
 Run tensor-only tests without launching Isaac Sim:
 
@@ -694,7 +722,7 @@ That contact-regression script explicitly selects PI mode at 240/60 Hz to retain
 ./isaaclab.sh -p source/isaaclab_tasks/isaaclab_tasks/direct/borinot_goalkeeper/tests/control_smoke.py --headless --output /tmp/borinot_goalkeeper_control.json env.control_mode=thrust_and_torque_control env.physics_hz=200 env.policy_hz=100 env.effort_lim_sim=2.7 '--kit_args=--/UJITSO/geometry=false --/UJITSO/textures=false --/UJITSO/materials=false'
 ```
 
-The checks cover ballistic goal-threatening shots, progress geometry, actual paddle/base/arm/goal/floor contacts, reward scales, full observations, mass/inertia/material readback, partial resets, finite rollouts, and curriculum boundaries. They also check the corrected paddle plane at bent-arm poses, both crash-reset switches independently, and the configurable tilt threshold. The physics checks use a known 1.5 m home-height baseline, not the locally tuned lower home.
+Historical contact checks cover the original ballistic goal-threatening shots, progress geometry, actual paddle/base/arm/goal/floor contacts, reward scales, full observations, mass/inertia/material readback, partial resets, finite rollouts, and curriculum boundaries. They also check the corrected paddle plane at bent-arm poses, both crash-reset switches independently, and the configurable tilt threshold. These earlier physics checks used the 1.5 m reference height. The current continuous task uses that height by default.
 
 The round-racket and mount controls passed **121 CPU tests** and **1118 offline browser checks**. Real task physics checks cover 12, 16 and 24 cm heads, actual head/handle hits and outside-rim misses, mass/COM/inertia readback, and the full 71-check contact/reset regression. They also verify −4, 0 and +4 cm mount shifts at neutral and bent joints, plus a real Hydra launch with both diameter and mount overrides. The default 16 cm racket and its +4 cm extension passed neutral clearance with physical self-collisions enabled. A separate CPU bench tested 21 imposed poses and 10 continuous paths; its four intended clear paths had no contacts with either filter setting. These are geometry and integration checks, not a learned-policy comparison or a complete safe-workspace map.
 
@@ -710,7 +738,7 @@ To follow the reward in code, read these methods in order:
 2. `_sample_physics_events()`: detect contacts, safety violations, ball clearance, and escape on completed physics steps.
 3. `_get_dones()` and `task_math.terminal_outcome()`: apply recovery/deadline logic, select the event label, and decide whether to reset.
 4. `_get_rewards()`: add the six components defined above. `_sample_power()` supplies its physics-rate power average; `_interception()` and `_recovery_geometry()` supply optional shaping signals.
-5. `_reset_idx()`: sample a new shot and reset that environment's hit/clearance history, shot clock, previous actions, and power buffers.
+5. `_launch_ball()` / `_park_ball()`: recycle only the ball and per-shot state. `_reset_idx()` resets the robot, controller and full episode only for safety/time limits. `_record_shots()` drives curriculum evidence; `_update_curriculum()` logs full episodes and gates stage-pure episode returns.
 
 - `borinot_goalkeeper_env_cfg.py`: geometry, reward weights, limits, and difficulty settings.
 - `borinot_goalkeeper_env.py`: control, observations, contacts, rewards, resets, and curriculum.

@@ -141,7 +141,7 @@ try:
           and torch.equal(env._power_sum_w[1:], other_power))
     step_and_check(actions)
     if args.task == "goalkeeper":
-        env._shot_steps[:] = env.max_episode_length - 1
+        env._episode_steps[:] = env.max_episode_length - 1
     else:
         env.episode_length_buf[:] = env.max_episode_length - 1
     done, actual = step_and_check(actions)

@@ -16,12 +16,12 @@ from .borinot_goalkeeper_env_cfg import BorinotGoalkeeperEnvCfg
 from .paddle import attach_paddle
 from .task_math import (
     crosses_goal, plane_progress, predict_intercept, promotion_ready, sample_robot_positions, sample_shots,
-    terminal_outcome, validate_reset_grid,
+    sample_shot_delay_steps, terminal_outcome, validate_reset_grid, validate_shot_schedule,
 )
 
 
 class BorinotGoalkeeperEnv(DirectRLEnv):
-    """A save requires a real paddle contact and safe ball clearance.
+    """Continuous one-ball shots; only robot safety failures terminate an episode.
 
     Outcome codes: 0 ongoing, 1 base hit, 2 arm hit, 3 goal, 4 live-ball floor,
     5 leave goal area, 6 deadline, 7 save, 8 robot collision/crash, 9 miss/escape.
@@ -33,10 +33,15 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
     def __init__(self, cfg: BorinotGoalkeeperEnvCfg, render_mode=None, **kwargs):
         cfg.configure_control()
         validate_reset_grid(cfg)
+        validate_shot_schedule(cfg)
         if not 0 <= cfg.shot_level < len(cfg.shot_half_extents_yz):
             raise ValueError("shot_level must index shot_half_extents_yz.")
-        if not 1 <= cfg.curriculum_min_episodes <= cfg.curriculum_window_episodes:
-            raise ValueError("Require 1 <= curriculum_min_episodes <= curriculum_window_episodes.")
+        if not 1 <= cfg.curriculum_min_shots <= cfg.curriculum_window_shots:
+            raise ValueError("Require 1 <= curriculum_min_shots <= curriculum_window_shots.")
+        if not cfg.robot_crash_body_names or set(cfg.robot_crash_body_names) - set(self.contact_body_names):
+            raise ValueError(f"robot_crash_body_names must select from {self.contact_body_names}.")
+        if cfg.robot_crash_force_threshold_n <= 0:
+            raise ValueError("robot_crash_force_threshold_n must be positive.")
         if cfg.curriculum_min_steps < 1 or cfg.motor_time_constant_s <= 0:
             raise ValueError("Curriculum dwell and motor time constant must be positive.")
         super().__init__(cfg, render_mode, **kwargs)
@@ -44,6 +49,7 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         self.base_id = self.robot.find_bodies("base")[0][0]
         self.paddle_id = self.robot.find_bodies("paddle")[0][0]
         self._contact_ids = self.robot_contact.find_bodies(list(self.contact_body_names), preserve_order=True)[0]
+        self._crash_contact_columns = [self.contact_body_names.index(name) for name in cfg.robot_crash_body_names]
         if self.ball_contact.contact_physx_view.filter_count != 6:
             raise RuntimeError("Expected separate paddle, base, arm1, arm2, goal, and floor contact filters.")
 
@@ -99,13 +105,20 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
             for name in ("plane_progress", "outcome", "floor_after_save", "optional_rates", "optional_hit", "energy")
         }
         self._shot_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self._episode_steps = torch.zeros_like(self._shot_steps)
+        self._ball_active = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self._next_launch_steps = torch.zeros_like(self._shot_steps)
+        self._shot_stage = torch.full_like(self._shot_steps, cfg.shot_level)
+        self._episode_shots = torch.zeros_like(self._shot_steps)
+        self._episode_saves = torch.zeros_like(self._shot_steps)
+        self._episode_paddle_hits = torch.zeros_like(self._shot_steps)
         self._episode_stage = torch.full((self.num_envs,), cfg.shot_level, device=self.device, dtype=torch.long)
         self.spawn_grid_index = torch.full((self.num_envs,), -1, device=self.device, dtype=torch.long)
         self.shot_level = cfg.shot_level
         self._stage_start_step = 0
-        self._curriculum_window = torch.zeros(cfg.curriculum_window_episodes, device=self.device)
+        self._curriculum_window = torch.zeros(cfg.curriculum_window_shots, device=self.device)
         self._window_cursor = 0
-        self._stage_episodes = 0
+        self._stage_shots = 0
         # Newest consecutive completed episodes that started at the current level. Training only
         # scores a stage's best checkpoint once the whole reward buffer comes from that stage.
         self.curriculum_stage_pure_episodes = 0
@@ -164,6 +177,7 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
     def _interception(self):
         ball_pos = self.ball.data.root_pos_w - self.scene.env_origins
         target, time_s, valid = predict_intercept(ball_pos, self.ball.data.root_lin_vel_w, self.cfg.keeper_plane_x)
+        valid &= self._ball_active
         paddle_pos = self._paddle_pose()[0]
         distance = torch.linalg.vector_norm(target - paddle_pos, dim=-1)
         approaching = valid & ~self._hit
@@ -172,12 +186,18 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
 
     def _pre_physics_step(self, actions):
         self.extras.pop("log", None)
-        self._shot_steps += 1
+        self._episode_steps += 1
+        self._next_launch_steps.sub_(1).clamp_min_(0)
+        launch_ids = ((~self._ball_active) & (self._next_launch_steps == 0)).nonzero().flatten()
+        if len(launch_ids):
+            self._launch_ball(launch_ids)
+        self._shot_steps += self._ball_active
+        self._outcome.zero_()
         self._previous_actions.copy_(self.actions)
         self.actions.copy_(actions.clamp(-1.0, 1.0))
         self._previous_paddle.copy_(self._paddle_pose()[0])
         ball_pos = self.ball.data.root_pos_w - self.scene.env_origins
-        self._old_progress_active.copy_(~self._hit & (self.ball.data.root_lin_vel_w[:, 0] < -0.1)
+        self._old_progress_active.copy_(self._ball_active & ~self._hit & (self.ball.data.root_lin_vel_w[:, 0] < -0.1)
                                        & (ball_pos[:, 0] > self.cfg.goal_center[0]))
         self._new_hit.zero_()
         for flag in self._flags.values():
@@ -239,7 +259,7 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         position = self.ball.data.root_pos_w - self.scene.env_origins
         velocity = self.ball.data.root_lin_vel_w
         matrix = self.ball_contact.data.force_matrix_w[:, 0]
-        contact = torch.linalg.vector_norm(matrix, dim=-1) > self.cfg.contact_force_threshold_n
+        contact = (torch.linalg.vector_norm(matrix, dim=-1) > self.cfg.contact_force_threshold_n) & self._ball_active[:, None]
         fresh_hit = contact[:, 0] & ~self._hit
         paddle_pos, paddle_quat, _ = self._paddle_pose()
         relative = quat_apply_inverse(paddle_quat, position - paddle_pos)
@@ -250,8 +270,8 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         self._hit |= contact[:, 0]
         self._flags["base"] |= contact[:, 1]
         self._flags["arm"] |= contact[:, 2:4].any(-1)
-        self._flags["goal"] |= contact[:, 4] | crosses_goal(self._previous_ball, position, self.cfg)
-        self._flags["floor"] |= (contact[:, 5] | (position[:, 2] <= self.cfg.ball_radius_m + 0.001)) & ~self._clear
+        self._flags["goal"] |= self._ball_active & (contact[:, 4] | crosses_goal(self._previous_ball, position, self.cfg))
+        self._flags["floor"] |= self._ball_active & (contact[:, 5] | (position[:, 2] <= self.cfg.ball_radius_m + 0.001)) & ~self._clear
 
         # Robot net forces include legitimate paddle/ball impact. Remove the
         # equal-and-opposite ball normal force before checking other collisions.
@@ -261,7 +281,7 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         self._flags["area"] |= ((root_pos < self._area_min) | (root_pos > self._area_max)).any(-1)
         self._flags["tilt"] |= gravity_b[:, 2] > -math.cos(math.radians(self.cfg.robot_tilt_threshold_degs))
         self._flags["crash"] |= (
-            torch.linalg.vector_norm(other_contact, dim=-1) > 0.1
+            torch.linalg.vector_norm(other_contact[:, self._crash_contact_columns], dim=-1) > self.cfg.robot_crash_force_threshold_n
         ).any(-1)
 
         returned = (position[:, 0] > self.cfg.keeper_plane_x + self.cfg.clear_distance_m) & (
@@ -280,9 +300,9 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
                   | self._flags["tilt"] | self._flags["area"])
         # A paddle deflection onto the floor in front of the goal is a save, but
         # still pays the floor penalty. No-contact floor events never earn a save.
-        self._clear |= self._hit & (returned | safely_wide | landed_in_front) & ~failed
+        self._clear |= self._ball_active & self._hit & (returned | safely_wide | landed_in_front) & ~failed
         escaped = (position[:, 0].abs() > 3.0) | (position[:, 1].abs() > 3.0) | (position[:, 2] > 4.5)
-        self._flags["miss"] |= escaped & ~self._clear
+        self._flags["miss"] |= self._ball_active & escaped & ~self._clear
         self._previous_ball.copy_(position)
 
     def _recovery_geometry(self):
@@ -302,12 +322,12 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
 
     def _get_dones(self):
         self._sample_physics_events()  # final physics substep of this policy transition
-        success = self._clear
+        success = self._clear & self._ball_active
         if self.cfg.require_recovery_for_save:
             stable = self._recovery_geometry()[0] & self._clear
             self._recovery_time = torch.where(stable, self._recovery_time + self.step_dt, 0.0)
             success = success & (self._recovery_time >= self.cfg.recovery_dwell_s)
-        deadline = (self._shot_steps >= self.max_episode_length) & ~success
+        deadline = self._ball_active & (self._shot_steps * self.step_dt >= self.cfg.shot_timeout_s) & ~success
         live_floor = self._flags["floor"] & ~self._clear
         crash = self._flags["crash"] | self._flags["tilt"]
         self._outcome = terminal_outcome(self._flags["base"], self._flags["arm"], crash,
@@ -315,11 +335,10 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
                                         self._flags["miss"], deadline, success)
         reset_crash = ((self._flags["crash"] & self.cfg.reset_robot_on_robot_crash)
                        | (self._flags["tilt"] & self.cfg.reset_robot_on_tilt_threshold))
-        # Reset switches do not disable rewards or unrelated terminal events.
-        terminated = (reset_crash | self._flags["base"] | self._flags["arm"] | self._flags["goal"]
-                      | live_floor | self._flags["area"] | self._flags["miss"] | deadline | success)
-        # Three seconds is a real task deadline, not an artificial trajectory truncation.
-        return terminated, torch.zeros_like(success)
+        # Ball results end only the shot. The robot must keep balancing between balls.
+        terminated = reset_crash | self._flags["area"]
+        time_limit = self._episode_steps >= self.max_episode_length
+        return terminated | (time_limit & self.cfg.is_finite_horizon), time_limit & ~terminated & (not self.cfg.is_finite_horizon)
 
     def _get_rewards(self):
         self._sample_power()  # final completed substep, before automatic resets
@@ -380,6 +399,16 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
             "dissipative": mean_power_w[:, 1] + mean_power_w[:, 3],
             "total_estimate": mean_power_w.sum(-1),
         }
+        finished = self._ball_active & (self._outcome != 0)
+        self.extras["goalkeeper_shot_finished"] = finished.clone()
+        self.extras["goalkeeper_shot_stage"] = self._shot_stage.clone()
+        ids = finished.nonzero().flatten()
+        if len(ids):
+            self._record_shots(ids)
+            self._ball_active[ids] = False
+            if self.cfg.shot_resampling_mode == "resolution":
+                self._next_launch_steps[ids] = sample_shot_delay_steps(len(ids), self.device, self.cfg, self.step_dt)
+            self._park_ball(ids)
         return reward
 
     def _get_observations(self):
@@ -397,26 +426,32 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         ball_parts = [quat_apply_inverse(quaternion, ball_pos - root_pos),
                       quat_apply_inverse(quaternion, self.ball.data.root_lin_vel_w - self.robot.data.root_lin_vel_w),
                       quat_apply_inverse(quaternion, target - paddle_pos), time_s[:, None], valid[:, None].float()]
+        ball_parts = [value * self._ball_active[:, None] for value in ball_parts]
         phase = torch.stack((self._hit.float(), self._clear.float(),
-                             self._shot_steps * self.step_dt / self.cfg.episode_length_s,
-                             self._recovery_time / self.cfg.recovery_dwell_s), dim=-1)
+                             (self._shot_steps * self.step_dt / self.cfg.shot_timeout_s).clamp_max(1),
+                             (self._recovery_time / self.cfg.recovery_dwell_s).clamp_max(1),
+                             self._ball_active.float(),
+                             self._next_launch_steps * self.step_dt / max(self.cfg.shot_resampling_time_range_s[1], self.step_dt),
+                             self._episode_steps * self.step_dt / self.cfg.episode_length_s), dim=-1)
         tail = [phase, self.actions, self._rotor_thrust / self._hover_per_rotor,
                 self._rate_integral, self._ball_parameters]
         critic = torch.cat(common + ball_parts + tail, dim=-1)
         return {"policy": critic.clone(), "critic": critic}
 
     def _update_curriculum(self, env_ids):
-        completed = env_ids[(self._shot_steps[env_ids] > 0) & (self._outcome[env_ids] != 0)]
+        """Log full episodes and gate stage-pure episode-return checkpoints."""
+        completed = env_ids[self._episode_steps[env_ids] > 0]
         if not len(completed):
             return
-        codes = self._outcome[completed]
-        self.outcome_counts += torch.bincount(codes, minlength=10)
         self.extras["log"] = {"Episode/return": self._episode_rewards[completed].mean(),
+                              "Episode/shots": self._episode_shots[completed].float().mean(),
+                              "Episode/saves": self._episode_saves[completed].float().mean(),
+                              "Episode/duration_s": (self._episode_steps[completed] * self.step_dt).mean(),
                               "Goalkeeper/cumulative_save_fraction": (
                                   self.outcome_counts[7] / self.outcome_counts.sum().clamp_min(1)
                               ),
-                              "Goalkeeper/paddle_contact_fraction": self._hit[completed].float().mean(),
-                              "Goalkeeper/ball_clearance_fraction": self._clear[completed].float().mean(),
+                              "Goalkeeper/paddle_contact_fraction": self._episode_paddle_hits[completed].sum() / self._episode_shots[completed].sum().clamp_min(1),
+                              "Goalkeeper/ball_clearance_fraction": self._episode_saves[completed].sum() / self._episode_shots[completed].sum().clamp_min(1),
                               "Curriculum/collection_stage": self._episode_stage[completed].float().mean()}
         # RSL selects log keys from the first packet: preserve episode-only packets.
         # Per-environment interval means remain available on every step in extras.
@@ -425,41 +460,88 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         self.extras["log"].update({f"Episode_Reward/{name}": value[completed].mean()
                                   for name, value in self._episode_terms.items()})
         current = self._episode_stage[completed] == self.shot_level
-        eligible = completed[current]
         stale = (~current).nonzero()
         if len(stale):
             self.curriculum_stage_pure_episodes = len(completed) - 1 - stale[-1].item()
         else:
             self.curriculum_stage_pure_episodes += len(completed)
+        retained = min(self._stage_shots, len(self._curriculum_window))
+        self.extras["log"].update({"Curriculum/selected_stage": self.shot_level,
+                                  "Curriculum/stage_pure_save_fraction": self._curriculum_window.sum() / max(1, retained),
+                                  "Curriculum/window_completed_shots": retained,
+                                  "Curriculum/age_policy_steps": self.common_step_counter - self._stage_start_step})
+
+    def _record_shots(self, completed):
+        """Count each shot once. In-flight old-stage shots cannot promote a new stage."""
+        completed = completed[self._outcome[completed] != 0]
+        if not len(completed):
+            return
+        codes = self._outcome[completed]
+        self.outcome_counts += torch.bincount(codes, minlength=10)
+        self._episode_shots[completed] += 1
+        self._episode_saves[completed] += (codes == 7).long()
+        self._episode_paddle_hits[completed] += self._hit[completed].long()
+        eligible = completed[self._shot_stage[completed] == self.shot_level]
         if len(eligible):
             outcomes = (self._outcome[eligible] == 7).float()
-            self._stage_episodes += len(outcomes)
+            self._stage_shots += len(outcomes)
             outcomes = outcomes[-len(self._curriculum_window):]
             indices = (torch.arange(len(outcomes), device=self.device) + self._window_cursor) % len(
                 self._curriculum_window
             )
             self._curriculum_window[indices] = outcomes
             self._window_cursor = (self._window_cursor + len(outcomes)) % len(self._curriculum_window)
-            retained = min(self._stage_episodes, len(self._curriculum_window))
+            retained = min(self._stage_shots, len(self._curriculum_window))
             rate = self._curriculum_window.sum() / retained
-            self.extras["log"].update({"Curriculum/decision_stage": self.shot_level,
-                                      "Curriculum/stage_pure_save_fraction": rate,
-                                      "Curriculum/window_completed_episodes": retained,
-                                      "Curriculum/age_policy_steps": self.common_step_counter - self._stage_start_step})
             if self.shot_level < len(self.cfg.shot_half_extents_yz) - 1 and promotion_ready(
-                self.common_step_counter - self._stage_start_step, self._stage_episodes, float(rate), self.cfg
+                self.common_step_counter - self._stage_start_step, self._stage_shots, float(rate), self.cfg
             ):
                 self.shot_level += 1
                 self._stage_start_step = self.common_step_counter
                 self._curriculum_window.zero_()
                 self._window_cursor = 0
-                self._stage_episodes = 0
+                self._stage_shots = 0
                 self.curriculum_stage_pure_episodes = 0
-        self.extras["log"]["Curriculum/selected_stage"] = self.shot_level
 
     def get_curriculum_global_idx(self) -> int:
         """Shot level; train.py keeps one best_model_curriculum_idx_<level>.pt per level."""
         return self.shot_level
+
+    def _park_ball(self, env_ids):
+        """Remove a resolved ball without writing any robot/controller state."""
+        state = self.ball.data.default_root_state[env_ids].clone()
+        state[:, :3] = torch.tensor(self.cfg.ball_park_position, device=self.device) + self.scene.env_origins[env_ids]
+        state[:, 7:] = 0.0
+        self.ball.write_root_state_to_sim(state, env_ids)
+        self.ball_contact.reset(env_ids)
+        self._previous_ball[env_ids] = torch.tensor(self.cfg.ball_park_position, device=self.device)
+
+    def _launch_ball(self, env_ids):
+        """Re-use the single ball; per-shot resets never teleport the robot."""
+        n = len(env_ids)
+        position, velocity, _, _ = sample_shots(n, self.device, self.cfg, self.shot_level)
+        state = self.ball.data.default_root_state[env_ids].clone()
+        state[:, :3] = position + self.scene.env_origins[env_ids]
+        state[:, 7:10] = velocity
+        state[:, 10:] = 0.0
+        self.ball.write_root_state_to_sim(state, env_ids)
+        self.ball_contact.reset(env_ids)
+        self._previous_ball[env_ids] = position
+        ids_cpu = env_ids.cpu()
+        masses = torch.empty(n).uniform_(*self.cfg.ball_mass_range_kg)
+        self._ball_masses[ids_cpu, 0] = masses
+        self._ball_inertias[ids_cpu] = torch.eye(3).reshape(1, 9) * (0.4 * masses * self.cfg.ball_radius_m**2)[:, None]
+        self._ball_materials[ids_cpu, :, 2] = torch.empty(n, 1).uniform_(*self.cfg.ball_restitution_range)
+        self._ball_parameters[env_ids, 0] = masses.to(self.device)
+        self._ball_parameters[env_ids, 1] = self._ball_materials[ids_cpu, 0, 2].to(self.device)
+        self.ball.root_physx_view.set_masses(self._ball_masses, ids_cpu)
+        self.ball.root_physx_view.set_inertias(self._ball_inertias, ids_cpu)
+        self.ball.root_physx_view.set_material_properties(self._ball_materials, ids_cpu)
+        for buffer in (self._hit, self._clear, self._new_hit, self._center_quality, self._shot_steps, self._recovery_time):
+            buffer[env_ids] = 0
+        self._shot_stage[env_ids] = self.shot_level
+        self._next_launch_steps[env_ids] = sample_shot_delay_steps(n, self.device, self.cfg, self.step_dt)
+        self._ball_active[env_ids] = True
 
     def _reset_idx(self, env_ids):
         if env_ids is None:
@@ -482,29 +564,10 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
             self.robot.data.default_joint_pos[env_ids][:, self.joint_ids], joint_ids=self.joint_ids, env_ids=env_ids)
         self.robot.set_joint_velocity_target(joint_zero, joint_ids=self.joint_ids, env_ids=env_ids)
         self.robot.set_joint_effort_target(joint_zero, joint_ids=self.joint_ids, env_ids=env_ids)
-        position, velocity, _, _ = sample_shots(n, self.device, self.cfg, self.shot_level)
-        ball_state = self.ball.data.default_root_state[env_ids].clone()
-        ball_state[:, :3] = position + self.scene.env_origins[env_ids]
-        ball_state[:, 7:10] = velocity
-        ball_state[:, 10:] = 0.0
-        self.ball.write_root_state_to_sim(ball_state, env_ids)
-        self._previous_ball[env_ids] = position
-        ids_cpu = env_ids.cpu()
-        masses = torch.empty(n).uniform_(*self.cfg.ball_mass_range_kg)
-        self._ball_masses[ids_cpu, 0] = masses
-        self._ball_inertias[ids_cpu] = (
-            torch.eye(3).reshape(1, 9) * (0.4 * masses * self.cfg.ball_radius_m**2)[:, None]
-        )
-        self._ball_materials[ids_cpu, :, 2] = torch.empty(n, 1).uniform_(*self.cfg.ball_restitution_range)
-        self._ball_parameters[env_ids, 0] = masses.to(self.device)
-        self._ball_parameters[env_ids, 1] = self._ball_materials[ids_cpu, 0, 2].to(self.device)
-        self.ball.root_physx_view.set_masses(self._ball_masses, ids_cpu)
-        self.ball.root_physx_view.set_inertias(self._ball_inertias, ids_cpu)
-        self.ball.root_physx_view.set_material_properties(self._ball_materials, ids_cpu)
         for buffer in (self.actions, self._previous_actions, self._rate_integral, self._recovery_time,
                        self._hit, self._clear, self._new_hit, self._center_quality, self._outcome,
-                       self._episode_rewards,
-                       self._shot_steps):
+                       self._episode_rewards, self._episode_steps, self._episode_shots,
+                       self._episode_saves, self._episode_paddle_hits, self._shot_steps):
             buffer[env_ids] = 0
         for flag in self._flags.values():
             flag[env_ids] = False
@@ -513,3 +576,4 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         self._rotor_thrust[env_ids] = self._hover_per_rotor
         self._power_sum_w[env_ids] = 0.0
         self._episode_stage[env_ids] = self.shot_level
+        self._launch_ball(env_ids)

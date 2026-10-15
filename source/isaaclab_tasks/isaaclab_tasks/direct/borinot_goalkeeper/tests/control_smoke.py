@@ -79,7 +79,7 @@ def main(cfg, agent_cfg):
         direct = cfg.control_mode != "PI_rotors_PD_joint_pos_control"
         use_pd = cfg.control_mode != "thrust_and_torque_control" or cfg.hold_arm
         check("spaces_follow_selected_mode", cfg.action_space == (8 if direct else 6)
-              and cfg.observation_space == cfg.state_space == 54 + cfg.action_space
+              and cfg.observation_space == cfg.state_space == 57 + cfg.action_space
               and all(value.shape == (args.num_envs, cfg.observation_space) for value in obs.values())
               and env.action_space.shape[-1] == cfg.action_space)
         rotation = obs["policy"][:, 3:12].reshape(-1, 3, 3)
@@ -91,7 +91,7 @@ def main(cfg, agent_cfg):
         check("actor_and_critic_share_rotation_observations", torch.equal(obs["policy"], obs["critic"]))
         check("hydra_frequencies_reach_simulator", abs(env.physics_dt - 1/cfg.physics_hz) < 1e-10
               and abs(env.step_dt - 1/cfg.policy_hz) < 1e-10)
-        check("deadline_uses_policy_frequency", env.max_episode_length == 3*cfg.policy_hz)
+        check("deadline_uses_policy_frequency", env.max_episode_length == round(cfg.episode_length_s*cfg.policy_hz))
         expected = {"stiffness": cfg.joint_stiffness if use_pd else 0.0,
                     "damping": cfg.joint_damping if use_pd else 0.0, "armature": .00036207,
                     "effort_limit": cfg.effort_lim_sim, "velocity_limit": cfg.velocity_lim_sim, "friction": 0.0}
@@ -129,10 +129,10 @@ def main(cfg, agent_cfg):
               and not bool(env.actions[0].any()))
         check("partial_reset_leaves_other_commands", torch.equal(untouched, env.robot.data.joint_effort_target[1:])
               and torch.equal(untouched_actions, env.actions[1:]) and torch.equal(untouched_rotors, env._rotor_thrust[1:]))
-        env._shot_steps[:] = env.max_episode_length - 1
+        env._episode_steps[:] = env.max_episode_length - 1
         samples.clear()
         _, _, terminated, truncated, info = env.step(actions)
-        check("real_task_deadline_no_bootstrap", bool(terminated.all()) and not bool(truncated.any()))
+        check("episode_time_limit_bootstraps", bool(truncated.all()) and not bool(terminated.any()))
         check("final_substep_before_auto_reset", len(samples) == cfg.decimation
               and bool((info["power_mean_w"]["rotor_mechanical"] > 0).all()))
         check("auto_reset_clears_commands_and_power", not bool(env.actions.any())

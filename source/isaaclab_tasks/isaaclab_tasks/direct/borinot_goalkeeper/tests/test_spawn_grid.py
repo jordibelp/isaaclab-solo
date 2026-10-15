@@ -90,14 +90,14 @@ def test_point_exactly_at_noise_expanded_boundary_is_allowed(cfg):
     task_math.validate_reset_grid(cfg)
 
 
-def test_source_reset_uses_selected_stage_before_recording_episode():
+def test_source_reset_uses_selected_stage_for_new_episode():
     tree = ast.parse((FOLDER / "borinot_goalkeeper_env.py").read_text())
     reset = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "_reset_idx")
     calls = {n.func.id:n for n in ast.walk(reset) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
     assert "sample_robot_positions" in calls
     assert ast.unparse(calls["sample_robot_positions"].args[-1]) == "self.shot_level"
     text = ast.unparse(reset)
-    assert text.index("self._update_curriculum") < text.index("sample_robot_positions") < text.index("self._episode_stage[env_ids]")
+    assert text.index("sample_robot_positions") < text.index("self._episode_stage[env_ids]") < text.index("self._launch_ball")
 
 
 def test_zero_environments(cfg):

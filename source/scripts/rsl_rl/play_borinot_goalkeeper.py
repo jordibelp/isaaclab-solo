@@ -106,6 +106,8 @@ def main(env_cfg, agent_cfg):
         if args_cli.video:
             total_steps = min(total_steps, args_cli.video_length)
         counts = torch.zeros(10, dtype=torch.long, device=env.device)
+        terminated_episodes = 0
+        truncated_episodes = 0
         print(f"[INFO] Goalkeeper: {env_cfg.control_mode}, {env_cfg.physics_hz}/{env_cfg.policy_hz} Hz, "
               f"home={env_cfg.robot_home}, shot_level={env_cfg.shot_level}, curriculum={env_cfg.curriculum}, "
               f"camera={args_cli.camera}, {total_steps} policy steps", flush=True)
@@ -123,7 +125,9 @@ def main(env_cfg, agent_cfg):
                     raise RuntimeError("The environment produced non-finite rewards or observations.")
                 runner.alg.policy.reset(dones)
                 codes = info["goalkeeper_outcome"]
-                counts += torch.bincount(codes[dones.bool() & (codes != 0)], minlength=10)
+                counts += torch.bincount(codes[info["goalkeeper_shot_finished"]], minlength=10)
+                terminated_episodes += int(env.unwrapped.reset_terminated.sum())
+                truncated_episodes += int(env.unwrapped.reset_time_outs.sum())
                 completed_steps += 1
                 remaining = dt - (time.perf_counter() - start)
                 if args_cli.real_time and remaining > 0:
@@ -140,6 +144,7 @@ def main(env_cfg, agent_cfg):
                   "camera": args_cli.camera, "camera_eye": list(env_cfg.viewer.eye),
                   "camera_lookat": list(env_cfg.viewer.lookat),
                   "completed_outcomes": dict(zip(names, counts.cpu().tolist())),
+                  "terminated_episodes": terminated_episodes, "time_limit_episodes": truncated_episodes,
                   "video_dir": str(video_dir) if video_dir else None}
         print("GOALKEEPER_PLAY=" + json.dumps(report), flush=True)
     finally:

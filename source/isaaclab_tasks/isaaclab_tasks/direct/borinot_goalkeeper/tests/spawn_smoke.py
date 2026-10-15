@@ -111,16 +111,18 @@ def main(cfg, agent_cfg):
         # Take a real step first so completed-episode logging has its power packet.
         env.step(torch.zeros(env.num_envs,cfg.action_space,device=env.device))
         cfg.curriculum = True
-        cfg.curriculum_min_steps = cfg.curriculum_min_episodes = 1
+        cfg.curriculum_min_steps = cfg.curriculum_min_shots = 1
         cfg.curriculum_success_threshold = 0.0
         env.shot_level = cfg.reset_grid_start_level-1
         env._episode_stage[:] = env.shot_level
-        env._stage_episodes = env._window_cursor = 0
+        env._shot_stage[:] = env.shot_level
+        env._stage_shots = env._window_cursor = 0
         env._curriculum_window.zero_()
         env._stage_start_step = 0
         env.common_step_counter = 10
         env._shot_steps[:] = 1
         env._outcome[:] = 7
+        env._record_shots(env.robot._ALL_INDICES)
         env._reset_idx(env.robot._ALL_INDICES)
         check("promotion_happens_before_spawn_sampling", env.shot_level == cfg.reset_grid_start_level and (env.spawn_grid_index >= 0).all())
         check("promoted_episodes_record_new_stage", (env._episode_stage == env.shot_level).all())
@@ -128,9 +130,9 @@ def main(cfg, agent_cfg):
         readback(True)
 
         cfg.curriculum = False
-        env._shot_steps[:] = env.max_episode_length-1
+        env._episode_steps[:] = env.max_episode_length-1
         obs,reward,terminated,truncated,info = env.step(torch.zeros(env.num_envs,cfg.action_space,device=env.device))
-        check("deadline_triggers_real_automatic_reset", terminated.all() and not truncated.any())
+        check("deadline_triggers_real_automatic_reset", truncated.all() and not terminated.any())
         check("automatic_reset_uses_grid_and_clears_episode_clock", (env.spawn_grid_index >= 0).all() and not env._shot_steps.any())
         check("finite_post_reset_observations", all(torch.isfinite(v).all() for v in obs.values()) and torch.isfinite(reward).all())
         readback(True)

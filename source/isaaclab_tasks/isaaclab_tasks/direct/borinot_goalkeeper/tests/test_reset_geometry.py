@@ -112,7 +112,7 @@ def test_physics_tilt_detector_accepts_degrees(threshold_deg, roll_deg, pitch_de
 
 
 @pytest.mark.parametrize("reset_contact,reset_tilt", [(False, False), (False, True), (True, False), (True, True)])
-def test_reset_flags_are_independent_and_other_outcomes_still_terminate(reset_contact, reset_tilt):
+def test_reset_flags_are_independent_and_ball_outcomes_continue(reset_contact, reset_tilt):
     tree = ast.parse((FOLDER / "borinot_goalkeeper_env.py").read_text())
     method = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "_get_dones")
     namespace = {"torch": torch, "terminal_outcome": task_math.terminal_outcome}
@@ -124,10 +124,11 @@ def test_reset_flags_are_independent_and_other_outcomes_still_terminate(reset_co
     flags["goal"][3] = True
     flags["area"][4] = True
     env = SimpleNamespace(cfg=SimpleNamespace(require_recovery_for_save=False,
-        reset_robot_on_robot_crash=reset_contact, reset_robot_on_tilt_threshold=reset_tilt),
+        reset_robot_on_robot_crash=reset_contact, reset_robot_on_tilt_threshold=reset_tilt,shot_timeout_s=3.0,is_finite_horizon=False),
         _flags=flags, _sample_physics_events=lambda: None, _clear=torch.zeros(n, dtype=torch.bool),
-        _shot_steps=torch.tensor([1, 1, 1, 1, 1, 180]), max_episode_length=180)
+        _shot_steps=torch.tensor([1, 1, 1, 1, 1, 180]), _episode_steps=torch.ones(n,dtype=torch.long),
+        _ball_active=torch.ones(n,dtype=torch.bool), step_dt=1/60, max_episode_length=1200)
     terminated, truncated = namespace["_get_dones"](env)
-    assert terminated.tolist() == [reset_contact, reset_tilt, reset_contact or reset_tilt, True, True, True]
+    assert terminated.tolist() == [reset_contact, reset_tilt, reset_contact or reset_tilt, False, True, reset_contact]
     assert env._outcome.tolist() == [8, 8, 8, 3, 8, 8], "Disabling reset must not remove the crash penalty"
     assert not truncated.any()
