@@ -78,9 +78,25 @@ The robot comes from:
 ### Paddle and mass
 
 The original USD has a 115 g distal link. We model it as a 15 g shaft plus a separate 100 g paddle. This is a prototype interpretation of the existing tip ballast, not a measured separation of the physical parts.
-The paddle is a rigid cuboid: 12 mm thick, 240 mm wide, and 240 mm high. A fixed joint connects it to the distal link. Its center has a 50 mm standoff from the old tip center along the arm-plane normal, toward the incoming ball. The local mount rotates the paddle's +X normal onto the distal link's +Z axis. The root yaw then maps this normal onto world +X. The original USD is unchanged.
+The paddle is a round ping-pong-style racket: a **160 mm diameter** head, **12 mm thick**, plus a **60 × 26 mm** handle of the same thickness. Both parts are physical collision shapes on one rigid body named `paddle`. A ball hitting either part counts as a paddle hit. The short handle clears the upper arm at neutral. It extends toward the wrist along paddle-local +Y, overlapping the head by up to 10 mm so the parts join. This is a prototype shape, not a measured commercial racket.
 
-The task changes mass, center of mass, and inertia in the spawned USD layer only. It never saves over the original file. The shaft inertia uses a simple 160 mm rod approximation. PhysX computes the paddle inertia from its cuboid geometry and mass. Total robot mass remains **2.910538 kg** in the simulator.
+A fixed joint connects it to the distal link. The **head center** keeps the existing 50 mm standoff from the old tip center along the arm-plane normal, toward the incoming ball. The local mount rotates the paddle's +X normal onto the distal link's +Z axis. The root yaw then maps this normal onto world +X. Resizing does not move this center, its normal, or the fixed shot target. The original USD is unchanged.
+
+Configure the geometry in `borinot_goalkeeper_env_cfg.py`, in metres:
+
+```python
+paddle_diameter_m = 0.16
+paddle_thickness_m = 0.012
+paddle_handle_length_m = 0.06
+paddle_handle_width_m = 0.026
+paddle_mount_delta_m = 0.0
+```
+
+`paddle_mount_delta_m` moves the **whole racket** along the second link's length, not along the paddle normal. Positive values extend toward the calf tip along second-link local **−Y**. Negative values retract toward the wrist. Zero keeps the existing mount. The head-center offset from the second-link origin is `(x, y - delta, z)`, starting from `paddle_offset_ee=(0, -0.16, 0.029)` metres. For example, `paddle_mount_delta_m=0.04` changes that position to `(0, -0.20, 0.029)`: **4 cm farther along the calf**, with the same normal standoff and orientation. It follows the link when the joints move. The fixed shot aim does not move with it, so a shifted mount need not start at the aim center.
+
+For launch-only overrides, append `env.paddle_diameter_m=0.12 env.paddle_mount_delta_m=0.04` to the training or player command. Restart the environment after geometry changes. The old square `paddle_size` field is removed. The browser inspector at `http://127.0.0.1:8790` has **Ping-pong racket / Ø (cm)** and **Δ (cm)** sliders and numeric inputs. These update the visible racket, collision hulls and overlap checks together. They only change the preview; copy the displayed settings into the config to use them for training. **Restore config size** and **Restore config mount** restore those values independently. Restart the viewer after editing its config.
+
+The task changes mass, center of mass, and inertia in the spawned USD layer only. It never saves over the original file. The shaft inertia uses a simple 160 mm rod approximation. PhysX computes the racket center of mass and inertia from both collision shapes. `paddle_mass_kg=0.100` is the **total** racket mass, including its handle. Resizing keeps that mass fixed unless you also edit it. Total robot mass remains **2.910538 kg**. Mass distribution changes with diameter, so old checkpoints can load with the same observation/action sizes but are not validated for the new dynamics.
 
 The old distal mesh remains visible and collidable. A ball hitting it counts as an arm hit, not a paddle hit. The paddle's new mass distribution is intentionally different from the old ballast's distribution, even though the total mass is unchanged.
 
@@ -453,11 +469,12 @@ The face normal is the paddle's local +x axis rotated into world coordinates. At
 These are **event bonuses**, not rates. They are paid only on the first detected paddle hit of an episode, and only if the selected outcome in that interval is ongoing (0) or save (7):
 
 ```text
-Q = exp(-(u² + v²) / (0.09 m)²)
+sigma = 0.75 * paddle_diameter_m / 2
+Q = exp(-(u² + v²) / sigma²)
 first-hit reward = rwd_scale_hit + rwd_scale_centered_hit * Q
 ```
 
-`u` and `v` are the ball center's offsets along the paddle face, in the paddle's own coordinates, at first contact. Paddle thickness/depth is ignored. Q is 1 at the center and decreases toward the edges. The 0.09 m width is fixed in `_sample_physics_events()`; it is not `intercept_sigma_m`.
+`u` and `v` are the ball center's offsets from the **head center** along the paddle face, in the paddle's own coordinates, at first contact. Paddle thickness/depth is ignored. Q is 1 at the center and decreases toward the edges. The width is 75% of head radius: 0.06 m for a 0.16 m head. It scales with racket size and is separate from `intercept_sigma_m`. Handle contacts still count as hits, but usually have low centered quality. Both hit scales remain zero by default.
 
 For example, with hit scale 0.1 and centered-hit scale 0.2, a centered first contact earns +0.3. A second paddle contact earns no new bonus. A first paddle hit accompanied by a selected arm/base/goal/safety/deadline/miss failure earns neither bonus. **A bonus already paid on an earlier interval is not taken back if the ball later scores.** These terms encourage contact discovery, not verified saves, so keep them separate from `rwd_scale_save`.
 
@@ -630,6 +647,8 @@ That contact-regression script explicitly selects PI mode at 240/60 Hz to retain
 ```
 
 The checks cover ballistic goal-threatening shots, progress geometry, actual paddle/base/arm/goal/floor contacts, reward scales, full observations, mass/inertia/material readback, partial resets, finite rollouts, and curriculum boundaries. They also check the corrected paddle plane at bent-arm poses, both crash-reset switches independently, and the configurable tilt threshold. The physics checks use a known 1.5 m home-height baseline, not the locally tuned lower home.
+
+The round-racket and mount controls passed **121 CPU tests** and **1118 offline browser checks**. Real task physics checks cover 12, 16 and 24 cm heads, actual head/handle hits and outside-rim misses, mass/COM/inertia readback, and the full 71-check contact/reset regression. They also verify −4, 0 and +4 cm mount shifts at neutral and bent joints, plus a real Hydra launch with both diameter and mount overrides. The default 16 cm racket and its +4 cm extension passed neutral clearance with physical self-collisions enabled. A separate CPU bench tested 21 imposed poses and 10 continuous paths; its four intended clear paths had no contacts with either filter setting. These are geometry and integration checks, not a learned-policy comparison or a complete safe-workspace map.
 
 Control-variant validation passed 113 CPU tests and 304 simulator checks. The simulator checks cover all three modes, actuator property readback, 200/100 and 240/60 Hz timing, a held arm at 400/100 Hz, and the original contact regression. Those original control-interface checks completed two PPO updates per mode with 32 environments and 32 rollout steps, then reloaded each checkpoint for finite inference. The new shared PPO recipe uses 24 rollout steps; its separate verification is described in the linked PPO training guide. These checks establish integration, not learned agility, convergence, hardware transfer, or ten-thousand-environment throughput.
 

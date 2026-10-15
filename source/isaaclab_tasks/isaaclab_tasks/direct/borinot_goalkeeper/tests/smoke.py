@@ -167,12 +167,13 @@ try:
     env._area_min[2] = 0.0
     env.reset()
     low_root = env.robot.data.root_state_w.clone()
-    low_root[:, 2] = env.scene.env_origins[:, 2] + .52
+    # Keep the lower rim at the old fixture's height as the head is resized.
+    low_root[:, 2] = env.scene.env_origins[:, 2] + .4 + cfg.paddle_diameter_m/2
     env.robot.write_root_state_to_sim(low_root)
     env.step(actions)
     low_ball = env.ball.data.default_root_state.clone()
     low_ball[:, :3] = env._paddle_pose()[0] + env.scene.env_origins
-    low_ball[:, :3] += torch.tensor([.045, 0., -.095], device=env.device)
+    low_ball[:, :3] += torch.tensor([.045, 0., -cfg.paddle_diameter_m/2 + .025], device=env.device)
     low_ball[:, 7:10] = torch.tensor([-3., 0., -2.], device=env.device)
     low_ball[:, 10:] = 0.
     env.ball.write_root_state_to_sim(low_ball)

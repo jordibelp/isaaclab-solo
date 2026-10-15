@@ -66,8 +66,12 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     # Replace the original nominal 100 g tip ballast, rather than adding 100 g on top.
     shaft_mass_kg = 0.015
     paddle_mass_kg = 0.100
-    paddle_size = (0.012, 0.24, 0.24)  # thickness along +x; broad face is yz
+    paddle_diameter_m = 0.16  # round ping-pong head; broad face is local Y-Z
+    paddle_thickness_m = 0.012  # along local X (face normal)
+    paddle_handle_length_m = 0.06  # short grip toward the wrist along local +Y; clears the upper arm at neutral
+    paddle_handle_width_m = 0.026  # along local Z; same thickness as the head
     paddle_offset_ee = (0.0, -0.16, 0.029)  # 5 cm standoff along the arm-plane normal (+EE z)
+    paddle_mount_delta_m = 0.0  # positive extends the whole racket along second-link -Y (toward the tip)
     paddle_quat_ee = (0.7071067811865476, 0.0, -0.7071067811865476, 0.0)  # local +x normal -> EE +z
     # Neutral FK from the USD joint frames, not the file's authored preview pose.
     keeper_plane_x = -0.0303288

@@ -1,5 +1,9 @@
 # Borinot arm collisions: findings and inspectors
 
+**Geometry update, 2026-10-15:** the task now uses a configurable round ping-pong head plus handle, starting at 16 cm diameter. The browser diameter slider updates both its visible geometry and its collision checks. The pose-grid counts and blocked-motion endpoints below are historical results for the **old 24 × 24 cm square**, not measurements of the new racket. They must not be reused as the round racket's collision map. The filtering findings still apply. Run the bench again for the size you choose; for example add `--paddle-diameter-m 0.12`. See the [viewer guide](README.md) for the size control.
+
+The **Δ (cm)** control also moves the whole racket along second-link local −Y. Its persistent config is `paddle_mount_delta_m` in metres; positive extends toward the calf tip. To use a 4 cm extension in the physics bench, append `--paddle-mount-delta-m 0.04`. A different mount changes clearance; neither a smaller diameter nor a positive extension guarantees a collision-free path.
+
 ## Answer
 
 Self-collisions can be enabled without freezing the arm. But setting that flag alone does not prevent every arm–body intersection.

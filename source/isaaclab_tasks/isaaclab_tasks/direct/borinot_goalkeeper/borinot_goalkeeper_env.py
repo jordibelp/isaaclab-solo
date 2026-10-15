@@ -238,7 +238,8 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         fresh_hit = contact[:, 0] & ~self._hit
         paddle_pos, paddle_quat, _ = self._paddle_pose()
         relative = quat_apply_inverse(paddle_quat, position - paddle_pos)
-        center_quality = torch.exp(-relative[:, 1:].square().sum(-1) / 0.09**2)
+        center_sigma = 0.75 * self.cfg.paddle_diameter_m / 2
+        center_quality = torch.exp(-relative[:, 1:].square().sum(-1) / center_sigma**2)
         self._center_quality = torch.where(fresh_hit, center_quality, self._center_quality)
         self._new_hit |= fresh_hit
         self._hit |= contact[:, 0]

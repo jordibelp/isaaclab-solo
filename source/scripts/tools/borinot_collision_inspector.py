@@ -14,6 +14,8 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--self-collisions", choices=["on", "off", "compare"], default="compare")
 parser.add_argument("--scan", action="store_true", help="Probe a joint grid by imposing poses; not a reachable-motion test.")
 parser.add_argument("--grid-deg", type=float, default=10.0)
+parser.add_argument("--paddle-diameter-m", type=float, help="Override the configured round head diameter for this bench only.")
+parser.add_argument("--paddle-mount-delta-m", type=float, help="Shift the racket along distal-link -Y; metres, positive extends.")
 parser.add_argument("--output", type=Path, help="Save all probe and motion samples as JSON.")
 parser.add_argument("--duration", type=float, default=0.0, help="GUI time limit in seconds; 0 runs until closed.")
 parser.add_argument("--demo", action="store_true", help="GUI demo: clear motion followed by a blocked target.")
@@ -43,6 +45,10 @@ from isaaclab_tasks.direct.borinot_goalkeeper.paddle import attach_paddle
 
 def main():
     cfg = BorinotGoalkeeperEnvCfg()
+    if args.paddle_diameter_m is not None:
+        cfg.paddle_diameter_m = args.paddle_diameter_m
+    if args.paddle_mount_delta_m is not None:
+        cfg.paddle_mount_delta_m = args.paddle_mount_delta_m
     sim = sim_utils.SimulationContext(sim_utils.SimulationCfg(dt=1/cfg.physics_hz, device=args.device,
                                                             gravity=(0.0, 0.0, 0.0)))
     # We use the low-level callback rather than ContactSensor, so enable reports explicitly.
@@ -111,7 +117,12 @@ def main():
 
     from isaacsim.core.version import get_version
     report = {"simulator_version": list(get_version()), "sleep_threshold": 0.0,
-              "paddle_size_m": list(cfg.paddle_size), "paddle_offset_ee_m": list(cfg.paddle_offset_ee),
+              "paddle_diameter_m": cfg.paddle_diameter_m, "paddle_thickness_m": cfg.paddle_thickness_m,
+              "paddle_handle_length_m": cfg.paddle_handle_length_m,
+              "paddle_handle_width_m": cfg.paddle_handle_width_m,
+              "paddle_mount_delta_m": cfg.paddle_mount_delta_m,
+              "paddle_offset_ee_m": [cfg.paddle_offset_ee[0], cfg.paddle_offset_ee[1]-cfg.paddle_mount_delta_m,
+                                     cfg.paddle_offset_ee[2]],
               "paddle_quat_ee_wxyz": list(cfg.paddle_quat_ee),
               "bench_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
               "refresh_kinematics_after_impose": True,
@@ -222,9 +233,19 @@ def main():
         if geometry["usd_sha256"] != report["usd_sha256"]:
             raise ValueError("Collision outline cache is stale; refresh export_robot.py")
         outlines = geometry["collision_shapes"]
-        # The paddle is a true collision shape too.
-        vertices = [[x*cfg.paddle_size[0]/2, y*cfg.paddle_size[1]/2, z*cfg.paddle_size[2]/2]
-                    for x in (-1, 1) for y in (-1, 1) for z in (-1, 1)]
+        # Two colliders on the same paddle body, matching attach_paddle().
+        radius = cfg.paddle_diameter_m / 2
+        vertices = [[x*cfg.paddle_thickness_m/2, radius*math.cos(i*math.tau/64), radius*math.sin(i*math.tau/64)]
+                    for x in (-1, 1) for i in range(64)]
+        faces = []
+        for i in range(64):
+            j = (i+1) % 64
+            faces.extend([[i,j,64+i], [j,64+j,64+i]])
+        outlines.append({"body": "paddle", "matrix": np.eye(4).reshape(-1).tolist(),
+                         "vertices": vertices, "faces": faces})
+        handle_y = radius + cfg.paddle_handle_length_m/2 - min(0.01, radius/4)
+        vertices = [[x*cfg.paddle_thickness_m/2, handle_y+y*cfg.paddle_handle_length_m/2,
+                     z*cfg.paddle_handle_width_m/2] for x in (-1, 1) for y in (-1, 1) for z in (-1, 1)]
         outlines.append({"body": "paddle", "matrix": np.eye(4).reshape(-1).tolist(), "vertices": vertices,
                          "faces": [[0,1,2],[1,2,3],[4,5,6],[5,6,7],[0,1,4],[1,4,5],
                                    [2,3,6],[3,6,7],[0,2,4],[2,4,6],[1,3,5],[3,5,7]]})

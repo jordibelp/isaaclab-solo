@@ -52,9 +52,12 @@ function createCollisionInspector() {
     const mesh=new THREE.LineSegments(new THREE.EdgesGeometry(geometry,1),material.clone());mesh.matrix.fromArray(item.matrix);mesh.matrixAutoUpdate=false;
     bodies[item.body].add(mesh);shapes.push({...item,mesh});
   }
-  const paddleHull={name:'paddle',body:'paddle',mesh:new THREE.LineSegments(new THREE.EdgesGeometry(paddle.geometry),material.clone()),
-    vertices:Array.from({length:8},(_,i)=>D.paddle_size.map((s,k)=>((i>>k)&1?1:-1)*s/2))};
-  paddle.add(paddleHull.mesh);shapes.push(paddleHull);
+  for(const [name,part] of [['paddle_head',paddleHead],['paddle_handle',paddleHandle]]){
+    const positions=part.geometry.attributes.position,vertices=new Map();
+    for(let i=0;i<positions.count;i++){const v=new THREE.Vector3().fromBufferAttribute(positions,i).toArray();vertices.set(v.join(','),v);}
+    const mesh=new THREE.LineSegments(new THREE.EdgesGeometry(part.geometry),material.clone());
+    part.add(mesh);shapes.push({name,body:'paddle',mesh,vertices:[...vertices.values()]});
+  }
   const adjacent=new Set(MODEL.joints.map(j=>[j.parent,j.child].sort().join('|')));
   adjacent.add(['flying_arm_2__link2','paddle'].sort().join('|'));
   let result=[];

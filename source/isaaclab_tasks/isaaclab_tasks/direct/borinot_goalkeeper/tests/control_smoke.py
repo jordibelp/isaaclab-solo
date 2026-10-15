@@ -17,6 +17,7 @@ app = AppLauncher(args).app
 
 import gymnasium as gym
 import torch
+from pxr import UsdGeom
 import isaaclab_tasks
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
@@ -35,6 +36,8 @@ def main(cfg, agent_cfg):
     report = {"checks": [], "control_mode": cfg.control_mode, "physics_hz": cfg.physics_hz,
               "policy_hz": cfg.policy_hz, "decimation": cfg.decimation, "action_space": cfg.action_space,
               "observation_space": cfg.observation_space, "hold_arm": cfg.hold_arm,
+              "paddle_diameter_m": cfg.paddle_diameter_m,
+              "paddle_mount_delta_m": cfg.paddle_mount_delta_m,
               "effort_lim_sim": cfg.effort_lim_sim, "velocity_lim_sim": cfg.velocity_lim_sim}
 
     def check(name, condition):
@@ -68,6 +71,10 @@ def main(cfg, agent_cfg):
     env._sample_power = traced_sample
     try:
         obs, _ = env.reset()
+        head = UsdGeom.Cylinder(env.sim.stage.GetPrimAtPath("/World/envs/env_0/Robot/paddle/geometry/mesh"))
+        check("hydra_paddle_diameter_reaches_physics", abs(head.GetRadiusAttr().Get()*2 - cfg.paddle_diameter_m) < 1e-7)
+        mount = env.sim.stage.GetPrimAtPath("/World/envs/env_0/Robot/paddle_fixed_joint").GetAttribute("physics:localPos0").Get()
+        check("hydra_mount_delta_reaches_physics", abs(mount[1] - (cfg.paddle_offset_ee[1]-cfg.paddle_mount_delta_m)) < 1e-7)
         direct = cfg.control_mode != "PI_rotors_PD_joint_pos_control"
         use_pd = cfg.control_mode != "thrust_and_torque_control" or cfg.hold_arm
         check("spaces_follow_selected_mode", cfg.action_space == (8 if direct else 6)
