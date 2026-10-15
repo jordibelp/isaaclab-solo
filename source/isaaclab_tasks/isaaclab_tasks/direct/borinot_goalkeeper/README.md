@@ -292,9 +292,9 @@ Use `env.control_mode` as a Hydra override on the training or playback command. 
 
 | `env.control_mode` | Policy actions | Actor / critic values |
 |---|---:|---:|
-| `thrust_and_torque_control` | 6 individual thrusts + 2 joint torques: **8** | **57** each |
-| `thrust_and_PD_joint_pos_control` | 6 individual thrusts + 2 desired joint angles: **8** | **57** each |
-| `PI_rotors_PD_joint_pos_control` | Collective thrust + 3 body rates + 2 desired joint angles: **6** | **55** each |
+| `thrust_and_torque_control` | 6 individual thrusts + 2 joint torques: **8** | **62** each |
+| `thrust_and_PD_joint_pos_control` | 6 individual thrusts + 2 desired joint angles: **8** | **62** each |
+| `PI_rotors_PD_joint_pos_control` | Collective thrust + 3 body rates + 2 desired joint angles: **6** | **60** each |
 
 Append one of these selectors to the training command:
 
@@ -384,7 +384,11 @@ These four fields are floats. The task refreshes limits and gains on the existin
 
 ### Observation and checkpoint contract
 
-Actor and critic each receive the same 49 shared values plus the current policy actions: 57 values in direct modes or 55 in PI mode. Shared values include the home-position error, full root quaternion, base linear and angular velocities, joint positions and velocities, relative paddle position and normal, relative ball position and velocity, predicted intercept/time/validity, shot phase/time, rotor thrust state, controller integral, and sampled ball mass/restitution. The three PI-integral entries remain zero in direct modes. Joint velocity is divided by `velocity_lim_sim`.
+Actor and critic each receive the same 54 shared values plus the current policy actions: 62 values in direct modes or 60 in PI mode. Shared values include the home-position error, full root rotation matrix, base linear and angular velocities, joint positions and velocities, relative paddle position and normal, relative ball position and velocity, predicted intercept/time/validity, shot phase/time, rotor thrust state, controller integral, and sampled ball mass/restitution. The three PI-integral entries remain zero in direct modes. Joint velocity is divided by `velocity_lim_sim`.
+
+Orientation occupies indices `3:12` (zero-based). It is the base-to-world 3×3 rotation matrix, flattened row by row: `[R00, R01, R02, R10, R11, R12, R20, R21, R22]`. We convert the simulator's `(w, x, y, z)` quaternion with `matrix_from_quat`; internal vector transforms still use that quaternion. The observation is identical for `q` and `-q`. This follows the continuity motivation in [Zhou et al., On the Continuity of Rotation Representations in Neural Networks](https://arxiv.org/abs/1812.07035); we use the requested full 9D matrix, not their compact 6D representation.
+
+**Checkpoint change (2026-10-15):** older goalkeeper checkpoints use a 4D quaternion and have 57 inputs in direct modes or 55 in PI mode. They cannot load directly into this 62/60-input environment. Train a new policy with the matrix observations, or use matching older code in a separate checkout to replay old weights. Changing the declared observation size alone does not make old weights compatible.
 
 The predicted intercept is privileged information. It does not replace the current-ball target in the default progress reward. All coordinates remove the clone's world offset. The finite shot clock is independent of the generic runner's randomized initial episode-length counter.
 

@@ -44,7 +44,7 @@ def test_requested_default_selector_exists():
 
 
 @pytest.mark.parametrize("mode,actions,observations,kp,kd", [
-    (MODES[0], 8, 57, 0.0, 0.0), (MODES[1], 8, 57, 35.0, 0.6), (MODES[2], 6, 55, 35.0, 0.6),
+    (MODES[0], 8, 62, 0.0, 0.0), (MODES[1], 8, 62, 35.0, 0.6), (MODES[2], 6, 60, 35.0, 0.6),
 ])
 def test_resolver_updates_spaces_timing_and_existing_actuator(mode, actions, observations, kp, kd):
     cfg = config()

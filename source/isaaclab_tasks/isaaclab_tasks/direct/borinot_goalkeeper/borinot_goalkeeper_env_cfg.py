@@ -20,8 +20,8 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     episode_length_s = 3.0
     is_finite_horizon = True
     action_space = 8  # derived: 8 for direct thrust modes, 6 for PI
-    observation_space = 57  # derived: 49 shared values plus the current actions
-    state_space = 57
+    observation_space = 62  # derived: 54 shared values plus the current actions
+    state_space = 62
     sim = sim_utils.SimulationCfg(
         dt=1 / 200,
         render_interval=decimation,
@@ -199,7 +199,7 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
         self.sim.dt = 1 / self.physics_hz
         self.sim.render_interval = self.decimation
         self.action_space = 6 if self.control_mode == modes[2] else 8
-        self.observation_space = self.state_space = 49 + self.action_space
+        self.observation_space = self.state_space = 54 + self.action_space
         actuator = self.robot.actuators["arm"]
         use_pd = self.control_mode != modes[0] or self.hold_arm
         actuator.stiffness = self.joint_stiffness if use_pd else 0.0

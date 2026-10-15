@@ -2,7 +2,9 @@
 
 Use the dedicated RSL-RL player. `play_direct_0325.py` is a Solo12 player. It expects velocity-command fields and Solo12 robot attributes that this task does not have.
 
-## Your first trained checkpoint
+## Play a current checkpoint
+
+Current goalkeeper policies use a flattened 3×3 rotation matrix: 62 observations in direct control modes or 60 in PI mode. Use a checkpoint trained with this observation layout. Older quaternion-input weights do not load directly.
 
 Activate the local environment once:
 
@@ -13,12 +15,12 @@ cd /home/jordibelp/IsaacLab && source /home/jordibelp/miniconda3/etc/profile.d/c
 Then run:
 
 ```bash
-./isaaclab.sh -p source/scripts/rsl_rl/play_borinot_goalkeeper.py --checkpoint /home/jordibelp/IsaacLab-dirty/logs/skrl/checkpoints/1014_ii4tbx06_model_4690.pt --num_envs 1 --duration_s 2000 env.control_mode=thrust_and_torque_control env.physics_hz=200 env.policy_hz=100 'env.robot_home=[0.0,0.0,1.5]' env.rwd_scale_energy=0.0
+./isaaclab.sh -p source/scripts/rsl_rl/play_borinot_goalkeeper.py --checkpoint /absolute/path/new_rotation_matrix_checkpoint.pt --num_envs 1 --duration_s 2000 env.control_mode=thrust_and_torque_control env.physics_hz=200 env.policy_hz=100 'env.robot_home=[0.0,0.0,1.5]' env.rwd_scale_energy=0.0
 ```
 
 The task and agent default to `Borinot-Goalkeeper-Direct-v0` and `rsl_rl_cfg_entry_point`. There is no Solo12 `--task` flag to keep. The checkpoint path is storage only; the source code comes from the canonical `IsaacLab` checkout.
 
-We checked the saved W&B configuration for `jordibelp/borinotIsaacLab/ii4tbx06`. It used these control rates, torque actions, home height, and zero energy-reward scale. Its PPO network has 57 inputs, 8 actions, `[512, 256, 128]` hidden layers, ELU activation, and observation normalization. The player restores the saved normalizers along with the weights.
+For historical context, we checked the saved W&B configuration for `jordibelp/borinotIsaacLab/ii4tbx06`. It used these control rates, torque actions, home height, and zero energy-reward scale. Its PPO network has 57 quaternion-based inputs, 8 actions, `[512, 256, 128]` hidden layers, ELU activation, and observation normalization. That older checkpoint needs matching code from before the rotation-matrix observation change; it is not compatible with the current environment. The player restores saved normalizers along with the weights for compatible checkpoints.
 
 ## Camera views
 

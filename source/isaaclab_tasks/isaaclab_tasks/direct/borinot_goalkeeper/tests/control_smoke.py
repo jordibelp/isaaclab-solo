@@ -19,6 +19,7 @@ import gymnasium as gym
 import torch
 from pxr import UsdGeom
 import isaaclab_tasks
+from isaaclab.utils.math import quat_apply
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
 
@@ -78,8 +79,16 @@ def main(cfg, agent_cfg):
         direct = cfg.control_mode != "PI_rotors_PD_joint_pos_control"
         use_pd = cfg.control_mode != "thrust_and_torque_control" or cfg.hold_arm
         check("spaces_follow_selected_mode", cfg.action_space == (8 if direct else 6)
-              and all(value.shape == (args.num_envs, 49 + cfg.action_space) for value in obs.values())
+              and cfg.observation_space == cfg.state_space == 54 + cfg.action_space
+              and all(value.shape == (args.num_envs, cfg.observation_space) for value in obs.values())
               and env.action_space.shape[-1] == cfg.action_space)
+        rotation = obs["policy"][:, 3:12].reshape(-1, 3, 3)
+        basis = torch.eye(3, device=env.device).expand(args.num_envs, -1, -1)
+        rotated_basis = quat_apply(env.robot.data.root_quat_w[:, None, :].expand(-1, 3, -1), basis)
+        check("row_major_base_to_world_rotation", torch.allclose(rotation, rotated_basis.mT, atol=1e-6))
+        check("rotation_is_orthonormal", torch.allclose(rotation.mT @ rotation, basis, atol=1e-6)
+              and torch.allclose(torch.linalg.det(rotation), torch.ones(args.num_envs, device=env.device), atol=1e-6))
+        check("actor_and_critic_share_rotation_observations", torch.equal(obs["policy"], obs["critic"]))
         check("hydra_frequencies_reach_simulator", abs(env.physics_dt - 1/cfg.physics_hz) < 1e-10
               and abs(env.step_dt - 1/cfg.policy_hz) < 1e-10)
         check("deadline_uses_policy_frequency", env.max_episode_length == 3*cfg.policy_hz)

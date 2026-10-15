@@ -10,7 +10,7 @@ import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation, RigidObject
 from isaaclab.envs import DirectRLEnv
 from isaaclab.sensors import ContactSensor, ContactSensorCfg
-from isaaclab.utils.math import quat_apply, quat_apply_inverse
+from isaaclab.utils.math import matrix_from_quat, quat_apply, quat_apply_inverse
 
 from .borinot_goalkeeper_env_cfg import BorinotGoalkeeperEnvCfg
 from .paddle import attach_paddle
@@ -384,7 +384,8 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         ball_pos = self.ball.data.root_pos_w - self.scene.env_origins
         target, time_s, valid, _ = self._interception()
         common = [quat_apply_inverse(quaternion, self._home - root_pos),
-                  quaternion, self.robot.data.root_lin_vel_b,
+                  matrix_from_quat(quaternion).flatten(start_dim=1),  # base-to-world rotation matrix, row-major (9)
+                  self.robot.data.root_lin_vel_b,
                   self.robot.data.root_ang_vel_b, self.robot.data.joint_pos[:, self.joint_ids] / self._joint_scale,
                   self.robot.data.joint_vel[:, self.joint_ids] / self.cfg.velocity_lim_sim,
                   quat_apply_inverse(quaternion, paddle_pos - root_pos), quat_apply_inverse(quaternion, normal)]
