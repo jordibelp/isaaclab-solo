@@ -20,6 +20,8 @@ FIELDS = (
     "keeper_plane_x", "target_center_yz", "ball_radius_m", "goal_center", "goal_size", "launch_x_range",
     "launch_z", "launch_y_noise", "shot_half_extents_yz", "shot_flight_time_ranges_s", "shot_level",
     "goal_area_x_m", "goal_area_y_m", "goal_area_z_m", "reset_xy_noise_m", "reset_z_noise_m",
+    "reset_grid_enabled", "reset_grid_start_level", "reset_grid_y_offsets_m", "reset_grid_z_offsets_m",
+    "enabled_self_collisions",
 )
 
 
@@ -36,8 +38,6 @@ def task_defaults():
     values = {name: ast.literal_eval(fields[name]) for name in FIELDS}
     values["env_spacing"] = ast.literal_eval(keyword(fields["scene"], "env_spacing"))
     values["joint_pose"] = ast.literal_eval(keyword(keyword(fields["robot"], "init_state"), "joint_pos"))
-    values["enabled_self_collisions"] = ast.literal_eval(keyword(
-        keyword(keyword(fields["robot"], "spawn"), "articulation_props"), "enabled_self_collisions"))
     asset_expr = keyword(keyword(fields["robot"], "spawn"), "usd_path")
     # Resolve only the supported Path expression; never eval config source.
     expected = 'str(Path(__file__).resolve().parents[4] / "isaaclab_assets/data/Robots/Borinot/borinotFlat.usd")'
@@ -61,6 +61,7 @@ def build_html():
             .replace("/* THREE_LICENSE */", (vendor / "THREE-LICENSE").read_text())
             .replace("/* COLLISION_CODE */", (ASSETS / "collision.js").read_text())
             .replace("/* CURRICULUM_CODE */", (ASSETS / "curriculum.js").read_text())
+            .replace("/* SPAWN_CODE */", (ASSETS / "spawn.js").read_text())
             .replace("/* MODEL_DATA */null", json.dumps({"defaults": defaults, "robot": robot}, separators=(",", ":"))))
 
 

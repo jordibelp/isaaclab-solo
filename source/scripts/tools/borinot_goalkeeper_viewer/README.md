@@ -55,6 +55,16 @@ The **orange outline** shows the selected target rectangle at `keeper_plane_x`. 
 
 The purple projection is **not an impact envelope**. The task samples the aim at the keeper plane, in front of the goal. Gravity and launch noise change where an unblocked ball reaches the goal later. The path guide uses the edited spread and flight times with the original launch ranges, noise and gravity. Very wide or slow custom phases can miss the goal or reach the floor; choosing a phase is not proof that every shot threatens the goal or is reachable by the robot.
 
+## Robot spawn locations
+
+Select a shot phase first. The **Robot spawn locations** panel shows one cyan base-origin cross in centre-only phases, or all available grid locations in later phases. The default is a 3 × 3 grid. The panel follows the configured `reset_grid_enabled` and `reset_grid_start_level`; changing a shot phase does not move the robot automatically.
+
+Use **Inspect location** to put the robot exactly at one location, without small reset noise. **Sample robot reset** picks uniformly from the available locations and adds the configured XYZ reset noise. Both restore the config body orientation and joint pose. Racket size/mount preview edits remain unchanged. The ball aim stays fixed when the robot moves.
+
+Tune `robot_home`, `reset_grid_y_offsets_m`, `reset_grid_z_offsets_m`, `reset_grid_start_level`, `reset_grid_enabled`, `reset_xy_noise_m` and `reset_z_noise_m` in the task config. Restart the viewer after editing it. Grid offsets use world Y/Z, not body coordinates. Locations are numbered by bottom-to-top Z row, then Y column, for the default ascending offsets. The cyan crosses mark base origins, not racket centres. They do not certify collision-free or dynamically reachable poses.
+
+The default home height is now 1.5 m. Y offsets are −0.8, 0 and +0.8 m; Z offsets are −0.65, 0 and +0.65 m. This gives base heights 0.85, 1.5 and 2.15 m, before noise. Phases 0–1 use only the centre; phase 2 onward samples all nine locations, including the centre.
+
 ## Geometry and configuration
 
 The viewer reads selected literal values from the current `borinot_goalkeeper_env_cfg.py` at launch. It never imports the environment. Relaunch after editing the config. It previews one environment at its local origin, with no reset noise.
@@ -67,7 +77,7 @@ The task settings are `paddle_diameter_m`, `paddle_thickness_m`, `paddle_handle_
 
 The orange box constrains the base origin only. Warnings flag a base outside that box or visible geometry below the floor. They are geometry checks, not collision or dynamic reachability tests. The shot target remains fixed when you move Borinot, as it does in the environment.
 
-The shot aim centre matches the neutral paddle at the reference home height of 1.5 m. A locally tuned home Z of 0.5 m puts the paddle about 1 m below it and the base below the allowed minimum of 0.55 m. The viewer exposes these differences; it does not fix them.
+The shot aim centre matches the zero-delta neutral paddle at the reference home height of 1.5 m. A different home or mount changes that alignment without moving the shot aim. A home Z of 0.5 m would put the base below the allowed minimum of 0.55 m. The enabled task reset grid rejects an out-of-bounds home/grid/noise combination; the viewer still shows source values without silently adjusting them.
 
 ## Standalone offline HTML
 
@@ -88,6 +98,14 @@ This refresh uses the [OpenUSD joint frames](https://openusd.org/release/api/cla
 This viewer does not simulate thrust, gravity on Borinot, collision response, reward, curriculum promotion or policy behaviour. Use Isaac Sim when those dynamics matter. For comparing geometry and moving the robot around, this viewer is enough.
 
 ## Verification
+
+The spawn-grid update passed **144 CPU tests**, **64 spawn-browser assertions**, and **136 real-simulator assertions** across two launches. The simulator checks read actual PhysX root transforms for centre/grid/noisy starts, partial and automatic resets, and a promotion at the switch boundary. They verify fixed shot targets and self-collision flags OFF/ON after real Hydra parsing. The ON launch also changed the grid spacing, switch phase and reset noise. The shot-editor regression passed **1379 assertions** with Jordi's six local phases.
+
+Run the spawn interaction checks on an exported file or live viewer:
+
+```bash
+python3 /home/jordibelp/IsaacLab/source/scripts/tools/borinot_goalkeeper_viewer/check_spawns.py http://127.0.0.1:8790/ --output /tmp/goalkeeper-spawn-checks.json
+```
 
 Run the curriculum browser checks on an exported HTML or the live viewer:
 

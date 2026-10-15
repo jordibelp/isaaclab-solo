@@ -102,6 +102,12 @@ The old distal mesh remains visible and collidable. A ball hitting it counts as 
 
 ### Ball and contacts
 
+The top-level `enabled_self_collisions=False` keeps the previous default. Override it at launch with `env.enabled_self_collisions=True` for training or playback. The environment resolves it into `robot.spawn.articulation_props.enabled_self_collisions` **after Hydra overrides and before spawn**. Do not use a new unregistered `+env.enabled_self_collisions` key or edit only the nested default.
+
+With self-collisions ON, eligible nonadjacent robot links can collide. Parent–child pairs remain filtered by PhysX. The task's robot-contact crash detector can terminate these episodes; the existing `reset_robot_on_robot_crash` option controls that termination separately. Enabling this flag does not change the source USD, masses, actuator settings or observation sizes. The browser self-collision switch remains preview-only, but its initial value reads this top-level config field.
+
+Use `source/scripts/rsl_rl/play_borinot_goalkeeper.py`, not the Solo12 player, for goalkeeper weights. The checkpoint `1014_ii4tbx06_model_4690.pt` has 57-input actor/normalizer tensors; current direct-mode observations have 62 values after the rotation-matrix update. It cannot load unchanged on current code. Use a matching 62-input checkpoint or the older matching code. This collision option does not convert checkpoint inputs.
+
 The ball has a 30 mm radius. Each reset samples mass uniformly from 20–50 g and restitution from 0.35–0.65. Restitution means how strongly the ball rebounds. We use the `max` material combination rule with a zero-restitution paddle, so the sampled ball value sets the ball–paddle restitution.
 
 When mass changes, the code also changes the sphere's inertia using `I = 0.4 * mass * radius²`. The property setters change the active PhysX model, not just USD metadata. Validation reads those properties back.
@@ -118,7 +124,7 @@ Every reward weight uses `rwd_scale_*`. The code adds `scale * signal`: **negati
 
 Here, **racket** and **paddle** mean the same separate rigid body. A **live shot** is a ball that has not yet met the safe-clearance conditions. A paddle touch alone does not make the ball safe.
 
-The tables below give the shipped values in the committed config. **Current local tuning on 2026-10-14 differs:** `rwd_scale_energy=-0.0001`, `arm_copper_loss_coefficient=6.888`, `clear_speed_m_s=0.2`, and `robot_home=(0.0, 0.0, 0.5)`. Energy is therefore enabled in the current working file. Its home height is also below the allowed minimum of 0.55 m; see the area explanation below. These locally tuned values are preserved. Hydra overrides can change them again at launch.
+The tables below give the shipped values in the committed config. Current local reward tuning includes `rwd_scale_energy=-0.0001`, `arm_copper_loss_coefficient=6.888`, and `clear_speed_m_s=0.2`. These values are preserved. The reset-grid update uses `robot_home=(0.0, 0.0, 1.5)` as its centre. The earlier 0.5 m home was below the allowed minimum of 0.55 m and cannot support the default lower row. Hydra overrides can change these settings again at launch.
 
 ### How one policy step gets its reward
 
@@ -209,7 +215,7 @@ z: [ 0.55, 2.60] m
 
 Any sampled base coordinate strictly below its minimum or above its maximum sets the area flag, even if the base returns inside before the policy interval ends. The selected area outcome costs −1 and ends the episode. Tune `goal_area_x_m`, `goal_area_y_m`, and `goal_area_z_m` to change the box. The racket may extend outside it without causing this particular penalty.
 
-Both spawn and reset use `robot_home_quat` in wxyz order. Reset position is `robot_home`, plus noise of up to 0.015 m on each axis. Changing home does **not** move the allowed box or the fixed ball-target center. In the current locally tuned file, home z = 0.5 m gives reset z in [0.485, 0.515] m, all below the allowed minimum. This can trigger an area failure immediately, without the robot first moving away from home. The committed 1.5 m reference home does not have this mismatch.
+Both spawn and reset use `robot_home_quat` in wxyz order. Early phases start at `robot_home` plus small noise. Later phases add a sampled Y/Z grid offset before applying that noise; see section 4. Changing home does **not** move the allowed box or the fixed ball-target centre. With the grid enabled, construction rejects a home/grid/noise combination that can start outside this box. It does not silently clip positions. This checks base coordinates, not full-body collision clearance or dynamic reachability.
 
 ### `rwd_scale_robot_crash`: non-ball contact or excessive tilt
 
@@ -396,7 +402,7 @@ Always match the control mode, rates, action scales, and actuator settings when 
 
 ## 4. Difficulty and curriculum
 
-Every shot is ballistic and aimed at the defense plane. Tests check that unblocked shots also threaten the goal and do not hit the floor first. This avoids training on harmless throws.
+Every shot is ballistic and aimed at the defense plane. The original four levels below were checked to threaten the goal without hitting the floor first. Additional, wider or slower custom phases need the same check; increasing a spread does not by itself guarantee a useful shot.
 
 | Level | Sideways target range around the neutral racket | Height range | Flight time to defense plane |
 |---:|---:|---:|---:|
@@ -420,9 +426,39 @@ env.curriculum=False env.shot_level=2
 
 Checkpoint resume restores the policy and optimizer, but the standard runner does not save this environment's curriculum window or active level. Set `env.shot_level=N` explicitly when resuming a later level. The dwell and evidence window restart. Do not infer restored curriculum state from the checkpoint iteration number.
 
+### Centre-to-grid robot resets
+
+The robot starts near the centre in the first shot phases. From a chosen shot level onward, every reset independently selects one location from a configurable Y/Z grid. The shot target stays fixed in world coordinates. It is **not** recentered around the sampled robot position. This makes the robot move from different starting positions to defend the same goal.
+
+Defaults in the task config:
+
+```python
+robot_home = (0.0, 0.0, 1.5)
+reset_grid_enabled = True
+reset_grid_start_level = 2
+reset_grid_y_offsets_m = (-0.8, 0.0, 0.8)
+reset_grid_z_offsets_m = (-0.65, 0.0, 0.65)
+reset_xy_noise_m = 0.015
+reset_z_noise_m = 0.015
+```
+
+Phases are zero-based: phases **0–1** use only `robot_home`. Phase **2 and later** samples all nine combinations of the three Y offsets and three Z offsets, with equal probability **1/9**, including the centre. These are **base positions**, not racket positions. Before noise, Y is −0.8, 0 or +0.8 m, and Z is 0.85, 1.5 or 2.15 m. X remains at `robot_home[0]`. The offsets use world axes, not the rotated body frame.
+
+Both modes then add independent uniform noise: X/Y within ±`reset_xy_noise_m`, and Z within ±`reset_z_noise_m`. Set both noise fields to `0.0` for exact grid points. The orientation, joint pose and zero initial velocities are unchanged. `robot_home` stays the centre used by the home-position observation and optional recovery terms; it does not become each episode's randomly selected start. Observation and action sizes are unchanged by this reset feature.
+
+Change either offset tuple to tune spacing or the number of rows/columns. Their Cartesian product defines all locations, so three Y values and four Z values give twelve locations. A location index uses `row * len(reset_grid_y_offsets_m) + column`. `env.spawn_grid_index` stores each episode's selected index; −1 denotes centre-only sampling.
+
+The grid uses the active `shot_level` even when `curriculum=False`. For example, fixed level 3 still uses grid resets with the default threshold. To keep centre-only starts at any level, use `env.reset_grid_enabled=False`. To keep phases 0–3 centred and switch at phase 4, use `env.reset_grid_start_level=4`. You can also override `env.reset_grid_y_offsets_m=[-0.5,0.0,0.5]` and `env.reset_grid_z_offsets_m=[-0.4,0.0,0.4]` at launch. Keep at least one finite offset per axis, non-negative noise, and a non-negative integer switch level.
+
+With the grid enabled, the environment validates the centre, all grid points and the full noise ranges against `goal_area_*_m` before simulator construction. Invalid combinations raise a clear error; they are not clipped into duplicate edge positions. This is a base-position check, not a collision-clearance or reachability guarantee. The centre height is now **1.5 m**, replacing the previous 0.5 m source value, which was below the allowed minimum and left no space for a lower row.
+
+Promotion happens before a reset samples its next start. Episodes already running keep their current pose and stage. Only the selected reset environments change; partial resets leave other robot poses, balls and spawn indices alone. Normal automatic resets use the same sampler. This keeps the existing stage-pure best-checkpoint gate aligned with both shot difficulty and spawn difficulty.
+
+The browser viewer shows the available base-origin crosses for the selected phase. Its **Inspect location** dropdown moves the robot without noise; **Sample robot reset** includes noise. Both restore the configured body orientation and joint pose. They change the preview only. See the [viewer guide](../../../../scripts/tools/borinot_goalkeeper_viewer/README.md).
+
 ### Best checkpoint per level
 
-`source/scripts/rsl_rl/train.py` keeps one best checkpoint per shot level in the run folder: `best_model_curriculum_idx_0.pt` to `best_model_curriculum_idx_3.pt`. "Best" means the highest `Train/mean_reward`. This is the mean return of the last 100 finished episodes. `best_model.pt` is a copy of the most recently improved level best. Each file stores its level, iteration, and score in the checkpoint `infos`.
+`source/scripts/rsl_rl/train.py` keeps one best checkpoint per shot level in the run folder: `best_model_curriculum_idx_<level>.pt`, for every configured level. "Best" means the highest `Train/mean_reward`. This is the mean return of the last 100 finished episodes. `best_model.pt` is a copy of the most recently improved level best. Each file stores its level, iteration, and score in the checkpoint `infos`.
 
 A promotion does not end the shots already in flight. For a few iterations, the finished episodes still come from the old, easier level. Their return must not count as the new level's score. The environment therefore counts the newest finished episodes that started at the current level (`curriculum_stage_pure_episodes`). The script skips a level's best-checkpoint update until this count covers the whole 100-episode reward buffer. In a local check, this skipped two or three iterations after each promotion. Without the skip, a level-2 score would have become the level-3 best.
 
@@ -599,6 +635,14 @@ First inspect physical hit attribution, sampled throws, and the outcome breakdow
 If flight stability is the main obstacle, pretrain hovering or reuse a flight controller with the same action contract. If sparse discoveries remain the obstacle, a model-based interception teacher could generate demonstrations. SAC or a recurrent policy are later comparisons, not implemented alternatives in this task registration.
 
 ## 7. Logging, verification, and limits
+
+The staged reset-grid and self-collision override passed **144 CPU tests** and **136 real-simulator assertions** in two launches (64 and 32 environments). These cover centre-only and grid phases, every default grid location, finite noisy starts inside bounds, partial/automatic resets, same-reset promotion, the unchanged observation shape, fixed world shot targets, and actual articulation flags OFF/ON. The ON case used real Hydra overrides for a different switch level, smaller grid offsets and different XY/Z noise. Browser checks passed 64 spawn assertions and 1379 shot-editor regression assertions on the current six-phase preview. These prove configuration/reset integration, not learned performance with random starts or self-collision enabled.
+
+Reproduce the simulator reset checks from the activated local IsaacLab environment:
+
+```bash
+./isaaclab.sh -p source/isaaclab_tasks/isaaclab_tasks/direct/borinot_goalkeeper/tests/spawn_smoke.py --headless --num-envs 64 --output /tmp/goalkeeper-spawns.json env.enabled_self_collisions=True '--kit_args=--/UJITSO/geometry=false --/UJITSO/textures=false --/UJITSO/materials=false'
+```
 
 `goalkeeper_outcome` in step extras records the selected reward outcome before automatic reset. With either crash-reset switch disabled, outcome 8 can be nonterminal; use `terminated` to identify actual endings. `goalkeeper_had_paddle_hit`, `goalkeeper_robot_contact_crash`, `goalkeeper_tilt_threshold`, and `goalkeeper_reward_terms` support attribution checks. `outcome_counts` pools completed episodes, not means of unequal reset-batch success rates.
 

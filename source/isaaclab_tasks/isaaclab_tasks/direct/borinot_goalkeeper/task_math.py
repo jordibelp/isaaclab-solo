@@ -1,6 +1,46 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """Tensor-only shot geometry. These functions also run without Isaac Sim."""
+import math
+
 import torch
+
+
+def validate_reset_grid(cfg):
+    """Reject an enabled grid whose root positions/noise can leave the allowed box."""
+    if not isinstance(cfg.reset_grid_start_level, int) or cfg.reset_grid_start_level < 0:
+        raise ValueError("reset_grid_start_level must be a non-negative integer.")
+    for name in ("reset_grid_y_offsets_m", "reset_grid_z_offsets_m"):
+        values = getattr(cfg, name)
+        if not values or not all(math.isfinite(v) for v in values):
+            raise ValueError(f"{name} must be a non-empty sequence of finite offsets.")
+    if not all(math.isfinite(v) and v >= 0 for v in (cfg.reset_xy_noise_m, cfg.reset_z_noise_m)):
+        raise ValueError("Reset noise must be finite and non-negative.")
+    if not cfg.reset_grid_enabled:
+        return
+    for axis, offsets, noise, bounds in (
+        (0, (0.0,), cfg.reset_xy_noise_m, cfg.goal_area_x_m),
+        (1, (0.0, *cfg.reset_grid_y_offsets_m), cfg.reset_xy_noise_m, cfg.goal_area_y_m),
+        (2, (0.0, *cfg.reset_grid_z_offsets_m), cfg.reset_z_noise_m, cfg.goal_area_z_m),
+    ):
+        lo, hi = cfg.robot_home[axis] + min(offsets) - noise, cfg.robot_home[axis] + max(offsets) + noise
+        if not math.isfinite(lo + hi) or lo < bounds[0] - 1e-9 or hi > bounds[1] + 1e-9:
+            raise ValueError(f"Reset grid/home plus noise exceeds goal_area_{'xyz'[axis]}_m: "
+                             f"[{lo:.4f}, {hi:.4f}] not inside {bounds}. Adjust home, offsets, noise or bounds.")
+
+
+def sample_robot_positions(n, device, cfg, level):
+    """Environment-local base positions; index -1 is centre-only, otherwise z-row/y-column."""
+    position = torch.tensor(cfg.robot_home, device=device, dtype=torch.float32).expand(n, -1).clone()
+    indices = torch.full((n,), -1, dtype=torch.long, device=device)
+    if cfg.reset_grid_enabled and level >= cfg.reset_grid_start_level:
+        y = torch.tensor(cfg.reset_grid_y_offsets_m, device=device)
+        z = torch.tensor(cfg.reset_grid_z_offsets_m, device=device)
+        indices = torch.randint(len(y) * len(z), (n,), device=device)
+        position[:, 1] += y[indices % len(y)]
+        position[:, 2] += z[indices // len(y)]
+    position[:, :2] += (2 * torch.rand(n, 2, device=device) - 1) * cfg.reset_xy_noise_m
+    position[:, 2] += (2 * torch.rand(n, device=device) - 1) * cfg.reset_z_noise_m
+    return position, indices
 
 
 def ballistic_state(position, velocity, time_s, gravity=9.81):

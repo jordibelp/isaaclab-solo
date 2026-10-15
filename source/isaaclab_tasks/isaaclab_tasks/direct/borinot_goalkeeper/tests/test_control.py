@@ -33,7 +33,7 @@ def config():
                 pass
     values["sim"] = SimpleNamespace(dt=1/240, render_interval=4)
     values["km_over_kf"] = values["km"] / values["kf"]
-    values["robot"] = SimpleNamespace(actuators={"arm": SimpleNamespace(
+    values["robot"] = SimpleNamespace(spawn=SimpleNamespace(articulation_props=SimpleNamespace(enabled_self_collisions=False)), actuators={"arm": SimpleNamespace(
         stiffness=35.0, damping=0.6, effort_limit_sim=2.7, velocity_limit_sim=15.0,
         friction=0.0, armature=0.00036207, effort_limit=None, velocity_limit=None)})
     return SimpleNamespace(**values)
@@ -41,6 +41,15 @@ def config():
 
 def test_requested_default_selector_exists():
     assert getattr(config(), "control_mode", None) == MODES[0]
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_self_collision_selector_overrides_spawn_settings_after_hydra(enabled):
+    cfg = config()
+    cfg.enabled_self_collisions = enabled
+    cfg.robot.spawn.articulation_props.enabled_self_collisions = not enabled
+    method("borinot_goalkeeper_env_cfg.py", "configure_control")(cfg)
+    assert cfg.robot.spawn.articulation_props.enabled_self_collisions is enabled
 
 
 @pytest.mark.parametrize("mode,actions,observations,kp,kd", [

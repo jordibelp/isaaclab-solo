@@ -14,6 +14,7 @@ from isaaclab.utils import configclass
 @configclass
 class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     control_mode = "thrust_and_torque_control"
+    enabled_self_collisions = False  # env.enabled_self_collisions=True enables eligible nonadjacent body pairs
     physics_hz = 200
     policy_hz = 100
     decimation = 2  # derived from physics_hz / policy_hz after Hydra overrides
@@ -30,7 +31,7 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     scene = InteractiveSceneCfg(num_envs=2048, env_spacing=7.0, replicate_physics=True)
     viewer = ViewerCfg(eye=(4.0, 4.0, 2.7), lookat=(0.3, 0.0, 1.2))
 
-    robot_home = (0.0, 0.0, 0.5)
+    robot_home = (0.0, 0.0, 1.5)  # centre of the reset grid; also the observation/recovery reference
     robot_home_quat = (0.7071067811865476, 0.0, 0.0, -0.7071067811865476)  # wxyz; -90 deg yaw
     effort_lim_sim = 2.7  # N*m; also maps unit torque actions to joint efforts
     velocity_lim_sim = 100.0  # rad/s
@@ -43,7 +44,7 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
             activate_contact_sensors=True,
             rigid_props=sim_utils.RigidBodyPropertiesCfg(enable_gyroscopic_forces=True),
             articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-                enabled_self_collisions=False,
+                enabled_self_collisions=enabled_self_collisions,
                 solver_position_iteration_count=8,
                 solver_velocity_iteration_count=2,
             ),
@@ -143,6 +144,12 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     goal_area_z_m = (0.55, 2.6)
     reset_xy_noise_m = 0.015
     reset_z_noise_m = 0.015
+    # Before this zero-based shot level, spawn at robot_home. Afterwards sample
+    # uniformly from the Cartesian product of these world Y/Z offsets from home.
+    reset_grid_enabled = True
+    reset_grid_start_level = 2
+    reset_grid_y_offsets_m = (-0.8, 0.0, 0.8)
+    reset_grid_z_offsets_m = (-0.65, 0.0, 0.65)
 
     # Every reward adds rwd_scale_* * its signal: negative scales penalize, positive scales reward.
     # Rate terms use policy dt; events are paid once; mean-power energy uses no extra dt.
@@ -185,6 +192,7 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
 
     def configure_control(self):
         """Refresh derived settings before simulator/space creation, including after Hydra."""
+        self.robot.spawn.articulation_props.enabled_self_collisions = self.enabled_self_collisions
         modes = ("thrust_and_torque_control", "thrust_and_PD_joint_pos_control", "PI_rotors_PD_joint_pos_control")
         if self.control_mode not in modes:
             raise ValueError(f"Unknown control_mode {self.control_mode!r}; choose one of {modes}.")

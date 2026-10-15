@@ -14,7 +14,10 @@ from isaaclab.utils.math import matrix_from_quat, quat_apply, quat_apply_inverse
 
 from .borinot_goalkeeper_env_cfg import BorinotGoalkeeperEnvCfg
 from .paddle import attach_paddle
-from .task_math import crosses_goal, plane_progress, predict_intercept, promotion_ready, sample_shots, terminal_outcome
+from .task_math import (
+    crosses_goal, plane_progress, predict_intercept, promotion_ready, sample_robot_positions, sample_shots,
+    terminal_outcome, validate_reset_grid,
+)
 
 
 class BorinotGoalkeeperEnv(DirectRLEnv):
@@ -29,8 +32,9 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
 
     def __init__(self, cfg: BorinotGoalkeeperEnvCfg, render_mode=None, **kwargs):
         cfg.configure_control()
+        validate_reset_grid(cfg)
         if not 0 <= cfg.shot_level < len(cfg.shot_half_extents_yz):
-            raise ValueError("shot_level must be in [0, 3].")
+            raise ValueError("shot_level must index shot_half_extents_yz.")
         if not 1 <= cfg.curriculum_min_episodes <= cfg.curriculum_window_episodes:
             raise ValueError("Require 1 <= curriculum_min_episodes <= curriculum_window_episodes.")
         if cfg.curriculum_min_steps < 1 or cfg.motor_time_constant_s <= 0:
@@ -96,6 +100,7 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         }
         self._shot_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self._episode_stage = torch.full((self.num_envs,), cfg.shot_level, device=self.device, dtype=torch.long)
+        self.spawn_grid_index = torch.full((self.num_envs,), -1, device=self.device, dtype=torch.long)
         self.shot_level = cfg.shot_level
         self._stage_start_step = 0
         self._curriculum_window = torch.zeros(cfg.curriculum_window_episodes, device=self.device)
@@ -463,9 +468,8 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         super()._reset_idx(env_ids)
         n = len(env_ids)
         root = self.robot.data.default_root_state[env_ids].clone()
-        root[:, :3] = self._home + self.scene.env_origins[env_ids]
-        root[:, :2] += (2 * torch.rand(n, 2, device=self.device) - 1) * self.cfg.reset_xy_noise_m
-        root[:, 2] += (2 * torch.rand(n, device=self.device) - 1) * self.cfg.reset_z_noise_m
+        position, self.spawn_grid_index[env_ids] = sample_robot_positions(n, self.device, self.cfg, self.shot_level)
+        root[:, :3] = position + self.scene.env_origins[env_ids]
         root[:, 3:7] = torch.tensor(self.cfg.robot_home_quat, device=self.device)
         root[:, 7:] = 0.0
         self.robot.write_root_state_to_sim(root, env_ids)
