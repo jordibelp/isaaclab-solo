@@ -65,7 +65,7 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
         )},
     )
     joint_names = ("flying_arm_2__j_bl_link1", "flying_arm_2__j_link1_link2")
-    joint_target_scale = (1.1, 1.4)
+    joint_target_scale = (1.1, 1.4) # why this target scales? 
     hold_arm = False  # neutral PD targets; this is NOT a mechanically welded arm
 
     # Replace the original nominal 100 g tip ballast, rather than adding 100 g on top.
@@ -76,7 +76,7 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     paddle_handle_length_m = 0.06  # short grip toward the wrist along local +Y; clears the upper arm at neutral
     paddle_handle_width_m = 0.026  # along local Z; same thickness as the head
     paddle_offset_ee = (0.0, -0.16, 0.029)  # 5 cm standoff along the arm-plane normal (+EE z)
-    paddle_mount_delta_m = 0.0  # positive extends the whole racket along second-link -Y (toward the tip)
+    paddle_mount_delta_m = 0.07  # positive extends the whole racket along second-link -Y (toward the tip)
     paddle_quat_ee = (0.7071067811865476, 0.0, -0.7071067811865476, 0.0)  # local +x normal -> EE +z
     # Neutral FK from the USD joint frames, not the file's authored preview pose.
     keeper_plane_x = -0.0303288
@@ -109,8 +109,8 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     launch_x_range = (1.9, 2.1)
     launch_z = 1.55
     launch_y_noise = 0.15
-    shot_half_extents_yz = ((0.045, 0.045), (0.20, 0.12), (0.40, 0.22), (0.65, 0.32))
-    shot_flight_time_ranges_s = ((0.42, 0.50), (0.35, 0.50), (0.30, 0.46), (0.25, 0.42))
+    shot_half_extents_yz = ((0.045, 0.045), (0.20, 0.12), (0.40, 0.22), (0.65, 0.32), (0.8,0.6), (1.0,1.0))
+    shot_flight_time_ranges_s = ((0.42, 0.50), (0.35, 0.50), (0.30, 0.46), (0.25, 0.42), (0.25, 0.50), (0.25, 0.6))
     shot_level = 0
     curriculum = True
     curriculum_window_shots = 2048

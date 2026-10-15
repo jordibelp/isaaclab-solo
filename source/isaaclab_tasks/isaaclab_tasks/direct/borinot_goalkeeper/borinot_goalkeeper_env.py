@@ -417,22 +417,30 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         paddle_pos, _, normal = self._paddle_pose()
         ball_pos = self.ball.data.root_pos_w - self.scene.env_origins
         target, time_s, valid, _ = self._interception()
-        common = [quat_apply_inverse(quaternion, self._home - root_pos),
+        common = [quat_apply_inverse(quaternion, self._home - root_pos),  # base position wrt home on the base frame
                   matrix_from_quat(quaternion).flatten(start_dim=1),  # base-to-world rotation matrix, row-major (9)
-                  self.robot.data.root_lin_vel_b,
-                  self.robot.data.root_ang_vel_b, self.robot.data.joint_pos[:, self.joint_ids] / self._joint_scale,
-                  self.robot.data.joint_vel[:, self.joint_ids] / self.cfg.velocity_lim_sim,
-                  quat_apply_inverse(quaternion, paddle_pos - root_pos), quat_apply_inverse(quaternion, normal)]
-        ball_parts = [quat_apply_inverse(quaternion, ball_pos - root_pos),
-                      quat_apply_inverse(quaternion, self.ball.data.root_lin_vel_w - self.robot.data.root_lin_vel_w),
-                      quat_apply_inverse(quaternion, target - paddle_pos), time_s[:, None], valid[:, None].float()]
+                  self.robot.data.root_lin_vel_b, # linear vel
+                  self.robot.data.root_ang_vel_b, # angular vel
+                  self.robot.data.joint_pos[:, self.joint_ids] / self._joint_scale, # joints
+                  self.robot.data.joint_vel[:, self.joint_ids] / self.cfg.velocity_lim_sim, # joint vels
+                  quat_apply_inverse(quaternion, paddle_pos - root_pos), # vector base->padle expressed base frame. 
+                  quat_apply_inverse(quaternion, normal) # normal vector of the racket expressed base frame
+                  ]
+        ball_parts = [quat_apply_inverse(quaternion, ball_pos - root_pos), # vector base->ball in base frame 
+                      quat_apply_inverse(quaternion, self.ball.data.root_lin_vel_w - self.robot.data.root_lin_vel_w), # velocitat relative de la pilota respecte base (base frame); smart choice 
+                      quat_apply_inverse(quaternion, target - paddle_pos),# distance racket to plane crossing point (obs_includes_ball_plane_intersection_point)
+                      time_s[:, None], valid[:, None].float() #  predicted time until crossing plane, clipped to 0–1 seconds. (obs_includes_time_ball_collides_plane)
+                      ]
         ball_parts = [value * self._ball_active[:, None] for value in ball_parts]
-        phase = torch.stack((self._hit.float(), self._clear.float(),
-                             (self._shot_steps * self.step_dt / self.cfg.shot_timeout_s).clamp_max(1),
+        # obs_includes_phase
+        phase = torch.stack((self._hit.float(), # if hit the ball with raquet 
+                             self._clear.float(), # if ball is considered cleared: past the x=0.3 line
+                             (self._shot_steps * self.step_dt / self.cfg.shot_timeout_s).clamp_max(1), # time left before timeout
                              (self._recovery_time / self.cfg.recovery_dwell_s).clamp_max(1),
-                             self._ball_active.float(),
-                             self._next_launch_steps * self.step_dt / max(self.cfg.shot_resampling_time_range_s[1], self.step_dt),
-                             self._episode_steps * self.step_dt / self.cfg.episode_length_s), dim=-1)
+                             self._ball_active.float(), 
+                             self._next_launch_steps * self.step_dt / max(self.cfg.shot_resampling_time_range_s[1], self.step_dt), # next launch time seconds
+                             self._episode_steps * self.step_dt / self.cfg.episode_length_s), dim=-1 # episode progress
+                             )
         tail = [self.actions, self._rotor_thrust / self._hover_per_rotor,
                 self._rate_integral, self._ball_parameters]
         # The flags simplify only the actor; the critic keeps every privileged input.
