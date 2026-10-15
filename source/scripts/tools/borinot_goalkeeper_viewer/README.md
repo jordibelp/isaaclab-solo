@@ -33,9 +33,27 @@ systemctl --user stop borinot-goalkeeper-viewer.service
 - Click the scene, then use arrow keys to move Y/Z. Page Up/Down move X. The increment is 2 cm, or 10 cm with Shift.
 - Restore config pose returns to the configured home position, `robot_home_quat` orientation, and joint pose. Put paddle at shot aim centre translates the robot so the current paddle centre matches the fixed shot target centre. It does not solve for a flight or arm motion.
 - Toggle the allowed base-position box, shot aim region, goal transparency, dimensions, and all collision hulls.
-- New shot samples one of the task's four launch levels. Play and the time slider show a gravity-only flight path. The ball passes through the robot. This is not contact simulation or a save prediction.
+- Use **Shot curriculum / Phase** to select any configured phase or a new preview phase. **New shot** samples its current spread and flight-time range. Play and the time slider show a gravity-only flight path. The ball passes through the robot. This is not contact simulation or a save prediction.
 
 All controls change the preview only. They never write to the task config.
+
+## Design the shot curriculum
+
+The first panel reads all phases from `shot_half_extents_yz` and `shot_flight_time_ranges_s`. The selected phase starts at the configured `shot_level`. Phase indices start at zero. There is no fixed four-phase limit in the editor.
+
+- **Y half-spread ± (m)** controls the horizontal range around `target_center_yz[0]`.
+- **Z half-spread ± (m)** controls the vertical range around `target_center_yz[1]`.
+- **Flight min/max (s)** controls the time from launch to the keeper plane, not the goal. Shorter times produce faster shots for the same launch and target.
+- **Add phase** appends an independent copy of the selected phase and selects it. Edit that copy to design the next difficulty level.
+- **Remove** deletes the selected phase and reindexes the remaining phases. At least one phase remains.
+- **Restore config phases** restores all source spreads, time ranges and the source starting level. It does not change the robot pose or racket settings.
+- Open **Config to copy** and click **Copy config** to copy both phase tuples and the selected `shot_level`. Paste these lines into the task config when ready. No file is saved automatically. Reloading the page discards preview edits.
+
+These are **half-extents**, not full dimensions. For example, `(0.20, 0.12)` means targets span ±20 cm horizontally and ±12 cm vertically: a rectangle 40 cm wide and 24 cm tall. The summary displays those full dimensions. Zero spread is allowed. Flight times must be positive, and min may equal max. Empty, negative, non-finite or inverted inputs leave the last valid phase active and show an error.
+
+The **orange outline** shows the selected target rectangle at `keeper_plane_x`. The **purple filled area** shows the same Y/Z rectangle projected onto the goal's front face. Other purple outlines let you compare all phases. Toggle the projection and comparison separately; the orange outline has its own Scene guides toggle. The overlay stays centred at the configured target when you move the robot. It is not clipped at the goal edges; the summary flags a projected area that extends outside the goal.
+
+The purple projection is **not an impact envelope**. The task samples the aim at the keeper plane, in front of the goal. Gravity and launch noise change where an unblocked ball reaches the goal later. The path guide uses the edited spread and flight times with the original launch ranges, noise and gravity. Very wide or slow custom phases can miss the goal or reach the floor; choosing a phase is not proof that every shot threatens the goal or is reachable by the robot.
 
 ## Geometry and configuration
 
@@ -70,6 +88,16 @@ This refresh uses the [OpenUSD joint frames](https://openusd.org/release/api/cla
 This viewer does not simulate thrust, gravity on Borinot, collision response, reward, curriculum promotion or policy behaviour. Use Isaac Sim when those dynamics matter. For comparing geometry and moving the robot around, this viewer is enough.
 
 ## Verification
+
+Run the curriculum browser checks on an exported HTML or the live viewer:
+
+```bash
+python3 /home/jordibelp/IsaacLab/source/scripts/tools/borinot_goalkeeper_viewer/check_curriculum.py http://127.0.0.1:8790 --output /tmp/goalkeeper-curriculum-checks.json
+```
+
+These checks read actual rendered rectangle vertices and compare their bounds with the source or edited half-extents. They independently evaluate sampled ballistic paths. They also exercise arbitrary phase counts, phase-copy independence, removal down to one phase, zero and continuous spreads, fixed flight times, invalid inputs, paired Python config export, clipboard fallback, overlay toggles, camera presets and mobile layout. The standalone page must load and work without external resources or JavaScript errors. This verifies geometry and interaction, not physics or learned performance.
+
+The shot-phase update passed **1045 browser assertions**, plus the existing **1118 geometry/browser regression assertions**. The refreshed local page matched the tested standalone export byte-for-byte. Live desktop/mobile checks passed. The actual CPU task sampler also passed 5120 shots across the four source phases and an added fifth phase with zero Y spread and a fixed flight time. No simulator dynamics or training run was needed for this preview-only change.
 
 The round-racket and mount controls passed **1118 browser checks** over 40 arm poses and five diameter settings. These check the circular radius, thickness, handle location, invalid inputs, slider keyboard input, independent size/mount resets, and convex overlap results against an independent solver. Mount shifts are checked at neutral and two bent poses against the distal link's rotation, including every moved collision hull. Actual task physics separately checked 12, 16 and 24 cm rackets. The 16 cm head with a 6 cm handle clears the upper arm at neutral with self-collisions enabled; this does not guarantee clearance at every pose, size or offset.
 

@@ -60,6 +60,7 @@ def build_html():
             .replace("/* THREE_LIBRARY */", (vendor / "three-r160.min.js").read_text())
             .replace("/* THREE_LICENSE */", (vendor / "THREE-LICENSE").read_text())
             .replace("/* COLLISION_CODE */", (ASSETS / "collision.js").read_text())
+            .replace("/* CURRICULUM_CODE */", (ASSETS / "curriculum.js").read_text())
             .replace("/* MODEL_DATA */null", json.dumps({"defaults": defaults, "robot": robot}, separators=(",", ":"))))
 
 
