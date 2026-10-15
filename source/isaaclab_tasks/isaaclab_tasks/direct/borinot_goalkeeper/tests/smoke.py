@@ -46,7 +46,7 @@ def check(name, condition, detail=None):
 
 try:
     obs, _ = env.reset()
-    check("observation_contract", obs["policy"].shape == (args.num_envs, 63)
+    check("observation_contract", obs["policy"].shape == (args.num_envs, 51)
           and obs["critic"].shape == (args.num_envs, 63))
     check("finite_reset", all(torch.isfinite(value).all().item() for value in obs.values()))
     check("mass_preserved", abs(env.robot_mass_kg - 2.910538) < 1e-4)

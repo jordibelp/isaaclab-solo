@@ -11,6 +11,8 @@ import torch
 FOLDER=Path(__file__).resolve().parents[1]
 spec=importlib.util.spec_from_file_location('continuous_math',FOLDER/'task_math.py')
 math=importlib.util.module_from_spec(spec);spec.loader.exec_module(math)
+spec=importlib.util.spec_from_file_location('control_helpers',FOLDER/'tests'/'test_control.py')
+control=importlib.util.module_from_spec(spec);spec.loader.exec_module(control)
 tree=ast.parse((FOLDER/'borinot_goalkeeper_env.py').read_text())
 names=('_pre_physics_step','_interception','_get_dones','_get_rewards','_get_observations','_record_shots','_park_ball','_launch_ball')
 scope={name:getattr(math,name) for name in ('terminal_outcome','sample_shots','sample_shot_delay_steps','promotion_ready','plane_progress','predict_intercept')}
@@ -125,10 +127,28 @@ def test_partial_shot_relaunch_preserves_other_ball_and_robot_state(env):
 def test_waiting_observations_hide_parked_ball_and_expose_schedule(env):
     env._ball_active[:]=False;env._park_ball(torch.arange(9))
     obs=env._get_observations()
-    assert obs['policy'].shape==(9,65)
-    assert (obs['policy'][:,28:39]==0).all()
-    assert (obs['policy'][:,43]==0).all()  # ball-active flag after four previous phase values
-    assert torch.isfinite(obs['policy']).all() and torch.equal(obs['policy'],obs['critic'])
+    assert obs['critic'].shape==(9,65) and obs['policy'].shape==(9,53)
+    assert (obs['critic'][:,28:39]==0).all() and (obs['policy'][:,28:34]==0).all()
+    assert (obs['critic'][:,43]==0).all()  # ball-active flag after four previous phase values
+    assert torch.isfinite(obs['policy']).all() and torch.isfinite(obs['critic']).all()
+
+
+@pytest.mark.parametrize('point,time,phase',[(p,t,h) for p in (False,True) for t in (False,True) for h in (False,True)])
+def test_actor_flags_select_columns_and_critic_keeps_all(env,point,time,phase):
+    env.cfg.obs_includes_ball_plane_intersection_point=point
+    env.cfg.obs_includes_time_ball_collides_plane=time
+    env.cfg.obs_includes_phase=phase
+    # Nonzero, mostly distinct values in every optional column: an incoming ball and a live shot clock.
+    env.ball.data.root_pos_w[:]=torch.tensor([2.,.3,1.6]);env.ball.data.root_lin_vel_w[:]=torch.tensor([-4.,.1,.5])
+    env._hit[:]=True;env._clear[:]=True;env._shot_steps[:]=7;env._episode_steps[:]=11;env._recovery_time[:]=.2
+    obs=env._get_observations()
+    assert obs['critic'].shape==(9,65) and (obs['critic'][:,37:39]>0).all()
+    keep=list(range(34))+[34,35,36]*point+[37]*time+[38]*(point or time)+list(range(39,46))*phase+list(range(46,65))
+    assert torch.equal(obs['policy'],obs['critic'][:,keep])
+    cfg=control.config();cfg.obs_includes_ball_plane_intersection_point=point
+    cfg.obs_includes_time_ball_collides_plane=time;cfg.obs_includes_phase=phase
+    control.method('borinot_goalkeeper_env_cfg.py','configure_control')(cfg)
+    assert (cfg.observation_space,cfg.state_space)==(obs['policy'].shape[1],obs['critic'].shape[1])
 
 
 @pytest.mark.parametrize('mode,limits',[('bad',(2.,3.)),('launch',(-1.,3.)),('launch',(3.,2.)),('launch',(0.,float('nan')))])

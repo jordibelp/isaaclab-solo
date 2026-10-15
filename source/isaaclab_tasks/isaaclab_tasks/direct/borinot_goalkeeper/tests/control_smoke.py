@@ -79,8 +79,11 @@ def main(cfg, agent_cfg):
         direct = cfg.control_mode != "PI_rotors_PD_joint_pos_control"
         use_pd = cfg.control_mode != "thrust_and_torque_control" or cfg.hold_arm
         check("spaces_follow_selected_mode", cfg.action_space == (8 if direct else 6)
-              and cfg.observation_space == cfg.state_space == 57 + cfg.action_space
-              and all(value.shape == (args.num_envs, cfg.observation_space) for value in obs.values())
+              and cfg.state_space == 57 + cfg.action_space
+              and obs["policy"].shape == (args.num_envs, cfg.observation_space)
+              and obs["critic"].shape == (args.num_envs, cfg.state_space)
+              and env.single_observation_space["policy"].shape[-1] == cfg.observation_space
+              and env.single_observation_space["critic"].shape[-1] == cfg.state_space
               and env.action_space.shape[-1] == cfg.action_space)
         rotation = obs["policy"][:, 3:12].reshape(-1, 3, 3)
         basis = torch.eye(3, device=env.device).expand(args.num_envs, -1, -1)
@@ -88,7 +91,10 @@ def main(cfg, agent_cfg):
         check("row_major_base_to_world_rotation", torch.allclose(rotation, rotated_basis.mT, atol=1e-6))
         check("rotation_is_orthonormal", torch.allclose(rotation.mT @ rotation, basis, atol=1e-6)
               and torch.allclose(torch.linalg.det(rotation), torch.ones(args.num_envs, device=env.device), atol=1e-6))
-        check("actor_and_critic_share_rotation_observations", torch.equal(obs["policy"], obs["critic"]))
+        tail = 11 + cfg.action_space  # actions, rotor thrust, rate integral, ball mass/restitution
+        check("actor_and_critic_share_robot_ball_and_tail_observations",
+              torch.equal(obs["policy"][:, :34], obs["critic"][:, :34])
+              and torch.equal(obs["policy"][:, -tail:], obs["critic"][:, -tail:]))
         check("hydra_frequencies_reach_simulator", abs(env.physics_dt - 1/cfg.physics_hz) < 1e-10
               and abs(env.step_dt - 1/cfg.policy_hz) < 1e-10)
         check("deadline_uses_policy_frequency", env.max_episode_length == round(cfg.episode_length_s*cfg.policy_hz))

@@ -433,10 +433,15 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
                              self._ball_active.float(),
                              self._next_launch_steps * self.step_dt / max(self.cfg.shot_resampling_time_range_s[1], self.step_dt),
                              self._episode_steps * self.step_dt / self.cfg.episode_length_s), dim=-1)
-        tail = [phase, self.actions, self._rotor_thrust / self._hover_per_rotor,
+        tail = [self.actions, self._rotor_thrust / self._hover_per_rotor,
                 self._rate_integral, self._ball_parameters]
-        critic = torch.cat(common + ball_parts + tail, dim=-1)
-        return {"policy": critic.clone(), "critic": critic}
+        # The flags simplify only the actor; the critic keeps every privileged input.
+        point, time = self.cfg.obs_includes_ball_plane_intersection_point, self.cfg.obs_includes_time_ball_collides_plane
+        optional = [(point, ball_parts[2]), (time, ball_parts[3]),
+                    (point or time, ball_parts[4]),  # prediction-valid flag
+                    (self.cfg.obs_includes_phase, phase)]
+        policy = common + ball_parts[:2] + [value for used, value in optional if used] + tail
+        return {"policy": torch.cat(policy, dim=-1), "critic": torch.cat(common + ball_parts + [phase] + tail, dim=-1)}
 
     def _update_curriculum(self, env_ids):
         """Log full episodes and gate stage-pure episode-return checkpoints."""

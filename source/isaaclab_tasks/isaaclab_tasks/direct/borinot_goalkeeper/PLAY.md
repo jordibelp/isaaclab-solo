@@ -4,7 +4,7 @@ Use the dedicated RSL-RL player. `play_direct_0325.py` is a Solo12 player. It ex
 
 ## Play a current checkpoint
 
-Current goalkeeper policies use a flattened 3×3 rotation matrix: 65 observations in direct control modes or 63 in PI mode. Use a checkpoint trained with this observation layout. Older quaternion-input weights do not load directly.
+Current goalkeeper policies use a flattened 3×3 rotation matrix. With the default observation flags, the actor has 53 inputs in direct control modes or 51 in PI mode. The critic has 65 or 63. Use a checkpoint trained with this observation layout. If you trained with any `env.obs_includes_*` flag set to `true`, pass the same flags to the player; otherwise the actor sizes differ and loading fails. Older quaternion-input weights do not load directly.
 
 Activate the local environment once:
 

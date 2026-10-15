@@ -5,7 +5,7 @@ Date: 2026-10-14. Task ID: `Borinot-Goalkeeper-Direct-v0`.
 ## Start here
 
 This is a separate task. It does not change the existing Borinot locomotion task or the source USD.
-We start with privileged simulator information. Both the actor and critic receive true robot state, ball position and velocity, and the sampled ball mass and restitution. There is no camera or state estimator yet.
+We start with privileged simulator information. Both the actor and critic receive true robot state, ball position and velocity, and the sampled ball mass and restitution. There is no camera or state estimator yet. By default the actor does not see the predicted plane crossing or the shot phase; the critic always does (see the observation contract below).
 
 Episodes now contain a continuous sequence of single-ball shots. A save or failed interception does not reset Borinot. Only configured base crashes, excessive tilt, leaving the allowed area, and the episode time limit reset the robot. The default reward follows Jordi's requested approach. Goal and base hits cost −1. Arm hits cost −0.25. Leaving the goal area costs −1. Moving the racket closer to the ball in the goal-parallel plane earns signed progress. A verified racket save earns +1. Additional shaping and the recovery requirement are off by default.
 
@@ -134,7 +134,7 @@ The top-level `enabled_self_collisions=False` keeps the previous default. Overri
 
 With self-collisions ON, eligible nonadjacent robot links can collide. Parent–child pairs remain filtered by PhysX. The task's robot-contact crash detector can terminate these episodes; the existing `reset_robot_on_robot_crash` option controls that termination separately. Enabling this flag does not change the source USD, masses, actuator settings or observation sizes. The browser self-collision switch remains preview-only, but its initial value reads this top-level config field.
 
-Use `source/scripts/rsl_rl/play_borinot_goalkeeper.py`, not the Solo12 player, for goalkeeper weights. The checkpoint `1014_ii4tbx06_model_4690.pt` has 57-input actor/normalizer tensors; current direct-mode observations have 65 values after the matrix and continuous-shot updates. It cannot load unchanged on current code. Use a matching 65-input checkpoint or the older matching code. This collision option does not convert checkpoint inputs.
+Use `source/scripts/rsl_rl/play_borinot_goalkeeper.py`, not the Solo12 player, for goalkeeper weights. The checkpoint `1014_ii4tbx06_model_4690.pt` has 57-input actor/normalizer tensors; current direct-mode actors have 53 inputs with the default observation flags (65 with every flag on). It cannot load unchanged on current code. Use a checkpoint trained with matching flags, or the older matching code. This collision option does not convert checkpoint inputs.
 
 The ball has a 30 mm radius. Each ball launch samples mass uniformly from 20–50 g and restitution from 0.35–0.65. Restitution means how strongly the ball rebounds. We use the `max` material combination rule with a zero-restitution paddle, so the sampled ball value sets the ball–paddle restitution.
 
@@ -324,11 +324,13 @@ Use floats such as `1.0` for float config fields. The defaults are starting valu
 
 Use `env.control_mode` as a Hydra override on the training or playback command. Names are case-sensitive. The default is `thrust_and_torque_control`.
 
-| `env.control_mode` | Policy actions | Actor / critic values |
+| `env.control_mode` | Policy actions | Actor / critic values (default flags) |
 |---|---:|---:|
-| `thrust_and_torque_control` | 6 individual thrusts + 2 joint torques: **8** | **65** each |
-| `thrust_and_PD_joint_pos_control` | 6 individual thrusts + 2 desired joint angles: **8** | **65** each |
-| `PI_rotors_PD_joint_pos_control` | Collective thrust + 3 body rates + 2 desired joint angles: **6** | **63** each |
+| `thrust_and_torque_control` | 6 individual thrusts + 2 joint torques: **8** | **53** / **65** |
+| `thrust_and_PD_joint_pos_control` | 6 individual thrusts + 2 desired joint angles: **8** | **53** / **65** |
+| `PI_rotors_PD_joint_pos_control` | Collective thrust + 3 body rates + 2 desired joint angles: **6** | **51** / **63** |
+
+The actor size depends on the `obs_includes_*` flags; see the observation contract below.
 
 Append one of these selectors to the training command:
 
@@ -418,11 +420,24 @@ These four fields are floats. The task refreshes limits and gains on the existin
 
 ### Observation and checkpoint contract
 
-Actor and critic each receive the same 57 shared values plus the current policy actions: 65 values in direct modes or 63 in PI mode. Shared values include the home-position error, full root rotation matrix, base linear and angular velocities, joint positions and velocities, relative paddle position and normal, relative ball position and velocity, predicted intercept/time/validity, shot phase/time, ball-active flag, next-launch countdown, episode progress, rotor thrust state, controller integral, and sampled ball mass/restitution. The three PI-integral entries remain zero in direct modes. Joint velocity is divided by `velocity_lim_sim`.
+The critic always receives all 57 values plus the current policy actions: 65 values in direct modes or 63 in PI mode. These values are the home-position error, full root rotation matrix, base linear and angular velocities, joint positions and velocities, relative paddle position and normal, relative ball position and velocity, predicted intercept/time/validity, shot phase/time, ball-active flag, next-launch countdown, episode progress, rotor thrust state, controller integral, and sampled ball mass/restitution. The three PI-integral entries remain zero in direct modes. Joint velocity is divided by `velocity_lim_sim`.
+
+The actor (policy) gets a subset. Three config flags choose the optional groups. All are `False` by default:
+
+| Flag | Actor values added | Critic indices |
+|---|---|---|
+| `obs_includes_ball_plane_intersection_point` | Vector from racket to the predicted point where the ball crosses the keeper plane (3) | `34:37` |
+| `obs_includes_time_ball_collides_plane` | Predicted time until the ball crosses that plane, clipped to 0–1 s (1) | `37` |
+| either of the two above | Prediction-valid flag: 1 when the ball is incoming and crosses within 1 s (1) | `38` |
+| `obs_includes_phase` | Paddle hit, ball cleared, shot age, recovery time, ball active, next-launch countdown, episode progress (7) | `39:46` |
+
+With every flag off, the actor gets 45 values plus the actions: **53** in direct modes and **51** in PI mode. With every flag on, the actor equals the critic. The actor keeps the critic's order and drops the unused groups. The critic keeps the full set because hit/clear status and the shot clock decide the rewards; without them its value estimate would be ambiguous. Set the flags with Hydra, for example `env.obs_includes_phase=true`.
+
+With the phase flags off, the actor has no ball-active flag. While no ball is in the air, the ball position and velocity values are zero. That zero block is the actor's only "no ball" signal.
 
 Orientation occupies indices `3:12` (zero-based). It is the base-to-world 3×3 rotation matrix, flattened row by row: `[R00, R01, R02, R10, R11, R12, R20, R21, R22]`. We convert the simulator's `(w, x, y, z)` quaternion with `matrix_from_quat`; internal vector transforms still use that quaternion. The observation is identical for `q` and `-q`. This follows the continuity motivation in [Zhou et al., On the Continuity of Rotation Representations in Neural Networks](https://arxiv.org/abs/1812.07035); we use the requested full 9D matrix, not their compact 6D representation.
 
-**Checkpoint change:** continuous shots add three phase values: ball active, normalized remaining launch delay, and normalized episode time. Direct-mode inputs are now 65; PI inputs are 63. Earlier 62/60-input matrix checkpoints and 57/55-input quaternion checkpoints do not load unchanged. Train a new policy. Ball-related values at indices `28:39` are zero while the ball is inactive. The three new phase values are at indices `43:46`, before the action history. Shot age uses `shot_timeout_s`; episode progress uses `episode_length_s`.
+**Checkpoint change:** continuous shots add three phase values: ball active, normalized remaining launch delay, and normalized episode time. The critic now has 65 inputs in direct modes and 63 in PI mode. With the default flags, the actor has 53 or 51 inputs. Earlier checkpoints (65/63-input actors, 62/60-input matrix checkpoints and 57/55-input quaternion checkpoints) do not load with the default flags. Train a new policy, and play it back with the same `obs_includes_*` flags. In critic indices, ball-related values at `28:39` are zero while the ball is inactive. The three new phase values are at `43:46`, before the action history. Shot age uses `shot_timeout_s`; episode progress uses `episode_length_s`.
 
 The predicted intercept is privileged information. It does not replace the current-ball target in the default progress reward. All coordinates remove the clone's world offset. The finite shot clock is independent of the generic runner's randomized initial episode-length counter.
 

@@ -52,17 +52,17 @@ def test_self_collision_selector_overrides_spawn_settings_after_hydra(enabled):
     assert cfg.robot.spawn.articulation_props.enabled_self_collisions is enabled
 
 
-@pytest.mark.parametrize("mode,actions,observations,kp,kd", [
-    (MODES[0], 8, 65, 0.0, 0.0), (MODES[1], 8, 65, 35.0, 0.6), (MODES[2], 6, 63, 35.0, 0.6),
+@pytest.mark.parametrize("mode,actions,observations,states,kp,kd", [
+    (MODES[0], 8, 53, 65, 0.0, 0.0), (MODES[1], 8, 53, 65, 35.0, 0.6), (MODES[2], 6, 51, 63, 35.0, 0.6),
 ])
-def test_resolver_updates_spaces_timing_and_existing_actuator(mode, actions, observations, kp, kd):
+def test_resolver_updates_spaces_timing_and_existing_actuator(mode, actions, observations, states, kp, kd):
     cfg = config()
     cfg.control_mode = mode
     cfg.effort_lim_sim = 1.8
     cfg.velocity_lim_sim = 72.0
     actuator = cfg.robot.actuators["arm"]
     method("borinot_goalkeeper_env_cfg.py", "configure_control")(cfg)
-    assert (cfg.action_space, cfg.observation_space, cfg.state_space) == (actions, observations, observations)
+    assert (cfg.action_space, cfg.observation_space, cfg.state_space) == (actions, observations, states)
     assert (cfg.sim.dt, cfg.decimation, cfg.sim.render_interval) == (0.005, 2, 2)
     assert cfg.robot.actuators["arm"] is actuator
     assert (actuator.stiffness, actuator.damping) == (kp, kd)
