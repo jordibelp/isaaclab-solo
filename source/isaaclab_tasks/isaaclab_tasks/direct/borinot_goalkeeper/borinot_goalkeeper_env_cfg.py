@@ -118,10 +118,11 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     curriculum_min_steps = 3000  # 30 s at 100 Hz (50 s at 60 Hz), per environment, not aggregate transitions
     curriculum_success_threshold = 0.7
 
-    thrust_to_weight = 10.0  # max thrust applicable by the rotors
+    thrust_to_weight = 3.5  # max thrust applicable by the rotors
     rotor_action_scale = 1.0  # direct modes: hover_per_rotor * (1 + scale * action)
     action_clamp=10.0  # used only when remove_action_and_thrust_clippings=False
-    remove_action_and_thrust_clippings=True  # True: no action clamp and no upper rotor thrust cap; thrust stays >= 0
+    remove_action_clipping=True  # True: no action clamp and no upper rotor thrust cap; thrust stays >= 0
+    remove_thrust_clipping=False # clip thrust between 0 and TWR if false
     collective_action_scale = 0.7
     body_rate_scale = (2.0, 2.0, 1.5)
     rate_kp = (0.35, 0.35, 0.15)

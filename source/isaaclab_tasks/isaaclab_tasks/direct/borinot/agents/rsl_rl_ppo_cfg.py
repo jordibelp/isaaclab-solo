@@ -28,7 +28,7 @@ class BorinotPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     adam_beta2 = 0.95
     weight_decay = 0.001
     num_steps_per_env = 24
-    max_iterations = 10000
+    max_iterations = 50000
     save_interval = 469
     experiment_name = "borinot_rsl_rl_ppo"
     run_name = "Borinot PPO"
@@ -36,6 +36,7 @@ class BorinotPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     wandb_project = "borinotIsaacLab"
     obs_groups = {"policy": ["policy"], "critic": ["policy"]}
     local_redundancy = RslRlLocalRedundancyCfg(enabled=True, interval=50, batch_size=64)
+    # clips log_std
     policy = BoundedStdActorCriticCfg(
         init_noise_std=1.0,
         noise_std_type="log",
@@ -44,7 +45,7 @@ class BorinotPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         actor_hidden_dims=[512, 256, 128],
         critic_hidden_dims=[512, 256, 128],
         activation="elu",
-    )
+    )   
     algorithm = Solo12PpoAlgorithmCfg(
         value_loss_coef=1.0,
         use_clipped_value_loss=True,

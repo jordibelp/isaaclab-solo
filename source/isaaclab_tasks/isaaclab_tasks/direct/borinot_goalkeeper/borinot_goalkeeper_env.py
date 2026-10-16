@@ -194,7 +194,7 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         self._shot_steps += self._ball_active
         self._outcome.zero_()
         self._previous_actions.copy_(self.actions)
-        if not self.cfg.remove_action_and_thrust_clippings:
+        if not self.cfg.remove_thrust_clipping:
             actions = actions.clamp(-self.cfg.action_clamp, self.cfg.action_clamp)
         self.actions.copy_(actions)
         self._previous_paddle.copy_(self._paddle_pose()[0])
@@ -225,7 +225,7 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
             commands = self._hover_per_rotor * (1 + self.cfg.rotor_action_scale * self.actions[:, :6])
         # Rotors only push: thrust is always >= 0. The flag removes only the upper thrust cap.
         cap = self._hover_per_rotor * self.cfg.thrust_to_weight
-        commands.clamp_(min=0.0, max=None if self.cfg.remove_action_and_thrust_clippings else cap)
+        commands.clamp_(min=0.0, max=None if self.cfg.remove_thrust_clipping else cap)
         self._rotor_thrust.add_(self._motor_alpha * (commands - self._rotor_thrust))
         wrench = self._rotor_thrust @ self._allocation.T
         force = torch.zeros(self.num_envs, 1, 3, device=self.device)
