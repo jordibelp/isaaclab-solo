@@ -43,6 +43,16 @@ def test_requested_default_selector_exists():
     assert getattr(config(), "control_mode", None) == MODES[0]
 
 
+def test_solo_style_pd_gain_defaults_and_overrides():
+    cfg = config()
+    assert (cfg.kp, cfg.kd) == (9.0, 0.2)
+    cfg.control_mode = MODES[1]
+    cfg.kp, cfg.kd = 12.0, 0.3
+    method("borinot_goalkeeper_env_cfg.py", "configure_control")(cfg)
+    actuator = cfg.robot.actuators["arm"]
+    assert (actuator.stiffness, actuator.damping) == (12.0, 0.3)
+
+
 @pytest.mark.parametrize("enabled", [False, True])
 def test_self_collision_selector_overrides_spawn_settings_after_hydra(enabled):
     cfg = config()
@@ -53,7 +63,7 @@ def test_self_collision_selector_overrides_spawn_settings_after_hydra(enabled):
 
 
 @pytest.mark.parametrize("mode,actions,observations,states,kp,kd", [
-    (MODES[0], 8, 53, 65, 0.0, 0.0), (MODES[1], 8, 53, 65, 35.0, 0.6), (MODES[2], 6, 51, 63, 35.0, 0.6),
+    (MODES[0], 8, 53, 65, 0.0, 0.0), (MODES[1], 8, 53, 65, 9.0, 0.2), (MODES[2], 6, 51, 63, 9.0, 0.2),
 ])
 def test_resolver_updates_spaces_timing_and_existing_actuator(mode, actions, observations, states, kp, kd):
     cfg = config()
@@ -204,4 +214,4 @@ def test_hold_arm_is_neutral_pd_in_every_mode(mode):
     env.actions[:, -2:] = 1.0
     method("borinot_goalkeeper_env.py", "_apply_action")(env)
     assert not calls["position"].any() and not calls["effort"].any()
-    assert env.cfg.robot.actuators["arm"].stiffness == 35.0
+    assert env.cfg.robot.actuators["arm"].stiffness == 9.0

@@ -51,8 +51,27 @@ def test_rotor_piecewise_mapping_and_lag_with_independent_rotor_commands():
     torch.testing.assert_close(env._rotor_thrust, (5 + env._motor_alpha*(requested-5)).expand(3, -1))
 
 
+@pytest.mark.parametrize("effort_limit", [2.5, 2.7, 1.8])
+def test_sac_torque_endpoints_zero_and_independent_joints(effort_limit):
+    env, calls = action_env("thrust_and_torque_control")
+    env.cfg.sac_action_mapping = True
+    env.cfg.effort_lim_sim = effort_limit
+    method("borinot_goalkeeper_env_cfg.py", "configure_control")(env.cfg)
+    upper, lower = algorithm_class()._compute_action_scaling(env, "cpu")
+    torch.testing.assert_close(upper, torch.ones(8))
+    torch.testing.assert_close(lower, torch.ones(8))
+    env.actions[:, 6:] = torch.tensor([[-1., 1.], [0., 0.], [.5, -.5]])
+    method("borinot_goalkeeper_env.py", "_apply_action")(env)
+    expected = torch.tensor([[-effort_limit, effort_limit], [0., 0.],
+                             [.5 * effort_limit, -.5 * effort_limit]], dtype=torch.float64)
+    torch.testing.assert_close(calls["effort"], expected)
+    assert "position" not in calls and "velocity" not in calls
+    actuator = env.cfg.robot.actuators["arm"]
+    assert (actuator.stiffness, actuator.damping, actuator.effort_limit_sim) == (0., 0., effort_limit)
+
+
 @pytest.mark.parametrize("field,value", [
-    ("control_mode", "thrust_and_torque_control"), ("control_mode", "PI_rotors_PD_joint_pos_control"),
+    ("control_mode", "PI_rotors_PD_joint_pos_control"),
     ("thrust_to_weight", 1.0), ("thrust_to_weight", float("nan")),
     ("joint_target_scale", (0.0, 1.0)), ("sac_joint_pos_offset", (4.0, 0.0)),
     ("joint_soft_limit_calf", (200.0, -200.0)), ("joint_physical_limit_thigh", (float("nan"), 90.0)),
@@ -68,8 +87,10 @@ def test_invalid_sac_contract_rejected_before_simulation(field, value):
 
 @pytest.mark.parametrize("loss", ["two_hot", "mse"])
 @pytest.mark.parametrize("initialize_offset", [False, True])
-def test_constructor_dispatch_initialization_update_and_checkpoint(monkeypatch, loss, initialize_offset):
+@pytest.mark.parametrize("mode", ["thrust_and_torque_control", "thrust_and_PD_joint_pos_control"])
+def test_constructor_dispatch_initialization_update_and_checkpoint(monkeypatch, loss, initialize_offset, mode):
     env, _ = sac_env()
+    env.cfg.control_mode = mode
     env.num_actions, env.num_envs = 8, 3
     env.cfg.sac_q_offset_init_actions = initialize_offset
     obs = TensorDict({"policy": torch.randn(3, 5), "critic": torch.randn(3, 7)}, batch_size=[3])
@@ -88,7 +109,7 @@ def test_constructor_dispatch_initialization_update_and_checkpoint(monkeypatch, 
     alg = SAC.construct_algorithm(obs, env, copy.deepcopy(cfg), "cpu")
     mean_head = [m for m in alg.actor.mlp.modules() if isinstance(m, torch.nn.Linear)][-1]
     initial = alg.actor._squash_and_scale(mean_head.bias[:8])
-    if initialize_offset:
+    if initialize_offset or mode == "thrust_and_torque_control":
         torch.testing.assert_close(initial, torch.zeros(8), atol=1e-7, rtol=0)
     else:
         torch.testing.assert_close(initial[-2:]*env._joint_scale + env._sac_joint_offset,

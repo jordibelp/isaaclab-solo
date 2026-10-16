@@ -246,6 +246,7 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
             forces=force, torques=wrench[:, None, 1:4], body_ids=[self.base_id], is_global=False,
         )
         if self.cfg.control_mode == "thrust_and_torque_control" and not self.cfg.hold_arm:
+            # SAC keeps these actions in [-1, 1]: -limit / zero / +limit at u=-1 / 0 / +1.
             self.robot.set_joint_effort_target(self.actions[:, 6:8] * self.cfg.effort_lim_sim, joint_ids=self.joint_ids)
         else:
             targets = self.actions[:, -2:] * self._joint_scale

@@ -413,10 +413,20 @@ Every mode uses `ImplicitActuatorCfg`, with **armature 0.00036207**, joint frict
 Configure limits and the position-mode PD gains through Hydra:
 
 ```bash
-env.effort_lim_sim=2.7 env.velocity_lim_sim=100.0 env.joint_stiffness=35.0 env.joint_damping=0.6
+env.effort_lim_sim=2.7 env.velocity_lim_sim=100.0 env.kp=9.0 env.kd=0.2
 ```
 
 These four fields are floats. The task refreshes limits and gains on the existing actuator before spawn, without replacing its friction or armature settings. Torque mode ignores the PD gains unless `hold_arm=True`. In every mode, `hold_arm=True` means neutral-position PD and zero feedforward torque; it is **not** a mechanically welded limb.
+
+`kp` and `kd` use the same names as Solo12. Their defaults are 9.0 N·m/rad and 0.2 N·m·s/rad.
+The former `joint_stiffness` and `joint_damping` names are no longer config fields.
+For an older position policy trained with the previous defaults, pass `env.kp=35.0 env.kd=0.6`.
+
+Both SAC agents support the two direct modes. In torque mode, each joint's tanh output
+-1 / 0 / +1 maps to -effort_lim_sim / zero / +effort_lim_sim N·m, with no joint PD.
+The same scalar limit applies to both independently commanded joints.
+In position mode, SAC uses its configured angle endpoints rather than PPO's legacy angle scales.
+SAC's rotor mapping is also different from PPO's mapping above; see [SAC_TRAINING.md](SAC_TRAINING.md).
 
 ### Observation and checkpoint contract
 

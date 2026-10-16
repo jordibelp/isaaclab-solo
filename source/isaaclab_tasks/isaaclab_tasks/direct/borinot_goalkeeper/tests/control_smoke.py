@@ -110,8 +110,8 @@ def main(cfg, agent_cfg):
         check("hydra_frequencies_reach_simulator", abs(env.physics_dt - 1/cfg.physics_hz) < 1e-10
               and abs(env.step_dt - 1/cfg.policy_hz) < 1e-10)
         check("deadline_uses_policy_frequency", env.max_episode_length == round(cfg.episode_length_s*cfg.policy_hz))
-        expected = {"stiffness": cfg.joint_stiffness if use_pd else 0.0,
-                    "damping": cfg.joint_damping if use_pd else 0.0, "armature": .00036207,
+        expected = {"stiffness": cfg.kp if use_pd else 0.0,
+                    "damping": cfg.kd if use_pd else 0.0, "armature": .00036207,
                     "effort_limit": cfg.effort_lim_sim, "velocity_limit": cfg.velocity_lim_sim, "friction": 0.0}
         before = properties()
         for name, value in expected.items():

@@ -3,7 +3,8 @@
 Both SAC agents use the same recipe as Jordi's supplied Solo12 SAC command.
 Only the critic loss changes between the two agents.
 This integration is for `Borinot-Goalkeeper-Direct-v0`.
-PPO and the original `Borinot-Direct-v0` task keep their existing behavior.
+PPO keeps its action mapping. Goalkeeper PD defaults are now `kp=9.0` and `kd=0.2` for every agent.
+The original `Borinot-Direct-v0` task is unchanged.
 
 ## Train
 
@@ -24,9 +25,16 @@ There is no new symexp implementation. The existing shared linear support is reu
 ./isaaclab.sh -p source/scripts/rsl_rl/train.py --task=Borinot-Goalkeeper-Direct-v0 --agent=rsl_rl_sac_mse_cfg_entry_point --headless --num_envs=10000 --max_iterations=4500 --seed=230999 --symmetry-mode=none '--run-name=[Cluster]-SAC MSE: heavier balls (200g max)' env.control_mode=thrust_and_PD_joint_pos_control env.physics_hz=200 env.policy_hz=100 'env.robot_home=[0.0,0.0,1.5]' env.rwd_scale_energy=0.0 env.enabled_self_collisions=True 'env.ball_mass_range_kg=[0.050,0.200]' env.thrust_to_weight=3.5
 ```
 
-The control mode deliberately differs from the example PPO command.
-Joint position targets need `thrust_and_PD_joint_pos_control`, not torque control.
-The SAC config rejects torque and PI modes with a clear error.
+Both SAC agents support `thrust_and_PD_joint_pos_control` and `thrust_and_torque_control`.
+The commands above select position targets. To train with joint torques instead, replace the mode with:
+
+```bash
+env.control_mode=thrust_and_torque_control env.effort_lim_sim=2.5
+```
+
+This example gives both joints a torque range of -2.5 to +2.5 N·m.
+Without the effort override, the default range remains -2.7 to +2.7 N·m.
+The SAC config still rejects the PI rotor mode.
 It enables the SAC action mapping before the environment and its spaces are created.
 The effective environment YAML records this choice.
 
@@ -39,6 +47,8 @@ No cluster copy, push, or training submission is part of this change.
 
 The action order is six independent rotors, then thigh, then calf.
 Here `u` means the normalized tanh output, not the scaled action stored in replay for a joint.
+
+### Position control
 
 | Output | u = -1 | u = 0 | u = +1 | Physical stops |
 | --- | ---: | ---: | ---: | --- |
@@ -59,6 +69,25 @@ The source USD is unchanged.
 The task keeps a separate SAC target-range tensor; IsaacLab's generic `soft_joint_pos_limits`
 still describes a range derived from the physical stops and is not the SAC target support.
 
+### Torque control
+
+For `thrust_and_torque_control`, all eight actor outputs stay in [-1, +1].
+The last two outputs independently request thigh and calf torque:
+
+| Output | u = -1 | u = 0 | u = +1 |
+| --- | ---: | ---: | ---: |
+| Thigh torque | -effort_lim_sim | 0 | +effort_lim_sim |
+| Calf torque | -effort_lim_sim | 0 | +effort_lim_sim |
+
+Torque is in N·m. Each requested torque is `u * effort_lim_sim`.
+The scalar effort setting applies to both joints and also sets their PhysX effort limit.
+PD stiffness and damping are zero in torque mode; angle-target scales and offsets do not scale the torque.
+As before, the explicit `hold_arm=True` override replaces joint actions with neutral-position PD.
+Leave it False for policy torque control.
+The configured physical joint stops still apply.
+
+### Rotor control in both modes
+
 Thrust uses two linear segments around hover.
 Below zero: `F / F_hover_per_rotor = 1 + u`.
 Above zero: `F / F_hover_per_rotor = 1 + (thrust_to_weight - 1) * u`.
@@ -68,6 +97,16 @@ The existing motor lag remains active, so the table describes the command, not i
 The SAC rotor bounds do not depend on PPO's `rotor_action_scale` or action clamp.
 
 ### Joint settings
+
+Set position-mode PD gains with the same names as Solo12:
+
+```bash
+env.kp=9.0 env.kd=0.2
+```
+
+These are the new defaults: Kp is in N·m/rad and Kd is in N·m·s/rad.
+The old `joint_stiffness` and `joint_damping` config names have been removed.
+To replay a position policy trained with the previous defaults, explicitly set `env.kp=35.0 env.kd=0.6`.
 
 The endpoint and physical-limit config values are in degrees:
 
@@ -138,6 +177,8 @@ Use the existing match player with the matching agent:
 ```
 
 For MSE, replace the agent with `rsl_rl_sac_mse_cfg_entry_point`.
+For a torque-trained policy, select `env.control_mode=thrust_and_torque_control` and match `env.effort_lim_sim`.
+Position and torque policies have the same action count but different meanings; do not interchange them.
 Match any training changes to network sizes, observations, joint bounds, robot geometry, control rates, and support.
 Playback restores networks and normalizers, but not optimizers.
 It allocates only a minimal unused replay buffer.
@@ -161,3 +202,7 @@ They establish integration and numerical behavior, not learned goalkeeper perfor
 - The public match player reloads each smoke checkpoint for finite headless inference.
 
 Source changes are local only. No new long training run or cluster sync has been launched.
+
+The torque-mode and PD-gain follow-up is checked separately in
+`artifacts/2026-10-16-goalkeeper-torque/`. Its checks cover both action modes,
+both critic losses, gain overrides, torque endpoints, live PhysX properties, and checkpoint playback.

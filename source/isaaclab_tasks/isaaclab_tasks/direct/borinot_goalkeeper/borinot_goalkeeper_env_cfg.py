@@ -39,8 +39,8 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     robot_home_quat = (0.7071067811865476, 0.0, 0.0, -0.7071067811865476)  # wxyz; -90 deg yaw
     effort_lim_sim = 2.7  # N*m; also maps unit torque actions to joint efforts
     velocity_lim_sim = 100.0  # rad/s
-    joint_stiffness = 35.0  # N*m/rad; disabled in torque mode unless hold_arm=True
-    joint_damping = 0.6  # N*m*s/rad; disabled in torque mode unless hold_arm=True
+    kp = 9.0  # N*m/rad; disabled in torque mode unless hold_arm=True
+    kd = 0.2  # N*m*s/rad; disabled in torque mode unless hold_arm=True
     robot = ArticulationCfg(
         prim_path="/World/envs/env_.*/Robot",
         spawn=sim_utils.UsdFileCfg(
@@ -228,8 +228,8 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
         if self.effort_lim_sim <= 0 or self.velocity_lim_sim <= 0:
             raise ValueError("effort_lim_sim and velocity_lim_sim must be positive.")
         if self.sac_action_mapping:
-            if self.control_mode != modes[1]:
-                raise ValueError("sac_action_mapping requires thrust_and_PD_joint_pos_control.")
+            if self.control_mode not in modes[:2]:
+                raise ValueError("sac_action_mapping requires a direct thrust control mode (torque or PD position).")
             if not math.isfinite(self.thrust_to_weight) or self.thrust_to_weight <= 1:
                 raise ValueError("SAC thrust_to_weight must be finite and greater than 1 (hover).")
             if len(self.joint_target_scale) != 2 or any(not math.isfinite(s) or s <= 0 for s in self.joint_target_scale):
@@ -254,8 +254,8 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
                                  + 7 * self.obs_actor_includes_phase + 2 * self.obs_actor_includes_ball_params)
         actuator = self.robot.actuators["arm"]
         use_pd = self.control_mode != modes[0] or self.hold_arm
-        actuator.stiffness = self.joint_stiffness if use_pd else 0.0
-        actuator.damping = self.joint_damping if use_pd else 0.0
+        actuator.stiffness = self.kp if use_pd else 0.0
+        actuator.damping = self.kd if use_pd else 0.0
         actuator.effort_limit_sim = self.effort_lim_sim
         actuator.velocity_limit_sim = self.velocity_lim_sim
         # Keep only the non-deprecated limits, including when reusing a config instance.
