@@ -139,7 +139,7 @@ def test_direct_rotors_have_no_rate_feedback_and_keep_motor_lag(mode):
 
 
 @pytest.mark.parametrize("remove,requested", [
-    (True, [-5., 0., 5., 10., 20., 55.]),  # no clamp: reverse and >2x hover thrust pass through
+    (True, [0., 0., 5., 10., 20., 55.]),  # no upper cap: >2x hover passes through; never negative
     (False, [0., 0., 5., 10., 10., 10.]),  # clamp to [0, thrust_to_weight * hover]
 ])
 def test_thrust_clipping_flag(remove, requested):

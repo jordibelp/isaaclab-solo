@@ -65,7 +65,7 @@ The panel lets you switch all eight cameras during playback. Views use environme
 
 ## Evaluation settings
 
-- The policy uses deterministic inference. Action and thrust clipping follow the env flag `remove_action_and_thrust_clippings` (default `True`: no clipping). For checkpoints trained with the old `[-1, 1]` / 2× hover limits, add `env.remove_action_and_thrust_clippings=False env.action_clamp=1.0 env.thrust_to_weight=2.0`.
+- The policy uses deterministic inference. Action and thrust clipping follow the env flag `remove_action_and_thrust_clippings` (default `True`: no action clipping and no upper thrust limit; thrust always stays at or above zero). For checkpoints trained with the old `[-1, 1]` / 2× hover limits, add `env.remove_action_and_thrust_clippings=False env.action_clamp=1.0 env.thrust_to_weight=2.0`.
 - Playback defaults to `env.curriculum=False`. Shot difficulty therefore stays fixed. The default shot level is 0; add `env.shot_level=1`, `2`, or `3` to test wider/faster shots. Add `env.curriculum=True` only if you want progression during play.
 - `--duration_s` measures total playback time. A robot episode lasts 20 seconds by default and contains multiple shots. Saves and ball failures recycle only the ball. Safety failures reset the robot. Tune `env.episode_length_s`, `env.shot_timeout_s`, `env.shot_resampling_time_range_s` and `env.shot_resampling_mode` to change timing. The player counts all resolved shots, not only robot resets.
 - Playback is paced in real time when possible. Add `--no-real-time` for unpaced headless checks. Rendering may make playback slower than real time; no physics steps are skipped.

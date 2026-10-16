@@ -223,8 +223,9 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
             commands = torch.cat((collective, torque), dim=-1) @ self._allocation_inverse.T
         else:
             commands = self._hover_per_rotor * (1 + self.cfg.rotor_action_scale * self.actions[:, :6])
-        if not self.cfg.remove_action_and_thrust_clippings:
-            commands.clamp_(0.0, self._hover_per_rotor * self.cfg.thrust_to_weight)
+        # Rotors only push: thrust is always >= 0. The flag removes only the upper thrust cap.
+        cap = self._hover_per_rotor * self.cfg.thrust_to_weight
+        commands.clamp_(min=0.0, max=None if self.cfg.remove_action_and_thrust_clippings else cap)
         self._rotor_thrust.add_(self._motor_alpha * (commands - self._rotor_thrust))
         wrench = self._rotor_thrust @ self._allocation.T
         force = torch.zeros(self.num_envs, 1, 3, device=self.device)
@@ -246,8 +247,7 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         """Sample completed substeps using lagged thrust and the applied PD torque estimate."""
         if self._power_samples == self._physics_samples:
             return
-        # abs(): unclipped commands can request reverse thrust, which must not be free.
-        omega = torch.sqrt(self._rotor_thrust.abs() / self.cfg.kf)
+        omega = torch.sqrt(self._rotor_thrust.clamp_min(0.0) / self.cfg.kf)
         rotor_mechanical_w = (self.cfg.km * omega**3).sum(-1)
         self._power_sum_w[:, 0] += rotor_mechanical_w
         self._power_sum_w[:, 1] += rotor_mechanical_w * (1.0 / self.cfg.p_el_motor_efficiency - 1.0)

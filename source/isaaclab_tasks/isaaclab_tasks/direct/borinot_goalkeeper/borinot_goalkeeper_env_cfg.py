@@ -121,7 +121,7 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     thrust_to_weight = 10.0  # max thrust applicable by the rotors
     rotor_action_scale = 1.0  # direct modes: hover_per_rotor * (1 + scale * action)
     action_clamp=10.0  # used only when remove_action_and_thrust_clippings=False
-    remove_action_and_thrust_clippings=True  # True: no action clamp and no rotor thrust clamp (negative thrust allowed)
+    remove_action_and_thrust_clippings=True  # True: no action clamp and no upper rotor thrust cap; thrust stays >= 0
     collective_action_scale = 0.7
     body_rate_scale = (2.0, 2.0, 1.5)
     rate_kp = (0.35, 0.35, 0.15)

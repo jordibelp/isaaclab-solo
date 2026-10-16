@@ -2,10 +2,23 @@
 """Borinot PPO recipe matched to Solo12 run 8958tyzt, without Solo symmetry."""
 from isaaclab.utils import configclass
 from isaaclab_rl.rsl_rl import RslRlLocalRedundancyCfg, RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg
+import rsl_rl.runners.on_policy_runner as rsl_rl_on_policy_runner
 
 # This PPO wrapper is task-independent: compiled forwards and gradient diagnostics.
 # Import its config module as well to register Solo12PPO with the RSL-RL runner.
 from isaaclab_tasks.direct.solo12.agents.rsl_rl_ppo_cfg import Solo12PpoAlgorithmCfg
+
+from .bounded_std_actor_critic import BoundedStdActorCritic
+
+rsl_rl_on_policy_runner.BoundedStdActorCritic = BoundedStdActorCritic
+
+
+@configclass
+class BoundedStdActorCriticCfg(RslRlPpoActorCriticCfg):
+    class_name: str = "BoundedStdActorCritic"
+    # Same std bounds as the Solo12 race PPO SharedActorCritic: log_std in [-13.8, 2.56].
+    min_action_std: float = 1.0e-6
+    max_action_std: float = 13.0
 
 
 @configclass
@@ -23,7 +36,7 @@ class BorinotPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     wandb_project = "borinotIsaacLab"
     obs_groups = {"policy": ["policy"], "critic": ["policy"]}
     local_redundancy = RslRlLocalRedundancyCfg(enabled=True, interval=50, batch_size=64)
-    policy = RslRlPpoActorCriticCfg(
+    policy = BoundedStdActorCriticCfg(
         init_noise_std=1.0,
         noise_std_type="log",
         actor_obs_normalization=True,

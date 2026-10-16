@@ -366,7 +366,7 @@ Changing rates also changes the number of actions in a shot. The three-second de
 
 ### Direct rotor modes: a and b
 
-The environment owns action clipping; the RSL-RL wrapper does not clip (`clip_actions=None`). With the default `remove_action_and_thrust_clippings=True`, actions and rotor thrust commands are **not clipped at all**. Large actions can request very large thrust, and actions below −1 request negative (reverse) thrust. The energy term charges reverse thrust like forward thrust. With `False`, actions are clipped to `[-action_clamp, action_clamp]` and commands to `[0, thrust_to_weight * hover_per_rotor]`. Actions 0–5 independently request thrust from rotors 0–5:
+The environment owns action clipping; the RSL-RL wrapper does not clip (`clip_actions=None`). Rotor thrust commands are always clipped below at zero: the rotors only push. With the default `remove_action_and_thrust_clippings=True`, actions are **not clipped**, and thrust has **no upper limit**. Large actions can therefore request very large thrust. With `False`, actions are clipped to `[-action_clamp, action_clamp]` and commands to `[0, thrust_to_weight * hover_per_rotor]`. Actions 0–5 independently request thrust from rotors 0–5:
 
 ```text
 requested rotor thrust = hover_per_rotor * (1 + rotor_action_scale * action)

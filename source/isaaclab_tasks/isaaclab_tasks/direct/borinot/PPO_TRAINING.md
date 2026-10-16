@@ -21,6 +21,7 @@ The reference is [Solo12 run 8958tyzt](https://wandb.ai/jordibelp/borinotIsaacLa
 | Actor and critic hidden layers | `[512, 256, 128]`, ELU |
 | Actor / critic observation normalization | Both enabled |
 | Initial action standard deviation | 1.0, with learned log standard deviation |
+| Action standard deviation bounds | `[1e-6, 13]` (`agent.policy.min_action_std` / `max_action_std`); see below |
 | Initial learning rate / schedule | 0.001 / adaptive |
 | PPO clip / value-loss coefficient | 0.2 / 1.0 |
 | Entropy coefficient / GAE lambda | 0.005 / 0.95 |
@@ -79,6 +80,12 @@ agent.policy.actor_obs_normalization=True agent.policy.critic_obs_normalization=
 ```
 
 The shared training script applies optimizer selection, betas, and weight decay to the live optimizer. It keeps action-noise parameters in a separate decay-free group, as in Solo. The PPO wrapper is still named `Solo12PPO`, but its code is task-independent: it adds compiled actor/critic forwards and gradient-norm diagnostics. It does not change Borinot into a Solo environment. Compilation does not include the simulator or the full optimizer/update loop.
+
+### Bounded action noise
+
+The entropy bonus rewards a larger action standard deviation (std). Plain RSL-RL `ActorCritic` does not limit the std. Earlier goalkeeper runs grew it to about 1e8–1e9. Both Borinot tasks now use `BoundedStdActorCritic`. It is the same network, with the same checkpoint keys. Before each distribution update, it moves the learned std back into `[min_action_std, max_action_std]`. Gradients still reach the std at the limit, so the std can shrink again.
+
+The defaults `[1e-6, 13]` are the same bounds as the Solo12 race PPO `SharedActorCritic`. Solo12 `two-feet` PPO uses plain `ActorCritic`, so it has no std bound. A std of 13 is still very large for unit-scale actions. To use a tighter limit, add for example `agent.policy.max_action_std=1.0`. Deterministic playback uses only the mean action, so this bound does not change playback.
 
 Use **`source/scripts/rsl_rl/train.py`** for the complete recipe. The upstream `scripts/reinforcement_learning/rsl_rl/train.py` does not apply this custom optimizer/diagnostic setup merely because the fields exist in the config.
 
