@@ -855,7 +855,7 @@ class SAC:
         print(f"SAC Actor: {actor}")
 
         # Compute action scaling from robot joint limits
-        upper, lower = SAC._compute_action_scaling(env, device)
+        upper, lower = alg_class._compute_action_scaling(env, device)
         lower_neg = -lower
         actor.action_bias.copy_(0.5 * (upper + lower_neg))
         actor.action_range.copy_(0.5 * (upper - lower_neg))

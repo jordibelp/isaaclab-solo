@@ -1,6 +1,6 @@
 # Copyright (c) 2022-2026, The Isaac Lab Project Developers.
 # SPDX-License-Identifier: BSD-3-Clause
-"""Play Borinot goalkeeper PPO weights with a match panel and recent-ball physics."""
+"""Play Borinot goalkeeper PPO or SAC weights with a match panel and recent-ball physics."""
 
 import argparse
 import json
@@ -15,7 +15,7 @@ from isaaclab.app import AppLauncher
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--task", default="Borinot-Goalkeeper-Direct-v0", choices=["Borinot-Goalkeeper-Direct-v0"])
 parser.add_argument("--agent", default="rsl_rl_cfg_entry_point")
-parser.add_argument("--checkpoint", required=True, help="RSL-RL PPO checkpoint; optimizer state is not restored.")
+parser.add_argument("--checkpoint", required=True, help="RSL-RL checkpoint; optimizer state is not restored.")
 parser.add_argument("--num_envs", type=int, default=1)
 parser.add_argument("--seed", type=int, default=None)
 parser.add_argument("--duration_s", type=float, default=2000.0, help="Playback duration in simulated seconds.")
@@ -55,6 +55,8 @@ simulation_app = AppLauncher(args_cli).app
 import gymnasium as gym
 import torch
 from rsl_rl.runners import OnPolicyRunner
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "rsl_rl_sac_vendor"))
+from rsl_rl_sac.runners import OffPolicyRunner
 
 import isaaclab_tasks  # noqa: F401 -- registers the task and its PPO algorithm
 from isaaclab.utils.assets import retrieve_file_path
@@ -83,6 +85,9 @@ def main(env_cfg, agent_cfg):
     if args_cli.device is not None:
         env_cfg.sim.device = args_cli.device
     agent_cfg.device = env_cfg.sim.device
+    configure_environment = getattr(agent_cfg, "configure_environment", None)
+    if configure_environment is not None:
+        configure_environment(env_cfg)
     env_cfg.configure_control()  # derived action/observation sizes and rates after Hydra
     env_cfg.robot.init_state.pos = tuple(env_cfg.robot_home)
     configure_camera(env_cfg, args_cli.camera)
@@ -102,8 +107,16 @@ def main(env_cfg, agent_cfg):
                                            step_trigger=lambda step: step == 0,
                                            video_length=args_cli.video_length, disable_logger=True)
         env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
-        runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
-        runner.load(checkpoint, load_optimizer=False)
+        if agent_cfg.class_name == "OffPolicyRunner":
+            # Playback never collects replay; avoid allocating the training-sized buffer.
+            agent_cfg.algorithm.replay_buffer_size = env.num_envs
+            runner = OffPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
+            runner.load(checkpoint, load_cfg={"actor": True, "critic": True, "optimizer": False, "iteration": False})
+            policy_model = runner.alg.actor
+        else:
+            runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
+            runner.load(checkpoint, load_optimizer=False)
+            policy_model = runner.alg.policy
         policy = runner.get_inference_policy(device=env.unwrapped.device)
         obs = env.get_observations()
         controls = PlayControls(env.unwrapped, args_cli.camera, args_cli.playback_speed,
@@ -126,7 +139,7 @@ def main(env_cfg, agent_cfg):
                 start = time.perf_counter()
                 if controls.reset_requested:
                     env.unwrapped.reset_borinot()
-                    runner.alg.policy.reset(torch.ones(env.num_envs, device=env.device, dtype=torch.bool))
+                    policy_model.reset(torch.ones(env.num_envs, device=env.device, dtype=torch.bool))
                     obs = env.get_observations()
                     controls.reset_requested = False
                     controls.manual_resets += 1
@@ -141,7 +154,7 @@ def main(env_cfg, agent_cfg):
                 obs, rewards, dones, info = env.step(actions)
                 if not torch.isfinite(rewards).all() or not torch.isfinite(obs["policy"]).all():
                     raise RuntimeError("The environment produced non-finite rewards or observations.")
-                runner.alg.policy.reset(dones)
+                policy_model.reset(dones)
                 codes = info["goalkeeper_outcome"]
                 counts += torch.bincount(codes[info["goalkeeper_shot_finished"]], minlength=10)
                 controls.score.record(int(codes[0]), bool(info["goalkeeper_shot_finished"][0]))

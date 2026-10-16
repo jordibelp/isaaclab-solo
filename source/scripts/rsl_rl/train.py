@@ -2877,6 +2877,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     else:
         logger.warning("IO descriptors are only supported for manager based RL environments. No IO descriptors will be exported.")
 
+    configure_environment = getattr(agent_cfg, "configure_environment", None)
+    if configure_environment is not None:
+        configure_environment(env_cfg)
     env_cfg.log_dir = log_dir
     # Keep the large training env in normal non-rgb mode.  Periodic eval videos temporarily
     # switch render_mode to rgb_array only while recording, which avoids the huge render-product
@@ -3164,7 +3167,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         agent_cfg_py,
                         *[inspect.getsourcefile(base) for base in type(agent_cfg).__mro__
                           if base.__module__.startswith("isaaclab_tasks.")],
-                        inspect.getsourcefile(type(runner.alg)),
+                        *[inspect.getsourcefile(base) for base in type(runner.alg).__mro__ if base is not object],
                         symmetry_py,
                         __file__,
                         _THIS_DIR / "continual_backprop.py",

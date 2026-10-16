@@ -144,7 +144,7 @@ def test_direct_rotors_have_no_rate_feedback_and_keep_motor_lag(mode):
 ])
 def test_thrust_clipping_flag(remove, requested):
     env, _ = action_env(MODES[0])
-    env.cfg.remove_action_and_thrust_clippings, env.cfg.thrust_to_weight = remove, 2.0
+    env.cfg.remove_thrust_clipping, env.cfg.thrust_to_weight = remove, 2.0
     env.actions[:, :6] = torch.tensor([-2., -1., 0., 1., 3., 10.])
     method("borinot_goalkeeper_env.py", "_apply_action")(env)
     expected = 5.0 + env._motor_alpha * (torch.tensor(requested, dtype=torch.float64) - 5.0)
@@ -154,7 +154,7 @@ def test_thrust_clipping_flag(remove, requested):
 @pytest.mark.parametrize("remove,expected", [(True, [-7., -.5, 3., 12.]), (False, [-2., -.5, 2., 2.])])
 def test_action_clipping_flag(remove, expected):
     cfg = config()
-    cfg.remove_action_and_thrust_clippings, cfg.action_clamp, cfg.goal_center = remove, 2.0, (-0.45, 0.0, 1.2)
+    cfg.remove_thrust_clipping, cfg.action_clamp, cfg.goal_center = remove, 2.0, (-0.45, 0.0, 1.2)
     zeros = lambda *shape, dtype=torch.float32: torch.zeros(*shape, dtype=dtype)
     env = SimpleNamespace(cfg=cfg, extras={}, _episode_steps=zeros(1), _next_launch_steps=torch.ones(1),
         _ball_active=torch.ones(1, dtype=torch.bool), _shot_steps=zeros(1), _outcome=zeros(1),

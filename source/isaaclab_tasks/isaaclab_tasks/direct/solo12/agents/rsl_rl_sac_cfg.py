@@ -46,13 +46,6 @@ class Solo12SAC(SAC):
         return upper, lower
 
 
-# RSL-RL-SAC 4.0.1 calls ``SAC._compute_action_scaling`` explicitly inside
-# construct_algorithm rather than dispatching through the configured subclass.
-# This module is imported only for the Solo12 SAC entry point, so install the
-# task-specific bound computation for this process.
-SAC._compute_action_scaling = staticmethod(Solo12SAC._compute_action_scaling)
-
-
 @configclass
 class Solo12SACRunnerCfg(RslRlOffPolicyRunnerCfg):
     """Paper-style SAC defaults adapted to the Solo12 direct task."""

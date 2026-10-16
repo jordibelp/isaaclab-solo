@@ -66,6 +66,14 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         self._previous_actions = torch.zeros_like(self.actions)
         self._rate_integral = torch.zeros(self.num_envs, 3, device=self.device)
         self._joint_scale = torch.tensor(cfg.joint_target_scale, device=self.device)
+        if cfg.sac_action_mapping:
+            self._sac_joint_offset = torch.tensor(cfg.sac_joint_pos_offset, device=self.device)
+            self._sac_joint_soft_limits = torch.deg2rad(torch.tensor(
+                [cfg.joint_soft_limit_thigh, cfg.joint_soft_limit_calf], device=self.device))
+            hard_limits = torch.deg2rad(torch.tensor(
+                [cfg.joint_physical_limit_thigh, cfg.joint_physical_limit_calf], device=self.device))
+            self.robot.write_joint_position_limit_to_sim(
+                hard_limits.expand(self.num_envs, -1, -1).clone(), joint_ids=self.joint_ids)
         self._rate_scale = torch.tensor(cfg.body_rate_scale, device=self.device)
         self._kp = torch.tensor(cfg.rate_kp, device=self.device)
         self._ki = torch.tensor(cfg.rate_ki, device=self.device)
@@ -194,7 +202,7 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         self._shot_steps += self._ball_active
         self._outcome.zero_()
         self._previous_actions.copy_(self.actions)
-        if not self.cfg.remove_thrust_clipping:
+        if not self.cfg.sac_action_mapping and not self.cfg.remove_thrust_clipping:
             actions = actions.clamp(-self.cfg.action_clamp, self.cfg.action_clamp)
         self.actions.copy_(actions)
         self._previous_paddle.copy_(self._paddle_pose()[0])
@@ -222,7 +230,11 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
             collective = self._hover_total * (1 + self.cfg.collective_action_scale * self.actions[:, :1])
             commands = torch.cat((collective, torque), dim=-1) @ self._allocation_inverse.T
         else:
-            commands = self._hover_per_rotor * (1 + self.cfg.rotor_action_scale * self.actions[:, :6])
+            if self.cfg.sac_action_mapping:
+                u = self.actions[:, :6].clamp(-1.0, 1.0)
+                commands = self._hover_per_rotor * (1 + torch.where(u >= 0, (self.cfg.thrust_to_weight - 1) * u, u))
+            else:
+                commands = self._hover_per_rotor * (1 + self.cfg.rotor_action_scale * self.actions[:, :6])
         # Rotors only push: thrust is always >= 0. The flag removes only the upper thrust cap.
         cap = self._hover_per_rotor * self.cfg.thrust_to_weight
         commands.clamp_(min=0.0, max=None if self.cfg.remove_thrust_clipping else cap)
@@ -237,6 +249,8 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
             self.robot.set_joint_effort_target(self.actions[:, 6:8] * self.cfg.effort_lim_sim, joint_ids=self.joint_ids)
         else:
             targets = self.actions[:, -2:] * self._joint_scale
+            if self.cfg.sac_action_mapping:
+                targets = targets + self._sac_joint_offset
             if self.cfg.hold_arm:
                 targets = torch.zeros_like(targets)
             self.robot.set_joint_position_target(targets, joint_ids=self.joint_ids)

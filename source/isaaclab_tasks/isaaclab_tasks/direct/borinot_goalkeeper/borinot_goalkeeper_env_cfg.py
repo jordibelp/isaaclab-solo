@@ -68,6 +68,15 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     joint_target_scale = (1.1, 1.4) # why this target scales? 
     hold_arm = False  # neutral PD targets; this is NOT a mechanically welded arm
 
+    # Enabled by the SAC runner before env creation. PPO keeps its existing mapping/limits.
+    sac_action_mapping = False
+    sac_q_offset_init_actions = False  # Solo semantics: initialize mean at q_offset, not the soft midpoint
+    sac_joint_pos_offset = (0.0, 0.0)  # rad, in joint_names order (thigh, calf)
+    joint_physical_limit_thigh = (-90.0, 90.0)  # deg; actual PhysX stops
+    joint_physical_limit_calf = (-160.0, 160.0)
+    joint_soft_limit_thigh = (-75.0, 75.0)  # deg; SAC target endpoints, independent of physical stops
+    joint_soft_limit_calf = (-200.0, 200.0)  # intentionally outside the physical calf stops
+
     # Replace the original nominal 100 g tip ballast, rather than adding 100 g on top.
     shaft_mass_kg = 0.015
     paddle_mass_kg = 0.100
@@ -218,6 +227,22 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
             raise ValueError("physics_hz must be an integer multiple of policy_hz.")
         if self.effort_lim_sim <= 0 or self.velocity_lim_sim <= 0:
             raise ValueError("effort_lim_sim and velocity_lim_sim must be positive.")
+        if self.sac_action_mapping:
+            if self.control_mode != modes[1]:
+                raise ValueError("sac_action_mapping requires thrust_and_PD_joint_pos_control.")
+            if not math.isfinite(self.thrust_to_weight) or self.thrust_to_weight <= 1:
+                raise ValueError("SAC thrust_to_weight must be finite and greater than 1 (hover).")
+            if len(self.joint_target_scale) != 2 or any(not math.isfinite(s) or s <= 0 for s in self.joint_target_scale):
+                raise ValueError("SAC joint_target_scale must contain two finite positive values.")
+            if len(self.sac_joint_pos_offset) != 2:
+                raise ValueError("sac_joint_pos_offset must contain two values in joint_names order.")
+            for i, name in enumerate(("thigh", "calf")):
+                for kind in ("physical", "soft"):
+                    bounds = getattr(self, f"joint_{kind}_limit_{name}")
+                    if len(bounds) != 2 or not all(map(math.isfinite, bounds)) or bounds[0] >= bounds[1]:
+                        raise ValueError(f"joint_{kind}_limit_{name} must be two ordered finite degrees.")
+                    if not math.radians(bounds[0]) < self.sac_joint_pos_offset[i] < math.radians(bounds[1]):
+                        raise ValueError(f"sac_joint_pos_offset must lie inside the {kind} {name} limits.")
         self.decimation = round(ratio)
         self.sim.dt = 1 / self.physics_hz
         self.sim.render_interval = self.decimation

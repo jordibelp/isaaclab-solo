@@ -10,5 +10,7 @@ gym.register(
     kwargs={
         "env_cfg_entry_point": f"{__name__}.borinot_goalkeeper_env_cfg:BorinotGoalkeeperEnvCfg",
         "rsl_rl_cfg_entry_point": f"{__name__}.agents.rsl_rl_ppo_cfg:BorinotGoalkeeperPPORunnerCfg",
+        "rsl_rl_sac_cfg_entry_point": f"{__name__}.agents.rsl_rl_sac_cfg:BorinotGoalkeeperSACRunnerCfg",
+        "rsl_rl_sac_mse_cfg_entry_point": f"{__name__}.agents.rsl_rl_sac_cfg:BorinotGoalkeeperSACMSERunnerCfg",
     },
 )
