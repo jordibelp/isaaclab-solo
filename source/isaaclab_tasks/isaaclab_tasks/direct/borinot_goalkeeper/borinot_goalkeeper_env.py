@@ -194,7 +194,9 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         self._shot_steps += self._ball_active
         self._outcome.zero_()
         self._previous_actions.copy_(self.actions)
-        self.actions.copy_(actions.clamp(-self.cfg.action_clamp, self.cfg.action_clamp))
+        if not self.cfg.remove_action_and_thrust_clippings:
+            actions = actions.clamp(-self.cfg.action_clamp, self.cfg.action_clamp)
+        self.actions.copy_(actions)
         self._previous_paddle.copy_(self._paddle_pose()[0])
         ball_pos = self.ball.data.root_pos_w - self.scene.env_origins
         self._old_progress_active.copy_(self._ball_active & ~self._hit & (self.ball.data.root_lin_vel_w[:, 0] < -0.1)
@@ -221,7 +223,8 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
             commands = torch.cat((collective, torque), dim=-1) @ self._allocation_inverse.T
         else:
             commands = self._hover_per_rotor * (1 + self.cfg.rotor_action_scale * self.actions[:, :6])
-        commands.clamp_(0.0, self._hover_per_rotor * self.cfg.thrust_to_weight)
+        if not self.cfg.remove_action_and_thrust_clippings:
+            commands.clamp_(0.0, self._hover_per_rotor * self.cfg.thrust_to_weight)
         self._rotor_thrust.add_(self._motor_alpha * (commands - self._rotor_thrust))
         wrench = self._rotor_thrust @ self._allocation.T
         force = torch.zeros(self.num_envs, 1, 3, device=self.device)
@@ -243,7 +246,8 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         """Sample completed substeps using lagged thrust and the applied PD torque estimate."""
         if self._power_samples == self._physics_samples:
             return
-        omega = torch.sqrt(self._rotor_thrust.clamp_min(0.0) / self.cfg.kf)
+        # abs(): unclipped commands can request reverse thrust, which must not be free.
+        omega = torch.sqrt(self._rotor_thrust.abs() / self.cfg.kf)
         rotor_mechanical_w = (self.cfg.km * omega**3).sum(-1)
         self._power_sum_w[:, 0] += rotor_mechanical_w
         self._power_sum_w[:, 1] += rotor_mechanical_w * (1.0 / self.cfg.p_el_motor_efficiency - 1.0)

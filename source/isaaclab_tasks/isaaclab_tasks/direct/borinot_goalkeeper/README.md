@@ -366,14 +366,14 @@ Changing rates also changes the number of actions in a shot. The three-second de
 
 ### Direct rotor modes: a and b
 
-All policy actions are clipped to `[-1, 1]`. Actions 0–5 independently request thrust from rotors 0–5:
+The environment owns action clipping; the RSL-RL wrapper does not clip (`clip_actions=None`). With the default `remove_action_and_thrust_clippings=True`, actions and rotor thrust commands are **not clipped at all**. Large actions can request very large thrust, and actions below −1 request negative (reverse) thrust. The energy term charges reverse thrust like forward thrust. With `False`, actions are clipped to `[-action_clamp, action_clamp]` and commands to `[0, thrust_to_weight * hover_per_rotor]`. Actions 0–5 independently request thrust from rotors 0–5:
 
 ```text
 requested rotor thrust = hover_per_rotor * (1 + rotor_action_scale * action)
 hover_per_rotor = simulated robot mass * 9.81 / 6
 ```
 
-With `rotor_action_scale=1.0` and `thrust_to_weight=2.0`, action −1 requests zero thrust, action 0 requests nominal per-rotor hover thrust, and action +1 requests twice that thrust. Commands are clipped to `[0, thrust_to_weight * hover_per_rotor]`. Unlike the old locomotion run's below-hover cap, this default provides nominal flight thrust reserve.
+With `rotor_action_scale=1.0`, action −1 requests zero thrust, action 0 requests nominal per-rotor hover thrust, and action +1 requests twice that thrust. Policies trained before this change used a wrapper clip of `[-1, 1]` and `thrust_to_weight=2.0`. To replay them, add `env.remove_action_and_thrust_clippings=False env.action_clamp=1.0 env.thrust_to_weight=2.0`.
 
 There is **no body-rate PI feedback** in either direct mode. The rotor geometry maps the individual forces to the resulting base force and torque. The physical response still uses a first-order thrust filter with `motor_time_constant_s=0.04`. Zero thrust actions request nominal hover thrust, but do not stabilize position or attitude on their own. These are simulator assumptions, not calibrated ESC or motor limits.
 
