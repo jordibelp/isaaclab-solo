@@ -256,6 +256,14 @@ parser.add_argument(
     help="Title of the Omni.UI command window.",
 )
 parser.add_argument(
+    "--viz_q_plots", "--viz-q-plots", action="store_true",
+    help="Show low-rate measured joint angles with physical and task soft limits (env 0, degrees).",
+)
+parser.add_argument(
+    "--viz_q_interval_s", "--viz-q-interval-s", type=float, default=0.5,
+    help="Joint plot sample interval in simulation seconds (default: 0.5). Requires --viz_q_plots.",
+)
+parser.add_argument(
     "--apply-force-ui",
     action="store_true",
     default=False,
@@ -437,6 +445,8 @@ parser.add_argument(
 cli_args.add_rsl_rl_args(parser)
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
+if not math.isfinite(args_cli.viz_q_interval_s) or args_cli.viz_q_interval_s <= 0.0:
+    parser.error("--viz_q_interval_s must be finite and positive")
 if not math.isfinite(args_cli.bringup_clip_rad) or args_cli.bringup_clip_rad < 0.0:
     parser.error("--bringup_clip_rad must be finite and non-negative (0 disables clipping)")
 hydra_args = _consume_record_sequence_hydra_override(args_cli, hydra_args)
@@ -2321,6 +2331,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     force_ui_keepalive = None
     force_arrow = None
     helper_height_plane = None
+    joint_plots = None
     if interactive:
         ui_window, ui_keepalive = _build_command_window(
             cmd_state,
@@ -2330,6 +2341,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             args_cli.ui_title,
             camera_state if camera_toggle_enabled else None,
         )
+        if args_cli.viz_q_plots:
+            from joint_position_plots import JointPositionPlots
+
+            joint_plots = JointPositionPlots(raw_env, interval_s=args_cli.viz_q_interval_s)
+            print(f"[INFO] Joint angle plots enabled: env 0, degrees, every {args_cli.viz_q_interval_s:g} simulation s.")
         if args_cli.apply_force_ui:
             initial_force_magnitude = float(np.clip(args_cli.force_ui_initial_magnitude, 0.0, force_ui_max_magnitude))
             force_state = BodyFrameForceState(
@@ -2351,6 +2367,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         print("[WARN] Running headless: live Omni.UI window and scripted cameras are disabled.")
         if args_cli.apply_force_ui:
             print("[WARN] --apply-force-ui was requested but no UI can be shown in headless mode.", flush=True)
+        if args_cli.viz_q_plots:
+            print("[WARN] --viz_q_plots was requested but no UI can be shown in headless mode.", flush=True)
 
     scripted_camera = camera_toggle_enabled and interactive
     cameras = None
@@ -2504,6 +2522,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     _apply_live_direct_command(raw_env, cmd_state, (vx_ui_min, vx_ui_max), (vy_ui_min, vy_ui_max), (wz_ui_min, wz_ui_max))
     obs = vec_env.get_observations()
     active_body_force = _sync_manual_body_frame_base_force(raw_env, force_state)
+    if joint_plots is not None:
+        joint_plots.update(0.0)
     if force_arrow is not None:
         force_arrow.update(active_body_force)
     if helper_height_plane is not None:
@@ -2538,6 +2558,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         if cmd_state.consume_reset_request():
             print("[INFO] Manual reset requested from the UI; returning env(s) to the reset pose.", flush=True)
             obs = _manual_reset_all_envs(raw_env, vec_env)
+            if joint_plots is not None:
+                joint_plots.reset_history()
             try:
                 policy.actor_critic.reset(
                     torch.ones(raw_env.num_envs, device=vec_env.unwrapped.device, dtype=torch.long)
@@ -2693,6 +2715,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             print(log_data)
 
         if isinstance(dones, torch.Tensor) and dones.any():
+            if joint_plots is not None and bool(dones[0]):
+                joint_plots.reset_history()
             obs = vec_env.get_observations()
             _apply_live_direct_command(raw_env, cmd_state, (vx_ui_min, vx_ui_max), (vy_ui_min, vy_ui_max), (wz_ui_min, wz_ui_max))
             obs = vec_env.get_observations()
@@ -2705,6 +2729,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             force_state.tick()
 
         _update_active_camera(cameras, camera_state)
+
+        if joint_plots is not None:
+            joint_plots.update((timestep + 1) * float(dt))
 
         sleep_time = dt - (time.time() - loop_t0)
         if args_cli.real_time and sleep_time > 0:
@@ -2818,6 +2845,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     if force_arrow is not None:
         force_arrow.clear()
+    if joint_plots is not None:
+        joint_plots.close()
     vec_env.close()
 
 
