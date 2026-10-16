@@ -330,7 +330,7 @@ Use `env.control_mode` as a Hydra override on the training or playback command. 
 | `thrust_and_PD_joint_pos_control` | 6 individual thrusts + 2 desired joint angles: **8** | **53** / **65** |
 | `PI_rotors_PD_joint_pos_control` | Collective thrust + 3 body rates + 2 desired joint angles: **6** | **51** / **63** |
 
-The actor size depends on the `obs_includes_*` flags; see the observation contract below.
+The actor size depends on the `obs_actor_includes_*` flags; see the observation contract below.
 
 Append one of these selectors to the training command:
 
@@ -422,22 +422,23 @@ These four fields are floats. The task refreshes limits and gains on the existin
 
 The critic always receives all 57 values plus the current policy actions: 65 values in direct modes or 63 in PI mode. These values are the home-position error, full root rotation matrix, base linear and angular velocities, joint positions and velocities, relative paddle position and normal, relative ball position and velocity, predicted intercept/time/validity, shot phase/time, ball-active flag, next-launch countdown, episode progress, rotor thrust state, controller integral, and sampled ball mass/restitution. The three PI-integral entries remain zero in direct modes. Joint velocity is divided by `velocity_lim_sim`.
 
-The actor (policy) gets a subset. Three config flags choose the optional groups. All are `False` by default:
+The actor (policy) gets a subset. Four config flags choose the optional groups. The first three are `False` by default; ball parameters are `True`:
 
 | Flag | Actor values added | Critic indices |
 |---|---|---|
-| `obs_includes_ball_plane_intersection_point` | Vector from racket to the predicted point where the ball crosses the keeper plane (3) | `34:37` |
-| `obs_includes_time_ball_collides_plane` | Predicted time until the ball crosses that plane, clipped to 0–1 s (1) | `37` |
+| `obs_actor_includes_ball_plane_intersection_point` | Vector from racket to the predicted point where the ball crosses the keeper plane (3) | `34:37` |
+| `obs_actor_includes_time_ball_collides_plane` | Predicted time until the ball crosses that plane, clipped to 0–1 s (1) | `37` |
 | either of the two above | Prediction-valid flag: 1 when the ball is incoming and crosses within 1 s (1) | `38` |
-| `obs_includes_phase` | Paddle hit, ball cleared, shot age, recovery time, ball active, next-launch countdown, episode progress (7) | `39:46` |
+| `obs_actor_includes_phase` | Paddle hit, ball cleared, shot age, recovery time, ball active, next-launch countdown, episode progress (7) | `39:46` |
+| `obs_actor_includes_ball_params` | Sampled ball mass in kg and restitution (2) | Last two values |
 
-With every flag off, the actor gets 45 values plus the actions: **53** in direct modes and **51** in PI mode. With every flag on, the actor equals the critic. The actor keeps the critic's order and drops the unused groups. The critic keeps the full set because hit/clear status and the shot clock decide the rewards; without them its value estimate would be ambiguous. Set the flags with Hydra, for example `env.obs_includes_phase=true`.
+With the defaults, the actor gets 45 values plus the actions: **53** in direct modes and **51** in PI mode. Setting `env.obs_actor_includes_ball_params=false` removes the final two actor values, giving **51** or **49** inputs. With every flag off, the actor gets 43 values plus the actions. With every flag on, the actor equals the critic. The actor keeps the critic's order and drops the unused groups. The critic always keeps every group, including mass and restitution. Set the flags with Hydra, for example `env.obs_actor_includes_phase=true`. The old `obs_includes_*` names and the misspelled `obs_actor_inclues_ball_params` are not supported.
 
 With the phase flags off, the actor has no ball-active flag. While no ball is in the air, the ball position and velocity values are zero. That zero block is the actor's only "no ball" signal.
 
 Orientation occupies indices `3:12` (zero-based). It is the base-to-world 3×3 rotation matrix, flattened row by row: `[R00, R01, R02, R10, R11, R12, R20, R21, R22]`. We convert the simulator's `(w, x, y, z)` quaternion with `matrix_from_quat`; internal vector transforms still use that quaternion. The observation is identical for `q` and `-q`. This follows the continuity motivation in [Zhou et al., On the Continuity of Rotation Representations in Neural Networks](https://arxiv.org/abs/1812.07035); we use the requested full 9D matrix, not their compact 6D representation.
 
-**Checkpoint change:** continuous shots add three phase values: ball active, normalized remaining launch delay, and normalized episode time. The critic now has 65 inputs in direct modes and 63 in PI mode. With the default flags, the actor has 53 or 51 inputs. Earlier checkpoints (65/63-input actors, 62/60-input matrix checkpoints and 57/55-input quaternion checkpoints) do not load with the default flags. Train a new policy, and play it back with the same `obs_includes_*` flags. In critic indices, ball-related values at `28:39` are zero while the ball is inactive. The three new phase values are at `43:46`, before the action history. Shot age uses `shot_timeout_s`; episode progress uses `episode_length_s`.
+**Checkpoint change:** continuous shots add three phase values: ball active, normalized remaining launch delay, and normalized episode time. The critic now has 65 inputs in direct modes and 63 in PI mode. With the default flags, the actor has 53 or 51 inputs. Renaming the flags and leaving ball parameters enabled preserves the previous default observation layout. Earlier checkpoints (65/63-input actors, 62/60-input matrix checkpoints and 57/55-input quaternion checkpoints) do not load with the default flags. Train a new policy, and play it back with the same `obs_actor_includes_*` flags. In critic indices, ball-related values at `28:39` are zero while the ball is inactive. The three new phase values are at `43:46`, before the action history. Shot age uses `shot_timeout_s`; episode progress uses `episode_length_s`.
 
 The predicted intercept is privileged information. It does not replace the current-ball target in the default progress reward. All coordinates remove the clone's world offset. The finite shot clock is independent of the generic runner's randomized initial episode-length counter.
 

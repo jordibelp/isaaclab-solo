@@ -91,10 +91,22 @@ def main(cfg, agent_cfg):
         check("row_major_base_to_world_rotation", torch.allclose(rotation, rotated_basis.mT, atol=1e-6))
         check("rotation_is_orthonormal", torch.allclose(rotation.mT @ rotation, basis, atol=1e-6)
               and torch.allclose(torch.linalg.det(rotation), torch.ones(args.num_envs, device=env.device), atol=1e-6))
-        tail = 11 + cfg.action_space  # actions, rotor thrust, rate integral, ball mass/restitution
+        tail = 9 + cfg.action_space  # actions, rotor thrust, rate integral
+        actor_end = obs["policy"].shape[1] - 2 * cfg.obs_actor_includes_ball_params
         check("actor_and_critic_share_robot_ball_and_tail_observations",
               torch.equal(obs["policy"][:, :34], obs["critic"][:, :34])
-              and torch.equal(obs["policy"][:, -tail:], obs["critic"][:, -tail:]))
+              and torch.equal(obs["policy"][:, actor_end-tail:actor_end], obs["critic"][:, -tail-2:-2]))
+        check("critic_always_has_ball_parameters", torch.equal(obs["critic"][:, -2:], env._ball_parameters))
+        if cfg.obs_actor_includes_ball_params:
+            check("actor_has_ball_parameters", torch.equal(obs["policy"][:, -2:], env._ball_parameters))
+        else:
+            actor_before = obs["policy"].clone()
+            params_before = env._ball_parameters.clone()
+            env._ball_parameters.add_(1.0)
+            changed = env._get_observations()
+            check("actor_is_independent_of_hidden_ball_parameters", torch.equal(changed["policy"], actor_before)
+                  and torch.equal(changed["critic"][:, -2:], env._ball_parameters))
+            env._ball_parameters.copy_(params_before)
         check("hydra_frequencies_reach_simulator", abs(env.physics_dt - 1/cfg.physics_hz) < 1e-10
               and abs(env.step_dt - 1/cfg.policy_hz) < 1e-10)
         check("deadline_uses_policy_frequency", env.max_episode_length == round(cfg.episode_length_s*cfg.policy_hz))

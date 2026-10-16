@@ -432,11 +432,11 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
                   ]
         ball_parts = [quat_apply_inverse(quaternion, ball_pos - root_pos), # vector base->ball in base frame 
                       quat_apply_inverse(quaternion, self.ball.data.root_lin_vel_w - self.robot.data.root_lin_vel_w), # velocitat relative de la pilota respecte base (base frame); smart choice 
-                      quat_apply_inverse(quaternion, target - paddle_pos),# distance racket to plane crossing point (obs_includes_ball_plane_intersection_point)
-                      time_s[:, None], valid[:, None].float() #  predicted time until crossing plane, clipped to 0–1 seconds. (obs_includes_time_ball_collides_plane)
+                      quat_apply_inverse(quaternion, target - paddle_pos),# distance racket to plane crossing point (obs_actor_includes_ball_plane_intersection_point)
+                      time_s[:, None], valid[:, None].float() #  predicted time until crossing plane, clipped to 0–1 seconds. (obs_actor_includes_time_ball_collides_plane)
                       ]
         ball_parts = [value * self._ball_active[:, None] for value in ball_parts]
-        # obs_includes_phase
+        # obs_actor_includes_phase
         phase = torch.stack((self._hit.float(), # if hit the ball with raquet 
                              self._clear.float(), # if ball is considered cleared: past the x=0.3 line
                              (self._shot_steps * self.step_dt / self.cfg.shot_timeout_s).clamp_max(1), # time left before timeout
@@ -446,14 +446,17 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
                              self._episode_steps * self.step_dt / self.cfg.episode_length_s), dim=-1 # episode progress
                              )
         tail = [self.actions, self._rotor_thrust / self._hover_per_rotor,
-                self._rate_integral, self._ball_parameters]
+                self._rate_integral]
         # The flags simplify only the actor; the critic keeps every privileged input.
-        point, time = self.cfg.obs_includes_ball_plane_intersection_point, self.cfg.obs_includes_time_ball_collides_plane
+        point, time = self.cfg.obs_actor_includes_ball_plane_intersection_point, self.cfg.obs_actor_includes_time_ball_collides_plane
         optional = [(point, ball_parts[2]), (time, ball_parts[3]),
                     (point or time, ball_parts[4]),  # prediction-valid flag
-                    (self.cfg.obs_includes_phase, phase)]
+                    (self.cfg.obs_actor_includes_phase, phase)]
         policy = common + ball_parts[:2] + [value for used, value in optional if used] + tail
-        return {"policy": torch.cat(policy, dim=-1), "critic": torch.cat(common + ball_parts + [phase] + tail, dim=-1)}
+        if self.cfg.obs_actor_includes_ball_params:
+            policy.append(self._ball_parameters)
+        return {"policy": torch.cat(policy, dim=-1),
+                "critic": torch.cat(common + ball_parts + [phase] + tail + [self._ball_parameters], dim=-1)}
 
     def _update_curriculum(self, env_ids):
         """Log full episodes and gate stage-pure episode-return checkpoints."""

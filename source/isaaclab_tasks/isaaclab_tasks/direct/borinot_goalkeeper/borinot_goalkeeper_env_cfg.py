@@ -25,7 +25,7 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     shot_resampling_mode = "launch"  # "launch": launch-to-launch; "resolution": delay after each result
     ball_park_position = (0.0, 0.0, -2.0)  # inactive ball is removed below the local floor
     action_space = 8  # derived: 8 for direct thrust modes, 6 for PI
-    observation_space = 53  # derived: actor inputs selected by the obs_includes_* flags, plus the current actions
+    observation_space = 53  # derived: actor inputs selected by the obs_actor_includes_* flags, plus the current actions
     state_space = 65  # derived: critic always gets all 57 values plus the current actions
     sim = sim_utils.SimulationCfg(
         dt=1 / 200,
@@ -196,9 +196,10 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     arm_copper_loss_coefficient = 6.888
 
     # Actor-only input switches. The critic always receives these values.
-    obs_includes_time_ball_collides_plane=False
-    obs_includes_ball_plane_intersection_point=False 
-    obs_includes_phase=False
+    obs_actor_includes_time_ball_collides_plane=False
+    obs_actor_includes_ball_plane_intersection_point=False
+    obs_actor_includes_phase=False
+    obs_actor_includes_ball_params=True  # sampled mass (kg) and restitution
 
     def __post_init__(self):
         self.configure_control()
@@ -221,9 +222,10 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
         self.sim.render_interval = self.decimation
         self.action_space = 6 if self.control_mode == modes[2] else 8
         self.state_space = 57 + self.action_space
-        point, time = self.obs_includes_ball_plane_intersection_point, self.obs_includes_time_ball_collides_plane
-        # Optional actor inputs: plane point (3), crossing time (1), prediction-valid flag (1), phase (7).
-        self.observation_space = 45 + self.action_space + 3 * point + time + (point or time) + 7 * self.obs_includes_phase
+        point, time = self.obs_actor_includes_ball_plane_intersection_point, self.obs_actor_includes_time_ball_collides_plane
+        # Optional actor inputs: plane point (3), time (1), validity (1), phase (7), ball parameters (2).
+        self.observation_space = (43 + self.action_space + 3 * point + time + (point or time)
+                                 + 7 * self.obs_actor_includes_phase + 2 * self.obs_actor_includes_ball_params)
         actuator = self.robot.actuators["arm"]
         use_pd = self.control_mode != modes[0] or self.hold_arm
         actuator.stiffness = self.joint_stiffness if use_pd else 0.0

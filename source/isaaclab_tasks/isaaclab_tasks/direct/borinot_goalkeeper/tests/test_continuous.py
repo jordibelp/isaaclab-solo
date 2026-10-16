@@ -133,22 +133,43 @@ def test_waiting_observations_hide_parked_ball_and_expose_schedule(env):
     assert torch.isfinite(obs['policy']).all() and torch.isfinite(obs['critic']).all()
 
 
-@pytest.mark.parametrize('point,time,phase',[(p,t,h) for p in (False,True) for t in (False,True) for h in (False,True)])
-def test_actor_flags_select_columns_and_critic_keeps_all(env,point,time,phase):
-    env.cfg.obs_includes_ball_plane_intersection_point=point
-    env.cfg.obs_includes_time_ball_collides_plane=time
-    env.cfg.obs_includes_phase=phase
+@pytest.mark.parametrize('mode',control.MODES)
+@pytest.mark.parametrize('point,time,phase,params',[
+    (p,t,h,b) for p in (False,True) for t in (False,True) for h in (False,True) for b in (False,True)])
+def test_actor_flags_select_columns_and_critic_keeps_all(env,mode,point,time,phase,params):
+    env.cfg.control_mode=mode
+    configure=control.method('borinot_goalkeeper_env_cfg.py','configure_control')
+    cfg=control.config();cfg.control_mode=mode;configure(cfg)
+    env.actions=torch.zeros(9,cfg.action_space)
     # Nonzero, mostly distinct values in every optional column: an incoming ball and a live shot clock.
     env.ball.data.root_pos_w[:]=torch.tensor([2.,.3,1.6]);env.ball.data.root_lin_vel_w[:]=torch.tensor([-4.,.1,.5])
     env._hit[:]=True;env._clear[:]=True;env._shot_steps[:]=7;env._episode_steps[:]=11;env._recovery_time[:]=.2
+    env._ball_parameters[:]=torch.tensor([.035,.5])
+    critic_before=env._get_observations()['critic']
+    for config in (env.cfg,cfg):
+        config.obs_actor_includes_ball_plane_intersection_point=point
+        config.obs_actor_includes_time_ball_collides_plane=time
+        config.obs_actor_includes_phase=phase
+        config.obs_actor_includes_ball_params=params
     obs=env._get_observations()
-    assert obs['critic'].shape==(9,65) and (obs['critic'][:,37:39]>0).all()
-    keep=list(range(34))+[34,35,36]*point+[37]*time+[38]*(point or time)+list(range(39,46))*phase+list(range(46,65))
+    assert torch.equal(obs['critic'],critic_before) and (obs['critic'][:,37:39]>0).all()
+    end=57+cfg.action_space
+    keep=(list(range(34))+[34,35,36]*point+[37]*time+[38]*(point or time)
+          +list(range(39,46))*phase+list(range(46,end-2))+list(range(end-2,end))*params)
     assert torch.equal(obs['policy'],obs['critic'][:,keep])
-    cfg=control.config();cfg.obs_includes_ball_plane_intersection_point=point
-    cfg.obs_includes_time_ball_collides_plane=time;cfg.obs_includes_phase=phase
-    control.method('borinot_goalkeeper_env_cfg.py','configure_control')(cfg)
+    configure(cfg)
     assert (cfg.observation_space,cfg.state_space)==(obs['policy'].shape[1],obs['critic'].shape[1])
+
+
+def test_disabled_ball_params_do_not_leak_to_actor(env):
+    env.cfg.obs_actor_includes_ball_params=False
+    before=env._get_observations()
+    env._ball_parameters[:]=torch.tensor([.049,.64])
+    after=env._get_observations()
+    assert torch.equal(before['policy'],after['policy'])
+    assert torch.equal(before['critic'][:,:-2],after['critic'][:,:-2])
+    assert torch.equal(after['critic'][:,-2:],env._ball_parameters)
+    assert not torch.equal(before['critic'][:,-2:],after['critic'][:,-2:])
 
 
 @pytest.mark.parametrize('mode,limits',[('bad',(2.,3.)),('launch',(-1.,3.)),('launch',(3.,2.)),('launch',(0.,float('nan')))])
