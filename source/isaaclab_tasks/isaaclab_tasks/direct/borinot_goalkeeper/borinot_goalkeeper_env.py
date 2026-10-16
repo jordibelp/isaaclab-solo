@@ -194,7 +194,7 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         self._shot_steps += self._ball_active
         self._outcome.zero_()
         self._previous_actions.copy_(self.actions)
-        self.actions.copy_(actions.clamp(-1.0, 1.0))
+        self.actions.copy_(actions.clamp(-self.cfg.action_clamp, self.cfg.action_clamp))
         self._previous_paddle.copy_(self._paddle_pose()[0])
         ball_pos = self.ball.data.root_pos_w - self.scene.env_origins
         self._old_progress_active.copy_(self._ball_active & ~self._hit & (self.ball.data.root_lin_vel_w[:, 0] < -0.1)
