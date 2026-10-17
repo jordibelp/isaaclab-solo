@@ -101,9 +101,11 @@ def test_invalid_control_settings_fail_before_simulation(field, value):
         method("borinot_goalkeeper_env_cfg.py", "configure_control")(cfg)
 
 
-def action_env(mode, hold_arm=False):
+def action_env(mode, hold_arm=False, motor_time_constant_s=None):
     cfg = config()
     cfg.control_mode, cfg.hold_arm = mode, hold_arm
+    if motor_time_constant_s is not None:
+        cfg.motor_time_constant_s = motor_time_constant_s
     method("borinot_goalkeeper_env_cfg.py", "configure_control")(cfg)
     calls = {}
 
@@ -119,7 +121,7 @@ def action_env(mode, hold_arm=False):
         permanent_wrench_composer=SimpleNamespace(set_forces_and_torques=record("wrench")),
         set_joint_position_target=record("position"), set_joint_velocity_target=record("velocity"),
         set_joint_effort_target=record("effort"))
-    return SimpleNamespace(cfg=cfg, robot=robot, num_envs=3, device="cpu", joint_ids=[0, 1], base_id=0,
+    env = SimpleNamespace(cfg=cfg, robot=robot, num_envs=3, device="cpu", joint_ids=[0, 1], base_id=0,
         actions=torch.zeros(3, cfg.action_space, dtype=torch.float64), _physics_samples=0,
         _actuator_commands=torch.zeros(3, 8, dtype=torch.float64),
         _sample_power=lambda: None, _sample_physics_events=lambda: None, physics_dt=cfg.sim.dt,
@@ -127,17 +129,56 @@ def action_env(mode, hold_arm=False):
         _kp=torch.tensor(cfg.rate_kp), _ki=torch.tensor(cfg.rate_ki), _hover_total=30.0, _hover_per_rotor=5.0,
         _allocation=allocation, _allocation_inverse=torch.linalg.pinv(allocation),
         _rotor_thrust=torch.full((3, 6), 5.0, dtype=torch.float64),
-        _motor_alpha=1-math.exp(-cfg.sim.dt/cfg.motor_time_constant_s),
-        _joint_scale=torch.tensor(cfg.joint_target_scale)), calls
+        _joint_scale=torch.tensor(cfg.joint_target_scale))
+    init = next(n for n in source_class("borinot_goalkeeper_env.py").body
+                if isinstance(n, ast.FunctionDef) and n.name == "__init__")
+    alpha = next(n for n in init.body if isinstance(n, ast.Assign)
+                 and ast.unparse(n.targets[0]) == "self._motor_alpha")
+    exec(compile(ast.Module(body=[alpha], type_ignores=[]), "actual_motor_alpha", "exec"),
+         {"self": env, "cfg": cfg, "math": math})
+    return env, calls
+
+
+@pytest.mark.parametrize("tc,dwell,valid", [(0.0, 1, True), (.004, 1, True), (-.001, 1, False), (0.0, 0, False)])
+def test_motor_time_constant_validation(tc, dwell, valid):
+    init = next(n for n in source_class("borinot_goalkeeper_env.py").body
+                if isinstance(n, ast.FunctionDef) and n.name == "__init__")
+    validation = next(n for n in init.body if isinstance(n, ast.If)
+                      and "motor_time_constant_s" in ast.unparse(n.test))
+    code = compile(ast.Module(body=[validation], type_ignores=[]), "actual_motor_validation", "exec")
+    scope = {"cfg": SimpleNamespace(curriculum_min_steps=dwell, motor_time_constant_s=tc)}
+    if valid:
+        exec(code, scope)
+    else:
+        with pytest.raises(ValueError):
+            exec(code, scope)
+
+
+@pytest.mark.parametrize("mode,sac", [(mode, False) for mode in MODES] + [(mode, True) for mode in MODES[:2]])
+def test_zero_motor_time_constant_applies_each_command_immediately(mode, sac):
+    env, _ = action_env(mode, motor_time_constant_s=0.0)
+    env.cfg.sac_action_mapping = sac
+    env._sac_joint_offset = torch.zeros(2)
+    assert env._motor_alpha == 1.0
+    apply = method("borinot_goalkeeper_env.py", "_apply_action")
+    # A large previous thrust also checks that bypass uses an exact copy, not cancellation.
+    env._rotor_thrust.fill_(1e20)
+    for value in (-1.0, 1.0, -0.5, 0.0):
+        env.actions.fill_(value)
+        apply(env)
+        requested = env._actuator_commands[:, :6] * (env._hover_per_rotor * env.cfg.thrust_to_weight)
+        torch.testing.assert_close(env._rotor_thrust, requested, rtol=0, atol=1e-14)
 
 
 @pytest.mark.parametrize("mode", MODES[:2])
-def test_direct_rotors_have_no_rate_feedback_and_keep_motor_lag(mode):
-    env, calls = action_env(mode)
+@pytest.mark.parametrize("tc", [.004, .04])
+def test_direct_rotors_have_no_rate_feedback_and_keep_motor_lag(mode, tc):
+    env, calls = action_env(mode, motor_time_constant_s=tc)
     env.actions[:, :6] = torch.tensor([-1., -.5, 0., .5, 1., 0.])
     env.robot.data.root_ang_vel_b[:] = torch.tensor([5., -4., 3.])
     requested = torch.tensor([0., 2.5, 5., 7.5, 10., 5.], dtype=torch.float64)
-    expected = 5.0 + env._motor_alpha * (requested - 5.0)
+    alpha = 1 - math.exp(-env.physics_dt / tc)
+    expected = 5.0 + alpha * (requested - 5.0)
     apply = method("borinot_goalkeeper_env.py", "_apply_action")
     apply(env)
     torch.testing.assert_close(env._rotor_thrust, expected.expand(3, -1))

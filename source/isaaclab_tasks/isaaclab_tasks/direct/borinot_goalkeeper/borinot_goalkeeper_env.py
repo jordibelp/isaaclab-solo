@@ -42,8 +42,8 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
             raise ValueError(f"robot_crash_body_names must select from {self.contact_body_names}.")
         if cfg.robot_crash_force_threshold_n <= 0:
             raise ValueError("robot_crash_force_threshold_n must be positive.")
-        if cfg.curriculum_min_steps < 1 or cfg.motor_time_constant_s <= 0:
-            raise ValueError("Curriculum dwell and motor time constant must be positive.")
+        if cfg.curriculum_min_steps < 1 or cfg.motor_time_constant_s < 0:
+            raise ValueError("Curriculum dwell must be positive and motor time constant must be non-negative.")
         super().__init__(cfg, render_mode, **kwargs)
         self.joint_ids, _ = self.robot.find_joints(list(cfg.joint_names), preserve_order=True)
         self.base_id = self.robot.find_bodies("base")[0][0]
@@ -93,7 +93,9 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         self._actuator_commands = torch.zeros(self.num_envs, 8, device=self.device)
         self._actuator_commands[:, :6] = 1.0 / cfg.thrust_to_weight
         self._previous_actuator_commands = self._actuator_commands.clone()
-        self._motor_alpha = 1 - math.exp(-self.physics_dt / cfg.motor_time_constant_s)
+        self._motor_alpha = (
+            1.0 if cfg.motor_time_constant_s == 0 else 1 - math.exp(-self.physics_dt / cfg.motor_time_constant_s)
+        )
         # Columns: rotor mechanical, rotor dissipative, arm mechanical, arm copper loss.
         self._power_sum_w = torch.zeros((self.num_envs, 4), device=self.device)
         self._power_samples = 0
@@ -243,7 +245,10 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         cap = self._hover_per_rotor * self.cfg.thrust_to_weight
         commands.clamp_(min=0.0, max=None if self.cfg.remove_thrust_clipping else cap)
         self._actuator_commands[:, :6] = commands / cap
-        self._rotor_thrust.add_(self._motor_alpha * (commands - self._rotor_thrust))
+        if self.cfg.motor_time_constant_s == 0:
+            self._rotor_thrust.copy_(commands)
+        else:
+            self._rotor_thrust.add_(self._motor_alpha * (commands - self._rotor_thrust))
         wrench = self._rotor_thrust @ self._allocation.T
         force = torch.zeros(self.num_envs, 1, 3, device=self.device)
         force[:, 0, 2] = wrench[:, 0]
