@@ -157,7 +157,7 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     require_recovery_for_save = False
     goal_area_x_m = (-0.08, 0.9)
     goal_area_y_m = (-1.2, 1.2)
-    goal_area_z_m = (0.55, 2.6)
+    goal_area_z_m = (0.07, 2.6)
     reset_xy_noise_m = 0.015
     reset_z_noise_m = 0.015
     # Before this zero-based shot level, spawn at robot_home. Afterwards sample
@@ -180,10 +180,9 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     rwd_scale_ball_floor = -0.25  # live floor event or a deflected ball landing in front of goal
     rwd_scale_miss = -1.0 # Ball is not cleared and goes outside the region, might handle weird racket contacts
     rwd_scale_deadline = -1.0
-    rwd_scale_robot_crash = -1.0  # configured non-ball contacts, disallowed leg/racket ground contact, or excessive tilt
+    rwd_scale_robot_crash = -1.0  # non-ball contact on robot_crash_body_names or excessive tilt; independent of reset flags
     reset_robot_on_robot_crash = True
     reset_robot_on_tilt_threshold = True
-    reset_on_leg_or_racket_contact = True  # count leg/racket ground contact as a crash; False permits resting
     robot_crash_body_names = ("base",)  # non-ball normal contact on these bodies is fatal
     robot_crash_force_threshold_n = 0.1
     robot_tilt_threshold_degs = 70.0  # degrees from world vertical; converted internally for the cosine test
