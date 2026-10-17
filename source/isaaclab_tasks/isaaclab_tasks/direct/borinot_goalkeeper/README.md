@@ -7,7 +7,7 @@ Date: 2026-10-14. Task ID: `Borinot-Goalkeeper-Direct-v0`.
 This is a separate task. It does not change the existing Borinot locomotion task or the source USD.
 We start with privileged simulator information. Both the actor and critic receive true robot state, ball position and velocity, and the sampled ball mass and restitution. There is no camera or state estimator yet. By default the actor does not see the predicted plane crossing or the shot phase; the critic always does (see the observation contract below).
 
-Episodes now contain a continuous sequence of single-ball shots. A save or failed interception does not reset Borinot. Only configured base crashes, excessive tilt, leaving the allowed area, and the episode time limit reset the robot. The default reward follows Jordi's requested approach. Goal and base hits cost −1. Arm hits cost −0.25. Leaving the goal area costs −1. Moving the racket closer to the ball in the goal-parallel plane earns signed progress. A verified racket save earns +1. Additional shaping and the recovery requirement are off by default.
+Episodes now contain a continuous sequence of single-ball shots. A save or failed interception does not reset Borinot. Configured body crashes, disallowed leg/racket ground contacts, excessive tilt, leaving the allowed area, and the episode time limit reset the robot. The default reward follows Jordi's requested approach. Goal and base hits cost −1. Arm hits cost −0.25. Leaving the goal area costs −1. Moving the racket closer to the ball in the goal-parallel plane earns signed progress. A verified racket save earns +1. Additional shaping and the recovery requirement are off by default.
 
 Use **PPO** first. Both Borinot tasks now share the Solo-style PPO recipe: 24 rollout steps, four minibatches, five epochs, `[512, 256, 128]` networks, AdamW, and gamma 0.99. See [PPO training guide](../borinot/PPO_TRAINING.md) for the complete cluster commands and available flags. SAC remains future work.
 
@@ -24,6 +24,7 @@ robot_crash_body_names = ("base",)
 robot_crash_force_threshold_n = 0.1
 reset_robot_on_robot_crash = True
 reset_robot_on_tilt_threshold = True
+reset_on_leg_or_racket_contact = True
 robot_tilt_threshold_degs = 70.0
 ```
 
@@ -35,7 +36,17 @@ There is exactly **one physical ball per environment**. A completed shot is scor
 
 A save, ball/base hit, ball/arm hit, goal, ball-floor failure, miss or shot timeout ends **only the current shot**. The configured reward or penalty is paid once. The robot keeps its position, orientation, velocities, joint state, actions, motor thrust state and PI integral. It continues balancing and paying any enabled rate/energy terms while waiting. Optional recovery shaping can continue after a save until the next launch.
 
-By default, a crash means non-ball normal contact on the **base**, above `robot_crash_force_threshold_n`. Arm/paddle ground contacts do not by themselves trigger that detector. To include them, add their names to `robot_crash_body_names`: `base`, `paddle`, `flying_arm_2__link1`, `flying_arm_2__link2`. Ball-to-base and ball-to-arm impacts remain nonterminal shot failures. The contact and tilt reset switches are independent; leaving the goal area always terminates.
+The body-contact detector uses `robot_crash_body_names`, default `("base",)`, and `robot_crash_force_threshold_n`. In addition, `reset_on_leg_or_racket_contact=True` counts ground contact on the racket, upper leg, or calf as a crash. This new default is stricter than the earlier base-only detector. Ball-to-base and ball-to-arm impacts remain nonterminal shot failures.
+
+To allow ground resting between balls, append:
+
+```bash
+env.reset_on_leg_or_racket_contact=False 'env.goal_area_z_m=[0.0,2.6]'
+```
+
+`False` allows ground contact on `paddle`, `flying_arm_2__link1`, and `flying_arm_2__link2`. These contacts do not produce a crash penalty, fail the current shot, or reset the robot. A filtered floor sensor separates these forces from ball impacts and other collisions. Even if you add these links to `robot_crash_body_names`, only their ground forces are exempt; other contacts still follow that body list. Base contact, excessive tilt, and leaving the allowed area remain active. Physical collisions and self-collision filtering do not change.
+
+The height override matters: the default minimum base height is 0.55 m, which can reset the robot before its racket reaches the floor. The switch does not silently change this box. It also does not change rewards for ball contacts, shot timing, energy costs, or the episode time limit. Allowing ground resting does not guarantee that training will learn it.
 
 The private episode clock runs for 20 seconds across all shots and waiting periods. It is independent of RSL's randomized warm-start episode counter. This is an artificial collection limit by default: it returns a time-limit truncation and preserves the final observation for PPO bootstrapping. A safety failure returns a true termination. Set `is_finite_horizon=True` only if the time limit should instead be a true finite-horizon terminal state. A time limit alone has no extra shot-deadline penalty.
 
@@ -247,9 +258,10 @@ Both spawn and reset use `robot_home_quat` in wxyz order. Early phases start at 
 
 ### `rwd_scale_robot_crash`: non-ball contact or excessive tilt
 
-Two independent detectors share this reward scale:
+The contact and tilt detectors share this reward scale:
 
 - **Base contact:** we remove the ball's equal-and-opposite filtered normal force from the robot's net normal contact force. We inspect only `robot_crash_body_names`, default `("base",)`. A remaining magnitude above `robot_crash_force_threshold_n=0.1` N sets the crash flag. This separates a ball/base impact from a base crash against the scene. Other body names can be added explicitly.
+- **Leg/racket ground contact:** `reset_on_leg_or_racket_contact=True` also sets the crash flag for floor forces above the same threshold on the racket, upper leg, or calf. `False` removes these ground forces from crash detection, including from explicitly selected crash bodies. It does not suppress base contact or non-ground contact.
 - **Tilt:** the base's up axis tilts from world vertical by more than `robot_tilt_threshold_degs`, **70 degrees** by default. This setting is in degrees; the detector converts it internally with `math.radians()` before taking the cosine. At 69 degrees the tilt detector does not fire; at 71 degrees it does. This does not require a collision. Pure yaw does not trigger this test. For example, append `env.robot_tilt_threshold_degs=70.0` to a launch command. The old `robot_tilt_threshold_rad` field is no longer used.
 
 `reset_robot_on_robot_crash=True` ends the episode for the contact detector. `reset_robot_on_tilt_threshold=True` ends it for the tilt detector. Setting either to `False` disables **only that detector's reset**, not its reward or the other detector. A persistent violation can therefore receive −1 in every action interval. If both detectors fire in one interval, they still select one crash outcome, not two penalties.

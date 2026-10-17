@@ -49,9 +49,12 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         self.base_id = self.robot.find_bodies("base")[0][0]
         self.paddle_id = self.robot.find_bodies("paddle")[0][0]
         self._contact_ids = self.robot_contact.find_bodies(list(self.contact_body_names), preserve_order=True)[0]
+        self._leg_contact_columns = [0, 2, 3]  # paddle, upper leg, calf; never exempt the base
         self._crash_contact_columns = [self.contact_body_names.index(name) for name in cfg.robot_crash_body_names]
         if self.ball_contact.contact_physx_view.filter_count != 6:
             raise RuntimeError("Expected separate paddle, base, arm1, arm2, goal, and floor contact filters.")
+        if self.floor_contact.contact_physx_view.filter_count != 3:
+            raise RuntimeError("Expected separate paddle, upper-leg, and calf ground-contact filters.")
 
         self._home = torch.tensor(cfg.robot_home, device=self.device)
         self._area_min = torch.tensor(
@@ -154,6 +157,7 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         ground_cfg = sim_utils.CuboidCfg(
             size=(self.cfg.scene.env_spacing - 0.5, self.cfg.scene.env_spacing - 0.5, 0.1),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True, disable_gravity=True),
+            activate_contact_sensors=True,
             collision_props=sim_utils.CollisionPropertiesCfg(contact_offset=0.002, rest_offset=0.0),
             physics_material=sim_utils.RigidBodyMaterialCfg(restitution=0.0),
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.35, 0.35, 0.35)),
@@ -172,8 +176,14 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         self.robot_contact = ContactSensor(ContactSensorCfg(
             prim_path="/World/envs/env_.*/Robot/.*", update_period=0.0, history_length=0,
         ))
+        # One floor body with three filters avoids a separate sensor per robot link.
+        self.floor_contact = ContactSensor(ContactSensorCfg(
+            prim_path="/World/envs/env_.*/Floor", update_period=0.0, history_length=0,
+            filter_prim_paths_expr=[f"/World/envs/env_.*/Robot/{self.contact_body_names[i]}" for i in (0, 2, 3)],
+        ))
         self.scene.sensors["ball_contacts"] = self.ball_contact
         self.scene.sensors["robot_contacts"] = self.robot_contact
+        self.scene.sensors["floor_contacts"] = self.floor_contact
         light = sim_utils.DomeLightCfg(intensity=1800.0)
         light.func("/World/Light", light)
 
@@ -295,13 +305,22 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         # Robot net forces include legitimate paddle/ball impact. Remove the
         # equal-and-opposite ball normal force before checking other collisions.
         other_contact = self.robot_contact.data.net_forces_w[:, self._contact_ids] + matrix[:, :4]
+        floor_contact = self.floor_contact.data.force_matrix_w[:, 0]
+        if not self.cfg.reset_on_leg_or_racket_contact:
+            # Forces are reported ON the floor. Add them to remove only the
+            # permitted ground forces, retaining self/scene collisions on these links.
+            other_contact[:, self._leg_contact_columns] += floor_contact
+        self._flags["crash"] |= (
+            torch.linalg.vector_norm(other_contact[:, self._crash_contact_columns], dim=-1) > self.cfg.robot_crash_force_threshold_n
+        ).any(-1)
+        if self.cfg.reset_on_leg_or_racket_contact:
+            self._flags["crash"] |= (
+                torch.linalg.vector_norm(floor_contact, dim=-1) > self.cfg.robot_crash_force_threshold_n
+            ).any(-1)
         root_pos = self.robot.data.root_pos_w - self.scene.env_origins
         gravity_b = quat_apply_inverse(self.robot.data.root_quat_w, self._gravity)
         self._flags["area"] |= ((root_pos < self._area_min) | (root_pos > self._area_max)).any(-1)
         self._flags["tilt"] |= gravity_b[:, 2] > -math.cos(math.radians(self.cfg.robot_tilt_threshold_degs))
-        self._flags["crash"] |= (
-            torch.linalg.vector_norm(other_contact[:, self._crash_contact_columns], dim=-1) > self.cfg.robot_crash_force_threshold_n
-        ).any(-1)
 
         returned = (position[:, 0] > self.cfg.keeper_plane_x + self.cfg.clear_distance_m) & (
             velocity[:, 0] > self.cfg.clear_speed_m_s

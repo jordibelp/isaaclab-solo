@@ -32,6 +32,60 @@ def config_literals():
     return values
 
 
+def test_leg_or_racket_contact_reset_defaults_on():
+    assert config_literals()["reset_on_leg_or_racket_contact"] is True
+
+
+@pytest.mark.parametrize("reset_ground", [False, True])
+@pytest.mark.parametrize("crash_columns", [[1], [0, 1, 2, 3]])
+def test_ground_contact_switch_preserves_other_crashes(reset_ground, crash_columns):
+    tree = ast.parse((FOLDER / "borinot_goalkeeper_env.py").read_text())
+    method = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+                  and n.name == "_sample_physics_events")
+    def assignment_to(node, name):
+        return (isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id == name)
+    start = next(i for i, n in enumerate(method.body) if assignment_to(n, "other_contact"))
+    end = next(i for i, n in enumerate(method.body) if assignment_to(n, "root_pos"))
+    # One environment per independent physical case, plus simultaneous contacts.
+    forces = torch.zeros(9, 4, 3)
+    ball_forces = torch.zeros(9, 6, 3)
+    floor_forces = torch.zeros(9, 3, 3)  # paddle, upper leg, calf; forces ON the floor
+    forces[0, 0, 2] = 2.0
+    ball_forces[0, 0, 2] = -2.0  # legal ball/racket impact cancels
+    for row, body in enumerate([0, 2, 3], 1):
+        forces[row, body, 2] = 2.0
+        floor_forces[row, row - 1, 2] = -2.0
+    forces[4, 1, 2] = 2.0  # base/floor crash is never exempt
+    forces[5, 1, 0] = 2.0  # base self/scene contact is never exempt
+    forces[6, 0, 0] = 2.0  # non-floor racket contact still follows configured bodies
+    forces[7, 3, 2] = 2.0
+    floor_forces[7, 2, 2] = -2.0
+    forces[7, 1, 0] = 2.0  # legal calf rest plus simultaneous base crash
+    forces[8, 3, 2] = 2.0
+    floor_forces[8, 2, 2] = -2.0
+    forces[8, 3, 0] = 2.0  # ground subtraction must retain other calf contact
+    env = SimpleNamespace(
+        cfg=SimpleNamespace(reset_on_leg_or_racket_contact=reset_ground,
+                            robot_crash_force_threshold_n=0.1),
+        _contact_ids=list(range(4)), _leg_contact_columns=[0, 2, 3],
+        _crash_contact_columns=crash_columns,
+        robot_contact=SimpleNamespace(data=SimpleNamespace(net_forces_w=forces)),
+        floor_contact=SimpleNamespace(data=SimpleNamespace(force_matrix_w=floor_forces[:, None])),
+        _flags={"crash": torch.zeros(9, dtype=torch.bool)})
+    namespace = {"self": env, "matrix": ball_forces, "torch": torch}
+    detector = compile(ast.Module(body=method.body[start:end], type_ignores=[]), "ground_crash_detector", "exec")
+    exec(detector, namespace)
+    assert env._flags["crash"].tolist() == [
+        False, reset_ground, reset_ground, reset_ground, True, True,
+        0 in crash_columns, True, reset_ground or 3 in crash_columns,
+    ]
+    env._flags["crash"].fill_(True)
+    forces.zero_(); ball_forces.zero_(); floor_forces.zero_()
+    exec(detector, namespace)
+    assert env._flags["crash"].all(), "Transient contacts must stay latched until the policy boundary"
+
+
 def frame(position, quaternion_xyzw):
     result = np.eye(4)
     result[:3, :3] = Rotation.from_quat(quaternion_xyzw).as_matrix()
