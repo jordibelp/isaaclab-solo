@@ -615,12 +615,26 @@ A regularizer discourages unwanted motion or control changes. Each signal below 
 
 | Config field | Raw signal; contribution is `scale * signal * step_dt` | What it discourages |
 |---|---|---|
-| `rwd_scale_action_rate` | `sum((current_action - previous_action)²)` over all clipped policy actions (eight in direct modes, six in PI mode) | Abrupt action changes. This is a step-to-step difference, **not divided by dt**. The previous action is zero after reset. |
+| `rwd_scale_action_rate` | Mean squared normalized thrust-command change over six rotors, **plus** mean squared normalized joint-effort change over two joints. See the definition below. | Changes in post-clipping actuator commands, not raw policy outputs. The two actuator groups have equal weight. Differences are **not divided by dt**. |
 | `rwd_scale_body_angular_velocity` | `sum(base_angular_velocity_body_frame²)`, in (rad/s)² | Fast base rotation. All three axes count, including yaw. |
 | `rwd_scale_body_linear_velocity` | `sum(base_linear_velocity_world_frame²)`, in (m/s)² | Fast aircraft translation in any direction. |
 | `rwd_scale_thrust` | `mean((applied_rotor_thrust / nominal_hover_thrust_per_rotor - 1)²)` over six rotors | Thrust departing from its nominal hover allocation. Applied thrust includes motor lag. |
 
-For example, changing just one clipped action by 0.2 gives an action-rate signal of 0.04. With scale −0.1, its contribution is `−0.1 * 0.04 / 100 = −0.00004` at the default 100 Hz. The action-rate signal still includes the two arm outputs when `hold_arm=True`, although those outputs are ignored by the arm controller.
+The action-rate definition is:
+
+```text
+F_max = nominal_hover_thrust_per_rotor * thrust_to_weight
+rotor_change = (current_clipped_thrust_command - previous_clipped_thrust_command) / F_max
+torque_change = (current_clipped_joint_effort - previous_clipped_joint_effort) / (2 * effort_lim_sim)
+signal = mean_over_6_rotors(rotor_change²) + mean_over_2_joints(torque_change²)
+reward contribution = rwd_scale_action_rate * signal * step_dt
+```
+
+The torque denominator is the **full signed span**, from `-effort_lim_sim` to `+effort_lim_sim`. For example, changing all six thrust commands by 10% of their full range gives a signal of 0.01. Changing both joint efforts by 10% of their full signed range also gives 0.01. Doing both gives 0.02. With scale −0.1 at 100 Hz, the reward contribution is `−0.1 * 0.02 * 0.01 = −0.00002`.
+
+We compare commands at the end of successive policy intervals, including terminal intervals. Thrust is sampled **after its command clipping but before motor lag**. Joint effort uses `robot.data.applied_torque`: the implicit actuator's clipped effort estimate, **not measured PhysX torque**. This also covers PD and PI control modes. With `hold_arm=True`, ignored policy joint outputs do not count; changes in the holding controller's effort estimate still count.
+
+Both histories start at hover thrust and zero joint effort after a robot reset. A ball-only reset does not clear them. Repeating raw actions inside the same saturation region adds no action-rate cost. If upper thrust clipping is disabled, `F_max` remains the nominal normalization scale, not an enforced limit; normalized thrust can exceed 1. This reward does not add any new actuator clipping or change the policy observations. With the thrust cap enabled, the total signal lies between 0 and 2. Normalization and group averaging change its numerical scale, so an old action-rate weight does not preserve the old penalty strength.
 
 The thrust signal is zero at nominal hover thrust. It is **not a physical power estimate**: hovering consumes power but pays no thrust regularizer. It also penalizes reducing thrust below nominal hover, not only increasing it above hover.
 

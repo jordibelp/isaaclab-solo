@@ -38,7 +38,7 @@ def make_env():
     target[:, 1] = 1.0
     normal = xyz.clone()
     normal[:, 0] = 1.0
-    cfg = SimpleNamespace(**{name: 0.0 for name in config_scales()}, decimation=4,
+    cfg = SimpleNamespace(**{name: 0.0 for name in config_scales()}, decimation=4, effort_lim_sim=2.7,
                           progress_use_prediction=False, shot_resampling_mode="launch")
     return SimpleNamespace(
         cfg=cfg, device="cpu", step_dt=1/60, _sample_power=lambda: None,
@@ -47,14 +47,16 @@ def make_env():
         ball=SimpleNamespace(data=SimpleNamespace(root_pos_w=target, root_lin_vel_w=-normal)),
         scene=SimpleNamespace(env_origins=xyz),
         robot=SimpleNamespace(data=SimpleNamespace(root_ang_vel_b=torch.tensor([1., 2., 2.]).repeat(n, 1),
-                                                   root_lin_vel_w=torch.tensor([2., 2., 1.]).repeat(n, 1))),
+                                                   root_lin_vel_w=torch.tensor([2., 2., 1.]).repeat(n, 1),
+                                                   applied_torque=torch.full((n, 2), .54))),
         _interception=lambda: (target, zero, zero.bool(), torch.full((n,), .4)),
         _recovery_geometry=lambda: (torch.ones(n, dtype=torch.bool), torch.full((n,), .6)),
         _old_progress_active=torch.ones(n, dtype=torch.bool),
         _ball_active=torch.ones(n, dtype=torch.bool), _shot_stage=torch.zeros(n,dtype=torch.long),
         _record_shots=lambda ids: None, _park_ball=lambda ids: None,
         _clear=torch.ones(n, dtype=torch.bool), _hit=torch.ones(n, dtype=torch.bool),
-        actions=torch.full((n, 6), .1), _previous_actions=torch.zeros(n, 6),
+        actions=torch.full((n, 6), .1), joint_ids=[0, 1],
+        _actuator_commands=torch.full((n, 8), .1), _previous_actuator_commands=torch.zeros(n, 8),
         _rotor_thrust=torch.full((n, 6), 2.), _hover_per_rotor=1.,
         _outcome=torch.arange(n), _center_quality=torch.full((n,), .5),
         _new_hit=torch.zeros(n, dtype=torch.bool), _flags={name: torch.zeros(n, dtype=torch.bool) for name in ("floor", "crash", "tilt")},
@@ -101,7 +103,7 @@ def test_goal_base_and_crash_scales_are_independent():
 @pytest.mark.parametrize("scale", [-.2, .2])
 @pytest.mark.parametrize("field,raw", [
     ("rwd_scale_intercept", .4), ("rwd_scale_alignment", .4),
-    ("rwd_scale_recovery", .6), ("rwd_scale_action_rate", .06),
+    ("rwd_scale_recovery", .6), ("rwd_scale_action_rate", .02),
     ("rwd_scale_body_angular_velocity", 9.), ("rwd_scale_body_linear_velocity", 9.),
     ("rwd_scale_thrust", 1.),
 ])

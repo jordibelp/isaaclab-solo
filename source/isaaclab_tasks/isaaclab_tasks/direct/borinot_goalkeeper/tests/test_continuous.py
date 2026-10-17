@@ -40,7 +40,7 @@ def env():
         ball_data.root_pos_w[ids]=state[:,:3];ball_data.root_lin_vel_w[ids]=state[:,7:10]
     noop=lambda *a,**kw:None
     e=SimpleNamespace(cfg=cfg,device='cpu',num_envs=n,step_dt=.01,max_episode_length=2000,
-        actions=torch.zeros(n,8),_previous_actions=torch.zeros(n,8),_rate_integral=torch.ones(n,3),
+        actions=torch.zeros(n,8),_actuator_commands=torch.zeros(n,8),_previous_actuator_commands=torch.zeros(n,8),_rate_integral=torch.ones(n,3),
         _previous_paddle=xyz.clone(),_old_progress_active=torch.zeros(n,dtype=torch.bool),
         _hit=torch.zeros(n,dtype=torch.bool),_clear=torch.zeros(n,dtype=torch.bool),_new_hit=torch.zeros(n,dtype=torch.bool),
         _center_quality=zero(),_recovery_time=zero(),_outcome=torch.zeros(n,dtype=torch.long),

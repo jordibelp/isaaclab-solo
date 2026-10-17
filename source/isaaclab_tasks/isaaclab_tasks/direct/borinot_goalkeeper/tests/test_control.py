@@ -121,6 +121,7 @@ def action_env(mode, hold_arm=False):
         set_joint_effort_target=record("effort"))
     return SimpleNamespace(cfg=cfg, robot=robot, num_envs=3, device="cpu", joint_ids=[0, 1], base_id=0,
         actions=torch.zeros(3, cfg.action_space, dtype=torch.float64), _physics_samples=0,
+        _actuator_commands=torch.zeros(3, 8, dtype=torch.float64),
         _sample_power=lambda: None, _sample_physics_events=lambda: None, physics_dt=cfg.sim.dt,
         _rate_scale=torch.tensor(cfg.body_rate_scale), _rate_integral=torch.zeros(3, 3, dtype=torch.float64),
         _kp=torch.tensor(cfg.rate_kp), _ki=torch.tensor(cfg.rate_ki), _hover_total=30.0, _hover_per_rotor=5.0,
@@ -168,7 +169,7 @@ def test_action_clipping_flag(remove, expected):
     zeros = lambda *shape, dtype=torch.float32: torch.zeros(*shape, dtype=dtype)
     env = SimpleNamespace(cfg=cfg, extras={}, _episode_steps=zeros(1), _next_launch_steps=torch.ones(1),
         _ball_active=torch.ones(1, dtype=torch.bool), _shot_steps=zeros(1), _outcome=zeros(1),
-        actions=zeros(1, 4), _previous_actions=zeros(1, 4), _previous_paddle=zeros(1, 3),
+        actions=zeros(1, 4), _actuator_commands=zeros(1, 8), _previous_actuator_commands=zeros(1, 8), _previous_paddle=zeros(1, 3),
         _paddle_pose=lambda: (zeros(1, 3),), scene=SimpleNamespace(env_origins=zeros(1, 3)),
         ball=SimpleNamespace(data=SimpleNamespace(root_pos_w=zeros(1, 3), root_lin_vel_w=zeros(1, 3))),
         _old_progress_active=zeros(1, dtype=torch.bool), _hit=zeros(1, dtype=torch.bool), _new_hit=zeros(1, dtype=torch.bool), _flags={},

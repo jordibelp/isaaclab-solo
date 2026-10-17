@@ -194,6 +194,7 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     intercept_sigma_m = 0.30
     rwd_scale_hit = 0.0
     rwd_scale_centered_hit = 0.0
+    # Group-mean squared command changes, normalized by full thrust/torque spans; times policy dt.
     rwd_scale_action_rate = -0.0
     rwd_scale_body_angular_velocity = -0.0
     rwd_scale_body_linear_velocity = -0.0
@@ -227,6 +228,8 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
             raise ValueError("physics_hz must be an integer multiple of policy_hz.")
         if self.effort_lim_sim <= 0 or self.velocity_lim_sim <= 0:
             raise ValueError("effort_lim_sim and velocity_lim_sim must be positive.")
+        if not math.isfinite(self.thrust_to_weight) or self.thrust_to_weight <= 0:
+            raise ValueError("thrust_to_weight must be finite and positive.")
         if self.sac_action_mapping:
             if self.control_mode not in modes[:2]:
                 raise ValueError("sac_action_mapping requires a direct thrust control mode (torque or PD position).")

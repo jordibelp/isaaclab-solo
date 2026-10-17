@@ -63,7 +63,6 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         self._x_axis = torch.tensor([1.0, 0.0, 0.0], device=self.device).expand(self.num_envs, -1)
         self._gravity = torch.tensor([0.0, 0.0, -1.0], device=self.device).expand(self.num_envs, -1)
         self.actions = torch.zeros(self.num_envs, cfg.action_space, device=self.device)
-        self._previous_actions = torch.zeros_like(self.actions)
         self._rate_integral = torch.zeros(self.num_envs, 3, device=self.device)
         self._joint_scale = torch.tensor(cfg.joint_target_scale, device=self.device)
         if cfg.sac_action_mapping:
@@ -89,6 +88,11 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
                                         torch.tensor(cfg.rotor_spin, device=self.device) * cfg.km_over_kf))
         self._allocation_inverse = torch.linalg.pinv(self._allocation)
         self._rotor_thrust = torch.full((self.num_envs, 6), self._hover_per_rotor, device=self.device)
+        # Normalized post-clipping commands: thrust / F_max, torque / (2*tau_max).
+        # Reset starts at hover thrust and zero joint effort, not zero thrust.
+        self._actuator_commands = torch.zeros(self.num_envs, 8, device=self.device)
+        self._actuator_commands[:, :6] = 1.0 / cfg.thrust_to_weight
+        self._previous_actuator_commands = self._actuator_commands.clone()
         self._motor_alpha = 1 - math.exp(-self.physics_dt / cfg.motor_time_constant_s)
         # Columns: rotor mechanical, rotor dissipative, arm mechanical, arm copper loss.
         self._power_sum_w = torch.zeros((self.num_envs, 4), device=self.device)
@@ -201,7 +205,7 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
             self._launch_ball(launch_ids)
         self._shot_steps += self._ball_active
         self._outcome.zero_()
-        self._previous_actions.copy_(self.actions)
+        self._previous_actuator_commands.copy_(self._actuator_commands)
         if not self.cfg.sac_action_mapping and not self.cfg.remove_thrust_clipping:
             actions = actions.clamp(-self.cfg.action_clamp, self.cfg.action_clamp)
         self.actions.copy_(actions)
@@ -238,6 +242,7 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         # Rotors only push: thrust is always >= 0. The flag removes only the upper thrust cap.
         cap = self._hover_per_rotor * self.cfg.thrust_to_weight
         commands.clamp_(min=0.0, max=None if self.cfg.remove_thrust_clipping else cap)
+        self._actuator_commands[:, :6] = commands / cap
         self._rotor_thrust.add_(self._motor_alpha * (commands - self._rotor_thrust))
         wrench = self._rotor_thrust @ self._allocation.T
         force = torch.zeros(self.num_envs, 1, 3, device=self.device)
@@ -378,7 +383,11 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         if self.cfg.rwd_scale_recovery:
             rate += self.cfg.rwd_scale_recovery * self._recovery_geometry()[1] * self._clear
         if self.cfg.rwd_scale_action_rate:
-            rate += self.cfg.rwd_scale_action_rate * (self.actions - self._previous_actions).square().sum(-1)
+            # Implicit-actuator effort is a clipped estimate, not measured PhysX torque.
+            self._actuator_commands[:, 6:] = (
+                self.robot.data.applied_torque[:, self.joint_ids] / (2 * self.cfg.effort_lim_sim))
+            delta = self._actuator_commands - self._previous_actuator_commands
+            rate += self.cfg.rwd_scale_action_rate * (delta[:, :6].square().mean(-1) + delta[:, 6:].square().mean(-1))
         if self.cfg.rwd_scale_body_angular_velocity:
             rate += self.cfg.rwd_scale_body_angular_velocity * self.robot.data.root_ang_vel_b.square().sum(-1)
         if self.cfg.rwd_scale_body_linear_velocity:
@@ -599,7 +608,7 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
             self.robot.data.default_joint_pos[env_ids][:, self.joint_ids], joint_ids=self.joint_ids, env_ids=env_ids)
         self.robot.set_joint_velocity_target(joint_zero, joint_ids=self.joint_ids, env_ids=env_ids)
         self.robot.set_joint_effort_target(joint_zero, joint_ids=self.joint_ids, env_ids=env_ids)
-        for buffer in (self.actions, self._previous_actions, self._rate_integral, self._recovery_time,
+        for buffer in (self.actions, self._rate_integral, self._recovery_time,
                        self._hit, self._clear, self._new_hit, self._center_quality, self._outcome,
                        self._episode_rewards, self._episode_steps, self._episode_shots,
                        self._episode_saves, self._episode_paddle_hits, self._shot_steps):
@@ -609,6 +618,9 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         for value in self._episode_terms.values():
             value[env_ids] = 0
         self._rotor_thrust[env_ids] = self._hover_per_rotor
+        for buffer in (self._actuator_commands, self._previous_actuator_commands):
+            buffer[env_ids, :6] = 1.0 / self.cfg.thrust_to_weight
+            buffer[env_ids, 6:] = 0.0
         self._power_sum_w[env_ids] = 0.0
         self._episode_stage[env_ids] = self.shot_level
         self._launch_ball(env_ids)
