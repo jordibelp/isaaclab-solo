@@ -104,7 +104,7 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         self._clear = torch.zeros_like(self._hit)
         self._new_hit = torch.zeros_like(self._hit)
         self._flags = {
-            name: torch.zeros_like(self._hit) for name in ("base", "arm", "crash", "tilt", "goal", "floor", "area", "miss")
+            name: torch.zeros_like(self._hit) for name in ("base", "arm", "crash", "external_crash", "tilt", "goal", "floor", "area", "miss")
         }
         self._center_quality = torch.zeros(self.num_envs, device=self.device)
         self._recovery_time = torch.zeros(self.num_envs, device=self.device)
@@ -180,6 +180,18 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         ))
         self.scene.sensors["ball_contacts"] = self.ball_contact
         self.scene.sensors["robot_contacts"] = self.robot_contact
+        # Filtered reporting is one-to-many: one source sensor per monitored body.
+        # The default path needs no additional sensors or force subtraction.
+        self._self_contact_sensors = []
+        if not self.cfg.self_collision_triggers_reset:
+            for name in self.cfg.robot_crash_body_names:
+                sensor = ContactSensor(ContactSensorCfg(
+                    prim_path=f"/World/envs/env_.*/Robot/{name}", update_period=0.0, history_length=0,
+                    filter_prim_paths_expr=[f"/World/envs/env_.*/Robot/{other}"
+                                            for other in self.contact_body_names if other != name],
+                ))
+                self._self_contact_sensors.append(sensor)
+                self.scene.sensors[f"self_contacts_{name}"] = sensor
         light = sim_utils.DomeLightCfg(intensity=1800.0)
         light.func("/World/Light", light)
 
@@ -309,9 +321,7 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         gravity_b = quat_apply_inverse(self.robot.data.root_quat_w, self._gravity)
         self._flags["area"] |= ((root_pos < self._area_min) | (root_pos > self._area_max)).any(-1)
         self._flags["tilt"] |= gravity_b[:, 2] > -math.cos(math.radians(self.cfg.robot_tilt_threshold_degs))
-        self._flags["crash"] |= (
-            torch.linalg.vector_norm(other_contact[:, self._crash_contact_columns], dim=-1) > self.cfg.robot_crash_force_threshold_n
-        ).any(-1)
+        self._sample_robot_crashes(other_contact)
 
         returned = (position[:, 0] > self.cfg.keeper_plane_x + self.cfg.clear_distance_m) & (
             velocity[:, 0] > self.cfg.clear_speed_m_s
@@ -333,6 +343,19 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         escaped = (position[:, 0].abs() > 3.0) | (position[:, 1].abs() > 3.0) | (position[:, 2] > 4.5)
         self._flags["miss"] |= self._ball_active & escaped & ~self._clear
         self._previous_ball.copy_(position)
+
+    def _sample_robot_crashes(self, other_contact):
+        """Keep crash rewards unchanged; optionally exclude self forces from resets."""
+        self._flags["crash"] |= (
+            torch.linalg.vector_norm(other_contact[:, self._crash_contact_columns], dim=-1) > self.cfg.robot_crash_force_threshold_n
+        ).any(-1)
+        if not self.cfg.self_collision_triggers_reset:
+            scene_forces = other_contact[:, self._crash_contact_columns].clone()
+            for column, sensor in enumerate(self._self_contact_sensors):
+                scene_forces[:, column] -= sensor.data.force_matrix_w[:, 0].sum(1)
+            self._flags["external_crash"] |= (
+                torch.linalg.vector_norm(scene_forces, dim=-1) > self.cfg.robot_crash_force_threshold_n
+            ).any(-1)
 
     def _recovery_geometry(self):
         position = self.robot.data.root_pos_w - self.scene.env_origins
@@ -362,7 +385,8 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         self._outcome = terminal_outcome(self._flags["base"], self._flags["arm"], crash,
                                         self._flags["goal"], live_floor, self._flags["area"],
                                         self._flags["miss"], deadline, success)
-        reset_crash = ((self._flags["crash"] & self.cfg.reset_robot_on_robot_crash)
+        contact_crash = self._flags["crash" if self.cfg.self_collision_triggers_reset else "external_crash"]
+        reset_crash = ((contact_crash & self.cfg.reset_robot_on_robot_crash)
                        | (self._flags["tilt"] & self.cfg.reset_robot_on_tilt_threshold))
         # Ball results end only the shot. The robot must keep balancing between balls.
         terminated = reset_crash | self._flags["area"]

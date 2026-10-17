@@ -256,6 +256,8 @@ Two independent detectors share this reward scale:
 
 `reset_robot_on_robot_crash=True` ends the episode for the contact detector. `reset_robot_on_tilt_threshold=True` ends it for the tilt detector. Setting either to `False` disables **only that detector's reset**, not its reward or the other detector. A persistent violation can therefore receive −1 in every action interval. If both detectors fire in one interval, they still select one crash outcome, not two penalties.
 
+`self_collision_triggers_reset=True` is the default and preserves the existing contact-reset behavior. With physical self-collisions enabled, a racket/base impact can therefore reset the robot. Append `env.self_collision_triggers_reset=False` to keep physical self-contact and its crash penalty without resetting for that self-contact. This does not enable or disable physical collisions; `env.enabled_self_collisions` controls those separately. The opt-out path subtracts filtered robot/robot forces on each configured crash body for the reset decision only. Scene contact, including a simultaneous floor impact, still resets when `reset_robot_on_robot_crash=True`. Tilt, area, timeout, reward priority, and save-clearance checks are unchanged. The default path adds no sensors.
+
 Leaving the box still terminates the episode. Ball goals and shot deadlines do not. Contact/tilt violations also prevent new safe-clearance confirmation even when their resets are disabled. Extras `goalkeeper_robot_contact_crash` and `goalkeeper_tilt_threshold` expose the two causes separately.
 
 ### `rwd_scale_save`: contact plus safe clearance, not contact alone
