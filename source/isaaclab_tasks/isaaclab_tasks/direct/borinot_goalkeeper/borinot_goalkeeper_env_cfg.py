@@ -136,7 +136,7 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     body_rate_scale = (2.0, 2.0, 1.5)
     rate_kp = (0.35, 0.35, 0.15)
     rate_ki = (0.10, 0.10, 0.04)
-    motor_time_constant_s = 0.00 # motor lag
+    motor_time_constant_s = 0.004 # motor lag
     rotor_pos_b = ((0.20, 0.00, 0.00), (0.10, 0.17, 0.00), (-0.10, 0.17, 0.00),
                    (-0.20, 0.00, 0.00), (-0.10, -0.17, 0.00), (0.10, -0.17, 0.00))
     rotor_spin = (-1.0, 1.0, -1.0, 1.0, -1.0, 1.0)
