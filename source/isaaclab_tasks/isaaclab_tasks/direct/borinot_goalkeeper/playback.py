@@ -10,11 +10,12 @@ from isaaclab.assets import RigidObject
 from .borinot_goalkeeper_env import BorinotGoalkeeperEnv
 
 
-class BorinotGoalkeeperPlayEnv(BorinotGoalkeeperEnv):
+class GoalkeeperPlaybackMixin:
     """Continue resolved trajectories without letting old balls affect the policy.
 
     At most ``keep_balls`` balls per environment are on the field, including the
     live shot. Retired balls collide with scenery, not the robot or other balls.
+    Put it before a goalkeeper task class: ``class PlayEnv(GoalkeeperPlaybackMixin, TaskEnv)``.
     """
 
     def __init__(self, cfg, render_mode=None, keep_balls=5, **kwargs):
@@ -142,3 +143,7 @@ class BorinotGoalkeeperPlayEnv(BorinotGoalkeeperEnv):
             return self.reset()
         finally:
             self._reset_to_home = False
+
+
+class BorinotGoalkeeperPlayEnv(GoalkeeperPlaybackMixin, BorinotGoalkeeperEnv):
+    """Original goalkeeper task with recent-ball playback."""

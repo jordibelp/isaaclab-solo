@@ -12,8 +12,9 @@ from pathlib import Path
 
 from isaaclab.app import AppLauncher
 
+TASKS = ("Borinot-Goalkeeper-Direct-v0", "Borinot-Goalkeeper-Simple-Direct-v0")
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument("--task", default="Borinot-Goalkeeper-Direct-v0", choices=["Borinot-Goalkeeper-Direct-v0"])
+parser.add_argument("--task", default=TASKS[0], choices=TASKS)
 parser.add_argument("--agent", default="rsl_rl_cfg_entry_point")
 parser.add_argument("--checkpoint", required=True, help="RSL-RL checkpoint; optimizer state is not restored.")
 parser.add_argument("--num_envs", type=int, default=1)
@@ -64,6 +65,7 @@ from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
 from isaaclab_tasks.utils.hydra import hydra_task_config
 from isaaclab_tasks.direct.borinot_goalkeeper.playback import BorinotGoalkeeperPlayEnv
 from isaaclab_tasks.direct.borinot_goalkeeper.playback_ui import PlayControls, camera_pose
+from isaaclab_tasks.direct.borinot_goalkeeper_simple.playback import BorinotGoalkeeperSimplePlayEnv
 
 
 def configure_camera(cfg, mode):
@@ -94,8 +96,8 @@ def main(env_cfg, agent_cfg):
     checkpoint = retrieve_file_path(args_cli.checkpoint)
     # Only this entry point constructs the play subclass. Training keeps its
     # original single ball, observations, rewards, collisions and reset rules.
-    env = BorinotGoalkeeperPlayEnv(cfg=env_cfg, keep_balls=args_cli.keep_balls,
-                                  render_mode="rgb_array" if args_cli.video else None)
+    play_env = BorinotGoalkeeperSimplePlayEnv if args_cli.task == TASKS[1] else BorinotGoalkeeperPlayEnv
+    env = play_env(cfg=env_cfg, keep_balls=args_cli.keep_balls, render_mode="rgb_array" if args_cli.video else None)
     controls = None
     try:
         video_dir = None
@@ -128,7 +130,7 @@ def main(env_cfg, agent_cfg):
         counts = torch.zeros(10, dtype=torch.long, device=env.device)
         terminated_episodes = 0
         truncated_episodes = 0
-        print(f"[INFO] Goalkeeper: {env_cfg.control_mode}, {env_cfg.physics_hz}/{env_cfg.policy_hz} Hz, "
+        print(f"[INFO] {args_cli.task}: {env_cfg.control_mode}, {env_cfg.physics_hz}/{env_cfg.policy_hz} Hz, "
               f"home={env_cfg.robot_home}, shot_level={env_cfg.shot_level}, curriculum={env_cfg.curriculum}, "
               f"reset_on_goal={env_cfg.reset_on_goal}, camera={args_cli.camera}, "
               f"keep_balls={args_cli.keep_balls}, {total_steps} policy steps", flush=True)
@@ -167,7 +169,8 @@ def main(env_cfg, agent_cfg):
                     time.sleep(remaining)
         names = ("ongoing", "base_hit", "arm_hit", "goal", "ball_floor", "leave_goal_area",
                  "deadline", "save", "robot_crash", "miss")
-        report = {"checkpoint_name": Path(checkpoint).name, "checkpoint_path": str(checkpoint),
+        # The simplified task uses only "goal" and "save" (shot ended without a goal).
+        report = {"task": args_cli.task, "checkpoint_name": Path(checkpoint).name, "checkpoint_path": str(checkpoint),
                   "steps": completed_steps, "simulated_time_s": completed_steps * dt,
                   "num_envs": env.num_envs, "control_mode": env_cfg.control_mode,
                   "physics_hz": env_cfg.physics_hz, "policy_hz": env_cfg.policy_hz,

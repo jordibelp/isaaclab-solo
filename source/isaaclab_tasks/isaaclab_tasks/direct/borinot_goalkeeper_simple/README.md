@@ -1,0 +1,232 @@
+# Borinot goalkeeper — simplified reward
+
+Date: 2026-10-18. Task ID: `Borinot-Goalkeeper-Simple-Direct-v0`.
+
+## Start here
+
+This is a new task next to the original `Borinot-Goalkeeper-Direct-v0`. The original task's training code, config and rewards are unchanged. Only its playback file was split into a reusable part, so that one player can show both tasks. Playback of the original task behaves as before.
+
+The robot, racket, ball, goal, shots, curriculum, control modes and actor observations are the same. Only the reward and the reset rules change. The new reward is a plain **sum** of a few terms in three groups:
+
+```text
+reward = task + integrity + desirability
+```
+
+- **Task:** stop the ball. Pay for the ball's first robot contact and penalize a goal.
+- **Integrity:** keep the robot safe. Penalize base crashes, self-collisions and leaving the allowed area.
+- **Desirability:** prefer smooth, low-energy motion.
+
+There is no priority list and no "selected outcome". If several events happen in the same step, all of them add up. Every contact or goal is paid **at most once per ball**.
+
+### Train
+
+Activate the environment as in the original README, then run, for example:
+
+```bash
+./isaaclab.sh -p source/scripts/rsl_rl/train.py --task Borinot-Goalkeeper-Simple-Direct-v0 --num_envs 512 --max_iterations 10000 --headless --logger tensorboard '--kit_args=--/UJITSO/geometry=false --/UJITSO/textures=false --/UJITSO/materials=false'
+```
+
+Your usual cluster options work unchanged, because the non-reward settings keep their names. For example:
+
+```bash
+./isaaclab.sh -p source/scripts/rsl_rl/train.py --task Borinot-Goalkeeper-Simple-Direct-v0 --headless --num_envs 10000 --logger wandb --log_project_name borinotIsaacLab env.control_mode=thrust_and_torque_control env.physics_hz=200 env.policy_hz=100 'env.robot_home=[0.0,0.0,1.5]' env.paddle_mount_delta_m=0.07 'env.ball_mass_range_kg=[0.050,0.200]' env.thrust_to_weight=3.5
+```
+
+SAC uses the same entry points as the original task: `--agent rsl_rl_sac_cfg_entry_point` or `--agent rsl_rl_sac_mse_cfg_entry_point`. Logs go to `logs/rsl_rl/borinot_goalkeeper_simple` (PPO) and `logs/rsl_rl/borinot_goalkeeper_simple_sac` (SAC).
+
+**SAC CE value range.** The CE critic predicts values on a fixed grid from −20 to +20 (`distributional_linear_limit=20`). Targets outside the grid are clipped to its edge. Some situations in this task are worse than −20:
+
+- a self-contact that lasts more than about 8 policy steps (−2.5 each);
+- a crash or area exit with its reset switched off (−5 each step);
+- the energy option's final payment (about −27 for a 20 s episode).
+
+The critic then sees −20 for all of them. It still learns to avoid them, but it cannot tell how bad they are. If this matters, widen the grid, for example `agent.critic.distributional_linear_limit=50.0`, or use the MSE entry point. PPO has no such limit.
+
+### Play
+
+The goalkeeper player now accepts both tasks:
+
+```bash
+./isaaclab.sh -p source/scripts/rsl_rl/play_borinot_goalkeeper.py --task Borinot-Goalkeeper-Simple-Direct-v0 --num_envs 1 --checkpoint /absolute/path/model_N.pt env.shot_level=5
+```
+
+The match panel counts **goals** and **blocked** shots. In this task, "blocked" means the shot ended without a goal.
+
+Checkpoints trained in the original task do not load here. The actor inputs are the same, but the critic input is two values shorter (see "Observations").
+
+## 1. Task rewards
+
+| Config field | Default | When it is paid |
+|---|---:|---|
+| `rwd_scale_hit_racket` | +5.0 | The ball's first robot contact is the racket. |
+| `rwd_scale_hit_arm` | +2.5 | The first contact is the thigh or calf link (half the racket value). |
+| `rwd_scale_hit_base` | +1.25 | The first contact is the base (a quarter of the racket value). |
+| `rwd_scale_goal` | −5.0 | The ball touches the goal or crosses its front plane inside the goal. |
+| `rwd_scale_progress` | +2.5 | Per metre that the racket gets closer to the ball in the y–z plane. |
+
+**First contact only.** Each ball pays one contact reward: the first robot body it touches. A long contact pays once. Later contacts of the same ball pay nothing, whatever body they touch. If two bodies are touched in the same physics step (5 ms at 200 Hz), the racket wins, then the arm.
+
+**Goal once.** A goal pays −5 once and ends the shot. It is added to any earlier contact reward of the same ball. For example, a racket touch followed by a goal gives +5 − 5 = 0. A base touch followed by a goal gives +1.25 − 5 = −3.75. Contacts after a goal are ignored.
+
+**When a shot ends.** There is no "clearance" rule anymore. A shot ends at the first of:
+
+1. a goal (−5);
+2. the ball passes the goal's front plane outside the goal (it can no longer score);
+3. the ball leaves the tracking region (|x| > 3 m, |y| > 3 m or z > 4.5 m);
+4. `shot_timeout_s` (3 s) after the launch.
+
+Cases 2–4 pay nothing extra. A shot that ends without a goal counts as a **save** for the curriculum, the logs and the match panel. A ball that rolls into the goal after a weak touch still counts as a goal, because it really scored.
+
+**Progress.** We compare the racket's y–z distance to the current ball position at the start and at the end of each policy step:
+
+```text
+progress = rwd_scale_progress * (d_before - d_after)
+```
+
+Both distances use the same ball position, so a racket that does not move earns zero. Progress is paid only while the ball is live and has not touched the robot yet. The step that contains the first contact still pays its progress.
+
+## 2. Integrity rewards
+
+| Config field | Default | When it is paid |
+|---|---:|---|
+| `rwd_scale_base_crash` | −5.0 | The base touches the floor or the goal. |
+| `rwd_scale_self_collision` | −2.5 | Two robot bodies touch each other (half the crash value). |
+| `rwd_scale_leave_goal_area` | −5.0 | The base origin is outside the goal-area box. |
+
+These penalties are paid on **every policy step** that has the event. With the default resets, a base crash or leaving the area ends the episode, so it is paid once. Self-collisions do not reset by default, so a racket pressed against the base keeps costing −2.5 per step. At 100 Hz that is −250 per second of contact. This is on purpose: it discourages the "racket resting on the base" pose seen in recent policies. The original task also charged every step, as a robot crash of −1, but only for contacts that involve the base. In a 20-iteration PPO check with a random starting policy, self-contacts cost only about −0.1 to −0.3 per episode, so they do not swamp early learning.
+
+If you switch a reset off, its penalty is still paid on every step. For example, with `reset_robot_on_robot_crash=False` a base lying on the floor costs −5 per step.
+
+**Base crash** means the base against the scene only. A ball hitting the base is a task event (+1.25), not a crash. A self-collision is not a crash either. Leg and racket contacts with the floor are allowed and cost nothing.
+
+**Self-collision** covers every robot pair that can touch. PhysX never reports pairs joined by a joint (base–thigh, thigh–calf, calf–racket). The remaining pairs are base–calf, base–racket and racket–thigh. We measured all three in the simulator; see section 7. This needs physical self-collisions, so this task sets `enabled_self_collisions=True` by default (the original task defaults to `False`).
+
+**Leaving the area** keeps the original box: x in [−0.08, 0.90] m, y in [−1.2, 1.2] m, z in [0.07, 2.6] m, measured at the base origin. The original sketch had this as a reset only. We added the penalty for one reason: an episode that ends without a penalty is an escape. The robot could fly 8 cm backwards out of the box just before a goal and avoid the −5. With −5 for leaving, an escape costs as much as the goal it avoids. It only pays off if the robot expects the rest of its episode to be negative.
+
+Tilt has **no** penalty. It only matters through its optional reset (off by default). If you turn the tilt reset on, consider a penalty too, for the same escape reason.
+
+Contact thresholds: ball contacts use `contact_force_threshold_n=0.05` N. Base-crash and self-collision contacts use `robot_crash_force_threshold_n=0.1` N.
+
+## 3. Desirability rewards
+
+| Config field | Default | Signal |
+|---|---:|---|
+| `rwd_scale_action_rate` | −5.0 | Same definition as the original task, times the policy step `dt`. |
+| `rwd_scale_energy` | −2.5e-5 | Mean mechanical plus dissipative power of each step, in watts. |
+| `minimize_energy_not_power` | `False` | `True`: pay the episode's energy once, at its last transition. |
+
+**Action rate.** The original definition is kept exactly:
+
+```text
+action_rate = mean over 6 rotors of (delta thrust command / F_max)^2
+            + mean over 2 joints of (delta joint effort / (2 * effort_lim_sim))^2
+reward      = rwd_scale_action_rate * action_rate * step_dt
+```
+
+Commands are compared after clipping, at successive policy steps.
+
+**Power (default).** Each policy step pays `rwd_scale_energy * P_mean`. `P_mean` is the average over the step's physics substeps of rotor mechanical power, rotor losses, signed joint mechanical power and joint copper losses. This is the same model and the same per-watt scale as `rwd_scale_energy` in the original task.
+
+**Energy (option).** With `env.minimize_energy_not_power=True`, nothing is paid during the episode. We add up the energy of every physics substep:
+
+```text
+E = sum over all physics substeps k of P(t_k) * physics_dt      [J]
+```
+
+The last transition of the episode (any reset, or the time limit) pays:
+
+```text
+r_last = rwd_scale_energy * E / step_dt
+```
+
+Dividing by `step_dt` keeps the same per-watt weight. With it, the **undiscounted** sum over an episode is exactly the same in both modes. So switching the flag changes only *when* the energy is paid, not how much. This makes the two modes a fair comparison.
+
+Two effects to expect before training with the energy option:
+
+- **Discounting.** With PPO's `gamma=0.99` at 100 Hz, a cost paid `T` steps in the future is weighted by `0.99^T`. One second before the end this is 0.37; five seconds before, 0.0066. Early actions in a 20 s episode will see almost none of the energy cost. In practice the energy option penalizes energy mainly near the end of each episode. SAC uses `gamma=0.97`, so its view of the final payment is even shorter. Per-step power is already the step-by-step form of the same energy integral, with immediate feedback.
+- **Hidden state.** The size of the final payment depends on the energy used so far, which the critic does not observe. The critic can only predict its average. This adds noise to the advantages at the end of each episode.
+
+The final payment also grows with episode length. With the default weight and about 550 W while flying, a 20 s episode pays about −27 at its last step. A 180 s episode would pay about −250.
+
+## 4. Resets
+
+| Reset source | Config field | Default |
+|---|---|---|
+| Excessive tilt | `reset_robot_on_tilt_threshold` (`robot_tilt_threshold_degs=70`) | `False` |
+| Leaving the area | `reset_robot_on_leave_area` | `True` |
+| Base–scene contact | `reset_robot_on_robot_crash` | `True` |
+| Robot–robot contact | `self_collision_triggers_reset` | `False` |
+| Goal | `reset_on_goal` | `False` |
+
+The reset switches never change the rewards. The episode time limit (`episode_length_s=20`) is a truncation, as in the original task.
+
+The design sketch listed "Base – body collision" with a different default in the typed notes (True) and the drawing (False). We followed the drawing and the voice note: self-collisions do not reset by default.
+
+## 5. Where the default weights come from
+
+The main events are now ±5 instead of ±1. To keep the same balance as your run `qu68pf74`, we multiplied its other weights by 5:
+
+| Weight | qu68pf74 (original task) | This task |
+|---|---:|---:|
+| progress | 0.5 | 2.5 |
+| action rate | −1 | −5 |
+| power | −5e-6 | −2.5e-5 |
+
+Outside the reward and reset sections, all defaults equal the original config, except `enabled_self_collisions=True`. Your usual launch overrides still apply.
+
+## 6. Switching from the original task
+
+Same names: control, timing, racket, ball, shots, curriculum, reset grid, area box, observation flags, `rwd_scale_progress`, `rwd_scale_goal`, `rwd_scale_leave_goal_area`, `rwd_scale_action_rate`, `rwd_scale_energy`, `reset_robot_on_robot_crash`, `reset_robot_on_tilt_threshold`, `self_collision_triggers_reset`, `reset_on_goal`.
+
+New names:
+
+| New field | Replaces in the original task |
+|---|---|
+| `rwd_scale_hit_racket`, `rwd_scale_hit_arm`, `rwd_scale_hit_base` | `rwd_scale_save`, `rwd_scale_hit`, `rwd_scale_ball_arm_collision`, `rwd_scale_ball_base_collision` |
+| `rwd_scale_base_crash` | `rwd_scale_robot_crash` (base contacts only now, no tilt) |
+| `rwd_scale_self_collision` | self-contact used to count as a robot crash |
+| `minimize_energy_not_power` | new |
+| `reset_robot_on_leave_area` | leaving the area always reset |
+
+Removed: floor, miss and deadline penalties, the clearance rule (`clear_*`), recovery (`recovery_*`, `require_recovery_for_save`), intercept/alignment/centered-hit shaping, velocity/thrust regularizers, `progress_use_prediction`, `robot_crash_body_names`, and the unused `remove_action_clipping`. An old override for a removed field fails loudly in Hydra instead of being silently ignored.
+
+## 7. Observations, logs and code
+
+**Observations.** The actor inputs are identical to the original task: 53 values with the default flags. The critic's phase block has 5 values instead of 7: first contact happened, shot time, ball active, time to the next launch, and episode time. The old "cleared" and "recovery" values no longer exist. The critic therefore has 63 inputs (61 in PI mode).
+
+**Step extras.** `goalkeeper_reward_terms` holds every term, already scaled, named `task/...`, `integrity/...` and `desirability/...`. Their sum is the reward. `goalkeeper_events` holds the raw events of the step, including `tilt`. `goalkeeper_outcome` is 3 (goal) or 7 (save) on the step a shot ends, else 0; `goalkeeper_shot_finished` marks that step. `power_mean_w` is unchanged.
+
+**Episode logs.** `Episode_Reward/task`, `Episode_Reward/integrity` and `Episode_Reward/desirability` are the episode totals per group. `Episode_Reward/<group>/<term>` gives each term. `Episode/shots`, `saves`, `goals`, `hit_racket`, `hit_arm`, `hit_base` are counts per episode, and `Episode/energy_j` is the episode energy in joules. Curriculum and power logs are as before.
+
+**Code layout.** `borinot_goalkeeper_simple_env.py` has one method per group: `_task_rewards()`, `_integrity_rewards()` and `_desirability_rewards()`. `_sample_physics_events()` records the events after every physics substep. `_get_dones()` ends shots and applies the reset switches. Rotor/arm control and the power model are the original task's methods, reused unchanged (`_apply_action`, `_sample_power`). Shot geometry comes from the original `task_math.py`, and the racket from `paddle.py`.
+
+Contacts use three filtered sensors: ball against racket/thigh/calf/base/goal, base against floor/goal/calf/racket, and racket against thigh.
+
+**Verification (2026-10-18, laptop, Isaac Sim 5.1, GPU PhysX).**
+
+- 49 CPU tests run the real reward, event, reset and observation methods on controlled tensors. Command:
+
+  ```bash
+  python -m pytest -q --import-mode=importlib --rootdir=source/isaaclab_tasks/isaaclab_tasks/direct/borinot_goalkeeper_simple/tests --confcutdir=source/isaaclab_tasks/isaaclab_tasks/direct/borinot_goalkeeper_simple/tests source/isaaclab_tasks/isaaclab_tasks/direct/borinot_goalkeeper_simple/tests/test_simple_reward.py
+  ```
+
+- `tests/simple_smoke.py` checks real contacts, goals, resets and the energy logic through Hydra. It passed all 27 checks in power mode and all 27 in energy mode. Command (add `env.minimize_energy_not_power=True` for the second run):
+
+  ```bash
+  ./isaaclab.sh -p source/isaaclab_tasks/isaaclab_tasks/direct/borinot_goalkeeper_simple/tests/simple_smoke.py --headless --output /tmp/simple.json
+  ```
+
+- Self-collision pairs: we imposed 325 arm poses (a 15° grid) and stepped PhysX once. The first step reported base–racket contact in 127 poses, base–calf contact in 41 and racket–thigh contact in 42. Racket–thigh contact appeared only with the elbow at 165° or more.
+- Training: PPO ran 20 iterations with 256 environments (about 11 500 steps/s). SAC CE and SAC MSE each ran 4 iterations with small laptop batches. The default SAC batch sizes ran out of memory on the 8 GB laptop GPU; they are sized for the cluster.
+- Playback: the shared player ran 300 steps with the PPO and SAC CE smoke checkpoints of this task. It also ran 300 steps of the original task with checkpoint `1018_qu68pf74_best_model_curriculum_idx_5.pt`.
+- The original task's 298 CPU tests and its 84 playback physics checks still pass.
+
+This shows that the reward is computed as designed and that training and playback run. It does not show that a policy learns the task well; no full training run has been done yet.
+
+**Files.**
+
+- `borinot_goalkeeper_simple_env_cfg.py`: all settings; the reward and reset section is at the end.
+- `borinot_goalkeeper_simple_env.py`: events, shots, rewards, resets, observations and logs.
+- `playback.py`: playback class for the shared goalkeeper player.
+- `agents/`: the original PPO and SAC recipes with their own log names.
+- `tests/test_simple_reward.py`, `tests/simple_smoke.py`: CPU and simulator checks.
