@@ -113,6 +113,7 @@ class BorinotGoalkeeperSimpleEnv(DirectRLEnv):
         self._power_samples = 0
         self._physics_samples = 0
         self._episode_energy_j = torch.zeros(self.num_envs, device=self.device)
+        self._unpaid_energy_j = torch.zeros(self.num_envs, device=self.device)  # energy option: since the last payment
 
         # One ball per environment. Each ball pays its first robot contact and its goal at most once.
         self._ball_active = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
@@ -335,9 +336,15 @@ class BorinotGoalkeeperSimpleEnv(DirectRLEnv):
         # Mechanical plus dissipative energy over this action's completed physics steps.
         step_energy_j = self._power_sum_w.sum(-1) * self.physics_dt
         self._episode_energy_j += step_energy_j
-        # Default: pay each action's energy now. Option: pay the episode's energy once, on its last
-        # transition. Dividing by step_dt keeps the per-watt scale; both have the same undiscounted sum.
-        energy_j = self._episode_energy_j * self.reset_buf if self.cfg.minimize_energy_not_power else step_energy_j
+        # Default: pay each action's energy now. Option: pay the energy used since the previous payment
+        # when a shot ends or the episode terminates. A time-limit cut pays nothing: the learner bootstraps
+        # the unfinished shot, its energy included. Dividing by step_dt keeps the per-watt scale.
+        energy_j = step_energy_j
+        if self.cfg.minimize_energy_not_power:
+            self._unpaid_energy_j += step_energy_j
+            pay = (self._outcome != 0) | self.reset_terminated
+            energy_j = self._unpaid_energy_j * pay
+            self._unpaid_energy_j.masked_fill_(pay, 0.0)
         return {"action_rate": self.cfg.rwd_scale_action_rate * action_rate * self.step_dt,
                 "energy": self.cfg.rwd_scale_energy * energy_j / self.step_dt}
 
@@ -500,6 +507,7 @@ class BorinotGoalkeeperSimpleEnv(DirectRLEnv):
         self.robot.set_joint_effort_target(joint_zero, joint_ids=self.joint_ids, env_ids=env_ids)
         for buffer in (self.actions, self._rate_integral, self._touched, self._ball_done, self._outcome,
                        self._episode_rewards, self._episode_steps, self._shot_steps, self._episode_energy_j,
+                       self._unpaid_energy_j,
                        *self._events.values(), *self._episode_terms.values(), *self._episode_counts.values()):
             buffer[env_ids] = 0
         self._rotor_thrust[env_ids] = self._hover_per_rotor

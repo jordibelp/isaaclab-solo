@@ -37,10 +37,9 @@ SAC uses the same entry points as the original task: `--agent rsl_rl_sac_cfg_ent
 **SAC CE value range.** The CE critic predicts values on a fixed grid from −20 to +20 (`distributional_linear_limit=20`). Targets outside the grid are clipped to its edge. Some situations in this task are worse than −20:
 
 - a self-contact that lasts more than about 8 policy steps (−2.5 each);
-- a crash or area exit with its reset switched off (−5 each step);
-- the energy option's final payment (about −27 for a 20 s episode).
+- a crash or area exit with its reset switched off (−5 each step).
 
-The critic then sees −20 for all of them. It still learns to avoid them, but it cannot tell how bad they are. If this matters, widen the grid, for example `agent.critic.distributional_linear_limit=50.0`, or use the MSE entry point. PPO has no such limit.
+The energy option pays about −3 to −4 per shot (section 3), which fits inside the grid. The critic sees −20 for all the cases above. It still learns to avoid them, but it cannot tell how bad they are. If this matters, widen the grid, for example `agent.critic.distributional_linear_limit=50.0`, or use the MSE entry point. PPO has no such limit.
 
 ### Play
 
@@ -113,7 +112,7 @@ Contact thresholds: ball contacts use `contact_force_threshold_n=0.05` N. Base-c
 |---|---:|---|
 | `rwd_scale_action_rate` | −5.0 | Same definition as the original task, times the policy step `dt`. |
 | `rwd_scale_energy` | −2.5e-5 | Mean mechanical plus dissipative power of each step, in watts. |
-| `minimize_energy_not_power` | `False` | `True`: pay the episode's energy once, at its last transition. |
+| `minimize_energy_not_power` | `False` | `True`: pay the energy of each shot once, when the shot ends. |
 
 **Action rate.** The original definition is kept exactly:
 
@@ -127,26 +126,42 @@ Commands are compared after clipping, at successive policy steps.
 
 **Power (default).** Each policy step pays `rwd_scale_energy * P_mean`. `P_mean` is the average over the step's physics substeps of rotor mechanical power, rotor losses, signed joint mechanical power and joint copper losses. This is the same model and the same per-watt scale as `rwd_scale_energy` in the original task.
 
-**Energy (option).** With `env.minimize_energy_not_power=True`, nothing is paid during the episode. We add up the energy of every physics substep:
+**Energy (option).** With `env.minimize_energy_not_power=True`, energy is paid once per shot instead of on every step. We add up the energy of every physics substep since the last payment:
 
 ```text
-E = sum over all physics substeps k of P(t_k) * physics_dt      [J]
+E = sum over the physics substeps k since the last payment of P(t_k) * physics_dt      [J]
 ```
 
-The last transition of the episode (any reset, or the time limit) pays:
+A payment window starts at the episode start or at the previous payment. It ends on the step where the shot ends (goal, ball past the goal plane, ball out of the tracking region, or shot timeout). So one window covers the wait before a launch plus the shot itself. That step pays:
 
 ```text
-r_last = rwd_scale_energy * E / step_dt
+r_shot = rwd_scale_energy * E / step_dt
 ```
 
-Dividing by `step_dt` keeps the same per-watt weight. With it, the **undiscounted** sum over an episode is exactly the same in both modes. So switching the flag changes only *when* the energy is paid, not how much. This makes the two modes a fair comparison.
+Dividing by `step_dt` keeps the same per-watt weight as the power mode. Each step's energy is paid once, so the **undiscounted** sum is the same in both modes, except for the time-limit case below.
 
-Two effects to expect before training with the energy option:
+With the default `shot_resampling_mode="launch"`, a ball is launched every 2–3 s, so a window lasts 2–3 s. At about 550 W while flying, one payment is about −2.75 to −4.1. In `"resolution"` mode the wait comes after each shot, so a window can last about 6 s (about −8).
 
-- **Discounting.** With PPO's `gamma=0.99` at 100 Hz, a cost paid `T` steps in the future is weighted by `0.99^T`. One second before the end this is 0.37; five seconds before, 0.0066. Early actions in a 20 s episode will see almost none of the energy cost. In practice the energy option penalizes energy mainly near the end of each episode. SAC uses `gamma=0.97`, so its view of the final payment is even shorter. Per-step power is already the step-by-step form of the same energy integral, with immediate feedback.
-- **Hidden state.** The size of the final payment depends on the energy used so far, which the critic does not observe. The critic can only predict its average. This adds noise to the advantages at the end of each episode.
+**If the episode ends in the middle of a window:**
 
-The final payment also grows with episode length. With the default weight and about 550 W while flying, a 20 s episode pays about −27 at its last step. A 180 s episode would pay about −250.
+- A **termination** pays the unpaid energy on its last step. This covers a crash, an area exit, any other enabled reset, and the time limit when `is_finite_horizon=True`. Nothing comes after a termination, so this is the only chance to charge that energy. It also means that a crash cannot erase the energy the robot already used.
+- The **time limit** (default `is_finite_horizon=False`) pays nothing for the unfinished window. Here the time limit is a cut, not a real end. PPO and SAC treat the episode as if it would continue, and add the critic's estimate of the future reward. That estimate already includes the payment that the unfinished shot would make later. Paying it at the cut would charge it twice.
+
+Because of the time-limit rule, `Episode_Reward/desirability/energy` misses the last unfinished window of a time-limited episode. On average this is half a window: about −1.7 of about −27 in a 20 s episode. To compare the physical energy of runs, use `Episode/energy_j`. It always counts every step.
+
+**Why one payment per shot.** A payment `T` steps in the future is weighted by `gamma^T`. The table gives this weight for the first step of a window, and its mean over all steps of the window, at 100 Hz:
+
+| Window length | PPO (`gamma=0.99`) first step | PPO mean | SAC (`gamma=0.97`) first step | SAC mean |
+|---|---:|---:|---:|---:|
+| 2 s | 0.14 | 0.43 | 0.0023 | 0.17 |
+| 3 s | 0.05 | 0.32 | 0.0001 | 0.11 |
+| 20 s (one payment per episode, for comparison) | 2e-9 | 0.05 | 4e-27 | 0.017 |
+
+In the power mode the weight is always 1, because each step pays its own energy. With one payment per shot, no step is more than about 3 s from its payment, and PPO's mean weight is 6–9 times higher than with one payment per episode. SAC sees much less, because its horizon is short: about 1 / (1 − 0.97) ≈ 33 steps, or 0.33 s. For SAC, the energy of the first second of a shot is still almost invisible.
+
+**Inside a window, timing does not matter.** All energy of one window is paid at the same moment. So the robot gains nothing by moving its energy use to later in the shot. It pays for how much energy the shot used, not for when it used it. This is the "energy, not power" idea. In the power mode, energy used later is discounted more, so the cost also depends on when it is used.
+
+**Hidden state.** The size of a payment depends on the energy used since the last payment. The critic does not observe this number. It does see the shot time and the time to the next launch, so it can predict the average payment, but not its exact size. Windows are short, so this noise is small. If it matters, the unpaid energy could become one more critic input.
 
 ## 4. Resets
 
@@ -204,19 +219,20 @@ Contacts use three filtered sensors: ball against racket/thigh/calf/base/goal, b
 
 **Verification (2026-10-18, laptop, Isaac Sim 5.1, GPU PhysX).**
 
-- 49 CPU tests run the real reward, event, reset and observation methods on controlled tensors. Command:
+- 53 CPU tests run the real reward, event, reset and observation methods on controlled tensors. Command:
 
   ```bash
   python -m pytest -q --import-mode=importlib --rootdir=source/isaaclab_tasks/isaaclab_tasks/direct/borinot_goalkeeper_simple/tests --confcutdir=source/isaaclab_tasks/isaaclab_tasks/direct/borinot_goalkeeper_simple/tests source/isaaclab_tasks/isaaclab_tasks/direct/borinot_goalkeeper_simple/tests/test_simple_reward.py
   ```
 
-- `tests/simple_smoke.py` checks real contacts, goals, resets and the energy logic through Hydra. It passed all 27 checks in power mode and all 27 in energy mode. Command (add `env.minimize_energy_not_power=True` for the second run):
+- `tests/simple_smoke.py` checks real contacts, goals, resets and the energy logic through Hydra. It passed all 28 checks in power mode and all 29 in energy mode. In energy mode it checks every step against a reference: a payment exactly when a shot ends or the environment terminates, and nothing at the time-limit cut. Command (add `env.minimize_energy_not_power=True` for the second run):
 
   ```bash
   ./isaaclab.sh -p source/isaaclab_tasks/isaaclab_tasks/direct/borinot_goalkeeper_simple/tests/simple_smoke.py --headless --output /tmp/simple.json
   ```
 
 - Self-collision pairs: we imposed 325 arm poses (a 15° grid) and stepped PhysX once. The first step reported base–racket contact in 127 poses, base–calf contact in 41 and racket–thigh contact in 42. Racket–thigh contact appeared only with the elbow at 165° or more.
+- The training and playback checks below ran before the per-shot energy payment. That change touches only the energy term of the energy option.
 - Training: PPO ran 20 iterations with 256 environments (about 11 500 steps/s). SAC CE and SAC MSE each ran 4 iterations with small laptop batches. The default SAC batch sizes ran out of memory on the 8 GB laptop GPU; they are sized for the cluster.
 - Playback: the shared player ran 300 steps with the PPO and SAC CE smoke checkpoints of this task. It also ran 300 steps of the original task with checkpoint `1018_qu68pf74_best_model_curriculum_idx_5.pt`.
 - The original task's 298 CPU tests and its 84 playback physics checks still pass.

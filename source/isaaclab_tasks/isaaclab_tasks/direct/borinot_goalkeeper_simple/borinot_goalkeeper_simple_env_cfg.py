@@ -184,7 +184,7 @@ class BorinotGoalkeeperSimpleEnvCfg(DirectRLEnvCfg):
     # Desirability: prefer smooth, low-power motion.
     rwd_scale_action_rate = -5.0  # group-mean squared normalized thrust/torque command change, times policy dt
     rwd_scale_energy = -2.5e-5  # per watt of mean power each action (the original convention)
-    minimize_energy_not_power = False  # True: pay the same total once, on the episode's last transition
+    minimize_energy_not_power = False  # True: pay the energy since the last payment when each shot ends
 
     # Robot resets. The penalties above do not depend on these switches.
     reset_robot_on_tilt_threshold = False

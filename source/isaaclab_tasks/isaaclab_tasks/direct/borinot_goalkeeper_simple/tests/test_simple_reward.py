@@ -138,6 +138,7 @@ def make_env(**overrides):
         _hover_per_rotor=5.0, _rotor_thrust=torch.full((N, 6), 5.0),
         _actuator_commands=torch.full((N, 8), 0.0), _previous_actuator_commands=torch.zeros(N, 8),
         _power_sum_w=torch.zeros(N, 4), _power_samples=0, _physics_samples=0, _episode_energy_j=torch.zeros(N),
+        _unpaid_energy_j=torch.zeros(N),
         _ball_active=torch.ones(N, dtype=torch.bool), _touched=torch.zeros(N, dtype=torch.bool),
         _ball_done=torch.zeros(N, dtype=torch.bool), _progress_active=torch.zeros(N, dtype=torch.bool),
         _events={name: torch.zeros(N, dtype=torch.bool) for name in SCOPE["EVENTS"]},
@@ -153,7 +154,7 @@ def make_env(**overrides):
         outcome_counts=torch.zeros(10, dtype=torch.long), _episode_stage=torch.zeros(N, dtype=torch.long),
         shot_level=0, _stage_start_step=0, _curriculum_window=torch.zeros(cfg.curriculum_window_shots),
         _window_cursor=0, _stage_shots=0, curriculum_stage_pure_episodes=0,
-        reset_buf=torch.zeros(N, dtype=torch.bool),
+        reset_buf=torch.zeros(N, dtype=torch.bool), reset_terminated=torch.zeros(N, dtype=torch.bool),
     )
     for name in BOUND:
         setattr(env, name, MethodType(SCOPE[name], env))
@@ -170,7 +171,7 @@ def step(env, *substeps):
         env._physics_samples += 1
         write_result(env)
     terminated, truncated = env._get_dones()
-    env.reset_buf = terminated | truncated
+    env.reset_terminated, env.reset_buf = terminated, terminated | truncated
     reward = env._get_rewards()
     return reward, terminated, truncated
 
@@ -475,31 +476,66 @@ def test_power_mode_keeps_the_original_per_watt_scale(physics_hz):
 
 
 @pytest.mark.parametrize("physics_hz", [200, 400])
-@pytest.mark.parametrize("ending", ["time_limit", "crash"])
-def test_energy_mode_pays_the_same_total_once_at_the_last_transition(physics_hz, ending):
+def test_energy_mode_pays_each_shot_window_when_the_shot_ends(physics_hz):
+    power_env = make_env(rwd_scale_energy=-2.5e-5, physics_hz=physics_hz)
+    energy_env = make_env(rwd_scale_energy=-2.5e-5, physics_hz=physics_hz, minimize_energy_not_power=True)
+    ends = {2: [0], 4: [1], 5: [0]}  # env 0 ends two shots (relaunched at step 3), env 1 one shot
+    per_step, paid = [], []
+    for policy_step in range(7):
+        substeps = [write_power(policy_step * power_env.cfg.decimation + i) for i in range(power_env.cfg.decimation)]
+        step(power_env, *substeps)
+        per_step.append(term(power_env, "desirability/energy").clone())
+        if policy_step in ends:  # the ball passes the goal plane in the last substep
+            substeps[-1] = lambda e, write=substeps[-1], envs=ends[policy_step]: (
+                write(e), ball_at([-0.5, 0.0, 1.2], envs)(e))
+        step(energy_env, *substeps)
+        assert energy_env.extras["goalkeeper_shot_finished"].nonzero().flatten().tolist() == ends.get(policy_step, [])
+        paid.append(term(energy_env, "desirability/energy").clone())
+        if policy_step == 2:
+            energy_env._next_launch_steps[0] = 1
+    per_step, paid = torch.stack(per_step), torch.stack(paid)
+    assert (paid[:, 0] != 0).nonzero().flatten().tolist() == [2, 5]
+    assert (paid[:, 1] != 0).nonzero().flatten().tolist() == [4]
+    assert not paid[:, 2:].any()
+    # Each payment is the sum of the per-step terms since the previous payment (or the episode start).
+    torch.testing.assert_close(paid[2, 0], per_step[:3, 0].sum())
+    torch.testing.assert_close(paid[5, 0], per_step[3:6, 0].sum())
+    torch.testing.assert_close(paid[4, 1], per_step[:5, 1].sum())
+    unpaid = -2.5e-5 * energy_env._unpaid_energy_j / energy_env.step_dt
+    torch.testing.assert_close(paid.sum(0) + unpaid, per_step.sum(0))
+
+
+@pytest.mark.parametrize("physics_hz", [200, 400])
+@pytest.mark.parametrize("ending", ["time_limit", "finite_horizon", "crash"])
+def test_energy_mode_pays_the_unfinished_shot_only_on_termination(physics_hz, ending):
     power_env = make_env(rwd_scale_energy=-2.5e-5, physics_hz=physics_hz, episode_length_s=0.05)
     energy_env = make_env(rwd_scale_energy=-2.5e-5, physics_hz=physics_hz, episode_length_s=0.05,
-                          minimize_energy_not_power=True)
+                          minimize_energy_not_power=True, is_finite_horizon=ending == "finite_horizon")
     steps = power_env.max_episode_length
     totals, energies = torch.zeros(N), []
     for policy_step in range(steps):
         substeps = [write_power(policy_step * power_env.cfg.decimation + i) for i in range(power_env.cfg.decimation)]
         if ending == "crash" and policy_step == steps - 2:
             substeps[-1] = lambda e, write=substeps[-1]: (write(e), e.base_contact.push(FLOOR, torch.full((N,), 2.0)))
-        reward, terminated, truncated = step(power_env, *substeps)
+        step(power_env, *substeps)
         totals += term(power_env, "desirability/energy")
-        step(energy_env, *substeps)
+        _, terminated, truncated = step(energy_env, *substeps)
         energies.append(term(energy_env, "desirability/energy").clone())
         if terminated.all() or truncated.all():
             break
     last = len(energies) - 1
     assert last == (steps - 2 if ending == "crash" else steps - 1)
     assert all(not energy.any() for energy in energies[:last])
-    torch.testing.assert_close(energies[last], totals)
     physics_steps = (last + 1) * power_env.cfg.decimation
     joules = sum(expected_power(i) for i in range(physics_steps)) / physics_hz
     torch.testing.assert_close(energy_env._episode_energy_j, joules)
-    torch.testing.assert_close(energies[last], -2.5e-5 * joules / energy_env.step_dt)
+    if ending == "time_limit":  # a cut, not an end: the learner's bootstrap covers the unfinished shot
+        assert truncated.all() and not energies[last].any()
+        torch.testing.assert_close(energy_env._unpaid_energy_j, joules)
+    else:
+        assert terminated.all() and not energy_env._unpaid_energy_j.any()
+        torch.testing.assert_close(energies[last], totals)
+        torch.testing.assert_close(energies[last], -2.5e-5 * joules / energy_env.step_dt)
 
 
 # --- Shots, logging and curriculum ---------------------------------------------------------------------------

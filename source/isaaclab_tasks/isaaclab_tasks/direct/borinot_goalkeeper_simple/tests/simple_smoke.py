@@ -162,6 +162,7 @@ def main(cfg, agent_cfg):
                 columns["base-calf"] |= bool(base_n[1, 2] > 0.1)
                 columns["racket-thigh"] |= bool(torch.linalg.vector_norm(env.paddle_contact.data.force_matrix_w[2, 0]) > 0.1)
             terminated, _ = env._get_dones()
+            env.reset_terminated[:] = terminated
             env.reset_buf = terminated
             env._get_rewards()
             terms, events = env.extras["goalkeeper_reward_terms"], env.extras["goalkeeper_events"]
@@ -192,40 +193,60 @@ def main(cfg, agent_cfg):
         check("all three robot/robot pairs were detected", all(columns.values()))
         check("landing robot crashed", crash_step is not None)
 
-        # --- Desirability: power each step, or the same total at the episode's last transition -------------
+        # --- Desirability: power each step, or each shot's energy when the shot ends -------------------------
+        # Envs 0 and 1 end one shot early; env 2 leaves the area on the last step; the rest hit the time limit.
         quiet()
         cfg.episode_length_s = 0.3
-        steps, sums = env.max_episode_length, torch.zeros(n, device=dev)
-        joules = torch.zeros(n, device=dev)
+        shoot([0, 1], [torch.tensor([-0.30, 1.5, 1.2], device=dev), torch.tensor([-0.30, 0.8, 1.2], device=dev)],
+              [[-10.0, 0.0, 0.0]] * 2)
+        steps, sums, paid = env.max_episode_length, torch.zeros(n, device=dev), torch.zeros(n, device=dev)
+        joules, unpaid, shot_end = torch.zeros(n, device=dev), torch.zeros(n, device=dev), {}
         for k in range(steps):
+            if k == steps - 1:
+                root = env.robot.data.root_state_w[2:3].clone()
+                root[0, 0] = env.scene.env_origins[2, 0] + 0.95  # outside the goal-area box
+                env.robot.write_root_state_to_sim(root, torch.tensor([2], device=dev))
             _, _, terminated, truncated, info = env.step(zero)
             energy = info["goalkeeper_reward_terms"]["desirability/energy"]
             per_watt = cfg.rwd_scale_energy * info["power_mean_w"]["total_estimate"]
             sums += per_watt
+            paid += energy
             joules += info["power_mean_w"]["total_estimate"] * env.step_dt
-            if cfg.minimize_energy_not_power and k < steps - 1:
-                assert not energy.any(), f"energy paid before the last transition at step {k}"
-            elif not cfg.minimize_energy_not_power:
+            for i in info["goalkeeper_shot_finished"].nonzero().flatten().tolist():
+                shot_end[i] = k
+            if cfg.minimize_energy_not_power:  # reference: pay the running sum when a shot ends or the env terminates
+                unpaid += per_watt
+                ends = info["goalkeeper_shot_finished"] | terminated
+                torch.testing.assert_close(energy, unpaid * ends, rtol=1e-5, atol=1e-6)
+                unpaid *= ~(ends | truncated)
+            else:
                 torch.testing.assert_close(energy, per_watt)
-        check("episode ended by the time limit", truncated.all() and not terminated.any())
+        others = torch.arange(n, device=dev) != 2
+        check("env 2 terminated and the rest hit the time limit on the last step",
+              terminated[2] and not terminated[others].any() and truncated[others].all())
+        check("envs 0 and 1 ended their shot early", sorted(shot_end) == [0, 1] and max(shot_end.values()) < steps - 1)
         if cfg.minimize_energy_not_power:
-            torch.testing.assert_close(energy, sums, rtol=1e-5, atol=1e-6)
-            check("energy mode: one payment equal to the summed power terms", energy.abs().min() > 0)
+            torch.testing.assert_close(paid[2], sums[2], rtol=1e-5, atol=1e-6)
+            check("energy mode: termination pays the whole unpaid window", paid[2] < 0)
+            check("energy mode: the shot end pays, the time-limit cut does not", (paid[:2] < 0).all()
+                  and (paid[:2] > sums[:2]).all() and not paid[3:].any())
         else:
             check("power mode: each step pays rwd_scale_energy * mean power", True)
         torch.testing.assert_close(env.extras["log"]["Episode/energy_j"], joules.mean(), rtol=1e-5, atol=1e-4)
         check("Episode/energy_j logs the episode's energy", True)
-        report["data"]["energy"] = {"episode_steps": steps, "summed_power_terms": sums.tolist(), "joules": joules.tolist()}
+        report["data"]["energy"] = {"episode_steps": steps, "shot_end_step": shot_end, "paid": paid.tolist(),
+                                    "summed_power_terms": sums.tolist(), "joules": joules.tolist()}
         cfg.episode_length_s = 20.0
 
         # --- Partial reset and a random rollout ----------------------------------------------------------------
         env.reset()
         for _ in range(5):
             env.step(zero)
-        before = env._episode_energy_j.clone()
+        before, unpaid_before = env._episode_energy_j.clone(), env._unpaid_energy_j.clone()
         env._reset_idx(torch.tensor([0], device=dev))
-        check("partial reset clears only its own episode energy", env._episode_energy_j[0] == 0
-              and torch.equal(env._episode_energy_j[1:], before[1:]))
+        check("partial reset clears only its own episode and unpaid energy", env._episode_energy_j[0] == 0
+              and env._unpaid_energy_j[0] == 0 and torch.equal(env._episode_energy_j[1:], before[1:])
+              and torch.equal(env._unpaid_energy_j[1:], unpaid_before[1:]))
         env.reset()
         torch.manual_seed(7)
         for _ in range(64):
