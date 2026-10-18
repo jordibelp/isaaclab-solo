@@ -124,7 +124,7 @@ def test_reset_flags_are_independent_and_ball_outcomes_continue(reset_contact, r
     flags["goal"][3] = True
     flags["area"][4] = True
     env = SimpleNamespace(cfg=SimpleNamespace(require_recovery_for_save=False,
-        reset_robot_on_robot_crash=reset_contact, self_collision_triggers_reset=True,
+        reset_robot_on_robot_crash=reset_contact, self_collision_triggers_reset=True, reset_on_goal=False,
         reset_robot_on_tilt_threshold=reset_tilt,shot_timeout_s=3.0,is_finite_horizon=False),
         _flags=flags, _sample_physics_events=lambda: None, _clear=torch.zeros(n, dtype=torch.bool),
         _shot_steps=torch.tensor([1, 1, 1, 1, 1, 180]), _episode_steps=torch.ones(n,dtype=torch.long),

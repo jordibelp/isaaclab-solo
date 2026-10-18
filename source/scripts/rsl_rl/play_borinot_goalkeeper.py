@@ -130,7 +130,8 @@ def main(env_cfg, agent_cfg):
         truncated_episodes = 0
         print(f"[INFO] Goalkeeper: {env_cfg.control_mode}, {env_cfg.physics_hz}/{env_cfg.policy_hz} Hz, "
               f"home={env_cfg.robot_home}, shot_level={env_cfg.shot_level}, curriculum={env_cfg.curriculum}, "
-              f"camera={args_cli.camera}, keep_balls={args_cli.keep_balls}, {total_steps} policy steps", flush=True)
+              f"reset_on_goal={env_cfg.reset_on_goal}, camera={args_cli.camera}, "
+              f"keep_balls={args_cli.keep_balls}, {total_steps} policy steps", flush=True)
         completed_steps = 0
         with torch.inference_mode():
             while completed_steps < total_steps:
@@ -172,6 +173,7 @@ def main(env_cfg, agent_cfg):
                   "physics_hz": env_cfg.physics_hz, "policy_hz": env_cfg.policy_hz,
                   "robot_home": list(env_cfg.robot_home), "shot_level_start": env_cfg.shot_level,
                   "shot_level_end": env.unwrapped.shot_level, "curriculum": env_cfg.curriculum,
+                  "reset_on_goal": env_cfg.reset_on_goal,
                   "observation_dimension": env_cfg.observation_space, "action_dimension": env_cfg.action_space,
                   "camera": args_cli.camera, "camera_eye": list(env_cfg.viewer.eye),
                   "camera_lookat": list(env_cfg.viewer.lookat),

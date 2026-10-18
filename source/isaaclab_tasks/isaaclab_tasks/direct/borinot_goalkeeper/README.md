@@ -19,6 +19,7 @@ is_finite_horizon = False
 shot_timeout_s = 3.0
 shot_resampling_time_range_s = (2.0, 3.0)
 shot_resampling_mode = "launch"
+reset_on_goal = False
 ball_park_position = (0.0, 0.0, -2.0)
 robot_crash_body_names = ("base",)
 robot_crash_force_threshold_n = 0.1
@@ -33,7 +34,9 @@ In **resolution** mode, the sampled delay starts after the previous shot ends. F
 
 There is exactly **one physical ball per environment**. A completed shot is scored once, marked inactive and moved below the local floor. The same ball body is reused on the next launch, with new mass/restitution. Inactive balls cannot score contacts, goals, floor events or misses. Their ball-related observations are zero. We do not create a second airborne ball. `ball_park_position` must put the whole sphere below the floor.
 
-A save, ball/base hit, ball/arm hit, goal, ball-floor failure, miss or shot timeout ends **only the current shot**. The configured reward or penalty is paid once. The robot keeps its position, orientation, velocities, joint state, actions, motor thrust state and PI integral. It continues balancing and paying any enabled rate/energy terms while waiting. Optional recovery shaping can continue after a save until the next launch.
+By default, a save, ball/base hit, ball/arm hit, goal, ball-floor failure, miss or shot timeout ends **only the current shot**. The configured reward or penalty is paid once. The robot keeps its position, orientation, velocities, joint state, actions, motor thrust state and PI integral. It continues balancing and paying any enabled rate/energy terms while waiting. Optional recovery shaping can continue after a save until the next launch.
+
+Set `env.reset_on_goal=True` to reset the whole robot episode after a goal. The default `False` preserves continuous play. The switch works in training and playback. It does not change goal detection, scoring, penalties, or the other reset conditions. A goal reset uses the normal configured spawn grid/noise, clears robot/controller state, and immediately launches a fresh shot, as other episode resets do. With `False`, the next shot follows the configured resampling schedule.
 
 By default, a crash means non-ball normal contact on the **base**, above `robot_crash_force_threshold_n`. Arm/paddle ground contacts do not by themselves trigger that detector. To include them, add their names to `robot_crash_body_names`: `base`, `paddle`, `flying_arm_2__link1`, `flying_arm_2__link2`. Ball-to-base and ball-to-arm impacts remain nonterminal shot failures. The contact and tilt reset switches are independent; leaving the goal area always terminates.
 

@@ -67,11 +67,13 @@ def env():
     return e
 
 
-def test_all_ball_results_are_nonterminal_but_safety_is_terminal(env):
+@pytest.mark.parametrize('reset_on_goal', [False, True])
+def test_only_goals_can_reset_ball_results_and_safety_is_terminal(env, reset_on_goal):
+    env.cfg.reset_on_goal = reset_on_goal
     for k,i in [('base',0),('arm',1),('goal',2),('floor',3),('miss',4),('crash',6),('tilt',7),('area',8)]:env._flags[k][i]=True
     env._hit[5]=env._clear[5]=True
     term,trunc=env._get_dones()
-    assert term.tolist()==[False]*6+[True]*3
+    assert term.tolist()==[False,False,reset_on_goal,False,False,False]+[True]*3
     assert not trunc.any()
     assert env._outcome.tolist()==[1,2,3,4,9,7,8,8,5]
 

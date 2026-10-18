@@ -388,8 +388,8 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         contact_crash = self._flags["crash" if self.cfg.self_collision_triggers_reset else "external_crash"]
         reset_crash = ((contact_crash & self.cfg.reset_robot_on_robot_crash)
                        | (self._flags["tilt"] & self.cfg.reset_robot_on_tilt_threshold))
-        # Ball results end only the shot. The robot must keep balancing between balls.
-        terminated = reset_crash | self._flags["area"]
+        # Other ball results end only the shot; goal resets are independently optional.
+        terminated = reset_crash | self._flags["area"] | (self._flags["goal"] & self.cfg.reset_on_goal)
         time_limit = self._episode_steps >= self.max_episode_length
         return terminated | (time_limit & self.cfg.is_finite_horizon), time_limit & ~terminated & (not self.cfg.is_finite_horizon)
 

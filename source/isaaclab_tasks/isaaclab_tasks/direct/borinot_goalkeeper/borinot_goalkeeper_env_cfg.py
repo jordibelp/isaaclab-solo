@@ -23,6 +23,7 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     shot_timeout_s = 3.0  # unresolved ball ends this shot, not the robot episode
     shot_resampling_time_range_s = (2.0, 3.0)
     shot_resampling_mode = "launch"  # "launch": launch-to-launch; "resolution": delay after each result
+    reset_on_goal = False  # True resets the robot too; goal scoring/penalty stay unchanged
     ball_park_position = (0.0, 0.0, -2.0)  # inactive ball is removed below the local floor
     action_space = 8  # derived: 8 for direct thrust modes, 6 for PI
     observation_space = 53  # derived: actor inputs selected by the obs_actor_includes_* flags, plus the current actions
