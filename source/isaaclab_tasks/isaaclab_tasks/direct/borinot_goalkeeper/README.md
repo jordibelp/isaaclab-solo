@@ -87,7 +87,7 @@ The local environment uses these coordinates:
 - The goal is a solid rectangular surface centered at x = −0.45 m. Its width and height are 2.4 m.
 - Borinot starts with its base at `(0, 0, 1.5)` m.
 - At the reference home height of 1.5 m, the neutral racket center is approximately `(−0.0303, −0.0647, 1.1293)` m.
-- The body starts at −90° yaw. The arm swings in the goal's Y–Z plane, and the paddle's broad face is parallel to that plane. Both joints can move the paddle across the goal without turning it edge-on to an incoming ball.
+- The body starts at −90° yaw. The arm swings in the goal's Y–Z plane. By default, the paddle's broad face is parallel to that plane. With `racket_parallel_to_arm_plane=False`, the face is perpendicular to the arm plane instead.
 - The progress plane is y–z, parallel to the goal. Forward motion along x alone earns no progress.
 
 ```mermaid
@@ -108,7 +108,9 @@ The robot comes from:
 The original USD has a 115 g distal link. We model it as a 15 g shaft plus a separate 100 g paddle. This is a prototype interpretation of the existing tip ballast, not a measured separation of the physical parts.
 The paddle is a round ping-pong-style racket: a **160 mm diameter** head, **12 mm thick**, plus a **60 × 26 mm** handle of the same thickness. Both parts are physical collision shapes on one rigid body named `paddle`. A ball hitting either part counts as a paddle hit. The short handle clears the upper arm at neutral. It extends toward the wrist along paddle-local +Y, overlapping the head by up to 10 mm so the parts join. This is a prototype shape, not a measured commercial racket.
 
-A fixed joint connects it to the distal link. The **head center** keeps the existing 50 mm standoff from the old tip center along the arm-plane normal, toward the incoming ball. The local mount rotates the paddle's +X normal onto the distal link's +Z axis. The root yaw then maps this normal onto world +X. Resizing does not move this center, its normal, or the fixed shot target. The original USD is unchanged.
+A fixed joint connects it to the distal link. The **head center** keeps the existing 50 mm standoff from the old tip center along the arm-plane normal, toward the incoming ball. With `racket_parallel_to_arm_plane=True`, the local mount rotates the paddle's +X normal onto the distal link's +Z axis. The root yaw then maps this normal onto world +X. Resizing does not move this center, its normal, or the fixed shot target. The original USD is unchanged.
+
+Set `env.racket_parallel_to_arm_plane=False` to twist the **whole racket** 90° around its handle axis (racket-local +Y). Its face becomes perpendicular to the arm's sweep plane. The head center, handle direction, mount offset, total mass and shot target stay fixed. This is a fixed mount choice for an environment, not an extra action. Restart training/playback to change it. The physical face normal already feeds the observations and alignment reward, so their input sizes do not change. Old weights can still load, but the changed contact geometry and inertia orientation can require a different learned strategy; we have not trained or evaluated a policy for it.
 
 Configure the geometry in `borinot_goalkeeper_env_cfg.py`, in metres:
 
@@ -118,11 +120,14 @@ paddle_thickness_m = 0.012
 paddle_handle_length_m = 0.06
 paddle_handle_width_m = 0.026
 paddle_mount_delta_m = 0.0
+racket_parallel_to_arm_plane = True
 ```
 
 `paddle_mount_delta_m` moves the **whole racket** along the second link's length, not along the paddle normal. Positive values extend toward the calf tip along second-link local **−Y**. Negative values retract toward the wrist. Zero keeps the existing mount. The head-center offset from the second-link origin is `(x, y - delta, z)`, starting from `paddle_offset_ee=(0, -0.16, 0.029)` metres. For example, `paddle_mount_delta_m=0.04` changes that position to `(0, -0.20, 0.029)`: **4 cm farther along the calf**, with the same normal standoff and orientation. It follows the link when the joints move. The fixed shot aim does not move with it, so a shifted mount need not start at the aim center.
 
 For launch-only overrides, append `env.paddle_diameter_m=0.12 env.paddle_mount_delta_m=0.04` to the training or player command. Restart the environment after geometry changes. The old square `paddle_size` field is removed. The browser inspector at `http://127.0.0.1:8790` has **Ping-pong racket / Ø (cm)** and **Δ (cm)** sliders and numeric inputs. These update the visible racket, collision hulls and overlap checks together. They only change the preview; copy the displayed settings into the config to use them for training. **Restore config size** and **Restore config mount** restore those values independently. Restart the viewer after editing its config.
+
+The same panel has a **Racket face parallel to arm plane** checkbox. Checked means True/current orientation; unchecked means False/perpendicular. It updates the visible head, handle, collision hulls, overlap checks and bounds immediately. **Restore config orientation** restores only this boolean, preserving your size and mount edits. The preview does not write the environment config.
 
 The task changes mass, center of mass, and inertia in the spawned USD layer only. It never saves over the original file. The shaft inertia uses a simple 160 mm rod approximation. PhysX computes the racket center of mass and inertia from both collision shapes. `paddle_mass_kg=0.100` is the **total** racket mass, including its handle. Resizing keeps that mass fixed unless you also edit it. Total robot mass remains **2.910538 kg**. Mass distribution changes with diameter, so old checkpoints can load with the same observation/action sizes but are not validated for the new dynamics.
 

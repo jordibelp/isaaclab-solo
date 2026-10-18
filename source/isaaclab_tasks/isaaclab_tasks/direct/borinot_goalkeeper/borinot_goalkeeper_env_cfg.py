@@ -86,6 +86,7 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     paddle_handle_width_m = 0.026  # along local Z; same thickness as the head
     paddle_offset_ee = (0.0, -0.16, 0.029)  # 5 cm standoff along the arm-plane normal (+EE z)
     paddle_mount_delta_m = 0.07  # positive extends the whole racket along second-link -Y (toward the tip)
+    racket_parallel_to_arm_plane = True  # False twists the whole racket 90 deg about its handle; head centre stays fixed
     paddle_quat_ee = (0.7071067811865476, 0.0, -0.7071067811865476, 0.0)  # local +x normal -> EE +z
     # Neutral FK from the USD joint frames, not the file's authored preview pose.
     keeper_plane_x = -0.0303288

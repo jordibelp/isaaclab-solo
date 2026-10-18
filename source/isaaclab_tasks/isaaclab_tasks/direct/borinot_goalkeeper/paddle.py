@@ -31,6 +31,9 @@ def attach_paddle(stage, robot_path, cfg):
     position = ee_in_robot.Transform(Gf.Vec3d(*offset))
     ee_quat = ee_in_robot.ExtractRotationQuat()
     local_quat = Gf.Quatd(cfg.paddle_quat_ee[0], Gf.Vec3d(*cfg.paddle_quat_ee[1:]))
+    if not cfg.racket_parallel_to_arm_plane:
+        # Twist about racket-local +Y (the handle axis), not a world axis.
+        local_quat = local_quat * Gf.Rotation(Gf.Vec3d(0.0, 1.0, 0.0), 90.0).GetQuat()
     rotation = ee_quat * local_quat
     paddle_cfg = sim_utils.CylinderCfg(
         radius=cfg.paddle_diameter_m / 2, height=cfg.paddle_thickness_m, axis="X",
@@ -62,7 +65,7 @@ def attach_paddle(stage, robot_path, cfg):
     joint.CreateBody0Rel().SetTargets([ee_path])
     joint.CreateBody1Rel().SetTargets([paddle_path])
     joint.CreateLocalPos0Attr().Set(Gf.Vec3f(*offset))
-    joint.CreateLocalRot0Attr().Set(Gf.Quatf(cfg.paddle_quat_ee[0], Gf.Vec3f(*cfg.paddle_quat_ee[1:])))
+    joint.CreateLocalRot0Attr().Set(Gf.Quatf(local_quat))
     joint.CreateLocalPos1Attr().Set(Gf.Vec3f(0.0))
     joint.CreateLocalRot1Attr().Set(Gf.Quatf(1.0))
     PhysxSchema.PhysxRigidBodyAPI.Apply(stage.GetPrimAtPath(paddle_path)).CreateEnableSpeculativeCCDAttr().Set(True)

@@ -21,7 +21,7 @@ FIELDS = (
     "launch_z", "launch_y_noise", "shot_half_extents_yz", "shot_flight_time_ranges_s", "shot_level",
     "goal_area_x_m", "goal_area_y_m", "goal_area_z_m", "reset_xy_noise_m", "reset_z_noise_m",
     "reset_grid_enabled", "reset_grid_start_level", "reset_grid_y_offsets_m", "reset_grid_z_offsets_m",
-    "enabled_self_collisions",
+    "enabled_self_collisions", "racket_parallel_to_arm_plane",
 )
 
 
