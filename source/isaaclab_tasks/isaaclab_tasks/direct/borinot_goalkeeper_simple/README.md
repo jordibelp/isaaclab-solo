@@ -149,15 +149,15 @@ With the default `shot_resampling_mode="launch"`, a ball is launched every 2–3
 
 Because of the time-limit rule, `Episode_Reward/desirability/energy` misses the last unfinished window of a time-limited episode. On average this is half a window: about −1.7 of about −27 in a 20 s episode. To compare the physical energy of runs, use `Episode/energy_j`. It always counts every step.
 
-**Why one payment per shot.** A payment `T` steps in the future is weighted by `gamma^T`. The table gives this weight for the first step of a window, and its mean over all steps of the window, at 100 Hz:
+**Why one payment per shot.** A payment `T` steps in the future is weighted by `gamma^T`. PPO and SAC both use `gamma=0.99` by default. The table gives this weight for the first step of a window, and its mean over all steps of the window, at 100 Hz:
 
-| Window length | PPO (`gamma=0.99`) first step | PPO mean | SAC (`gamma=0.97`) first step | SAC mean |
-|---|---:|---:|---:|---:|
-| 2 s | 0.14 | 0.43 | 0.0023 | 0.17 |
-| 3 s | 0.05 | 0.32 | 0.0001 | 0.11 |
-| 20 s (one payment per episode, for comparison) | 2e-9 | 0.05 | 4e-27 | 0.017 |
+| Window length | First step | Mean |
+|---|---:|---:|
+| 2 s | 0.14 | 0.43 |
+| 3 s | 0.05 | 0.32 |
+| 20 s (one payment per episode, for comparison) | 2e-9 | 0.05 |
 
-In the power mode the weight is always 1, because each step pays its own energy. With one payment per shot, no step is more than about 3 s from its payment, and PPO's mean weight is 6–9 times higher than with one payment per episode. SAC sees much less, because its horizon is short: about 1 / (1 − 0.97) ≈ 33 steps, or 0.33 s. For SAC, the energy of the first second of a shot is still almost invisible.
+In the power mode the weight is always 1, because each step pays its own energy. With one payment per shot, no step is more than about 3 s from its payment, and the mean weight is 6–9 times higher than with one payment per episode. With Solo's SAC value `agent.algorithm.gamma=0.97`, the horizon is only about 1 / (1 − 0.97) ≈ 33 steps, or 0.33 s. The mean weight then drops to 0.11–0.17, and the energy of the first second of a shot is almost invisible.
 
 **Inside a window, timing does not matter.** All energy of one window is paid at the same moment. So the robot gains nothing by moving its energy use to later in the shot. It pays for how much energy the shot used, not for when it used it. This is the "energy, not power" idea. In the power mode, energy used later is discounted more, so the cost also depends on when it is used.
 

@@ -144,7 +144,7 @@ With the default symmetric ranges and zero offset, both initializations are equi
 | Actor / critic optimizer | AdamW, betas (0.9, 0.95), weight decay 0.001 |
 | Temperature optimizer | AdamW, betas (0.9, 0.999), no weight decay |
 | Actor / critic / temperature LR | 0.0002 / 0.0002 / 0.00002 |
-| Gamma / tau / n-step | 0.97 / 0.003 / 5 |
+| Gamma / tau / n-step | 0.99 / 0.003 / 5 (Solo uses gamma 0.97) |
 | Initial alpha / automatic alpha / entropy scale | 0.001 / on / 0.166 |
 | Twin reduction | `mean_pi_q_none`: actor uses mean Q; each critic bootstraps from its own target |
 | Collection per iteration | 24 steps per environment |

@@ -29,7 +29,7 @@ class BorinotGoalkeeperSAC(SAC):
 
 @configclass
 class BorinotGoalkeeperSACRunnerCfg(Solo12SACRunnerCfg):
-    """Linear two-hot CE by default; remaining defaults match the supplied Solo command."""
+    """Linear two-hot CE by default; gamma 0.99 (Solo: 0.97); remaining defaults match the supplied Solo command."""
     experiment_name = "borinot_goalkeeper_sac"
     run_name = "Borinot goalkeeper SAC CE"
     max_iterations = 4500
@@ -48,7 +48,7 @@ class BorinotGoalkeeperSACRunnerCfg(Solo12SACRunnerCfg):
         distributional_num_bins=101, distributional_linear_limit=20.0,
     )
     algorithm = Solo12SACRunnerCfg().algorithm.replace(
-        class_name=f"{__name__}:BorinotGoalkeeperSAC", target_entropy_scale=0.166,
+        class_name=f"{__name__}:BorinotGoalkeeperSAC", gamma=0.99, target_entropy_scale=0.166,
         num_mini_batches=400, q_reduction_method="mean_pi_q_none", torch_compile=True,
     )
 
