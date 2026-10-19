@@ -374,7 +374,10 @@ class BorinotGoalkeeperSimpleEnv(DirectRLEnv):
                              self._ball_active.float(),
                              self._next_launch_steps * self.step_dt / max(self.cfg.shot_resampling_time_range_s[1], self.step_dt),
                              self._episode_steps * self.step_dt / self.cfg.episode_length_s), dim=-1)
-        tail = [self.actions, self._rotor_thrust / self._hover_per_rotor, self._rate_integral]
+        tail = [self.actions]
+        if self.cfg.control_mode == "PI_rotors_PD_joint_pos_control":
+            # Direct modes already command each rotor in the action; PI hides thrusts and its integral state.
+            tail += [self._rotor_thrust / self._hover_per_rotor, self._rate_integral]
         # The flags simplify only the actor; the critic keeps every privileged input.
         point, time = self.cfg.obs_actor_includes_ball_plane_intersection_point, self.cfg.obs_actor_includes_time_ball_collides_plane
         optional = [(point, ball_parts[2]), (time, ball_parts[3]),

@@ -264,11 +264,18 @@ def test_observation_sizes_match_derived_spaces(mode, flags):
     obs = env._get_observations()
     assert obs["policy"].shape == (N, env.cfg.observation_space)
     assert obs["critic"].shape == (N, env.cfg.state_space)
-    assert env.cfg.state_space == 55 + env.cfg.action_space
+    pi = mode == "PI_rotors_PD_joint_pos_control"
+    assert env.cfg.state_space == (61 if pi else 54)
     if all(flags):
         assert env.cfg.observation_space == env.cfg.state_space
     if flags == (False, False, False, True):
-        assert env.cfg.observation_space == (53 if mode != "PI_rotors_PD_joint_pos_control" else 51)
+        assert env.cfg.observation_space == (51 if pi else 44)
+    # Rotor thrust/hover (6) and the rate-PI integral (3) follow the actions only in PI mode.
+    end = 34 + 3 * flags[0] + flags[1] + (flags[0] or flags[1]) + 5 * flags[2] + env.cfg.action_space
+    assert obs["policy"].shape[1] == end + 9 * pi + 2 * flags[3]
+    if pi:
+        pi_values = torch.cat([env._rotor_thrust / env._hover_per_rotor, env._rate_integral], -1)
+        assert torch.equal(obs["policy"][:, end:end + 9], pi_values)
 
 
 # --- Task: first contact and goal, each once per ball ---------------------------------------------------------

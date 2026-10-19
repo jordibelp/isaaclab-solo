@@ -74,8 +74,8 @@ def main(cfg, agent_cfg):
         check("filtered sensors resolved (ball 5, base 4, racket 1)", [
             s.contact_physx_view.filter_count for s in (env.ball_contact, env.base_contact, env.paddle_contact)] == [5, 4, 1])
         obs = env._get_observations()
-        check("actor/critic sizes 53/63", (obs["policy"].shape[1], obs["critic"].shape[1]) == (cfg.observation_space,
-              cfg.state_space) == (53, 63))
+        check("actor/critic sizes 44/54", (obs["policy"].shape[1], obs["critic"].shape[1]) == (cfg.observation_space,
+              cfg.state_space) == (44, 54))
 
         # --- Task: real ball contacts and goals --------------------------------------------------------------
         quiet()

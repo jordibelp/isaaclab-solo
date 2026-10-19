@@ -32,8 +32,8 @@ class BorinotGoalkeeperSimpleEnvCfg(DirectRLEnvCfg):
     reset_on_goal = False  # True resets the robot too; the goal reward is unchanged
     ball_park_position = (0.0, 0.0, -2.0)  # inactive ball is removed below the local floor
     action_space = 8  # derived: 8 for direct thrust modes, 6 for PI
-    observation_space = 53  # derived: actor inputs selected by the obs_actor_includes_* flags, plus the current actions
-    state_space = 63  # derived: critic always gets all 55 values plus the current actions
+    observation_space = 44  # derived: actor inputs selected by the obs_actor_includes_* flags, plus the current actions
+    state_space = 54  # derived: critic always gets all 46 values plus the current actions (+9 PI-only values in PI mode)
     sim = sim_utils.SimulationCfg(
         dt=1 / 200,
         render_interval=decimation,
@@ -238,10 +238,11 @@ class BorinotGoalkeeperSimpleEnvCfg(DirectRLEnvCfg):
         self.sim.dt = 1 / self.physics_hz
         self.sim.render_interval = self.decimation
         self.action_space = 6 if self.control_mode == modes[2] else 8
-        self.state_space = 55 + self.action_space
+        pi_state = 9 if self.control_mode == modes[2] else 0  # PI only: rotor thrusts (6) and rate integral (3)
+        self.state_space = 46 + self.action_space + pi_state
         point, time = self.obs_actor_includes_ball_plane_intersection_point, self.obs_actor_includes_time_ball_collides_plane
         # Optional actor inputs: plane point (3), time (1), validity (1), phase (5), ball parameters (2).
-        self.observation_space = (43 + self.action_space + 3 * point + time + (point or time)
+        self.observation_space = (34 + self.action_space + pi_state + 3 * point + time + (point or time)
                                  + 5 * self.obs_actor_includes_phase + 2 * self.obs_actor_includes_ball_params)
         actuator = self.robot.actuators["arm"]
         use_pd = self.control_mode != modes[0] or self.hold_arm

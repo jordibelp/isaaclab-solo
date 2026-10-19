@@ -209,7 +209,9 @@ Removed: floor, miss and deadline penalties, the clearance rule (`clear_*`), rec
 
 ## 7. Observations, logs and code
 
-**Observations.** The actor inputs are identical to the original task: 53 values with the default flags. The critic's phase block has 5 values instead of 7: first contact happened, shot time, ball active, time to the next launch, and episode time. The old "cleared" and "recovery" values no longer exist. The critic therefore has 63 inputs (61 in PI mode).
+**Observations.** The actor inputs are identical to the original task: 44 values with the default flags (51 in PI mode). The critic's phase block has 5 values instead of 7: first contact happened, shot time, ball active, time to the next launch, and episode time. The old "cleared" and "recovery" values no longer exist. The critic therefore has 54 inputs (61 in PI mode).
+
+Since 2026-10-19, direct modes no longer observe the 6 rotor thrusts and the 3 PI-integral values; only PI mode does. Direct-mode checkpoints trained before that (53 / 63 inputs) need the earlier commit for playback.
 
 **Step extras.** `goalkeeper_reward_terms` holds every term, already scaled, named `task/...`, `integrity/...` and `desirability/...`. Their sum is the reward. `goalkeeper_events` holds the raw events of the step, including `tilt`. `goalkeeper_outcome` is 3 (goal) or 7 (save) on the step a shot ends, else 0; `goalkeeper_shot_finished` marks that step. `power_mean_w` is unchanged.
 
