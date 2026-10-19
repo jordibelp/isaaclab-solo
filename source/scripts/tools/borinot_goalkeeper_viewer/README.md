@@ -22,6 +22,28 @@ A background preview is already running on Jordi's laptop. You can open that URL
 systemctl --user stop borinot-goalkeeper-viewer.service
 ```
 
+The background preview is a transient user service, started with:
+
+```bash
+systemd-run --user --unit=borinot-goalkeeper-viewer --collect /usr/bin/python3 /home/jordibelp/IsaacLab/source/scripts/tools/borinot_goalkeeper_viewer.py --no-open
+```
+
+While that service exists, refresh its source/config snapshot with `systemctl --user restart borinot-goalkeeper-viewer.service`. The transient service is not installed to start after a reboot. Use the Python launcher or the command above to start it again.
+
+## Clearance and outcome zones
+
+The first panel has five independent checkboxes. The values below describe the current default configuration. The page reads the config and the task's literal escape/floor thresholds at startup.
+
+- **1 · Returned toward the shooter:** the teal floor line is at `keeper_plane_x + clear_distance_m`, currently **x = 0.2196712 m**. Clearance needs the ball centre strictly beyond this line and X velocity above **0.2 m/s**. The shaded side points toward +X. This route has no Y/Z limit.
+- **2 · Safely wide behind the goal:** blue volumes show **x < −0.4 m** and a ball centre outside the expanded goal rectangle: **y < −1.23 m**, **y > 1.23 m**, **z < −0.03 m**, or **z > 2.43 m**. The expansion includes the ball radius. The part below the physical floor is not drawn.
+- **3 · Floor landing in front of goal:** yellow marks the floor with **x > −0.4 m**. A floor landing after a racket hit can clear the ball here, but it still pays the floor penalty. The task uses physical contact or its fallback ball-centre check **z ≤ 0.031 m**.
+- **Miss / escape limits:** pink volumes are outside **|x| ≤ 3 m**, **|y| ≤ 3 m**, and **z ≤ 4.5 m**. Leaving any of these limits is a miss only if the ball has not already cleared. There is no lower-Z miss boundary; the floor has a separate rule.
+- **Goal crossing / failure boundary:** red marks the radius-expanded goal rectangle at **x = −0.4 m**. Swept crossing toward −X inside that rectangle counts as a goal, as does physical goal contact.
+
+All three clearance routes require an earlier racket hit and no disqualifying goal, arm/base collision, robot crash, tilt or area failure. Stable recovery is also required when `require_recovery_for_save=True`. The unblocked ball animation does not simulate racket hits or score these outcomes.
+
+Use **Fit outcome zones** to include the outer miss limits and ceiling in the camera view. Displayed volumes are clipped to the visible floor and a finite height; the task's tests are not clipped. The separate orange **Allowed base-position box** under **Scene guides** constrains the robot base, not the ball. Tilt, shot deadlines and physical contact failures do not have fixed spatial regions. All new guides are preview-only; no environment, reward or termination code is changed.
+
 ## Explore
 
 - Drag Borinot or its paddle to move it across the goal and up/down. This drag keeps X fixed. Use the X slider to move toward or away from the goal.
@@ -40,7 +62,7 @@ All controls change the preview only. They never write to the task config.
 
 ## Design the shot curriculum
 
-The first panel reads all phases from `shot_half_extents_yz` and `shot_flight_time_ranges_s`. The selected phase starts at the configured `shot_level`. Phase indices start at zero. There is no fixed four-phase limit in the editor.
+The **Shot curriculum** panel reads all phases from `shot_half_extents_yz` and `shot_flight_time_ranges_s`. The selected phase starts at the configured `shot_level`. Phase indices start at zero. There is no fixed four-phase limit in the editor.
 
 - **Y half-spread ± (m)** controls the horizontal range around `target_center_yz[0]`.
 - **Z half-spread ± (m)** controls the vertical range around `target_center_yz[1]`.

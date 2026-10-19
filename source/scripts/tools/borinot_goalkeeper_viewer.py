@@ -14,6 +14,7 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[2]
 ASSETS = HERE / "borinot_goalkeeper_viewer"
 CONFIG = REPO / "source/isaaclab_tasks/isaaclab_tasks/direct/borinot_goalkeeper/borinot_goalkeeper_env_cfg.py"
+ENVIRONMENT = CONFIG.with_name("borinot_goalkeeper_env.py")
 FIELDS = (
     "robot_home", "robot_home_quat", "joint_names", "joint_target_scale", "paddle_diameter_m", "paddle_thickness_m",
     "paddle_handle_length_m", "paddle_handle_width_m", "paddle_mass_kg", "paddle_offset_ee", "paddle_mount_delta_m", "paddle_quat_ee",
@@ -22,11 +23,36 @@ FIELDS = (
     "goal_area_x_m", "goal_area_y_m", "goal_area_z_m", "reset_xy_noise_m", "reset_z_noise_m",
     "reset_grid_enabled", "reset_grid_start_level", "reset_grid_y_offsets_m", "reset_grid_z_offsets_m",
     "enabled_self_collisions", "racket_parallel_to_arm_plane",
+    "clear_distance_m", "clear_speed_m_s", "require_recovery_for_save", "shot_timeout_s",
+    "robot_tilt_threshold_degs", "reset_robot_on_robot_crash", "reset_robot_on_tilt_threshold", "reset_on_goal",
 )
 
 
 def keyword(call, name):
     return next(k.value for k in call.keywords if k.arg == name)
+
+
+def outcome_rules():
+    """Read hard-coded ball bounds from the current task, without importing it."""
+    source = ENVIRONMENT.read_text()
+    method = next(n for n in ast.walk(ast.parse(source))
+                  if isinstance(n, ast.FunctionDef) and n.name == "_sample_physics_events")
+    assignments = {n.targets[0].id: n.value for n in method.body
+                   if isinstance(n, ast.Assign) and isinstance(n.targets[0], ast.Name)}
+    bounds = {}
+    for comparison in (n for n in ast.walk(assignments["escaped"]) if isinstance(n, ast.Compare)):
+        coordinate = comparison.left
+        if isinstance(coordinate, ast.Call):
+            coordinate = coordinate.func.value  # position[:, axis].abs()
+        axis = coordinate.slice.elts[1].value
+        bounds["xyz"[axis]] = ast.literal_eval(comparison.comparators[0])
+    floor_event = next(n for n in method.body if isinstance(n, ast.AugAssign)
+                       and ast.unparse(n.target) == "self._flags['floor']")
+    floor_height = next(n for n in ast.walk(floor_event.value) if isinstance(n, ast.Compare)
+                        and isinstance(n.ops[0], ast.LtE) and ast.unparse(n.left) == "position[:, 2]")
+    return {"escape_bounds_m": bounds,
+            "floor_slack_m": ast.literal_eval(floor_height.comparators[0].right),
+            "source_path": str(ENVIRONMENT), "source_sha256": hashlib.sha256(source.encode()).hexdigest()}
 
 
 def task_defaults():
@@ -46,6 +72,7 @@ def task_defaults():
     values["usd_path"] = str(CONFIG.resolve().parents[4] / "isaaclab_assets/data/Robots/Borinot/borinotFlat.usd")
     values["config_path"] = str(CONFIG)
     values["config_sha256"] = hashlib.sha256(CONFIG.read_bytes()).hexdigest()
+    values["outcome_rules"] = outcome_rules()
     return values
 
 
@@ -62,6 +89,7 @@ def build_html():
             .replace("/* COLLISION_CODE */", (ASSETS / "collision.js").read_text())
             .replace("/* CURRICULUM_CODE */", (ASSETS / "curriculum.js").read_text())
             .replace("/* SPAWN_CODE */", (ASSETS / "spawn.js").read_text())
+            .replace("/* OUTCOME_CODE */", (ASSETS / "outcome_zones.js").read_text())
             .replace("/* MODEL_DATA */null", json.dumps({"defaults": defaults, "robot": robot}, separators=(",", ":"))))
 
 

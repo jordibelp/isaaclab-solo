@@ -13,6 +13,7 @@
 <body>
 <header><div><h1>Borinot <span>/ Goalkeeper scene</span></h1><p>Explore scale, position and arm geometry. No simulator or policy.</p></div><span class="badge">True scale · metres · Z up</span></header>
 <main><aside>
+<section id="outcome-zones"><h2>Clearance and outcome zones</h2><div id="outcome-controls"></div><button id="zones-fit" class="wide">Fit outcome zones</button><details style="margin-top:12px"><summary>How to read these regions</summary><p class="hint" id="outcome-note"></p></details></section>
 <section id="curriculum-editor"><h2>Shot curriculum · preview</h2>
 <div class="row"><label for="level">Phase (zero-based)</label><select id="level" aria-label="Shot level"></select></div>
 <div class="row"><button id="phase-add" class="wide">Add phase</button><button id="phase-remove" class="wide">Remove</button></div>
@@ -76,6 +77,7 @@ const areaBounds=[D.goal_area_x_m,D.goal_area_y_m,D.goal_area_z_m];
 const area=edges(areaBounds.map(a=>a[1]-a[0]),areaBounds.map(a=>(a[1]+a[0])/2),0xe6aa64);
 /* CURRICULUM_CODE */
 /* SPAWN_CODE */
+/* OUTCOME_CODE */
 const robot=new THREE.Group();scene.add(robot);
 const bodies={},jointGroups={},visuals=[];
 for(const b of MODEL.bodies){bodies[b.name]=new THREE.Group();bodies[b.name].name=b.name;}
@@ -159,7 +161,9 @@ $('goal-size').textContent=`${D.goal_size[1].toFixed(2)} × ${D.goal_size[2].toF
 $('provenance').textContent=`Config: ${D.config_path}\nConfig SHA256: ${D.config_sha256}\nRobot USD: ${D.usd_path}\nUSD SHA256: ${MODEL.usd_sha256}\nMeshes, local transforms and physical joint limits come from USD. Zero-joint pose uses joint frames, not the authored USD display pose. Home preview omits reset noise (XY ±${D.reset_xy_noise_m} m; Z ±${D.reset_z_noise_m} m). Colours are simplified; hidden collider shapes are optional.`;$('provenance').style.whiteSpace='pre-wrap';
 const curriculum=createShotCurriculum();
 const spawnPreview=createSpawnPreview();
+const outcomeZones=createOutcomeZones();
 window.viewer={collisionGeometry:()=>collisions.shapes.map(s=>({name:s.name,body:s.body,vertices:s.world.map(v=>v.toArray())})),snapshot:()=>{scene.updateMatrixWorld(true);return {spawn:spawnPreview.snapshot(),curriculum:curriculum.snapshot(),state:{...state},collisions:collisions.snapshot(),paddle:paddlePosition.toArray(),paddle_quaternion:paddle.getWorldQuaternion(new THREE.Quaternion()).toArray(),bounds:{min:robotBounds.min.toArray(),max:robotBounds.max.toArray()},bodies:Object.fromEntries(Object.entries(bodies).map(([n,b])=>[n,{position:b.getWorldPosition(new THREE.Vector3()).toArray(),quaternion:b.getWorldQuaternion(new THREE.Quaternion()).toArray()}])),shot,ball:ball.position.toArray(),camera:camera.position.toArray(),config:D};}};
+window.viewer.outcomeZones=()=>outcomeZones.snapshot();
 sample();updatePose();render();
 } catch(error) {$('fatal').hidden=false;$('fatal').textContent='Could not create the 3D preview: '+error.message;console.error(error);}
 </script></body></html>
