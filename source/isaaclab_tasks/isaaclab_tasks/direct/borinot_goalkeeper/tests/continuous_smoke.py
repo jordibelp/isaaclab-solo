@@ -41,7 +41,7 @@ def main(cfg,agent_cfg):
     try:
         obs,_=env.reset()
         check('new_observation_contract',obs['policy'].shape==(env.num_envs,cfg.observation_space)
-              and obs['critic'].shape==(env.num_envs,57+cfg.action_space))
+              and obs['critic'].shape==(env.num_envs,cfg.state_space))
         check('single_physical_ball_per_environment',env.ball.root_physx_view.count==env.num_envs)
         cfg.shot_resampling_time_range_s=(10.,10.)
 

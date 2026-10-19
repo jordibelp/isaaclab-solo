@@ -79,7 +79,7 @@ def main(cfg, agent_cfg):
         direct = cfg.control_mode != "PI_rotors_PD_joint_pos_control"
         use_pd = cfg.control_mode != "thrust_and_torque_control" or cfg.hold_arm
         check("spaces_follow_selected_mode", cfg.action_space == (8 if direct else 6)
-              and cfg.state_space == 57 + cfg.action_space
+              and cfg.state_space == (56 if direct else 63)
               and obs["policy"].shape == (args.num_envs, cfg.observation_space)
               and obs["critic"].shape == (args.num_envs, cfg.state_space)
               and env.single_observation_space["policy"].shape[-1] == cfg.observation_space
@@ -91,7 +91,7 @@ def main(cfg, agent_cfg):
         check("row_major_base_to_world_rotation", torch.allclose(rotation, rotated_basis.mT, atol=1e-6))
         check("rotation_is_orthonormal", torch.allclose(rotation.mT @ rotation, basis, atol=1e-6)
               and torch.allclose(torch.linalg.det(rotation), torch.ones(args.num_envs, device=env.device), atol=1e-6))
-        tail = 9 + cfg.action_space  # actions, rotor thrust, rate integral
+        tail = cfg.action_space + (0 if direct else 9)  # actions; PI adds rotor thrust and rate integral
         actor_end = obs["policy"].shape[1] - 2 * cfg.obs_actor_includes_ball_params
         check("actor_and_critic_share_robot_ball_and_tail_observations",
               torch.equal(obs["policy"][:, :34], obs["critic"][:, :34])

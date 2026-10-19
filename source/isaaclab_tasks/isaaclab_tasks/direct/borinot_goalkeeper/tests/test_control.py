@@ -63,7 +63,7 @@ def test_self_collision_selector_overrides_spawn_settings_after_hydra(enabled):
 
 
 @pytest.mark.parametrize("mode,actions,observations,states,kp,kd", [
-    (MODES[0], 8, 53, 65, 0.0, 0.0), (MODES[1], 8, 53, 65, 9.0, 0.2), (MODES[2], 6, 51, 63, 9.0, 0.2),
+    (MODES[0], 8, 44, 56, 0.0, 0.0), (MODES[1], 8, 44, 56, 9.0, 0.2), (MODES[2], 6, 51, 63, 9.0, 0.2),
 ])
 def test_resolver_updates_spaces_timing_and_existing_actuator(mode, actions, observations, states, kp, kd):
     cfg = config()

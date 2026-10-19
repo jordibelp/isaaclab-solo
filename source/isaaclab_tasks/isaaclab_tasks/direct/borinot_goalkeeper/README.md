@@ -142,7 +142,7 @@ The top-level `enabled_self_collisions=False` keeps the previous default. Overri
 
 With self-collisions ON, eligible nonadjacent robot links can collide. Parent–child pairs remain filtered by PhysX. The task's robot-contact crash detector can terminate these episodes; the existing `reset_robot_on_robot_crash` option controls that termination separately. Enabling this flag does not change the source USD, masses, actuator settings or observation sizes. The browser self-collision switch remains preview-only, but its initial value reads this top-level config field.
 
-Use `source/scripts/rsl_rl/play_borinot_goalkeeper.py`, not the Solo12 player, for goalkeeper weights. The checkpoint `1014_ii4tbx06_model_4690.pt` has 57-input actor/normalizer tensors; current direct-mode actors have 53 inputs with the default observation flags (65 with every flag on). It cannot load unchanged on current code. Use a checkpoint trained with matching flags, or the older matching code. This collision option does not convert checkpoint inputs.
+Use `source/scripts/rsl_rl/play_borinot_goalkeeper.py`, not the Solo12 player, for goalkeeper weights. The checkpoint `1014_ii4tbx06_model_4690.pt` has 57-input actor/normalizer tensors; current direct-mode actors have 44 inputs with the default observation flags (56 with every flag on). It cannot load unchanged on current code. Use a checkpoint trained with matching flags, or the older matching code. This collision option does not convert checkpoint inputs.
 
 The ball has a 30 mm radius. Each ball launch samples mass uniformly from 20–50 g and restitution from 0.35–0.65. Restitution means how strongly the ball rebounds. We use the `max` material combination rule with a zero-restitution paddle, so the sampled ball value sets the ball–paddle restitution.
 
@@ -338,8 +338,8 @@ Use `env.control_mode` as a Hydra override on the training or playback command. 
 
 | `env.control_mode` | Policy actions | Actor / critic values (default flags) |
 |---|---:|---:|
-| `thrust_and_torque_control` | 6 individual thrusts + 2 joint torques: **8** | **53** / **65** |
-| `thrust_and_PD_joint_pos_control` | 6 individual thrusts + 2 desired joint angles: **8** | **53** / **65** |
+| `thrust_and_torque_control` | 6 individual thrusts + 2 joint torques: **8** | **44** / **56** |
+| `thrust_and_PD_joint_pos_control` | 6 individual thrusts + 2 desired joint angles: **8** | **44** / **56** |
 | `PI_rotors_PD_joint_pos_control` | Collective thrust + 3 body rates + 2 desired joint angles: **6** | **51** / **63** |
 
 The actor size depends on the `obs_actor_includes_*` flags; see the observation contract below.
@@ -442,7 +442,7 @@ SAC's rotor mapping is also different from PPO's mapping above; see [SAC_TRAININ
 
 ### Observation and checkpoint contract
 
-The critic always receives all 57 values plus the current policy actions: 65 values in direct modes or 63 in PI mode. These values are the home-position error, full root rotation matrix, base linear and angular velocities, joint positions and velocities, relative paddle position and normal, relative ball position and velocity, predicted intercept/time/validity, shot phase/time, ball-active flag, next-launch countdown, episode progress, rotor thrust state, controller integral, and sampled ball mass/restitution. The three PI-integral entries remain zero in direct modes. Joint velocity is divided by `velocity_lim_sim`.
+The critic always receives all 48 values plus the current policy actions: 56 values in direct modes. These values are the home-position error, full root rotation matrix, base linear and angular velocities, joint positions and velocities, relative paddle position and normal, relative ball position and velocity, predicted intercept/time/validity, shot phase/time, ball-active flag, next-launch countdown, episode progress, and sampled ball mass/restitution. PI mode also adds 9 controller values after the actions: the 6 rotor thrusts divided by hover thrust, and the 3 body-rate PI integrals. That gives 63 values. Direct modes leave them out: there, the actions already command each rotor, and the PI integral does not exist. Joint velocity is divided by `velocity_lim_sim`.
 
 The actor (policy) gets a subset. Four config flags choose the optional groups. The first three are `False` by default; ball parameters are `True`:
 
@@ -454,13 +454,15 @@ The actor (policy) gets a subset. Four config flags choose the optional groups. 
 | `obs_actor_includes_phase` | Paddle hit, ball cleared, shot age, recovery time, ball active, next-launch countdown, episode progress (7) | `39:46` |
 | `obs_actor_includes_ball_params` | Sampled ball mass in kg and restitution (2) | Last two values |
 
-With the defaults, the actor gets 45 values plus the actions: **53** in direct modes and **51** in PI mode. Setting `env.obs_actor_includes_ball_params=false` removes the final two actor values, giving **51** or **49** inputs. With every flag off, the actor gets 43 values plus the actions. With every flag on, the actor equals the critic. The actor keeps the critic's order and drops the unused groups. The critic always keeps every group, including mass and restitution. Set the flags with Hydra, for example `env.obs_actor_includes_phase=true`. The old `obs_includes_*` names and the misspelled `obs_actor_inclues_ball_params` are not supported.
+With the defaults, the actor gets 36 values plus the actions: **44** in direct modes. PI mode adds its 9 controller values: **51**. Setting `env.obs_actor_includes_ball_params=false` removes the final two actor values, giving **42** or **49** inputs. With every flag off, the actor gets 34 values plus the actions (and the 9 PI values in PI mode). With every flag on, the actor equals the critic. The actor keeps the critic's order and drops the unused groups. The critic always keeps every group, including mass and restitution. Set the flags with Hydra, for example `env.obs_actor_includes_phase=true`. The old `obs_includes_*` names and the misspelled `obs_actor_inclues_ball_params` are not supported.
 
 With the phase flags off, the actor has no ball-active flag. While no ball is in the air, the ball position and velocity values are zero. That zero block is the actor's only "no ball" signal.
 
 Orientation occupies indices `3:12` (zero-based). It is the base-to-world 3×3 rotation matrix, flattened row by row: `[R00, R01, R02, R10, R11, R12, R20, R21, R22]`. We convert the simulator's `(w, x, y, z)` quaternion with `matrix_from_quat`; internal vector transforms still use that quaternion. The observation is identical for `q` and `-q`. This follows the continuity motivation in [Zhou et al., On the Continuity of Rotation Representations in Neural Networks](https://arxiv.org/abs/1812.07035); we use the requested full 9D matrix, not their compact 6D representation.
 
-**Checkpoint change:** continuous shots add three phase values: ball active, normalized remaining launch delay, and normalized episode time. The critic now has 65 inputs in direct modes and 63 in PI mode. With the default flags, the actor has 53 or 51 inputs. Renaming the flags and leaving ball parameters enabled preserves the previous default observation layout. Earlier checkpoints (65/63-input actors, 62/60-input matrix checkpoints and 57/55-input quaternion checkpoints) do not load with the default flags. Train a new policy, and play it back with the same `obs_actor_includes_*` flags. In critic indices, ball-related values at `28:39` are zero while the ball is inactive. The three new phase values are at `43:46`, before the action history. Shot age uses `shot_timeout_s`; episode progress uses `episode_length_s`.
+**Checkpoint change (2026-10-19):** direct modes no longer observe the rotor thrusts and the PI integral. Those 9 values repeated the rotor actions, apart from clipping and the short motor lag, and the integral was always zero. Direct-mode actors go from 53 to 44 inputs and critics from 65 to 56. PI mode is unchanged (51 / 63). Older direct-mode checkpoints do not load on this code; use the commit before this change to play them back.
+
+**Earlier checkpoint change:** continuous shots add three phase values: ball active, normalized remaining launch delay, and normalized episode time. At that time the critic had 65 inputs in direct modes and 63 in PI mode. With the default flags, the actor has 53 or 51 inputs. Renaming the flags and leaving ball parameters enabled preserves the previous default observation layout. Earlier checkpoints (65/63-input actors, 62/60-input matrix checkpoints and 57/55-input quaternion checkpoints) do not load with the default flags. Train a new policy, and play it back with the same `obs_actor_includes_*` flags. In critic indices, ball-related values at `28:39` are zero while the ball is inactive. The three new phase values are at `43:46`, before the action history. Shot age uses `shot_timeout_s`; episode progress uses `episode_length_s`.
 
 The predicted intercept is privileged information. It does not replace the current-ball target in the default progress reward. All coordinates remove the clone's world offset. The finite shot clock is independent of the generic runner's randomized initial episode-length counter.
 

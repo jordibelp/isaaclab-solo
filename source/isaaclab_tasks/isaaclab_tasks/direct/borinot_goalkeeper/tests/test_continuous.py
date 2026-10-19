@@ -129,7 +129,7 @@ def test_partial_shot_relaunch_preserves_other_ball_and_robot_state(env):
 def test_waiting_observations_hide_parked_ball_and_expose_schedule(env):
     env._ball_active[:]=False;env._park_ball(torch.arange(9))
     obs=env._get_observations()
-    assert obs['critic'].shape==(9,65) and obs['policy'].shape==(9,53)
+    assert obs['critic'].shape==(9,56) and obs['policy'].shape==(9,44)
     assert (obs['critic'][:,28:39]==0).all() and (obs['policy'][:,28:34]==0).all()
     assert (obs['critic'][:,43]==0).all()  # ball-active flag after four previous phase values
     assert torch.isfinite(obs['policy']).all() and torch.isfinite(obs['critic']).all()
@@ -155,12 +155,22 @@ def test_actor_flags_select_columns_and_critic_keeps_all(env,mode,point,time,pha
         config.obs_actor_includes_ball_params=params
     obs=env._get_observations()
     assert torch.equal(obs['critic'],critic_before) and (obs['critic'][:,37:39]>0).all()
-    end=57+cfg.action_space
+    end=cfg.state_space
     keep=(list(range(34))+[34,35,36]*point+[37]*time+[38]*(point or time)
           +list(range(39,46))*phase+list(range(46,end-2))+list(range(end-2,end))*params)
     assert torch.equal(obs['policy'],obs['critic'][:,keep])
     configure(cfg)
     assert (cfg.observation_space,cfg.state_space)==(obs['policy'].shape[1],obs['critic'].shape[1])
+
+
+@pytest.mark.parametrize('mode',control.MODES)
+def test_rotor_thrust_and_rate_integral_are_observed_only_in_pi_mode(env,mode):
+    env.cfg.control_mode=mode;pi=mode==control.MODES[2]
+    env.actions=torch.full((9,6 if pi else 8),.25)  # fixture thrust/hover and integral are ones
+    obs=env._get_observations()
+    tail=[env.actions]+[torch.ones(9,9)]*pi
+    assert torch.equal(obs['critic'][:,46:-2],torch.cat(tail,-1))
+    assert torch.equal(obs['policy'][:,34:-2],torch.cat(tail,-1))
 
 
 def test_disabled_ball_params_do_not_leak_to_actor(env):

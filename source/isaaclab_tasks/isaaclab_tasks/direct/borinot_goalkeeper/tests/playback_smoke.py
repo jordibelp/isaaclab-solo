@@ -43,7 +43,7 @@ def main():
     actions = torch.zeros((2, cfg.action_space), device=env.device)
     try:
         obs, _ = env.reset()
-        check("unchanged_actor_critic_shapes", obs["policy"].shape == (2, 53) and obs["critic"].shape == (2, 65))
+        check("unchanged_actor_critic_shapes", obs["policy"].shape == (2, 44) and obs["critic"].shape == (2, 56))
         check("bounded_pool", len(env.history_balls) == args.keep_balls)
         untouched = env.ball.data.root_state_w[1].clone()
         # Tag twelve trajectories by position; this wraps the five-ball pool.
