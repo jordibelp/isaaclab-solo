@@ -208,7 +208,7 @@ def test_reward_scales_follow_the_requested_ratios():
     assert cfg.rwd_scale_hit_base == cfg.rwd_scale_hit_racket / 4
     assert cfg.rwd_scale_goal == -cfg.rwd_scale_hit_racket
     assert cfg.rwd_scale_self_collision == cfg.rwd_scale_base_crash / 2
-    assert cfg.rwd_scale_leave_goal_area == cfg.rwd_scale_base_crash
+    assert cfg.rwd_scale_leave_goal_area == cfg.rwd_scale_tilt == cfg.rwd_scale_base_crash
     assert cfg.rwd_scale_progress > 0 and cfg.rwd_scale_action_rate < 0 and cfg.rwd_scale_energy < 0
 
 
@@ -230,7 +230,7 @@ def test_shared_settings_match_the_original_task():
                        "reset_robot_on_tilt_threshold", "self_collision_triggers_reset"}
     assert simple.keys() - original.keys() == {
         "rwd_scale_hit_racket", "rwd_scale_hit_arm", "rwd_scale_hit_base", "rwd_scale_base_crash",
-        "rwd_scale_self_collision", "minimize_energy_not_power", "reset_robot_on_leave_area"}
+        "rwd_scale_self_collision", "rwd_scale_tilt", "minimize_energy_not_power", "reset_robot_on_leave_area"}
     assert original.keys() - simple.keys() == {
         "remove_action_clipping", "clear_distance_m", "clear_speed_m_s", "recovery_dwell_s",
         "recovery_position_tolerance_m", "recovery_speed_m_s", "recovery_angular_speed_rad_s", "recovery_tilt_rad",
@@ -400,7 +400,8 @@ def test_integrity_events_penalties_and_default_resets():
     assert events["self_collision"].tolist() == [False, False, True, True, True, False, False, False]
     assert events["leave_area"].tolist() == [False] * 5 + [True, False, False]
     assert events["tilt"].tolist() == [False] * 6 + [True, False]
-    assert reward.tolist() == [-5.0, -5.0, -2.5, -2.5, -2.5, -5.0, 0.0, 0.0]
+    assert reward.tolist() == [-5.0, -5.0, -2.5, -2.5, -2.5, -5.0, -5.0, 0.0]
+    assert term(env, "integrity/tilt").tolist() == [0.0] * 6 + [-5.0, 0.0]
     assert terminated.tolist() == [True, True, False, False, False, True, False, False]
     assert not truncated.any()
 
@@ -409,14 +410,14 @@ def test_reset_switches_change_only_resets():
     env = make_env(reset_robot_on_robot_crash=False, self_collision_triggers_reset=True,
                    reset_robot_on_leave_area=False, reset_robot_on_tilt_threshold=True)
     reward, terminated, _ = step(env, integrity_fixture, nothing)
-    assert reward.tolist() == [-5.0, -5.0, -2.5, -2.5, -2.5, -5.0, 0.0, 0.0]
+    assert reward.tolist() == [-5.0, -5.0, -2.5, -2.5, -2.5, -5.0, -5.0, 0.0]
     assert terminated.tolist() == [False, False, True, True, True, False, True, False]
 
 
-def test_contact_penalties_repeat_while_contact_lasts():
+def test_integrity_penalties_repeat_while_the_event_lasts():
     env = make_env()
-    rewards = [step(env, integrity_fixture, integrity_fixture)[0][3].item() for _ in range(3)]
-    assert rewards == [-2.5, -2.5, -2.5]
+    rewards = [step(env, integrity_fixture, integrity_fixture)[0][[3, 6]].tolist() for _ in range(3)]
+    assert rewards == [[-2.5, -5.0]] * 3  # self-contact and tilt, neither resets by default
 
 
 def test_simultaneous_events_add_up_without_priority():
@@ -560,7 +561,8 @@ def test_episode_log_groups_terms_by_category():
     env._update_curriculum(torch.arange(N))
     log = env.extras["log"]
     assert log["Episode_Reward/task"] == pytest.approx(5.0 / N)
-    assert log["Episode_Reward/integrity"] == pytest.approx(-22.5 / N)
+    assert log["Episode_Reward/integrity"] == pytest.approx(-27.5 / N)
+    assert log["Episode_Reward/integrity/tilt"] == pytest.approx(-5.0 / N)
     assert log["Episode_Reward/desirability"] == 0.0
     assert log["Episode/hit_racket"] == pytest.approx(1 / N)
     assert {"Episode/return", "Episode/energy_j", "Goalkeeper/cumulative_save_fraction",

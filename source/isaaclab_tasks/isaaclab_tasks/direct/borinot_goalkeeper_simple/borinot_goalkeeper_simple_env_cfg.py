@@ -181,6 +181,7 @@ class BorinotGoalkeeperSimpleEnvCfg(DirectRLEnvCfg):
     rwd_scale_base_crash = -5.0  # r_bc: the base touches the floor or the goal
     rwd_scale_self_collision = -2.5  # r_bc / 2: two robot bodies touch (racket, arm links, base)
     rwd_scale_leave_goal_area = -5.0  # the base origin is outside the goal-area box
+    rwd_scale_tilt = -5.0  # the base is tilted more than robot_tilt_threshold_degs from vertical
     # Desirability: prefer smooth, low-power motion.
     rwd_scale_action_rate = -5.0  # group-mean squared normalized thrust/torque command change, times policy dt
     rwd_scale_energy = -2.5e-5  # per watt of mean power each action (the original convention)

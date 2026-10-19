@@ -13,7 +13,7 @@ reward = task + integrity + desirability
 ```
 
 - **Task:** stop the ball. Pay for the ball's first robot contact and penalize a goal.
-- **Integrity:** keep the robot safe. Penalize base crashes, self-collisions and leaving the allowed area.
+- **Integrity:** keep the robot safe. Penalize base crashes, self-collisions, leaving the allowed area and tilting too far.
 - **Desirability:** prefer smooth, low-energy motion.
 
 There is no priority list and no "selected outcome". If several events happen in the same step, all of them add up. Every contact or goal is paid **at most once per ball**.
@@ -37,7 +37,7 @@ SAC uses the same entry points as the original task: `--agent rsl_rl_sac_cfg_ent
 **SAC CE value range.** The CE critic predicts values on a fixed grid from −20 to +20 (`distributional_linear_limit=20`). Targets outside the grid are clipped to its edge. Some situations in this task are worse than −20:
 
 - a self-contact that lasts more than about 8 policy steps (−2.5 each);
-- a crash or area exit with its reset switched off (−5 each step).
+- a crash, area exit or tilt with its reset switched off (−5 each step). The tilt reset is off by default, so a robot that stays tilted for more than 4 policy steps is already below −20.
 
 The energy option pays about −3 to −4 per shot (section 3), which fits inside the grid. The critic sees −20 for all the cases above. It still learns to avoid them, but it cannot tell how bad they are. If this matters, widen the grid, for example `agent.critic.distributional_linear_limit=50.0`, or use the MSE entry point. PPO has no such limit.
 
@@ -91,8 +91,9 @@ Both distances use the same ball position, so a racket that does not move earns 
 | `rwd_scale_base_crash` | −5.0 | The base touches the floor or the goal. |
 | `rwd_scale_self_collision` | −2.5 | Two robot bodies touch each other (half the crash value). |
 | `rwd_scale_leave_goal_area` | −5.0 | The base origin is outside the goal-area box. |
+| `rwd_scale_tilt` | −5.0 | The base is tilted more than `robot_tilt_threshold_degs` (70°) from vertical. |
 
-These penalties are paid on **every policy step** that has the event. With the default resets, a base crash or leaving the area ends the episode, so it is paid once. Self-collisions do not reset by default, so a racket pressed against the base keeps costing −2.5 per step. At 100 Hz that is −250 per second of contact. This is on purpose: it discourages the "racket resting on the base" pose seen in recent policies. The original task also charged every step, as a robot crash of −1, but only for contacts that involve the base. In a 20-iteration PPO check with a random starting policy, self-contacts cost only about −0.1 to −0.3 per episode, so they do not swamp early learning.
+These penalties are paid on **every policy step** that has the event. With the default resets, a base crash or leaving the area ends the episode, so it is paid once. The tilt reset is off by default, so a tilted robot pays −5 on every step until it is upright again. Self-collisions do not reset by default, so a racket pressed against the base keeps costing −2.5 per step. At 100 Hz that is −250 per second of contact. This is on purpose: it discourages the "racket resting on the base" pose seen in recent policies. The original task also charged every step, as a robot crash of −1, but only for contacts that involve the base. In a 20-iteration PPO check with a random starting policy, self-contacts cost only about −0.1 to −0.3 per episode, so they do not swamp early learning.
 
 If you switch a reset off, its penalty is still paid on every step. For example, with `reset_robot_on_robot_crash=False` a base lying on the floor costs −5 per step.
 
@@ -102,7 +103,7 @@ If you switch a reset off, its penalty is still paid on every step. For example,
 
 **Leaving the area** keeps the original box: x in [−0.08, 0.90] m, y in [−1.2, 1.2] m, z in [0.07, 2.6] m, measured at the base origin. The original sketch had this as a reset only. We added the penalty for one reason: an episode that ends without a penalty is an escape. The robot could fly 8 cm backwards out of the box just before a goal and avoid the −5. With −5 for leaving, an escape costs as much as the goal it avoids. It only pays off if the robot expects the rest of its episode to be negative.
 
-Tilt has **no** penalty. It only matters through its optional reset (off by default). If you turn the tilt reset on, consider a penalty too, for the same escape reason.
+**Tilt** has a penalty for the same escape reason. Run `inwdqoc1` (2026-10-19) trained with `reset_robot_on_tilt_threshold=True` and no tilt penalty. Its policy leaned into the ball, hit it with the racket (+5) and tipped past 70° right after. The free reset ended every episode after about 0.34 s. With `gamma=0.99` at 100 Hz, the next shot (2–3 s later) is worth almost nothing, and the reset also avoids a later goal (−5). With −5 for the tilt, this trick gains about nothing: the hit and the penalty cancel. The tilt event is the same with or without its reset.
 
 Contact thresholds: ball contacts use `contact_force_threshold_n=0.05` N. Base-crash and self-collision contacts use `robot_crash_force_threshold_n=0.1` N.
 
@@ -199,6 +200,7 @@ New names:
 |---|---|
 | `rwd_scale_hit_racket`, `rwd_scale_hit_arm`, `rwd_scale_hit_base` | `rwd_scale_save`, `rwd_scale_hit`, `rwd_scale_ball_arm_collision`, `rwd_scale_ball_base_collision` |
 | `rwd_scale_base_crash` | `rwd_scale_robot_crash` (base contacts only now, no tilt) |
+| `rwd_scale_tilt` | the tilt part of `rwd_scale_robot_crash` |
 | `rwd_scale_self_collision` | self-contact used to count as a robot crash |
 | `minimize_energy_not_power` | new |
 | `reset_robot_on_leave_area` | leaving the area always reset |
@@ -236,6 +238,8 @@ Contacts use three filtered sensors: ball against racket/thigh/calf/base/goal, b
 - Training: PPO ran 20 iterations with 256 environments (about 11 500 steps/s). SAC CE and SAC MSE each ran 4 iterations with small laptop batches. The default SAC batch sizes ran out of memory on the 8 GB laptop GPU; they are sized for the cluster.
 - Playback: the shared player ran 300 steps with the PPO and SAC CE smoke checkpoints of this task. It also ran 300 steps of the original task with checkpoint `1018_qu68pf74_best_model_curriculum_idx_5.pt`.
 - The original task's 298 CPU tests and its 84 playback physics checks still pass.
+
+- Tilt penalty (2026-10-19): the 53 CPU tests check −5 per tilted step, with and without the tilt reset, and the `Episode_Reward/integrity/tilt` log. The power-mode simulator smoke passed all 29 checks, including a real 80° tilted base that pays only −5 and an upright robot that pays nothing.
 
 This shows that the reward is computed as designed and that training and playback run. It does not show that a policy learns the task well; no full training run has been done yet.
 

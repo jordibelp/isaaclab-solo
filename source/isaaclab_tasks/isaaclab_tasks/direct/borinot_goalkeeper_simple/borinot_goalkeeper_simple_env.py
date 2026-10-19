@@ -28,7 +28,7 @@ OUTCOME_SAVE = 7  # the shot ended without a goal
 EVENTS = ("hit_racket", "hit_arm", "hit_base", "goal", "base_crash", "self_collision", "leave_area", "tilt")
 REWARD_TERMS = {
     "task": ("progress", "hit_racket", "hit_arm", "hit_base", "goal"),
-    "integrity": ("base_crash", "self_collision", "leave_area"),
+    "integrity": ("base_crash", "self_collision", "leave_area", "tilt"),
     "desirability": ("action_rate", "energy"),
 }
 
@@ -323,7 +323,8 @@ class BorinotGoalkeeperSimpleEnv(DirectRLEnv):
         events = self._events
         return {"base_crash": self.cfg.rwd_scale_base_crash * events["base_crash"],
                 "self_collision": self.cfg.rwd_scale_self_collision * events["self_collision"],
-                "leave_area": self.cfg.rwd_scale_leave_goal_area * events["leave_area"]}
+                "leave_area": self.cfg.rwd_scale_leave_goal_area * events["leave_area"],
+                "tilt": self.cfg.rwd_scale_tilt * events["tilt"]}
 
     def _desirability_rewards(self):
         """Prefer smooth actuator commands and low energy use."""

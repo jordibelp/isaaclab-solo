@@ -174,8 +174,10 @@ def main(cfg, agent_cfg):
                       == [-2.5] * 3 and not terminated[:3].any())
                 check("self-contact is not a base crash", not events["base_crash"][:3].any())
                 check("leaving the area pays -5 and resets", terms["integrity/leave_area"][4] == -5.0 and terminated[4])
-                check("tilt alone has no penalty and no reset (default)", events["tilt"][5] and terms["integrity/base_crash"][5]
-                      == terms["integrity/self_collision"][5] == terms["integrity/leave_area"][5] == 0 and not terminated[5])
+                check("tilt pays only -5 and keeps the robot (default)", events["tilt"][5] and terms["integrity/tilt"][5] == -5.0
+                      and terms["integrity/base_crash"][5] == terms["integrity/self_collision"][5]
+                      == terms["integrity/leave_area"][5] == 0 and not terminated[5])
+                check("an upright robot pays no tilt penalty", (terms["integrity/tilt"][[0, 1, 2, 3, 4, 6, 7]] == 0).all())
                 check("quiet environments have no events", not any(v[6:].any() for v in events.values()))
                 cfg.self_collision_triggers_reset = cfg.reset_robot_on_tilt_threshold = True
                 switched = env._get_dones()[0]
