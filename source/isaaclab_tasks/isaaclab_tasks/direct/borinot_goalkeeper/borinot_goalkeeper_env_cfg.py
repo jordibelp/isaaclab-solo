@@ -119,7 +119,7 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     goal_size = (0.04, 2.4, 2.4)
     launch_x_range = (1.9, 2.1)
     launch_z = 1.55
-    launch_y_noise = 0.15
+    launch_y_noise = 0.15 # y_launch sampled around y_des with a uniform noise pm this.
     shot_half_extents_yz = ((0.045, 0.045), (0.20, 0.12), (0.40, 0.22), (0.65, 0.32), (0.8,0.6), (1.0,1.0))
     shot_flight_time_ranges_s = ((0.42, 0.50), (0.35, 0.50), (0.30, 0.46), (0.25, 0.42), (0.25, 0.50), (0.25, 0.6))
     shot_level = 0

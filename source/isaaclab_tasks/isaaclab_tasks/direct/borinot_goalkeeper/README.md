@@ -177,17 +177,17 @@ reward = plane_progress + outcome + floor_after_save
 
 ### Main reward scales
 
-| Config field | Shipped scale | Signal and usual episode effect |
+| Config field | scale | Signal and usual episode effect |
 |---|---:|---|
 | `rwd_scale_goal` | −1.0 | Ball contacts or crosses the goal surface. Ends this shot; episode continues. |
 | `rwd_scale_ball_base_collision` | −1.0 | Ball contacts the aircraft base. Ends this shot; episode continues. |
 | `rwd_scale_ball_arm_collision` | −0.25 | Ball contacts either arm link, rather than only the paddle. Ends this shot; episode continues. |
 | `rwd_scale_leave_goal_area` | −1.0 | Base origin leaves the allowed box. Ends the episode. |
-| `rwd_scale_save` | +1.0 | A paddle hit is followed by verified safe clearance, plus recovery if requested. Ends this shot; episode continues. |
+| `rwd_scale_save` | +1.0 | A paddle hit is followed by verified safe clearance. |
 | `rwd_scale_ball_floor` | −0.25 | Live-floor shot failure, or a separate floor cost on a valid floor save. Episode continues. |
 | `rwd_scale_miss` | −1.0 | An unresolved ball leaves the tracking bounds. Ends this shot; episode continues. |
 | `rwd_scale_deadline` | −1.0 | Shot time runs out without a confirmed save. Ends this shot; episode continues. |
-| `rwd_scale_robot_crash` | −1.0 | Non-ball contact on configured crash bodies or excessive tilt. Reset uses two independent switches. |
+| `rwd_scale_robot_crash` | −1.0 | Non-ball base contact or excessive tilt. Reset uses two independent switches. |
 | `rwd_scale_progress` | +0.5 | Signed reduction in paddle-to-target y–z distance, in metres. Does not end the episode. |
 
 Each selected event has signal 1, so its contribution is exactly its scale. For example, a selected arm collision contributes −0.25, not −0.25 per second. Ball-result penalties are paid once per resolved shot without ending the episode. Safety penalties are paid on the failure transition. Crash penalties can repeat if you disable their resets.
