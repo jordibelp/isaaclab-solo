@@ -13,6 +13,7 @@ from isaaclab.sensors import ContactSensor, ContactSensorCfg
 from isaaclab.utils.math import matrix_from_quat, quat_apply, quat_apply_inverse
 
 from .borinot_goalkeeper_env_cfg import BorinotGoalkeeperEnvCfg
+from .events import configure_randomization
 from .paddle import attach_paddle
 from .task_math import (
     crosses_goal, plane_progress, predict_intercept, promotion_ready, sample_robot_positions, sample_shots,
@@ -32,6 +33,7 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
 
     def __init__(self, cfg: BorinotGoalkeeperEnvCfg, render_mode=None, **kwargs):
         cfg.configure_control()
+        configure_randomization(cfg)
         validate_reset_grid(cfg)
         validate_shot_schedule(cfg)
         if not 0 <= cfg.shot_level < len(cfg.shot_half_extents_yz):
@@ -77,12 +79,14 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         self._kp = torch.tensor(cfg.rate_kp, device=self.device)
         self._ki = torch.tensor(cfg.rate_ki, device=self.device)
 
-        masses = self.robot.root_physx_view.get_masses()
-        self.robot_mass_kg = float(masses[0].sum())
+        # Fixed action scale/cap: do not let environment 0's random mass retune all rotors.
+        self.robot_mass_kg = float(self.robot.data.default_mass[0].sum())
         self._hover_total = self.robot_mass_kg * 9.81
         self._hover_per_rotor = self._hover_total / 6
         rotor_pos = torch.tensor(cfg.rotor_pos_b, device=self.device)
-        base_com = self.robot.root_physx_view.get_coms()[0, self.base_id, :3].to(self.device)
+        base_coms = self.robot.root_physx_view.get_coms()[:, self.base_id, :3].to(self.device)
+        base_com = getattr(self, "_nominal_base_com", base_coms[0]).to(self.device)
+        self._base_com_offset = base_coms - base_com
         rotor_pos = rotor_pos - base_com
         self._allocation = torch.stack((torch.ones(6, device=self.device), rotor_pos[:, 1], -rotor_pos[:, 0],
                                         torch.tensor(cfg.rotor_spin, device=self.device) * cfg.km_over_kf))
@@ -262,6 +266,9 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         else:
             self._rotor_thrust.add_(self._motor_alpha * (commands - self._rotor_thrust))
         wrench = self._rotor_thrust @ self._allocation.T
+        # Forces act at the fixed rotor positions, about each environment's actual CoM.
+        wrench[:, 1] -= self._base_com_offset[:, 1] * wrench[:, 0]
+        wrench[:, 2] += self._base_com_offset[:, 0] * wrench[:, 0]
         force = torch.zeros(self.num_envs, 1, 3, device=self.device)
         force[:, 0, 2] = wrench[:, 0]
         self.robot.permanent_wrench_composer.set_forces_and_torques(

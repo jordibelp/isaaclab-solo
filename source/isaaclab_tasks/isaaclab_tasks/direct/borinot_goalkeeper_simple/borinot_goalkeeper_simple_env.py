@@ -14,6 +14,7 @@ from isaaclab.sensors import ContactSensor, ContactSensorCfg
 from isaaclab.utils.math import matrix_from_quat, quat_apply, quat_apply_inverse
 
 from isaaclab_tasks.direct.borinot_goalkeeper.borinot_goalkeeper_env import BorinotGoalkeeperEnv
+from isaaclab_tasks.direct.borinot_goalkeeper.events import configure_randomization
 from isaaclab_tasks.direct.borinot_goalkeeper.paddle import attach_paddle
 from isaaclab_tasks.direct.borinot_goalkeeper.task_math import (
     crosses_goal, plane_progress, predict_intercept, promotion_ready, sample_robot_positions, sample_shot_delay_steps,
@@ -47,6 +48,7 @@ class BorinotGoalkeeperSimpleEnv(DirectRLEnv):
 
     def __init__(self, cfg: BorinotGoalkeeperSimpleEnvCfg, render_mode=None, **kwargs):
         cfg.configure_control()
+        configure_randomization(cfg)
         validate_reset_grid(cfg)
         validate_shot_schedule(cfg)
         if not 0 <= cfg.shot_level < len(cfg.shot_half_extents_yz):
@@ -89,12 +91,14 @@ class BorinotGoalkeeperSimpleEnv(DirectRLEnv):
         self._rate_scale = torch.tensor(cfg.body_rate_scale, device=self.device)
         self._kp = torch.tensor(cfg.rate_kp, device=self.device)
         self._ki = torch.tensor(cfg.rate_ki, device=self.device)
-        masses = self.robot.root_physx_view.get_masses()
-        self.robot_mass_kg = float(masses[0].sum())
+        # Keep action scaling nominal; each robot still has its sampled physical mass.
+        self.robot_mass_kg = float(self.robot.data.default_mass[0].sum())
         self._hover_total = self.robot_mass_kg * 9.81
         self._hover_per_rotor = self._hover_total / 6
         rotor_pos = torch.tensor(cfg.rotor_pos_b, device=self.device)
-        base_com = self.robot.root_physx_view.get_coms()[0, self.base_id, :3].to(self.device)
+        base_coms = self.robot.root_physx_view.get_coms()[:, self.base_id, :3].to(self.device)
+        base_com = getattr(self, "_nominal_base_com", base_coms[0]).to(self.device)
+        self._base_com_offset = base_coms - base_com
         rotor_pos = rotor_pos - base_com
         self._allocation = torch.stack((torch.ones(6, device=self.device), rotor_pos[:, 1], -rotor_pos[:, 0],
                                         torch.tensor(cfg.rotor_spin, device=self.device) * cfg.km_over_kf))

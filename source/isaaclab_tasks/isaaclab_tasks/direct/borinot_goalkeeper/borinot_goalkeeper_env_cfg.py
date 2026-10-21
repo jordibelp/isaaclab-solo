@@ -10,6 +10,8 @@ from isaaclab.envs.common import ViewerCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.utils import configclass
 
+from .events import BorinotEventCfg
+
 
 @configclass
 class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
@@ -35,6 +37,13 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     )
     scene = InteractiveSceneCfg(num_envs=2048, env_spacing=7.0, replicate_physics=True)
     viewer = ViewerCfg(eye=(4.0, 4.0, 2.7), lookat=(0.3, 0.0, 1.2))
+
+    # Sample once per environment at startup, as in Solo12. Hydra accepts dotted dict keys.
+    include_events_randomization = True
+    event_randomization = {
+        "joint_friction": True, "add_base_mass": True, "racket_mass": True, "base_com": True,
+    }
+    events: BorinotEventCfg | None = BorinotEventCfg()
 
     robot_home = (0.0, 0.0, 1.5)  # centre of the reset grid; also the observation/recovery reference
     robot_home_quat = (0.7071067811865476, 0.0, 0.0, -0.7071067811865476)  # wxyz; -90 deg yaw

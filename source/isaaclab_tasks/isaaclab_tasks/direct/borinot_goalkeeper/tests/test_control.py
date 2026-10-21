@@ -128,6 +128,7 @@ def action_env(mode, hold_arm=False, motor_time_constant_s=None):
         _rate_scale=torch.tensor(cfg.body_rate_scale), _rate_integral=torch.zeros(3, 3, dtype=torch.float64),
         _kp=torch.tensor(cfg.rate_kp), _ki=torch.tensor(cfg.rate_ki), _hover_total=30.0, _hover_per_rotor=5.0,
         _allocation=allocation, _allocation_inverse=torch.linalg.pinv(allocation),
+        _base_com_offset=torch.zeros(3, 3, dtype=torch.float64),
         _rotor_thrust=torch.full((3, 6), 5.0, dtype=torch.float64),
         _joint_scale=torch.tensor(cfg.joint_target_scale))
     init = next(n for n in source_class("borinot_goalkeeper_env.py").body
