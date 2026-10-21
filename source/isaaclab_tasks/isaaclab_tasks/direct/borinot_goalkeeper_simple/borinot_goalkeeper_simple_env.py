@@ -95,6 +95,8 @@ class BorinotGoalkeeperSimpleEnv(DirectRLEnv):
         self.robot_mass_kg = float(self.robot.data.default_mass[0].sum())
         self._hover_total = self.robot_mass_kg * 9.81
         self._hover_per_rotor = self._hover_total / 6
+        # Resolve once so clipping, SAC endpoints and command normalization use the same physical limit.
+        cfg.thrust_to_weight = min(cfg.thrust_to_weight, cfg.rotor_thrust_limit_n / self._hover_per_rotor)
         rotor_pos = torch.tensor(cfg.rotor_pos_b, device=self.device)
         base_coms = self.robot.root_physx_view.get_coms()[:, self.base_id, :3].to(self.device)
         base_com = getattr(self, "_nominal_base_com", base_coms[0]).to(self.device)

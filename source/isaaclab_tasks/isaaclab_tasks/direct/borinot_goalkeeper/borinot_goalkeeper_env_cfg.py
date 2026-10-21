@@ -138,22 +138,25 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     curriculum_min_steps = 3000  # 30 s at 100 Hz (50 s at 60 Hz), per environment, not aggregate transitions
     curriculum_success_threshold = 0.7
 
-    thrust_to_weight = 3.5  # max thrust applicable by the rotors
+    rotor_thrust_limit_n = 10.0  # hardware-profile ceiling per rotor; used when thrust clipping is enabled
+    thrust_to_weight = 3.5  # further limits thrust; resolved against the 10 N ceiling at env creation
     rotor_action_scale = 1.0  # direct modes: hover_per_rotor * (1 + scale * action)
-    action_clamp=10.0  # used only when remove_action_and_thrust_clippings=False
-    remove_action_clipping=True  # True: no action clamp and no upper rotor thrust cap; thrust stays >= 0
-    remove_thrust_clipping=False # clip thrust between 0 and TWR if false
+    action_clamp=10.0  # used only when remove_thrust_clipping=False
+    remove_action_clipping=True  # legacy unused field; remove_thrust_clipping controls clipping
+    remove_thrust_clipping=False # False: cap thrust at min(TWR * nominal hover, rotor_thrust_limit_n)
     collective_action_scale = 0.7
     body_rate_scale = (2.0, 2.0, 1.5)
     rate_kp = (0.35, 0.35, 0.15)
     rate_ki = (0.10, 0.10, 0.04)
     motor_time_constant_s = 0.04  # motor lag; 0 disables filtering (instantaneous thrust commands)
-    rotor_pos_b = ((0.20, 0.00, 0.00), (0.10, 0.17, 0.00), (-0.10, 0.17, 0.00),
-                   (-0.20, 0.00, 0.00), (-0.10, -0.17, 0.00), (0.10, -0.17, 0.00))
-    rotor_spin = (-1.0, 1.0, -1.0, 1.0, -1.0, 1.0)
-    # current kf, km from: https://github.com/PepMS/eagle-mpc/blob/522b4af6f31dcdec72c9c461ace28bb774aa4057/yaml/hexacopter370/platform/hexacopter370.yaml#L1-L5
-    kf = 4.138394792004922e-06
-    km = 6.991478005829954e-08
+    # Eagle/PX4 motor order, body-frame metres, 0.185 m radius; spin is the body-yaw torque sign.
+    # Hardware profile: hidro-iri/eagle_mpc_lib@96c65ab, yaml/borinot_flying_arm_2/platform/borinot.yaml.
+    rotor_pos_b = ((0.0, -0.185, 0.0), (0.0, 0.185, 0.0),
+                   (0.1602147, 0.0925, 0.0), (-0.1602147, -0.0925, 0.0),
+                   (0.1602147, -0.0925, 0.0), (-0.1602147, 0.0925, 0.0))
+    rotor_spin = (1.0, -1.0, 1.0, -1.0, -1.0, 1.0)
+    kf = 3.847e-6  # N / (rad/s)^2; source identifies the ratio, not independent absolute fits
+    km = 5.361e-8  # N*m / (rad/s)^2
     p_el_motor_efficiency = 0.95
     km_over_kf = km / kf
 
@@ -243,6 +246,8 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
             raise ValueError("effort_lim_sim and velocity_lim_sim must be positive.")
         if not math.isfinite(self.thrust_to_weight) or self.thrust_to_weight <= 0:
             raise ValueError("thrust_to_weight must be finite and positive.")
+        if not math.isfinite(self.rotor_thrust_limit_n) or self.rotor_thrust_limit_n <= 0:
+            raise ValueError("rotor_thrust_limit_n must be finite and positive.")
         if self.sac_action_mapping:
             if self.control_mode not in modes[:2]:
                 raise ValueError("sac_action_mapping requires a direct thrust control mode (torque or PD position).")
