@@ -11,11 +11,13 @@ from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.utils import configclass
 
 from .events import BorinotEventCfg
+from .indi import IndiControllerCfg
 
 
 @configclass
 class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     control_mode = "thrust_and_torque_control"
+    indi = IndiControllerCfg()  # used only by control_mode="indi"; see INDI_CONTROL.md
     enabled_self_collisions = False  # env.enabled_self_collisions=True enables eligible nonadjacent body pairs
     physics_hz = 200
     policy_hz = 100
@@ -27,9 +29,9 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     shot_resampling_mode = "launch"  # "launch": launch-to-launch; "resolution": delay after each result
     reset_on_goal = False  # True resets the robot too; goal scoring/penalty stay unchanged
     ball_park_position = (0.0, 0.0, -2.0)  # inactive ball is removed below the local floor
-    action_space = 8  # derived: 8 for direct thrust modes, 6 for PI
+    action_space = 8  # derived: 8 direct, 6 PI, 9 INDI
     observation_space = 44  # derived: actor inputs selected by the obs_actor_includes_* flags, plus the current actions
-    state_space = 56  # derived: critic always gets all 48 values plus the current actions (+9 PI-only values in PI mode)
+    state_space = 56  # derived: 48 + actions + controller state (9 PI, 8 INDI)
     sim = sim_utils.SimulationCfg(
         dt=1 / 200,
         render_interval=decimation,
@@ -49,8 +51,8 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     robot_home_quat = (0.7071067811865476, 0.0, 0.0, -0.7071067811865476)  # wxyz; -90 deg yaw
     effort_lim_sim = 2.7  # N*m; also maps unit torque actions to joint efforts
     velocity_lim_sim = 100.0  # rad/s
-    kp = 9.0  # N*m/rad; disabled in torque mode unless hold_arm=True
-    kd = 0.2  # N*m*s/rad; disabled in torque mode unless hold_arm=True
+    kp = 9.0  # N*m/rad; implicit PD in position modes, explicit PID in INDI
+    kd = 0.2  # N*m*s/rad; disabled in direct torque mode unless hold_arm=True
     robot = ArticulationCfg(
         prim_path="/World/envs/env_.*/Robot",
         spawn=sim_utils.UsdFileCfg(
@@ -76,7 +78,7 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     )
     joint_names = ("flying_arm_2__j_bl_link1", "flying_arm_2__j_link1_link2")
     joint_target_scale = (1.1, 1.4) # why this target scales? 
-    hold_arm = False  # neutral PD targets; this is NOT a mechanically welded arm
+    hold_arm = False  # neutral PD/PID targets; this is NOT a mechanically welded arm
 
     # Enabled by the SAC runner before env creation. PPO keeps its existing mapping/limits.
     sac_action_mapping = False
@@ -234,7 +236,7 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     def configure_control(self):
         """Refresh derived settings before simulator/space creation, including after Hydra."""
         self.robot.spawn.articulation_props.enabled_self_collisions = self.enabled_self_collisions
-        modes = ("thrust_and_torque_control", "thrust_and_PD_joint_pos_control", "PI_rotors_PD_joint_pos_control")
+        modes = ("thrust_and_torque_control", "thrust_and_PD_joint_pos_control", "PI_rotors_PD_joint_pos_control", "indi")
         if self.control_mode not in modes:
             raise ValueError(f"Unknown control_mode {self.control_mode!r}; choose one of {modes}.")
         if self.physics_hz <= 0 or self.policy_hz <= 0:
@@ -248,9 +250,11 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
             raise ValueError("thrust_to_weight must be finite and positive.")
         if not math.isfinite(self.rotor_thrust_limit_n) or self.rotor_thrust_limit_n <= 0:
             raise ValueError("rotor_thrust_limit_n must be finite and positive.")
+        if self.control_mode == "indi":
+            self.indi.validate(self)
         if self.sac_action_mapping:
-            if self.control_mode not in modes[:2]:
-                raise ValueError("sac_action_mapping requires a direct thrust control mode (torque or PD position).")
+            if self.control_mode not in (*modes[:2], "indi"):
+                raise ValueError("sac_action_mapping requires direct thrust control (torque/PD position) or indi.")
             if not math.isfinite(self.thrust_to_weight) or self.thrust_to_weight <= 1:
                 raise ValueError("SAC thrust_to_weight must be finite and greater than 1 (hover).")
             if len(self.joint_target_scale) != 2 or any(not math.isfinite(s) or s <= 0 for s in self.joint_target_scale):
@@ -267,15 +271,15 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
         self.decimation = round(ratio)
         self.sim.dt = 1 / self.physics_hz
         self.sim.render_interval = self.decimation
-        self.action_space = 6 if self.control_mode == modes[2] else 8
-        pi_state = 9 if self.control_mode == modes[2] else 0  # PI only: rotor thrusts (6) and rate integral (3)
-        self.state_space = 48 + self.action_space + pi_state
+        self.action_space = 9 if self.control_mode == "indi" else (6 if self.control_mode == modes[2] else 8)
+        controller_state = 8 if self.control_mode == "indi" else (9 if self.control_mode == modes[2] else 0)
+        self.state_space = 48 + self.action_space + controller_state
         point, time = self.obs_actor_includes_ball_plane_intersection_point, self.obs_actor_includes_time_ball_collides_plane
         # Optional actor inputs: plane point (3), time (1), validity (1), phase (7), ball parameters (2).
-        self.observation_space = (34 + self.action_space + pi_state + 3 * point + time + (point or time)
+        self.observation_space = (34 + self.action_space + controller_state + 3 * point + time + (point or time)
                                  + 7 * self.obs_actor_includes_phase + 2 * self.obs_actor_includes_ball_params)
         actuator = self.robot.actuators["arm"]
-        use_pd = self.control_mode != modes[0] or self.hold_arm
+        use_pd = self.control_mode != "indi" and (self.control_mode != modes[0] or self.hold_arm)
         actuator.stiffness = self.kp if use_pd else 0.0
         actuator.damping = self.kd if use_pd else 0.0
         actuator.effort_limit_sim = self.effort_lim_sim

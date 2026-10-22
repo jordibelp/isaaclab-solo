@@ -4,12 +4,14 @@ Date: 2026-10-14. Task ID: `Borinot-Goalkeeper-Direct-v0`.
 
 ## Start here
 
+**New controller:** `env.control_mode=indi` selects a nine-action acceleration/rate/heading/joint-target policy with physics-rate INDI and joint PID. It works with PPO and both SAC critics. See the shared [step-by-step INDI guide](INDI_CONTROL.md) for equations, design choices, training/playback commands and limits.
+
 This is a separate task. It does not change the existing Borinot locomotion task or the source USD.
 We start with privileged simulator information. Both the actor and critic receive true robot state, ball position and velocity, and the sampled ball mass and restitution. There is no camera or state estimator yet. By default the actor does not see the predicted plane crossing or the shot phase; the critic always does (see the observation contract below).
 
 Episodes now contain a continuous sequence of single-ball shots. A save or failed interception does not reset Borinot. Only configured base crashes, excessive tilt, leaving the allowed area, and the episode time limit reset the robot. The default reward follows Jordi's requested approach. Goal and base hits cost −1. Arm hits cost −0.25. Leaving the goal area costs −1. Moving the racket closer to the ball in the goal-parallel plane earns signed progress. A verified racket save earns +1. Additional shaping and the recovery requirement are off by default.
 
-Use **PPO** first. Both Borinot tasks now share the Solo-style PPO recipe: 24 rollout steps, four minibatches, five epochs, `[512, 256, 128]` networks, AdamW, and gamma 0.99. See [PPO training guide](../borinot/PPO_TRAINING.md) for the complete cluster commands and available flags. SAC remains future work.
+Use **PPO** first. Both Borinot tasks now share the Solo-style PPO recipe: 24 rollout steps, four minibatches, five epochs, `[512, 256, 128]` networks, AdamW, and gamma 0.99. See [PPO training guide](../borinot/PPO_TRAINING.md) for the complete cluster commands and available flags. SAC is also available; see [SAC training](SAC_TRAINING.md).
 
 ### Continuous episode and shot timing
 

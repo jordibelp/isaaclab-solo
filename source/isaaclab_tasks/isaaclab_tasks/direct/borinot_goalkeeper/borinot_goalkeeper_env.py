@@ -14,6 +14,7 @@ from isaaclab.utils.math import matrix_from_quat, quat_apply, quat_apply_inverse
 
 from .borinot_goalkeeper_env_cfg import BorinotGoalkeeperEnvCfg
 from .events import configure_randomization
+from .indi import IndiController
 from .paddle import attach_paddle
 from .task_math import (
     crosses_goal, plane_progress, predict_intercept, promotion_ready, sample_robot_positions, sample_shots,
@@ -102,6 +103,8 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         self._motor_alpha = (
             1.0 if cfg.motor_time_constant_s == 0 else 1 - math.exp(-self.physics_dt / cfg.motor_time_constant_s)
         )
+        if cfg.control_mode == "indi":
+            self._init_indi()
         # Columns: rotor mechanical, rotor dissipative, arm mechanical, arm copper loss.
         self._power_sum_w = torch.zeros((self.num_envs, 4), device=self.device)
         self._power_samples = 0
@@ -148,6 +151,17 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         self._ball_materials = self.ball.root_physx_view.get_material_properties()
         self._ball_parameters = torch.zeros(self.num_envs, 2, device=self.device)
         self._physics_samples = 0
+
+    def _init_indi(self):
+        # default_inertia is nominal, about the base CoM and expressed in base-link axes.
+        # Never tune the common controller to one clone's startup-randomized physics.
+        inertia = self.robot.data.default_inertia[0, self.base_id].reshape(3, 3).to(self.device)
+        self._indi = IndiController(self.cfg, self.num_envs, self._allocation, inertia,
+                                    self.robot_mass_kg, self._hover_per_rotor)
+        hard_limits = torch.deg2rad(torch.tensor(
+            [self.cfg.joint_physical_limit_thigh, self.cfg.joint_physical_limit_calf], device=self.device))
+        self.robot.write_joint_position_limit_to_sim(
+            hard_limits.expand(self.num_envs, -1, -1).clone(), joint_ids=self.joint_ids)
 
     def _setup_scene(self):
         self.robot = Articulation(self.cfg.robot)
@@ -226,7 +240,9 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         self._shot_steps += self._ball_active
         self._outcome.zero_()
         self._previous_actuator_commands.copy_(self._actuator_commands)
-        if not self.cfg.sac_action_mapping and not self.cfg.remove_thrust_clipping:
+        if self.cfg.control_mode == "indi":
+            actions = actions.clamp(-1.0, 1.0)
+        elif not self.cfg.sac_action_mapping and not self.cfg.remove_thrust_clipping:
             actions = actions.clamp(-self.cfg.action_clamp, self.cfg.action_clamp)
         self.actions.copy_(actions)
         self._previous_paddle.copy_(self._paddle_pose()[0])
@@ -246,7 +262,11 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         if self._physics_samples:
             self._sample_physics_events()
         self._physics_samples += 1
-        if self.cfg.control_mode == "PI_rotors_PD_joint_pos_control":
+        if self.cfg.control_mode == "indi":
+            commands, joint_effort = self._indi.step(
+                self.actions, self.robot.data.root_quat_w, self.robot.data.root_ang_vel_b,
+                self.robot.data.joint_pos[:, self.joint_ids], self.robot.data.joint_vel[:, self.joint_ids])
+        elif self.cfg.control_mode == "PI_rotors_PD_joint_pos_control":
             rates = self.robot.data.root_ang_vel_b
             error = self.actions[:, 1:4] * self._rate_scale - rates
             self._rate_integral.add_(error * self.physics_dt).clamp_(-0.5, 0.5)
@@ -263,11 +283,16 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         cap = self._hover_per_rotor * self.cfg.thrust_to_weight
         commands.clamp_(min=0.0, max=None if self.cfg.remove_thrust_clipping else cap)
         self._actuator_commands[:, :6] = commands / cap
-        if self.cfg.motor_time_constant_s == 0:
+        if self.cfg.control_mode == "indi":
+            # INDI models lag on speed, not thrust. Other modes keep their original thrust lag.
+            self._rotor_thrust.copy_(self.cfg.kf * self._indi.rotor_speed.square())
+        elif self.cfg.motor_time_constant_s == 0:
             self._rotor_thrust.copy_(commands)
         else:
             self._rotor_thrust.add_(self._motor_alpha * (commands - self._rotor_thrust))
         wrench = self._rotor_thrust @ self._allocation.T
+        if self.cfg.control_mode == "indi":
+            wrench[:, 1:] += self._indi.transient_torque
         # Forces act at the fixed rotor positions, about each environment's actual CoM.
         wrench[:, 1] -= self._base_com_offset[:, 1] * wrench[:, 0]
         wrench[:, 2] += self._base_com_offset[:, 0] * wrench[:, 0]
@@ -276,7 +301,10 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         self.robot.permanent_wrench_composer.set_forces_and_torques(
             forces=force, torques=wrench[:, None, 1:4], body_ids=[self.base_id], is_global=False,
         )
-        if self.cfg.control_mode == "thrust_and_torque_control" and not self.cfg.hold_arm:
+        if self.cfg.control_mode == "indi":
+            # Implicit gains are zero: the software PID runs once per physics substep.
+            self.robot.set_joint_effort_target(joint_effort, joint_ids=self.joint_ids)
+        elif self.cfg.control_mode == "thrust_and_torque_control" and not self.cfg.hold_arm:
             # SAC keeps these actions in [-1, 1]: -limit / zero / +limit at u=-1 / 0 / +1.
             self.robot.set_joint_effort_target(self.actions[:, 6:8] * self.cfg.effort_lim_sim, joint_ids=self.joint_ids)
         else:
@@ -511,6 +539,8 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         if self.cfg.control_mode == "PI_rotors_PD_joint_pos_control":
             # Direct modes already command each rotor in the action; PI hides thrusts and its integral state.
             tail += [self._rotor_thrust / self._hover_per_rotor, self._rate_integral]
+        elif self.cfg.control_mode == "indi":
+            tail += [self._indi.observation()]
         # The flags simplify only the actor; the critic keeps every privileged input.
         point, time = self.cfg.obs_actor_includes_ball_plane_intersection_point, self.cfg.obs_actor_includes_time_ball_collides_plane
         optional = [(point, ball_parts[2]), (time, ball_parts[3]),
@@ -658,6 +688,8 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         for value in self._episode_terms.values():
             value[env_ids] = 0
         self._rotor_thrust[env_ids] = self._hover_per_rotor
+        if self.cfg.control_mode == "indi":
+            self._indi.reset(env_ids)
         for buffer in (self._actuator_commands, self._previous_actuator_commands):
             buffer[env_ids, :6] = 1.0 / self.cfg.thrust_to_weight
             buffer[env_ids, 6:] = 0.0

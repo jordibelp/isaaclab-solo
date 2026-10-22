@@ -1,5 +1,7 @@
 # Borinot goalkeeper SAC
 
+**INDI mode:** both SAC entries also support `env.control_mode=indi` in both goalkeeper tasks. This uses nine bounded high-level references, not eight direct actuator actions. See [INDI control](INDI_CONTROL.md) for its action order, physical scaling, training and playback commands. The direct-mode mapping described below is unchanged.
+
 Both SAC agents use the same recipe as Jordi's supplied Solo12 SAC command.
 Only the critic loss changes between the two agents.
 This integration is for `Borinot-Goalkeeper-Direct-v0`.

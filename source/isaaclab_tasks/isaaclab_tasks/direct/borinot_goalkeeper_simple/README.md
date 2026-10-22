@@ -4,6 +4,8 @@ Date: 2026-10-18. Task ID: `Borinot-Goalkeeper-Simple-Direct-v0`.
 
 ## Start here
 
+**New controller:** `env.control_mode=indi` selects the shared nine-action INDI + joint PID interface. Both low-level controllers run at physics rate during training and playback. PPO and both SAC critics are supported. Read the original task's [step-by-step INDI guide](../borinot_goalkeeper/INDI_CONTROL.md) for the full design and commands.
+
 This is a new task next to the original `Borinot-Goalkeeper-Direct-v0`. The original task's training code, config and rewards are unchanged. Only its playback file was split into a reusable part, so that one player can show both tasks. Playback of the original task behaves as before.
 
 The robot, racket, ball, goal, shots, curriculum, control modes and actor observations are the same. Only the reward and the reset rules change. The new reward is a plain **sum** of a few terms in three groups:

@@ -87,11 +87,11 @@ def test_invalid_sac_contract_rejected_before_simulation(field, value):
 
 @pytest.mark.parametrize("loss", ["two_hot", "mse"])
 @pytest.mark.parametrize("initialize_offset", [False, True])
-@pytest.mark.parametrize("mode", ["thrust_and_torque_control", "thrust_and_PD_joint_pos_control"])
+@pytest.mark.parametrize("mode", ["thrust_and_torque_control", "thrust_and_PD_joint_pos_control", "indi"])
 def test_constructor_dispatch_initialization_update_and_checkpoint(monkeypatch, loss, initialize_offset, mode):
     env, _ = sac_env()
     env.cfg.control_mode = mode
-    env.num_actions, env.num_envs = 8, 3
+    env.num_actions, env.num_envs = (9 if mode == "indi" else 8), 3
     env.cfg.sac_q_offset_init_actions = initialize_offset
     obs = TensorDict({"policy": torch.randn(3, 5), "critic": torch.randn(3, 7)}, batch_size=[3])
     cls = algorithm_class()
@@ -108,9 +108,9 @@ def test_constructor_dispatch_initialization_update_and_checkpoint(monkeypatch, 
                        num_mini_batches=1, mini_batch_size=3, q_reduction_method="mean_pi_q_none"))
     alg = SAC.construct_algorithm(obs, env, copy.deepcopy(cfg), "cpu")
     mean_head = [m for m in alg.actor.mlp.modules() if isinstance(m, torch.nn.Linear)][-1]
-    initial = alg.actor._squash_and_scale(mean_head.bias[:8])
-    if initialize_offset or mode == "thrust_and_torque_control":
-        torch.testing.assert_close(initial, torch.zeros(8), atol=1e-7, rtol=0)
+    initial = alg.actor._squash_and_scale(mean_head.bias[:env.num_actions])
+    if initialize_offset or mode in ("thrust_and_torque_control", "indi"):
+        torch.testing.assert_close(initial, torch.zeros(env.num_actions), atol=1e-7, rtol=0)
     else:
         torch.testing.assert_close(initial[-2:]*env._joint_scale + env._sac_joint_offset,
                                    torch.zeros(2), atol=1e-7, rtol=0)
