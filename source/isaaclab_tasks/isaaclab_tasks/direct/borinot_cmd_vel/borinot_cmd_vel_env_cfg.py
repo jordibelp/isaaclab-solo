@@ -24,8 +24,8 @@ class BorinotCmdVelEnvCfg(BorinotGoalkeeperEnvCfg):
     command_ang_vel_z_range = (-1.0, 1.0)
     command_resampling_time_s = 5.0
     standing_env_prob = 0.02  # all four commands zero
-    tracking_lin_std = 0.5  # m/s; Solo's tracking_std=sqrt(0.25)
-    tracking_ang_std = 0.5  # rad/s
+    tracking_lin_std = 0.223  # m/s; Solo's tracking_std=sqrt(0.25)
+    tracking_ang_std = 0.223  # rad/s
     rwd_scale_lin_vel = 1.5
     rwd_scale_ang_vel = 0.5
     rwd_scale_action_rate = 0.0  # same physical command-rate signal as goalkeeper, times dt
@@ -44,7 +44,7 @@ class BorinotCmdVelEnvCfg(BorinotGoalkeeperEnvCfg):
     base_push_duration_range_s = (0.5, 2.0)
     base_push_application_radius_m = 0.12
     base_push_application_half_height_m = 0.03
-    forces_applied_to_base_curriculum = (0.0, 5.0, 8.0)  # max |world-Z force|, N
+    forces_applied_to_base_curriculum = (0.0, 1.0, 3.0)  # max |world-Z force|, N
     curriculum = True
     skip_curriculum = False
     curriculum_start_level = 0  # also selects a fixed level when curriculum=False
@@ -57,7 +57,7 @@ class BorinotCmdVelEnvCfg(BorinotGoalkeeperEnvCfg):
     flight_height_range_m = (0.15, 20.0)
     flight_xy_limit_m = 25.0
     reset_robot_on_tilt_threshold = True
-    robot_tilt_threshold_degs = 70.0
+    robot_tilt_threshold_degs = 80.0
 
     def configure_control(self):
         super().configure_control()
