@@ -9,7 +9,7 @@ import torch
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
-from isaaclab.utils.math import matrix_from_quat, quat_apply_inverse
+from isaaclab.utils.math import matrix_from_quat, quat_apply_inverse, quat_from_euler_xyz, quat_mul
 from isaaclab_tasks.direct.borinot_goalkeeper.borinot_goalkeeper_env import BorinotGoalkeeperEnv
 from isaaclab_tasks.direct.borinot_goalkeeper.events import configure_randomization
 from isaaclab_tasks.direct.borinot_goalkeeper.indi import IndiController
@@ -274,6 +274,12 @@ class BorinotCmdVelEnv(DirectRLEnv):
         root[:, :2] += torch.empty(n, 2, device=self.device).uniform_(-self.cfg.reset_xy_noise_m, self.cfg.reset_xy_noise_m)
         root[:, 2] += torch.empty(n, device=self.device).uniform_(-self.cfg.reset_z_noise_m, self.cfg.reset_z_noise_m)
         root[:, 3:7] = torch.tensor(self.cfg.robot_home_quat, device=self.device)
+        if any(self.cfg.reset_rpy_noise_degs):
+            half_ranges = torch.deg2rad(torch.tensor(self.cfg.reset_rpy_noise_degs, device=self.device))
+            rpy = (2 * torch.rand(n, 3, device=self.device) - 1) * half_ranges
+            delta = quat_from_euler_xyz(*rpy.unbind(-1))
+            # Right multiplication: small local offsets about the nominal home attitude.
+            root[:, 3:7] = quat_mul(root[:, 3:7], delta)
         root[:, 7:] = 0.0
         self.robot.write_root_state_to_sim(root, env_ids)
         self.robot.write_joint_state_to_sim(self.robot.data.default_joint_pos[env_ids],

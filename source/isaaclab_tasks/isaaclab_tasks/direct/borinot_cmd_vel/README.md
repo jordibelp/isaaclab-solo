@@ -34,7 +34,7 @@ velocity. Quaternions are body-to-world, in wxyz order.
 | Physics / policy frequency | 200 / 100 Hz |
 | Episode collection limit | 10 s; timeout bootstraps |
 | Base reset position | (0, 0, 1.5) m; x/y noise ±0.015 m, no height noise |
-| Reset attitude | Upright, zero yaw |
+| Reset attitude | Nominal upright/zero yaw, with independent uniform ±5° roll/pitch/yaw offsets |
 | Heading vx, vy | Each uniform in [-1, 1] m/s |
 | World vz | Uniform in [-0.5, 0.5] m/s |
 | World-z angular velocity | Uniform in [-1, 1] rad/s |
@@ -47,6 +47,18 @@ action that is scored against it. Repeated observation reads do not resample it.
 
 The task has its own episode clock. RSL's initial randomization of
 `episode_length_buf` does not shorten a new flight.
+
+`env.reset_rpy_noise_degs=[5.0,5.0,5.0]` sets the roll, pitch and yaw half-ranges
+in degrees. New independent samples are applied at every episode reset, including
+partial and automatic resets, from the first curriculum stage. The small local
+rotation is composed after `robot_home_quat`; the nominal pose is not replaced.
+For example, `'env.reset_rpy_noise_degs=[3.0,3.0,10.0]'` changes the three ranges.
+Use `'env.reset_rpy_noise_degs=[0.0,0.0,0.0]'` for the original fixed attitude.
+These offsets change the physical starting pose. Observations still report the
+actual attitude; this is not sensor noise. Base linear/angular reset velocities
+remain zero. The nominal USD spawn attitude stays fixed until the episode reset.
+Observation and checkpoint dimensions do not change. For an exact fixed-attitude
+evaluation of an older run, explicitly set all three noise half-ranges to zero.
 
 ## Rewards
 

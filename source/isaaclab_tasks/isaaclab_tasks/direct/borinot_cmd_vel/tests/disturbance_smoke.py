@@ -27,6 +27,8 @@ def main():
     cfg.physics_hz = cfg.policy_hz = 200
     cfg.seed, cfg.include_events_randomization, cfg.curriculum = 42, False, False
     cfg.reset_xy_noise_m, cfg.standing_env_prob = 0.0, 1.0
+    cfg.reset_rpy_noise_degs = (0.0, 0.0, 0.0)  # paired momentum oracles need identical initial attitudes
+    cfg.forces_applied_to_base_curriculum = (0.0, 5.0, 8.0)  # fixed curriculum oracle, independent of local tuning
     cfg.viewer.origin_type, cfg.viewer.env_index = "asset_root", 0
     cfg.viewer.asset_name = "robot"
     cfg.viewer.eye, cfg.viewer.lookat = (3.0, 3.0, 1.5), (0.0, 0.0, 0.0)

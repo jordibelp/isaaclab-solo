@@ -15,6 +15,7 @@ class BorinotCmdVelEnvCfg(BorinotGoalkeeperEnvCfg):
     robot_home_quat = (1.0, 0.0, 0.0, 0.0)
     reset_xy_noise_m = 0.015
     reset_z_noise_m = 0.0
+    reset_rpy_noise_degs = (5.0, 5.0, 5.0)  # independent uniform +/- roll/pitch/yaw about robot_home_quat
 
     # [heading vx, heading vy, world vz, world-Z angular velocity], SI units.
     command_lin_vel_x_range = (-1.0, 1.0)
@@ -52,6 +53,9 @@ class BorinotCmdVelEnvCfg(BorinotGoalkeeperEnvCfg):
 
     def configure_control(self):
         super().configure_control()
+        if (len(self.reset_rpy_noise_degs) != 3
+                or any(not math.isfinite(v) or v < 0 for v in self.reset_rpy_noise_degs)):
+            raise ValueError("reset_rpy_noise_degs must contain three finite non-negative degree half-ranges.")
         # State available to both networks: v_b, omega_b, q, dq, last action,
         # unit gravity_b, row-major R_world_body, command, optional acceleration.
         controller_state = 8 if self.control_mode == "indi" else (
