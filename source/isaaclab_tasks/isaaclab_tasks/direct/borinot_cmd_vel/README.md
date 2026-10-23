@@ -306,19 +306,64 @@ Example fixed command: add `'env.command_lin_vel_x_range=[0.5,0.5]'`, and set th
 other ranges as needed. Set `env.standing_env_prob=0.0` to prevent zero-command
 resampling in a fixed-command test.
 
-New public player:
+Interactive public player (PPO by default):
 
 ```bash
-./isaaclab.sh -p source/scripts/rsl_rl/play_borinot_cmd_vel.py --checkpoint /absolute/path/model.pt --duration_s 30
+./isaaclab.sh -p source/scripts/rsl_rl/play_borinot_cmd_vel.py --checkpoint /absolute/path/model.pt --duration_s 2000 --cmd_init 0.1 0.0 0.0 0.0
 ```
 
 Match the training `--agent`, control mode, architecture, observation flags and
 physics settings. For example, add `--agent rsl_rl_sac_cfg_entry_point` for CE.
 The player restores observation normalizers, skips optimizer restoration, uses
-minimal replay allocation, and checks finite outputs. Evaluation freezes the
-curriculum by default. Its default fixed level is zero; choose another level
-explicitly when testing robustness. The viewer follows robot 0.
-`--no-real-time` disables wall-clock pacing.
+minimal replay allocation, and checks finite outputs. It uses deterministic
+policy inference. Evaluation freezes the curriculum by default. The force level
+comes from checkpoint metadata (`best_model_curriculum_idx`, then
+`curriculum_global_idx`), with the environment default as a fallback. An explicit
+`--curriculum-level N` takes priority. Explicit Hydra stage/skip overrides are
+also preserved instead of being overwritten by checkpoint metadata.
+
+`--cmd_init` takes **four** numbers: `vx vy vz wz`. The first two are heading-frame
+speeds, `vz` is world-up speed in m/s, and `wz` is angular velocity about world Z
+in rad/s. The default is all zeros. The GUI provides four sliders with exact
+numeric entry, Zero commands, Reset robot, and Pause/Resume. A command applies
+to all clones and persists through timed resampling and all episode resets.
+The command is visible to the policy before the action that uses it. These
+play-only controls do not change the registered training environment.
+
+The camera follows robot 0. Switch live between world-aligned Follow, yaw-aligned
+Chase, Side, Top and mouse-controlled Free. Start with `--camera chase` or
+`--camera free` if preferred. Optional `--vx_range MIN MAX`, `--vy_range`,
+`--vz_range` and `--wz_range` change the slider ranges, not the training task.
+An explicit slider range must include the initial value and zero.
+
+`--episode_length_s 80` changes only the play timeout. Omitted keeps the task's
+10-second timeout. Crash, tilt and flight-bound resets still apply. Zero `vz`
+requests zero vertical speed; it does not hold a chosen altitude. A sustained
+nonzero `vz` can eventually reach a height boundary.
+
+Use `--no-ui` to hide the panel, `--headless` for no window,
+`--no-real-time` to disable wall-clock pacing, or `--random-commands` to retain
+the original training-style command sampler (no manual command panel).
+
+For the trained `aunmwlq7` PPO checkpoint:
+
+```bash
+./isaaclab.sh -p source/scripts/rsl_rl/play_borinot_cmd_vel.py --task Borinot-cmd-vel --agent rsl_rl_cfg_entry_point --checkpoint /home/jordibelp/IsaacLab-dirty/logs/skrl/checkpoints/1023_aunmwlq7_best_model_curriculum_idx_2.pt --num_envs 1 --duration_s 2000 --cmd_init 0.1 0.0 0.0 0.0 --episode_length_s 80 env.control_mode=thrust_and_torque_control env.physics_hz=200 env.policy_hz=100
+```
+
+The saved stage is 2. This run's recorded force levels are `[0.0,1.0,3.0]` N,
+matching the current local config. Stage metadata selects an index; it does not
+restore the force magnitudes or other environment settings. For this run,
+`--curriculum-level 0` disables pushes. Match the recorded force list when
+playing a run trained with different magnitudes.
+
+Validated locally on 2026-10-23: 65 CPU checks (50 task and 15 playback tests),
+1,200 public-player steps with this exact checkpoint and nonzero `vz`/`wz`,
+and a 400-step, two-clone GUI callback smoke. The latter checks all four
+fields, zero commands, manual/partial/automatic resets, expired command
+resampling, pause/resume and all camera modes. Rendered viewport and panel
+were inspected. This is playback integration evidence, not a long-flight,
+cluster-simulator parity or hardware-transfer claim.
 
 Training logs go under `logs/rsl_rl/borinot_cmd_vel` or
 `logs/rsl_rl/borinot_cmd_vel_sac`. Existing research logs are not changed.
