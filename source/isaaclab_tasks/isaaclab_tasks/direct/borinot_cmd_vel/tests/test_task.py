@@ -155,13 +155,17 @@ def test_curriculum_ring_retains_newest_episodes_when_batch_exceeds_capacity():
 def reward_env():
     return SimpleNamespace(step_dt=.01, physics_dt=.005, joint_ids=[0, 1], extras={},
         cfg=SimpleNamespace(tracking_lin_std=.5, tracking_ang_std=.5, effort_lim_sim=2.,
-            rwd_scale_lin_vel=1.5, rwd_scale_ang_vel=.5, rwd_scale_action_rate=0., rwd_scale_energy=0.),
+            rwd_scale_lin_vel=1.5, rwd_scale_ang_vel=.5, rwd_scale_action_rate=0., rwd_scale_energy=0.,
+            rwd_scale_base_collision=-2., rwd_scale_leave_area=-2., rwd_scale_self_collision=-2.25, rwd_scale_tilt=-1.),
         robot=SimpleNamespace(data=SimpleNamespace(root_lin_vel_w=torch.zeros(2, 3),
             root_ang_vel_w=torch.zeros(2, 3), root_quat_w=torch.tensor([[1., 0, 0, 0]]).expand(2, -1),
             applied_torque=torch.zeros(2, 2))), _commands=torch.zeros(2, 4),
         _actuator_commands=torch.zeros(2, 8), _previous_actuator_commands=torch.zeros(2, 8),
         _power_sum_w=torch.tensor([[20., 2., -4., 6.], [30., 4., 8., 10.]]), _power_samples=2,
-        _episode_terms={name: torch.zeros(2) for name in ("track_lin_vel_xyz_exp", "track_ang_vel_z_exp", "action_rate", "energy")},
+        _events={name: torch.zeros(2, dtype=torch.bool) for name in ("base_collision", "leave_area", "tilt")},
+        _self_contact_bodies=torch.zeros(2, 4, dtype=torch.bool),
+        _episode_terms={name: torch.zeros(2) for name in ("track_lin_vel_xyz_exp", "track_ang_vel_z_exp", "action_rate", "energy",
+            "base_collision", "leave_area", "self_collision", "tilt")},
         _episode_xy_integral=torch.zeros(2), _episode_energy_j=torch.zeros(2))
 
 
@@ -185,7 +189,10 @@ def test_power_is_mean_watts_and_action_rate_is_group_means_times_dt():
 
 def test_time_limit_uses_task_clock_not_randomized_runner_clock():
     env = SimpleNamespace(cfg=SimpleNamespace(flight_height_range_m=(.15, 20.), flight_xy_limit_m=25.,
-        reset_robot_on_tilt_threshold=False), _sample_power=lambda: None,
+        reset_robot_on_tilt_threshold=False, reset_robot_on_robot_crash=False, self_collision_triggers_reset=False),
+        _sample_power=lambda: None, _sample_physics_events=lambda: None,
+        _events={"base_collision": torch.tensor([False, False]), "leave_area": torch.tensor([False, True]), "tilt": torch.tensor([False, False])},
+        _self_contact_bodies=torch.zeros(2, 4, dtype=torch.bool),
         robot=SimpleNamespace(data=SimpleNamespace(root_pos_w=torch.tensor([[0., 0, 1.5], [0., 0, .1]]))),
         scene=SimpleNamespace(env_origins=torch.zeros(2, 3)), _episode_steps=torch.tensor([1000, 3]),
         max_episode_length=1000, episode_length_buf=torch.tensor([5, 999]))
@@ -214,3 +221,124 @@ def test_command_changes_are_visible_before_the_policy_acts_and_observation_read
     assert first.shape == (2, 34) and first[0, -4:].tolist() == [1.] * 4
     assert not first[1, -4:].any()
     torch.testing.assert_close(first, second)
+
+
+@pytest.mark.parametrize("dt", [.005, .01, .02])
+def test_flat_event_penalties_and_per_body_dt_cost_are_additive(dt):
+    env = reward_env()
+    env.step_dt = dt
+    for event in env._events.values():
+        event[0] = True
+    env._self_contact_bodies[0, :2] = True
+    env._self_contact_bodies[1] = True
+    reward = method("_get_rewards")(env)
+    terms = env.extras["reward_terms"]
+    for name, cost in (("base_collision", -2.), ("leave_area", -2.), ("tilt", -1.)):
+        torch.testing.assert_close(terms[name], torch.tensor([cost, 0.]), rtol=0, atol=0)
+    torch.testing.assert_close(terms["self_collision"], -2.25*dt*torch.tensor([2., 4.]), rtol=0, atol=2e-8)
+    expected = torch.tensor([2*dt-5-2.25*dt*2, 2*dt-2.25*dt*4])
+    torch.testing.assert_close(reward, expected, rtol=0, atol=5e-7)
+    # Re-reading the reward must not manufacture additional contact counts.
+    torch.testing.assert_close(method("_get_rewards")(env), reward, rtol=0, atol=0)
+
+
+def test_disabling_penalty_weights_does_not_change_the_tracking_objective():
+    env = reward_env()
+    for event in env._events.values():
+        event.fill_(True)
+    env._self_contact_bodies.fill_(True)
+    for name in ("base_collision", "leave_area", "self_collision", "tilt"):
+        setattr(env.cfg, "rwd_scale_"+name, 0.)
+    torch.testing.assert_close(method("_get_rewards")(env), torch.full((2,), .02), rtol=0, atol=1e-8)
+
+
+@pytest.mark.parametrize("base_reset", [False, True])
+@pytest.mark.parametrize("tilt_reset", [False, True])
+@pytest.mark.parametrize("self_reset", [False, True])
+def test_reset_switches_do_not_merge_distinct_events_or_timeouts(base_reset, tilt_reset, self_reset):
+    events = {name: torch.zeros(6, dtype=torch.bool) for name in ("base_collision", "leave_area", "tilt")}
+    events["base_collision"][[0, 4]] = True
+    events["leave_area"][[1, 4]] = True
+    events["tilt"][[2, 4]] = True
+    own = torch.zeros(6, 4, dtype=torch.bool)
+    own[[3, 4], 0] = True
+    env = SimpleNamespace(cfg=SimpleNamespace(reset_robot_on_robot_crash=base_reset,
+        reset_robot_on_tilt_threshold=tilt_reset, self_collision_triggers_reset=self_reset),
+        _sample_power=lambda: None, _sample_physics_events=lambda: None, _events=events,
+        _self_contact_bodies=own, _episode_steps=torch.tensor([1, 1, 1, 1, 1, 1000]), max_episode_length=1000)
+    failed, timeout = method("_get_dones")(env)
+    assert failed.tolist() == [base_reset, True, tilt_reset, self_reset, True, False]
+    assert timeout.tolist() == [False, False, False, False, False, True]
+
+
+def contact_env(n=5):
+    cfg = SimpleNamespace(self_collision_force_threshold_n=.6, base_collision_force_threshold_n=1.,
+        flight_height_range_m=(.15, 20.), flight_xy_limit_m=25., robot_tilt_threshold_degs=70.,
+        reset_robot_on_tilt_threshold=True, reset_robot_on_robot_crash=True, self_collision_triggers_reset=False,
+        control_mode="thrust_and_torque_control", sac_action_mapping=False, remove_thrust_clipping=True)
+    sensors = [SimpleNamespace(data=SimpleNamespace(force_matrix_w=torch.zeros(n, 1, 3, 3),
+                                                   net_forces_w=torch.zeros(n, 1, 3))) for _ in range(4)]
+    env = SimpleNamespace(cfg=cfg, extras={}, _body_contact_sensors=sensors, _base_contact_column=1,
+        _events={name: torch.zeros(n, dtype=torch.bool) for name in ("base_collision", "leave_area", "tilt")},
+        _self_contact_bodies=torch.zeros(n, 4, dtype=torch.bool),
+        robot=SimpleNamespace(data=SimpleNamespace(root_pos_w=torch.tensor([[0., 0., 1.5]]).expand(n, -1).clone(),
+                                                    projected_gravity_b=torch.tensor([[0., 0., -1.]]).expand(n, -1).clone())),
+        scene=SimpleNamespace(env_origins=torch.zeros(n, 3)),
+        _episode_steps=torch.zeros(n, dtype=torch.long), _command_steps_left=torch.ones(n, dtype=torch.long),
+        _update_pushes=lambda: None, _actuator_commands=torch.zeros(n, 8), _previous_actuator_commands=torch.zeros(n, 8),
+        actions=torch.zeros(n, 8), _power_sum_w=torch.zeros(n, 4), _power_samples=0, _physics_samples=0)
+    return env
+
+
+def test_filtered_self_contacts_cannot_mask_simultaneous_scene_contacts_and_latch():
+    env = contact_env()
+    base = env._body_contact_sensors[1].data
+    base.force_matrix_w[0, 0, 0, 2] = 4.  # self only
+    base.force_matrix_w[2, 0, 0, 2] = -2.  # self + opposite floor force: net zero
+    base.force_matrix_w[3, 0, :2, 2] = torch.tensor([3., -3.])  # opposing self contacts
+    base.force_matrix_w[4, 0, 0, 2] = .5  # below self threshold
+    base.net_forces_w[:, 0] = base.force_matrix_w[:, 0].sum(1)
+    base.net_forces_w[1, 0, 2] += 3.  # floor only
+    base.net_forces_w[2, 0, 2] += 2.
+    for i in (0, 2):
+        env._body_contact_sensors[0].data.force_matrix_w[i, 0, 0, 2] = -base.force_matrix_w[i, 0, 0, 2]
+    env._body_contact_sensors[0].data.force_matrix_w[3, 0, 0, 2] = -3.
+    env._body_contact_sensors[2].data.force_matrix_w[3, 0, 0, 2] = 3.
+    sample = method("_sample_physics_events")
+    sample(env)
+    assert env._events["base_collision"].tolist() == [False, True, True, False, False]
+    assert env._self_contact_bodies.sum(-1).tolist() == [2, 0, 2, 3, 0]
+    for sensor in env._body_contact_sensors:
+        sensor.data.force_matrix_w.zero_()
+        sensor.data.net_forces_w.zero_()
+    sample(env)
+    assert env._events["base_collision"].tolist() == [False, True, True, False, False]
+    assert env._self_contact_bodies.sum(-1).tolist() == [2, 0, 2, 3, 0]
+    method("_pre_physics_step")(env, torch.zeros(5, 8))
+    assert not any(event.any() for event in env._events.values())
+    assert not env._self_contact_bodies.any()
+    sample(env)
+    assert not env._self_contact_bodies.any() and not env._events["base_collision"].any()
+
+
+@pytest.mark.parametrize("force,base_event,self_event", [(0., False, False), (.6, False, False),
+    (.6001, False, True), (1., False, True), (1.0001, True, True)])
+def test_contact_thresholds_are_strict_and_separate(force, base_event, self_event):
+    env = contact_env(1)
+    base = env._body_contact_sensors[1].data
+    base.force_matrix_w[0, 0, 0, 2] = force
+    base.net_forces_w[0, 0, 2] = 2 * force  # external and self each have magnitude force
+    method("_sample_physics_events")(env)
+    assert env._events["base_collision"].item() == base_event
+    assert env._self_contact_bodies[0, 1].item() == self_event
+
+
+def test_xyz_area_is_one_event_and_tilt_is_detected_even_with_its_reset_disabled():
+    env = contact_env()
+    env.cfg.reset_robot_on_tilt_threshold = False
+    env.robot.data.root_pos_w[:] = torch.tensor([[0., 0., .1], [0., 0., 21.], [26., 0., 1.5],
+        [26., -26., 21.], [0., 0., 1.5]])
+    env.robot.data.projected_gravity_b[4, 2] = 0.
+    method("_sample_physics_events")(env)
+    assert env._events["leave_area"].tolist() == [True, True, True, True, False]
+    assert env._events["tilt"].tolist() == [False, False, False, False, True]

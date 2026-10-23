@@ -9,6 +9,7 @@ import torch
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
+from isaaclab.sensors import ContactSensor, ContactSensorCfg
 from isaaclab.utils.math import matrix_from_quat, quat_apply_inverse, quat_from_euler_xyz, quat_mul
 from isaaclab_tasks.direct.borinot_goalkeeper.borinot_goalkeeper_env import BorinotGoalkeeperEnv
 from isaaclab_tasks.direct.borinot_goalkeeper.events import configure_randomization
@@ -22,6 +23,7 @@ from .task_math import sample_steps, sample_vertical_pushes, tracking_kernels
 class BorinotCmdVelEnv(DirectRLEnv):
     """Free-flight XYZ velocity/yaw-rate tracking, using the goalkeeper's exact plant."""
     cfg: BorinotCmdVelEnvCfg
+    contact_body_names = BorinotGoalkeeperEnv.contact_body_names
     _sample_power = BorinotGoalkeeperEnv._sample_power
     _init_indi = BorinotGoalkeeperEnv._init_indi
 
@@ -31,6 +33,14 @@ class BorinotCmdVelEnv(DirectRLEnv):
         super().__init__(cfg, render_mode, **kwargs)
         self.joint_ids, _ = self.robot.find_joints(list(cfg.joint_names), preserve_order=True)
         self.base_id = self.robot.find_bodies("base")[0][0]
+        self._base_contact_column = self.contact_body_names.index("base")
+        if any(sensor.contact_physx_view.filter_count != len(self.contact_body_names) - 1
+               for sensor in self._body_contact_sensors):
+            raise RuntimeError("Borinot contact filters must resolve all other robot bodies, excluding the source.")
+        self._events = {name: torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+                        for name in ("base_collision", "leave_area", "tilt")}
+        self._self_contact_bodies = torch.zeros(self.num_envs, len(self.contact_body_names),
+                                               dtype=torch.bool, device=self.device)
         self.actions = torch.zeros(self.num_envs, cfg.action_space, device=self.device)
         self._rate_integral = torch.zeros(self.num_envs, 3, device=self.device)
         self._joint_scale = torch.tensor(cfg.joint_target_scale, device=self.device)
@@ -83,7 +93,8 @@ class BorinotCmdVelEnv(DirectRLEnv):
         self._episode_xy_integral = torch.zeros(self.num_envs, device=self.device)
         self._episode_energy_j = torch.zeros_like(self._episode_xy_integral)
         self._episode_terms = {name: torch.zeros_like(self._episode_xy_integral) for name in (
-            "track_lin_vel_xyz_exp", "track_ang_vel_z_exp", "action_rate", "energy")}
+            "track_lin_vel_xyz_exp", "track_ang_vel_z_exp", "action_rate", "energy",
+            "base_collision", "leave_area", "self_collision", "tilt")}
         self._curriculum_window = torch.zeros(cfg.curriculum_window_episodes, device=self.device)
         self._window_cursor = self._stage_episodes = self._stage_start_step = 0
         self.curriculum_stage_pure_episodes = 0
@@ -97,6 +108,16 @@ class BorinotCmdVelEnv(DirectRLEnv):
         self.scene.clone_environments(copy_from_source=False)
         self.scene.filter_collisions(global_prim_paths=["/World/Ground"])
         self.scene.articulations["robot"] = self.robot
+        # Filtered reporting is one-to-many: one source body, explicit other-body
+        # targets. A source-inclusive wildcard can silently hide self forces.
+        self._body_contact_sensors = []
+        for name in self.contact_body_names:
+            sensor = ContactSensor(ContactSensorCfg(
+                prim_path=f"/World/envs/env_.*/Robot/{name}", update_period=0.0, history_length=0,
+                filter_prim_paths_expr=[f"/World/envs/env_.*/Robot/{other}"
+                                        for other in self.contact_body_names if other != name]))
+            self._body_contact_sensors.append(sensor)
+            self.scene.sensors[f"robot_contact_{name}"] = sensor
         light = sim_utils.DomeLightCfg(intensity=1800.0)
         light.func("/World/Light", light)
 
@@ -126,6 +147,9 @@ class BorinotCmdVelEnv(DirectRLEnv):
 
     def _pre_physics_step(self, actions):
         self.extras.pop("log", None)  # keep episode-only log packets for RSL
+        for event in self._events.values():
+            event.zero_()
+        self._self_contact_bodies.zero_()
         self._episode_steps += 1
         self._command_steps_left.sub_(1)
         self._update_pushes()
@@ -139,7 +163,23 @@ class BorinotCmdVelEnv(DirectRLEnv):
         self._power_samples = self._physics_samples = 0
 
     def _sample_physics_events(self):
-        """No ball/contact state machine in this task; shared control calls this hook."""
+        """Latch completed-substep events until this policy interval is scored."""
+        for column, sensor in enumerate(self._body_contact_sensors):
+            data = sensor.data
+            own_forces = data.force_matrix_w[:, 0]  # [env, other robot body, world XYZ]
+            # Count each body once per interval, even across repeated substep contacts.
+            # Pairwise norms also retain opposing self forces that cancel in the net.
+            self._self_contact_bodies[:, column] |= (
+                own_forces.norm(dim=-1) > self.cfg.self_collision_force_threshold_n).any(-1)
+            if column == self._base_contact_column:
+                external = data.net_forces_w[:, 0] - own_forces.sum(1)
+                self._events["base_collision"] |= external.norm(dim=-1) > self.cfg.base_collision_force_threshold_n
+        position = self.robot.data.root_pos_w - self.scene.env_origins
+        low, high = self.cfg.flight_height_range_m
+        self._events["leave_area"] |= ((position[:, 2] < low) | (position[:, 2] > high)
+                                      | (position[:, :2].abs() > self.cfg.flight_xy_limit_m).any(-1))
+        self._events["tilt"] |= (self.robot.data.projected_gravity_b[:, 2]
+                                > -math.cos(math.radians(self.cfg.robot_tilt_threshold_degs)))
 
     def _apply_action(self):
         BorinotGoalkeeperEnv._apply_action(self)
@@ -154,12 +194,14 @@ class BorinotCmdVelEnv(DirectRLEnv):
 
     def _get_dones(self):
         self._sample_power()  # include the final completed physics substep, before any automatic reset
-        position = self.robot.data.root_pos_w - self.scene.env_origins
-        low, high = self.cfg.flight_height_range_m
-        failed = (position[:, 2] < low) | (position[:, 2] > high) | (position[:, :2].abs() > self.cfg.flight_xy_limit_m).any(-1)
+        self._sample_physics_events()
+        failed = self._events["leave_area"].clone()
+        if self.cfg.reset_robot_on_robot_crash:
+            failed |= self._events["base_collision"]
         if self.cfg.reset_robot_on_tilt_threshold:
-            gravity_b = quat_apply_inverse(self.robot.data.root_quat_w, self._gravity)
-            failed |= gravity_b[:, 2] > -math.cos(math.radians(self.cfg.robot_tilt_threshold_degs))
+            failed |= self._events["tilt"]
+        if self.cfg.self_collision_triggers_reset:
+            failed |= self._self_contact_bodies.any(-1)
         # A real 10-second task clock, independent of runner episode-counter randomization.
         return failed, self._episode_steps >= self.max_episode_length
 
@@ -176,12 +218,17 @@ class BorinotCmdVelEnv(DirectRLEnv):
             "track_ang_vel_z_exp": self.cfg.rwd_scale_ang_vel * angular * self.step_dt,
             "action_rate": self.cfg.rwd_scale_action_rate * action_rate * self.step_dt,
             "energy": self.cfg.rwd_scale_energy * power.sum(-1),
+            "base_collision": self.cfg.rwd_scale_base_collision * self._events["base_collision"].float(),
+            "leave_area": self.cfg.rwd_scale_leave_area * self._events["leave_area"].float(),
+            "self_collision": self.cfg.rwd_scale_self_collision * self._self_contact_bodies.sum(-1) * self.step_dt,
+            "tilt": self.cfg.rwd_scale_tilt * self._events["tilt"].float(),
         }
         for name, value in terms.items():
             self._episode_terms[name] += value
         self._episode_xy_integral += planar * self.step_dt
         self._episode_energy_j += self._power_sum_w.sum(-1) * self.physics_dt
         self.extras["tracking"] = {"xyz": linear, "yaw": angular, "xy": planar}
+        self.extras["reward_terms"] = terms  # keep terminal contributions available after automatic reset
         self.extras["power_mean_w"] = {name: power[:, i] for i, name in enumerate(
             ("rotor_mechanical", "rotor_dissipative", "arm_mechanical", "arm_copper_loss"))}
         return sum(terms.values())
@@ -295,6 +342,9 @@ class BorinotCmdVelEnv(DirectRLEnv):
             buffer[env_ids] = 0
         for value in self._episode_terms.values():
             value[env_ids] = 0
+        for event in self._events.values():
+            event[env_ids] = False
+        self._self_contact_bodies[env_ids] = False
         self._rotor_thrust[env_ids] = self._hover_per_rotor
         self._episode_stage[env_ids] = self.force_level
         self._base_push_steps_until_next[env_ids] = sample_steps(

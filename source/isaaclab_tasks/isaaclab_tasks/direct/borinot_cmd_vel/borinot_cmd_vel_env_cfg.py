@@ -30,6 +30,14 @@ class BorinotCmdVelEnvCfg(BorinotGoalkeeperEnvCfg):
     rwd_scale_ang_vel = 0.5
     rwd_scale_action_rate = 0.0  # same physical command-rate signal as goalkeeper, times dt
     rwd_scale_energy = 0.0  # same mean-power model as goalkeeper, no extra dt
+    rwd_scale_base_collision = -2.0  # external base contact; no dt multiplier
+    rwd_scale_leave_area = -2.0  # any XYZ flight-bound violation; no dt multiplier
+    rwd_scale_self_collision = -2.25  # per contacting robot body, times policy dt (Solo undesired-contact style)
+    rwd_scale_tilt = -1.0  # tilt-threshold violation; no dt multiplier
+    enabled_self_collisions = True  # enable physical self contacts for the self-collision cost
+    self_collision_triggers_reset = False  # ongoing self-contact cost; keep flying by default
+    base_collision_force_threshold_n = 1.0  # Solo base contact threshold
+    self_collision_force_threshold_n = 0.6  # Solo undesired-contact threshold
     obs_include_base_lin_acc = False  # body-frame kinematic CoM acceleration; NOT specific force
 
     base_push_interval_range_s = (2.0, 5.0)  # start-to-start; first push delayed after reset
@@ -56,6 +64,12 @@ class BorinotCmdVelEnvCfg(BorinotGoalkeeperEnvCfg):
         if (len(self.reset_rpy_noise_degs) != 3
                 or any(not math.isfinite(v) or v < 0 for v in self.reset_rpy_noise_degs)):
             raise ValueError("reset_rpy_noise_degs must contain three finite non-negative degree half-ranges.")
+        for name in ("base_collision_force_threshold_n", "self_collision_force_threshold_n"):
+            if not math.isfinite(getattr(self, name)) or getattr(self, name) <= 0:
+                raise ValueError(f"{name} must be finite and positive.")
+        for name in ("rwd_scale_base_collision", "rwd_scale_leave_area", "rwd_scale_self_collision", "rwd_scale_tilt"):
+            if not math.isfinite(getattr(self, name)):
+                raise ValueError(f"{name} must be finite.")
         # State available to both networks: v_b, omega_b, q, dq, last action,
         # unit gravity_b, row-major R_world_body, command, optional acceleration.
         controller_state = 8 if self.control_mode == "indi" else (

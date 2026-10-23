@@ -66,7 +66,9 @@ def main(cfg, agent_cfg):
             check("spawn_orientation_diversity", (reset_rpy[:, axes].std(0) > bounds[axes] * .05).all())
         else:
             check("zero_noise_exact_nominal", torch.equal(env.robot.data.root_quat_w, nominal))
-        check("no_goal_or_ball", not env.scene.rigid_objects and not env.scene.sensors)
+        check("no_goal_or_ball", not env.scene.rigid_objects)
+        check("four_filtered_robot_contact_sensors", len(env._body_contact_sensors) == 4
+              and len(env.scene.sensors) == 4)
         check("physics_policy_clock", abs(env.physics_dt-1/cfg.physics_hz) < 1e-10
               and abs(env.step_dt-1/cfg.policy_hz) < 1e-10)
         use_pd = cfg.control_mode not in ("thrust_and_torque_control", "indi") or cfg.hold_arm

@@ -62,7 +62,7 @@ evaluation of an older run, explicitly set all three noise half-ranges to zero.
 
 ## Rewards
 
-Only these four terms are used. Other goalkeeper reward fields inherited for
+Only these eight terms are used. Other goalkeeper reward fields inherited for
 configuration reuse are not consumed by this task.
 
 | Config weight | Default | Signal |
@@ -71,6 +71,10 @@ configuration reuse are not consumed by this task.
 | `rwd_scale_ang_vel` | 0.5 | `exp(-(command_yaw_rate - measured_world_omega_z)^2 / tracking_ang_std^2)`, times policy dt |
 | `rwd_scale_action_rate` | 0.0 | Physical command-change cost from goalkeeper, times policy dt |
 | `rwd_scale_energy` | 0.0 | Mean modeled total power in W; no extra dt multiplier, as in goalkeeper |
+| `rwd_scale_base_collision` | -2.0 | External base contact above 1 N; once per policy interval, **no dt** |
+| `rwd_scale_leave_area` | -2.0 | Any XYZ flight-bound violation; once per policy interval, **no dt** |
+| `rwd_scale_self_collision` | -2.25 | Number of robot bodies with self contact above 0.6 N, times policy dt |
+| `rwd_scale_tilt` | -1.0 | Tilt-threshold violation; once per policy interval, **no dt** |
 
 Both tracking widths default to 0.5: m/s for linear velocity and rad/s for angular
 velocity. The exponent denominator is 0.25. The linear reward uses one kernel
@@ -78,8 +82,23 @@ over **all three components**, not a sum of three independent kernels.
 
 At exact tracking, the default reward is 2 per simulated second, or 0.02 per
 policy step at 100 Hz. A full perfect 10-second episode returns 20 before
-discounting. There are no active position, altitude, joint-pose, tilt, survival,
-or terminal reward terms.
+discounting and penalties. There are no position, altitude-hold, joint-pose or
+survival rewards. A clean 10-second timeout has no additional penalty.
+
+The four new costs are independent and additive. Leaving the flight area while
+over the tilt threshold costs -3.0, before tracking or other costs. Several
+violated area bounds still count as one area event. At 100 Hz, self contact on
+two bodies costs `-2.25 * 2 * 0.01 = -0.045` for that policy interval. This is a
+**body count**, like Solo's undesired-contact term, not a count of contact points
+or unique pairs. Both ends of a self-contact pair can count. Each body counts
+at most once per policy interval, even if it contacts several bodies or across
+several physics substeps.
+
+Contacts, bounds and tilt are latched across physics substeps so a brief event
+does not disappear before scoring. The final reward includes these costs before
+an automatic reset. Signed per-step contributions remain available in
+`info["reward_terms"]`, and episode totals are logged under
+`Episode_Reward/base_collision`, `leave_area`, `self_collision` and `tilt`.
 
 Set a cost weight negative to penalize its signal. The action-rate signal sums
 two group means: squared rotor-command changes divided by the full thrust span,
@@ -226,13 +245,31 @@ intended `env.curriculum_start_level` explicitly; promotion evidence starts fres
 ## Safety boundaries
 
 Reset below 0.15 m or above 20 m base height, beyond ±25 m in either local world
-horizontal axis, or above 70 degrees tilt. Disable just the tilt reset with
-`env.reset_robot_on_tilt_threshold=False`.
+horizontal axis, above 70 degrees tilt, or on external base contact above 1 N.
+The height range and XY limit define the area penalty as well as the area reset.
+They are not command limits or position targets.
 
-These are flight safety bounds, not position targets or extra penalties.
-There is no contact-specific reset sensor. Ground contact changes the dynamics;
-the base-height/tilt checks bound the flight. A sustained downward or upward
-velocity command can eventually reach a height boundary. We do not replace the
+Four single-body contact sensors report the base, two leg links and paddle.
+Each sensor explicitly filters the other three robot bodies. For the base crash
+test we subtract those self-contact forces from its total contact force. Thus
+self contact alone does not falsely trigger an external base crash. Paddle or
+leg contact with the ground is not a self-collision or base-collision penalty.
+
+Physical self-collisions are **enabled by default in this task**. Existing
+articulation pair filters, including parent-child exclusions, are unchanged.
+`env.enabled_self_collisions=False` disables physical self contact and its cost.
+The force thresholds are configurable with `base_collision_force_threshold_n`
+and `self_collision_force_threshold_n`; both are strict greater-than tests.
+
+Self contact costs reward but does not reset by default
+(`self_collision_triggers_reset=False`). Set it to `True` for an early reset.
+Disable the external base reset with `env.reset_robot_on_robot_crash=False`, or
+the tilt reset with `env.reset_robot_on_tilt_threshold=False`. Those two reset
+switches do **not** disable their costs. Set the corresponding reward weight to
+zero if the cost should also be disabled. The area reset remains enabled.
+
+A sustained downward or upward velocity command can eventually reach a height
+boundary. We do not replace the
 requested vertical-velocity objective with an altitude-hold objective.
 In particular, zero vertical velocity does not prefer 1.5 m over another height;
 a stationary robot supported by its leg can also match a zero-velocity command.
@@ -297,9 +334,15 @@ python -m pytest -q --confcutdir=source/isaaclab_tasks/isaaclab_tasks/direct/bor
 ```
 
 Keep `--confcutdir`: otherwise pytest imports the parent IsaacLab package before
-the simulator starts. The live fixture is `tests/runtime_smoke.py`; launch it
+the simulator starts. The general live fixture is `tests/runtime_smoke.py`; launch it
 through `isaaclab.sh` with `--headless --output /absolute/path/result.json` and
 the desired Hydra overrides. Run one simulator process at a time.
+
+`tests/penalty_smoke.py` checks real self-only, floor-only and mixed contacts,
+reset switches, exact reward values, automatic-reset reward delivery and clean
+timeouts. Run it the same way; also use `env.enabled_self_collisions=False` and
+an alternate policy rate to check the disabled path and dt scaling. Its folded
+test pose deliberately makes contact above the configured force threshold.
 
 Saved evidence is in the OpenClaw workspace under
 `artifacts/2026-10-23-borinot-cmd-vel`. It separates CPU tests, live property and
@@ -307,7 +350,7 @@ wrench checks, short public training runs and public checkpoint playback.
 These checks establish implementation/integration, not a learned flight policy,
 10,000-environment throughput, cluster readiness or hardware transfer.
 
-Verified locally on 2026-10-23:
+Original task verification on 2026-10-23:
 
 - 31 new CPU tests and all 438 existing goalkeeper tests passed.
 - Six live control/randomization fixtures passed 703 checks in total.
@@ -319,6 +362,22 @@ Verified locally on 2026-10-23:
 - An additional SAC-CE smoke used the default enabled update compilation.
 - An offline W&B run archived the inherited configuration and shared source
   files; their saved bytes matched the actual source files.
+
+Collision-penalty update, also verified locally on 2026-10-23:
+
+- 50 velocity-task CPU tests and all 438 goalkeeper regression tests passed.
+- 250 live checks passed: default contacts (42), self-collisions disabled (38),
+  INDI with 300/150 Hz physics/policy rates (42), and general runtime (128).
+- Real fixtures separated self-only, paddle-floor, base-floor and mixed
+  self/floor contacts. They checked exact costs, additive events, reset switches,
+  partial-reset isolation and clean timeouts. Automatic-reset checks confirmed
+  the final costs reach the agent and the episode logger.
+- PPO, SAC-CE and SAC-MSE each completed four small direct-torque training
+  iterations and 150 finite public-player steps, including 24 completed episodes
+  per playback. Checkpoints contain nonzero optimizer steps. TensorBoard records
+  all four new episode reward terms.
+- Evidence: `artifacts/2026-10-23-borinot-penalties` in the OpenClaw workspace.
+  Saved configs retain the working-tree tuning used during these checks.
 
 Training smokes used 16 environments, 64/32 networks, eight steps per iteration,
 and 0.12-second episodes to exercise repeated automatic resets. They are not
