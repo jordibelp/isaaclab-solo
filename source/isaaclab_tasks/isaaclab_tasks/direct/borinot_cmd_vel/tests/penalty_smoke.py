@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: BSD-3-Clause
-"""Live floor, self, mixed-contact and terminal reward oracles (no learned policy)."""
+"""Racket-contact reward oracles; launch with env.arm_holds_racket=True (no learned policy)."""
 import argparse
 import json
 import sys

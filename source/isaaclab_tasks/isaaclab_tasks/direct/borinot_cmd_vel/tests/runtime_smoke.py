@@ -67,8 +67,10 @@ def main(cfg, agent_cfg):
         else:
             check("zero_noise_exact_nominal", torch.equal(env.robot.data.root_quat_w, nominal))
         check("no_goal_or_ball", not env.scene.rigid_objects)
-        check("four_filtered_robot_contact_sensors", len(env._body_contact_sensors) == 4
-              and len(env.scene.sensors) == 4)
+        body_count = 4 if cfg.arm_holds_racket else 3
+        check("filtered_robot_contact_sensors_match_optional_racket", len(env._body_contact_sensors) == body_count
+              and len(env.scene.sensors) == body_count
+              and all(s.contact_physx_view.filter_count == body_count - 1 for s in env._body_contact_sensors))
         check("physics_policy_clock", abs(env.physics_dt-1/cfg.physics_hz) < 1e-10
               and abs(env.step_dt-1/cfg.policy_hz) < 1e-10)
         use_pd = cfg.control_mode not in ("thrust_and_torque_control", "indi") or cfg.hold_arm
@@ -77,8 +79,10 @@ def main(cfg, agent_cfg):
         check("live_effort_limits", torch.allclose(view.get_dof_max_forces()[:, env.joint_ids], torch.full((8, 2), cfg.effort_lim_sim)))
         check("armature_preserved", torch.allclose(view.get_dof_armatures()[:, env.joint_ids], torch.full((8, 2), .00036207)))
         masses, coms, friction = view.get_masses().clone(), view.get_coms().clone(), view.get_dof_friction_properties().clone()
-        paddle = env.robot.find_bodies("paddle")[0][0]
-        for tag, body in (("add_base_mass", env.base_id), ("racket_mass", paddle)):
+        mass_terms = [("add_base_mass", env.base_id)]
+        if cfg.arm_holds_racket:
+            mass_terms.append(("racket_mass", env.robot.find_bodies("paddle")[0][0]))
+        for tag, body in mass_terms:
             ratio = masses[:, body] / env.robot.data.default_mass[:, body].cpu()
             enabled = cfg.include_events_randomization and cfg.event_randomization[tag]
             check(f"{tag}_physical", ((ratio >= .9-1e-6).all() and (ratio <= 1.2+1e-6).all()

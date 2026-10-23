@@ -17,19 +17,24 @@ from isaaclab_tasks.direct.borinot_goalkeeper.indi import IndiController
 from isaaclab_tasks.direct.borinot_goalkeeper.paddle import attach_paddle
 
 from .borinot_cmd_vel_env_cfg import BorinotCmdVelEnvCfg
+from .end_effector import configure_end_effector
 from .task_math import sample_steps, sample_vertical_pushes, tracking_kernels
 
 
 class BorinotCmdVelEnv(DirectRLEnv):
-    """Free-flight XYZ velocity/yaw-rate tracking, using the goalkeeper's exact plant."""
+    """Free-flight velocity tracking with shared controls and a selectable tail payload."""
     cfg: BorinotCmdVelEnvCfg
-    contact_body_names = BorinotGoalkeeperEnv.contact_body_names
     _sample_power = BorinotGoalkeeperEnv._sample_power
     _init_indi = BorinotGoalkeeperEnv._init_indi
 
     def __init__(self, cfg: BorinotCmdVelEnvCfg, render_mode=None, **kwargs):
         cfg.configure_control()  # after Hydra, before spaces/physics
         configure_randomization(cfg)
+        # The shared racket randomizer must not resolve a body that is absent.
+        if not cfg.arm_holds_racket and cfg.events is not None:
+            cfg.events.racket_mass = None
+        self.contact_body_names = (("paddle",) if cfg.arm_holds_racket else ()) + (
+            "base", "flying_arm_2__link1", "flying_arm_2__link2")
         super().__init__(cfg, render_mode, **kwargs)
         self.joint_ids, _ = self.robot.find_joints(list(cfg.joint_names), preserve_order=True)
         self.base_id = self.robot.find_bodies("base")[0][0]
@@ -101,8 +106,7 @@ class BorinotCmdVelEnv(DirectRLEnv):
 
     def _setup_scene(self):
         self.robot = Articulation(self.cfg.robot)
-        # Retain the same leg/racket masses and geometry, including its randomizer.
-        attach_paddle(sim_utils.get_current_stage(), "/World/envs/env_0/Robot", self.cfg)
+        configure_end_effector(sim_utils.get_current_stage(), "/World/envs/env_0/Robot", self.cfg)
         ground = sim_utils.GroundPlaneCfg(physics_material=sim_utils.RigidBodyMaterialCfg(restitution=0.0))
         ground.func("/World/Ground", ground)
         self.scene.clone_environments(copy_from_source=False)
@@ -308,7 +312,8 @@ class BorinotCmdVelEnv(DirectRLEnv):
     def get_code_snapshot_files(self):
         """Archive shared plant/control helpers alongside this task's source."""
         return [inspect.getsourcefile(obj) for obj in (
-            BorinotGoalkeeperEnv, configure_randomization, attach_paddle, IndiController, tracking_kernels)]
+            BorinotGoalkeeperEnv, configure_randomization, attach_paddle, configure_end_effector,
+            IndiController, tracking_kernels)]
 
     def _reset_idx(self, env_ids):
         if env_ids is None:

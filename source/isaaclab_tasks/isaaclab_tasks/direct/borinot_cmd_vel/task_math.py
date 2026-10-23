@@ -4,6 +4,34 @@ import math
 
 import torch
 
+# Distal-most vertex of the source calf mesh, in flying_arm_2__link2 axes (m).
+# Not the racket's offset/standoff. Keep this tied to borinotFlat.usd geometry.
+CALF_TIP_B = (0.0, -0.136, -0.00495)
+SHAFT_COM_B = (0.0, -0.08, -0.021)
+
+
+def calf_payload_properties(shaft_mass_kg, payload_kg):
+    """Merge an ideal point payload into the existing 160 mm rod shaft model.
+
+    Return total mass, link-frame CoM and full inertia ABOUT that CoM. The point
+    has no intrinsic inertia, but its offset contributes via the parallel-axis
+    theorem. The original USD's 115 g distal mass is replaced, not added again.
+    """
+    if not math.isfinite(shaft_mass_kg) or shaft_mass_kg <= 0:
+        raise ValueError("Shaft mass must be finite and positive.")
+    if not math.isfinite(payload_kg) or payload_kg < 0:
+        raise ValueError("Point payload must be finite and non-negative.")
+    shaft_com = torch.tensor(SHAFT_COM_B, dtype=torch.float64)
+    tip = torch.tensor(CALF_TIP_B, dtype=torch.float64)
+    total = shaft_mass_kg + payload_kg
+    com = (shaft_mass_kg * shaft_com + payload_kg * tip) / total
+    transverse = shaft_mass_kg * 0.16**2 / 12
+    inertia = torch.diag(torch.tensor((transverse, 1.0e-6, transverse), dtype=torch.float64))
+    for mass, position in ((shaft_mass_kg, shaft_com), (payload_kg, tip)):
+        delta = position - com
+        inertia += mass * (delta.square().sum() * torch.eye(3, dtype=torch.float64) - torch.outer(delta, delta))
+    return total, com, inertia
+
 
 def heading_rotation(quaternion: torch.Tensor) -> torch.Tensor:
     """Heading-to-world R=[x,y,z], x=(cos(yaw),sin(yaw),0), y=z cross x.

@@ -162,9 +162,57 @@ the environment multiplies by `effort_lim_sim`. PPO uses its existing affine
 hover-centered rotor mapping. Torque and position checkpoints are not
 interchangeable even though both have eight actions.
 
-The plant keeps the same two-joint leg and racket, including its mass and shape.
-Only the ball and goal are removed. The source robot USD and both goalkeeper
-tasks are unchanged.
+The plant keeps the two-joint leg. There is no ball or goal. The racket is now
+**off by default**. The source robot USD and both goalkeeper tasks are unchanged.
+
+### Optional racket and calf-tip payload
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `env.arm_holds_racket` | `False` | Attach the goalkeeper racket, with its existing mass, shape and mount settings |
+| `env.ee_includes_puntual_mass` | `0.0` | Additional ideal point mass at the distal calf tip, in **kg** |
+
+For a 100 g tail payload, add these overrides to either training or playback:
+
+```bash
+env.arm_holds_racket=False env.ee_includes_puntual_mass=0.1
+```
+
+Use `env.ee_includes_puntual_mass=0.15` for 150 g. The two options are independent:
+you can include both a racket and a tip payload. Negative or non-finite payload
+masses are rejected.
+
+The bare shaft uses the existing 15 g, 160 mm rod approximation. The source USD
+has a 115 g distal-link mass. We replace that mass, rather than leaving its
+assumed 100 g ballast in place and adding another payload. With both new options
+at their defaults, the calf is therefore 15 g and the nominal total robot mass
+is about 2.810538 kg. A 100 g point payload makes the calf 115 g and the total
+robot about 2.910538 kg. These shaft/ballast assumptions are inherited prototype
+values, not a new measurement of the real robot.
+
+The point is at `(0.0, -0.136, -0.00495)` m in `flying_arm_2__link2` coordinates,
+the distal-most point of the current calf mesh. This is **not** the racket's
+extended mount or its face-normal standoff. The point is merged into the calf's
+mass, center of mass and full inertia tensor using the parallel-axis theorem.
+It has zero intrinsic rotational inertia, but its distance from the joint gives
+it real rotational inertia. PhysX therefore includes it in swing momentum,
+reaction on the base and existing calf-contact dynamics. There is no extra
+joint, rigid body, visual marker, collider or collision radius. The calf's
+existing collision mesh stays unchanged.
+
+Nominal hover calibration and all existing control modes use the selected total
+mass. The payload is fixed across clones and episode resets; the racket mass
+randomizer does not randomize it. With no racket, only the base and two leg
+bodies need self-contact filters. The racket randomizer is omitted because its
+target body does not exist.
+
+Existing policies retain the same observation and action dimensions, but a
+different payload changes the dynamics. The original `aunmwlq7` checkpoint was
+trained with the racket. To reproduce that setup, explicitly add:
+
+```bash
+env.arm_holds_racket=True env.ee_includes_puntual_mass=0.0
+```
 
 ## Randomization and vertical disturbances
 
@@ -172,7 +220,7 @@ Startup randomization is the same as goalkeeper:
 
 - Joint friction sampled in [0.01, 1.0].
 - Base mass and inertia scaled by a sample in [0.9, 1.2].
-- Racket mass and inertia scaled by a sample in [0.9, 1.2].
+- Racket mass and inertia scaled by a sample in [0.9, 1.2], only when the racket is enabled.
 - Base CoM shifted independently by ±1 cm per axis.
 
 Each clone keeps its sampled values across resets. The common controller/action
@@ -249,8 +297,9 @@ horizontal axis, above 70 degrees tilt, or on external base contact above 1 N.
 The height range and XY limit define the area penalty as well as the area reset.
 They are not command limits or position targets.
 
-Four single-body contact sensors report the base, two leg links and paddle.
-Each sensor explicitly filters the other three robot bodies. For the base crash
+Three single-body contact sensors report the base and two leg links. Enabling
+the racket adds a fourth sensor for the paddle.
+Each sensor explicitly filters the other present robot bodies. For the base crash
 test we subtract those self-contact forces from its total contact force. Thus
 self contact alone does not falsely trigger an external base crash. Paddle or
 leg contact with the ground is not a self-collision or base-collision penalty.
@@ -348,7 +397,7 @@ the original training-style command sampler (no manual command panel).
 For the trained `aunmwlq7` PPO checkpoint:
 
 ```bash
-./isaaclab.sh -p source/scripts/rsl_rl/play_borinot_cmd_vel.py --task Borinot-cmd-vel --agent rsl_rl_cfg_entry_point --checkpoint /home/jordibelp/IsaacLab-dirty/logs/skrl/checkpoints/1023_aunmwlq7_best_model_curriculum_idx_2.pt --num_envs 1 --duration_s 2000 --cmd_init 0.1 0.0 0.0 0.0 --episode_length_s 80 env.control_mode=thrust_and_torque_control env.physics_hz=200 env.policy_hz=100
+./isaaclab.sh -p source/scripts/rsl_rl/play_borinot_cmd_vel.py --task Borinot-cmd-vel --agent rsl_rl_cfg_entry_point --checkpoint /home/jordibelp/IsaacLab-dirty/logs/skrl/checkpoints/1023_aunmwlq7_best_model_curriculum_idx_2.pt --num_envs 1 --duration_s 2000 --cmd_init 0.1 0.0 0.0 0.0 --episode_length_s 80 env.control_mode=thrust_and_torque_control env.physics_hz=200 env.policy_hz=100 env.arm_holds_racket=True env.ee_includes_puntual_mass=0.0
 ```
 
 The saved stage is 2. This run's recorded force levels are `[0.0,1.0,3.0]` N,
@@ -375,7 +424,7 @@ helpers, math and controller sources, plus the existing agent/algorithm chain.
 CPU checks do not need Isaac Sim:
 
 ```bash
-python -m pytest -q --confcutdir=source/isaaclab_tasks/isaaclab_tasks/direct/borinot_cmd_vel/tests -p no:cacheprovider source/isaaclab_tasks/isaaclab_tasks/direct/borinot_cmd_vel/tests/test_task.py
+python -m pytest -q --confcutdir=source/isaaclab_tasks/isaaclab_tasks/direct/borinot_cmd_vel/tests -p no:cacheprovider source/isaaclab_tasks/isaaclab_tasks/direct/borinot_cmd_vel/tests
 ```
 
 Keep `--confcutdir`: otherwise pytest imports the parent IsaacLab package before
@@ -383,9 +432,15 @@ the simulator starts. The general live fixture is `tests/runtime_smoke.py`; laun
 through `isaaclab.sh` with `--headless --output /absolute/path/result.json` and
 the desired Hydra overrides. Run one simulator process at a time.
 
+`tests/payload_smoke.py` checks the actual cloned PhysX masses, centers of mass,
+full inertias, selected body/contact sets, hover calibration, finite rollouts,
+and mass-property persistence across resets. Launch with `--headless --output
+/absolute/path/result.json` and the desired payload/racket Hydra overrides.
+
 `tests/penalty_smoke.py` checks real self-only, floor-only and mixed contacts,
 reset switches, exact reward values, automatic-reset reward delivery and clean
-timeouts. Run it the same way; also use `env.enabled_self_collisions=False` and
+timeouts. Its racket-contact fixtures require `env.arm_holds_racket=True`.
+Run it the same way; also use `env.enabled_self_collisions=False` and
 an alternate policy rate to check the disabled path and dt scaling. Its folded
 test pose deliberately makes contact above the configured force threshold.
 
@@ -394,6 +449,24 @@ Saved evidence is in the OpenClaw workspace under
 wrench checks, short public training runs and public checkpoint playback.
 These checks establish implementation/integration, not a learned flight policy,
 10,000-environment throughput, cluster readiness or hardware transfer.
+
+Optional-payload update, verified locally on 2026-10-23:
+
+- 77 CPU tests passed, including independent kinetic-energy and first-moment
+  checks for zero, 1 g, 100 g, 150 g and 500 g point masses.
+- 296 live checks passed across the bare shaft, 100 g, 150 g, racket-only,
+  racket-plus-payload, startup-randomized and rendered configurations. These
+  include actual PhysX mass/CoM/full-inertia readback in every clone, dynamic
+  contact-filter counts, unchanged action/observation contracts, hover
+  calibration and persistence across partial and automatic resets.
+- Independent point-Jacobian checks matched the physical joint-inertia changes
+  for 100 g and 150 g to within `1e-7` kg·m².
+- Bare-shaft and 100 g PPO each completed four small training iterations, eight
+  optimizer steps and 150 finite public-player steps. The original `aunmwlq7`
+  checkpoint also completed 150 finite steps with its racket explicitly enabled.
+- The rendered no-racket view was inspected. Shared goalkeeper source and the
+  robot USD were not modified. Evidence is in
+  `artifacts/2026-10-23-borinot-payload` in the OpenClaw workspace.
 
 Original task verification on 2026-10-23:
 
