@@ -3165,6 +3165,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     path
                     for path in [
                         agent_cfg_py,
+                        *[inspect.getsourcefile(base) for base in type(env_cfg).__mro__
+                          if base.__module__.startswith("isaaclab_tasks.")],
+                        *getattr(env.unwrapped, "get_code_snapshot_files", lambda: [])(),
                         *[inspect.getsourcefile(base) for base in type(agent_cfg).__mro__
                           if base.__module__.startswith("isaaclab_tasks.")],
                         *[inspect.getsourcefile(base) for base in type(runner.alg).__mro__ if base is not object],
