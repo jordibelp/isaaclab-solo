@@ -97,18 +97,17 @@ def test_thrust_decomposition_zero_force_and_heading_singularity():
     torch.testing.assert_close(rotation[2, :, 2], torch.tensor([1., 0., 0.], dtype=torch.float64))
 
 
-def test_attitude_error_matches_independent_quaternion_formula_and_global_yaw_invariance():
+def test_attitude_error_matches_independent_so3_formula_and_global_yaw_invariance():
     rng = np.random.default_rng(4)
     current = Rotation.random(100, random_state=rng)
     desired = Rotation.random(100, random_state=rng)
     q = torch.from_numpy(current.as_quat(scalar_first=True))
     rd = torch.from_numpy(desired.as_matrix())
-    qe = (current.inv()*desired).as_quat(scalar_first=True)
-    w, x, y, z = qe.T
-    denominator = np.sqrt(w*w + z*z)
+    error = current.inv()*desired
+    tau_z = np.zeros((100, 3))
+    tau_z[:, 2] = error.as_rotvec()[:, 2]
     cfg = indi.IndiControllerCfg()
-    expected = cfg.tilt_gain*np.column_stack(((w*x-y*z)/denominator, (w*y+x*z)/denominator, np.zeros(100)))
-    expected[:, 2] = cfg.yaw_gain*np.sign(w)*z/denominator
+    expected = cfg.tilt_gain*(error*Rotation.from_rotvec(-tau_z)).as_rotvec() + cfg.yaw_gain*tau_z
     zeros = torch.zeros(100, 3, dtype=torch.float64)
     actual = indi.attitude_acceleration(q, rd, zeros, zeros, cfg)
     np.testing.assert_allclose(actual, expected, atol=1e-11)
@@ -125,7 +124,7 @@ def test_attitude_antipode_is_finite_with_deterministic_tilt_direction():
     rd = torch.diag(torch.tensor([1., -1., -1.], dtype=torch.float64))[None]
     zeros = torch.zeros(1, 3, dtype=torch.float64)
     actual = indi.attitude_acceleration(q, rd, zeros, zeros, cfg)
-    torch.testing.assert_close(actual, torch.tensor([[150., 0., 0.]], dtype=torch.float64))
+    torch.testing.assert_close(actual, torch.tensor([[150.*math.pi, 0., 0.]], dtype=torch.float64))
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])

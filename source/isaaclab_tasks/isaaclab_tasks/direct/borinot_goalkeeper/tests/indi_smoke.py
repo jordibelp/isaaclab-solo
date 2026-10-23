@@ -17,6 +17,8 @@ sys.argv = [sys.argv[0]] + hydra_args
 app = AppLauncher(args).app
 
 import gymnasium as gym
+import numpy as np
+from scipy.spatial.transform import Rotation
 import torch
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils.hydra import hydra_task_config
@@ -57,6 +59,30 @@ def main(cfg, agent_cfg):
               env.robot.data.default_inertia[0, env.base_id].reshape(3, 3).to(env.device)*cfg.indi.inertia_scale))
         check("reset_controller_observation", torch.allclose(env._indi.observation(),
               torch.tensor([1.]*6+[0.]*2, device=env.device).expand(args.num_envs, -1), atol=1e-6))
+        # Exercise the live controller object at large, tiny and pi errors against
+        # an independent SciPy oracle before resetting its state for the rollout.
+        from isaaclab_tasks.direct.borinot_goalkeeper.indi import thrust_attitude
+        reference = torch.zeros(args.num_envs, 9, device=env.device)
+        _, desired = thrust_attitude(reference[:, :3],
+            torch.full((args.num_envs,), env._indi.home_yaw, device=env.device), env._indi.mass)
+        errors = Rotation.from_rotvec(np.resize(np.array([
+            [0., 0., 0.], [1.2, -.8, .9], [np.pi-1e-5, 0., 0.], [0., 0., 1e-7]]), (args.num_envs, 3)))
+        desired_scipy = Rotation.from_matrix(desired.cpu().numpy())
+        current = desired_scipy * errors.inv()
+        test_rates = torch.zeros(args.num_envs, 3, device=env.device)
+        commands, _ = env._indi.step(reference,
+            torch.tensor(current.as_quat(scalar_first=True), dtype=torch.float32, device=env.device),
+            test_rates, test_rates[:, :2], test_rates[:, :2])
+        tau_z = np.zeros((args.num_envs, 3))
+        tau_z[:, 2] = errors.as_rotvec()[:, 2]
+        expected = (cfg.indi.tilt_gain*(errors*Rotation.from_rotvec(-tau_z)).as_rotvec()
+                    + cfg.indi.yaw_gain*tau_z)
+        error_max = np.max(np.abs(env._indi.alpha_desired.cpu().numpy()-expected))
+        report['tangent_alpha_max_error_rad_s2'] = float(error_max)
+        check("live_tangent_feedback_matches_scipy", error_max < 3e-4)
+        check("large_error_commands_bounded", torch.isfinite(commands).all()
+              and commands.min() >= 0 and commands.max() <= env._indi.allocator.cap+1e-5)
+        env._indi.reset(slice(None))
         calls = []
         original_step = env._indi.step
 

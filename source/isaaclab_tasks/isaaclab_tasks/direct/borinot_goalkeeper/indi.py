@@ -13,8 +13,8 @@ class IndiControllerCfg:
     acceleration_scale: tuple = (8.0, 8.0, 8.0)  # world m/s^2 per normalized action
     heading_range_degs: float = 180.0  # offset from robot_home_quat yaw
     joint_target_limit_degs: tuple = (90.0, 90.0)
-    tilt_gain: float = 150.0  # angular acceleration / quaternion vector component
-    yaw_gain: float = 3.0
+    tilt_gain: float = 150.0  # 1/s^2, multiplying Log(q_error * inverse(q_z)) in radians
+    yaw_gain: float = 3.0  # 1/s^2, multiplying the z projection of Log(q_error)
     rate_gain: tuple = (20.0, 20.0, 8.0)  # 1/s
     filter_cutoff_hz: float = 12.0
     allocation_weights: tuple = (1.0, 10.0, 10.0, 1.0)  # squared, capacity-normalized wrench error
@@ -81,27 +81,73 @@ def thrust_attitude(acceleration, heading, mass):
     return mass * magnitude, torch.stack((x, y, z), -1)
 
 
-def attitude_acceleration(quaternion, desired_rotation, rates, reference_rates, cfg):
-    """Tilt-prioritized error in CURRENT BODY axes, not a world-frame quaternion error.
+def quaternion_from_rotation(rotation):
+    """Scalar-first unit quaternion, including at pi; largest component is positive.
 
-    Geometric equivalent of q_e = inverse(q_WB) * q_WB_desired, then q_e=q_tilt*q_yaw.
-    At exactly opposite thrust axes the tilt axis is ambiguous; choose body +X, yaw=0.
+    Each row below is 4*q_i*q. Select the largest q_i^2 before normalizing,
+    avoiding division by a small scalar component near a 180-degree rotation.
     """
-    error = rotation_from_quat(quaternion).mT @ desired_rotation
-    z = error[:, :, 2]
-    c = ((1 + z[:, 2]).clamp_min(0) * 0.5).sqrt()
-    tilt = torch.stack((-z[:, 1], z[:, 0], torch.zeros_like(c)), -1) / (2*c[:, None]).clamp_min(1e-6)
-    antipodal = c < 1e-5
-    fallback = torch.zeros_like(tilt)
-    fallback[:, 0] = 1
-    tilt = torch.where(antipodal[:, None], fallback, tilt)
-    reduced_q = torch.cat((c[:, None], tilt), -1)
-    yaw_rotation = rotation_from_quat(reduced_q).mT @ error
-    yaw = torch.atan2(yaw_rotation[:, 1, 0], yaw_rotation[:, 0, 0])
-    yaw = torch.where(antipodal, torch.zeros_like(yaw), yaw)
-    alpha = cfg.tilt_gain * tilt + rates.new_tensor(cfg.rate_gain) * (reference_rates - rates)
-    alpha[:, 2] += cfg.yaw_gain * torch.sin(yaw / 2)
-    return alpha  # alpha_r=0: no differentiated policy feedforward
+    r = rotation
+    a, b, c = r[..., 0, 0], r[..., 1, 1], r[..., 2, 2]
+    wx, wy, wz = r[..., 2, 1]-r[..., 1, 2], r[..., 0, 2]-r[..., 2, 0], r[..., 1, 0]-r[..., 0, 1]
+    xy, xz, yz = r[..., 0, 1]+r[..., 1, 0], r[..., 0, 2]+r[..., 2, 0], r[..., 1, 2]+r[..., 2, 1]
+    squares = torch.stack((1+a+b+c, 1+a-b-c, 1-a+b-c, 1-a-b+c), -1)
+    candidates = torch.stack((torch.stack((squares[..., 0], wx, wy, wz), -1),
+                              torch.stack((wx, squares[..., 1], xy, xz), -1),
+                              torch.stack((wy, xy, squares[..., 2], yz), -1),
+                              torch.stack((wz, xz, yz, squares[..., 3]), -1)), -2)
+    index = squares.argmax(-1)[..., None, None].expand(*squares.shape[:-1], 1, 4)
+    return torch.nn.functional.normalize(candidates.gather(-2, index).squeeze(-2), dim=-1)
+
+
+def quaternion_log(quaternion):
+    """Principal SO(3) Log: full-angle rotation vector in radians, NOT half-angle log.
+
+    q and -q give the same result. At exactly pi, choose the representative
+    with its largest-magnitude vector component positive (the axis is not unique).
+    """
+    q = torch.nn.functional.normalize(quaternion, dim=-1)
+    w, v = q[..., :1], q[..., 1:]
+    largest = v.gather(-1, v.abs().argmax(-1, keepdim=True))
+    flip = (w < 0) | ((w == 0) & (largest < 0))
+    q = torch.where(flip, -q, q)
+    w, v = q[..., :1], q[..., 1:]
+    norm = v.norm(dim=-1, keepdim=True)
+    angle = 2 * torch.atan2(norm, w)
+    # theta/sin(theta/2) -> 2 at identity. Keep both torch.where branches finite.
+    scale = torch.where(norm > 1e-6, angle / norm.clamp_min(1e-6), 2 + norm.square()/3)
+    return v * scale
+
+
+def quaternion_exp(vector):
+    """SO(3) Exp of a full-angle rotation vector to a scalar-first unit quaternion."""
+    angle = vector.norm(dim=-1, keepdim=True)
+    # torch.sinc(x)=sin(pi*x)/(pi*x), including its exact limit at zero.
+    return torch.cat(((angle/2).cos(), .5*torch.sinc(angle/(2*math.pi))*vector), -1)
+
+
+def quaternion_multiply(left, right):
+    """Hamilton product for scalar-first quaternions."""
+    lw, lv, rw, rv = left[..., :1], left[..., 1:], right[..., :1], right[..., 1:]
+    return torch.cat((lw*rw - (lv*rv).sum(-1, keepdim=True),
+                      lw*rv + rw*lv + torch.linalg.cross(lv, rv)), -1)
+
+
+def attitude_acceleration(quaternion, desired_rotation, rates, reference_rates, cfg):
+    """Full-Log z projection in CURRENT BODY axes, following the requested sketch.
+
+    q_e=inverse(q_WB)*q_desired; tau=Log(q_e); tau_z=(0,0,tau[2]);
+    q_z=Exp(tau_z); q_xy=q_e*inverse(q_z); tau_xy=Log(q_xy).
+    This is NOT the old thrust-axis tilt/yaw split: tau_xy can have nonzero z.
+    Numeric gains are unchanged, so the local attitude feedback doubles.
+    """
+    error = quaternion_from_rotation(rotation_from_quat(quaternion).mT @ desired_rotation)
+    tau = quaternion_log(error)
+    tau_z = torch.cat((torch.zeros_like(tau[..., :2]), tau[..., 2:]), -1)
+    # Exp(-tau_z) = inverse(Exp(tau_z)) for these unit quaternions.
+    residual = quaternion_multiply(error, quaternion_exp(-tau_z))
+    return (cfg.tilt_gain * quaternion_log(residual) + cfg.yaw_gain * tau_z
+            + rates.new_tensor(cfg.rate_gain) * (reference_rates - rates))  # alpha_r=0
 
 
 class Butterworth:

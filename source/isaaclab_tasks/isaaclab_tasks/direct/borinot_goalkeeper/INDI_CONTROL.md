@@ -186,7 +186,7 @@ There is **no low-level position controller** and **no translational INDI** here
 The policy must correct position drift, mass errors, contact forces and arm-induced translation using its observations.
 Zero action is a hover *request*, not a guarantee that a freely moving arm/base will remain in place.
 
-## 6. Tilt-prioritized attitude control
+## 6. Tangent-space attitude control (updated 2026-10-23)
 
 We compare the current and desired orientation in **current body axes**.
 For Isaac's active, scalar-first quaternion convention, the corresponding error quaternion is:
@@ -198,26 +198,58 @@ q_error = inverse(q_current) * q_desired
 The multiplication order matters. A world-axis error fed into a body-axis torque law would be wrong at nonzero heading.
 The code uses the equivalent rotation-matrix construction and checks it against an independent quaternion calculation.
 
-We split this error into a shortest tilt followed by a yaw about the thrust axis.
-Let `tilt_vector` be the vector part of that tilt quaternion.
-Let `yaw_error` be the remaining yaw angle in `[-pi,pi]`.
-Then:
+We now follow Jordi's full-Log z-projection sketch. `Log` returns a three-component
+rotation vector whose length is the **full rotation angle in radians**.
+It is not the half-angle quaternion logarithm. The calculation is:
 
 ```text
-alpha_d = tilt_gain * tilt_vector
-        + yaw_gain * (0, 0, sin(yaw_error/2))
+tau       = Log(q_error)
+tau_z     = (0, 0, tau[2])
+q_z       = Exp(tau_z)
+q_xy      = q_error * inverse(q_z)
+tau_xy    = Log(q_xy)
+
+alpha_d = tilt_gain * tau_xy
+        + yaw_gain * tau_z
         + rate_gain * (Omega_r - Omega)
 ```
+
+Here `q_z` is a unit quaternion about body z. `q_xy` is the remaining quaternion,
+with the product order shown above. Both `tau_z` and `tau_xy` are three-component
+body-axis vectors in radians. The subscript `xy` is a label from the sketch:
+**the z component of `tau_xy` is generally nonzero** and is retained in feedback.
+Projecting the full log is not the old geometric thrust-axis tilt/yaw split.
+In particular, `tau[2]` is not in general Euler yaw or the old residual yaw angle.
+
+For a unit quaternion `(w,v)`, we use `Log(q) = 2*atan2(norm(v),w)*v/norm(v)`.
+We first choose the shortest representative (`w >= 0`), and use the finite
+identity limit `Log(q) = 2*v`. For a rotation vector `t` with length `a`,
+`Exp(t) = (cos(a/2), sin(a/2)*t/a)`, with vector limit `t/2` at zero.
+These conventions match [A micro Lie theory for state estimation in robotics,
+Appendix B-A](https://arxiv.org/html/1812.01537v8#A2.SS1).
+The implementation uses `atan2` and a stable largest-component matrix-to-quaternion
+conversion. It remains finite at identity and at 180 degrees.
+At exactly 180 degrees the shortest axis sign is not unique; we choose the sign
+that makes its largest-magnitude component positive. A principal-log branch
+discontinuity at 180 degrees is unavoidable; this is not a global stability claim.
 
 `alpha_d` is desired body angular acceleration, in rad/s².
 `Omega_r` is the policy's body-rate feedforward, and `Omega` is the measured body rate, both in rad/s.
 `rate_gain` acts element by element and has units 1/s.
-The quaternion vectors and sine are dimensionless.
-At exactly opposite thrust axes, tilt direction is not unique; we deterministically select body +X and suppress the undefined yaw term.
+The attitude gains now have units 1/s², multiplying rotation vectors in radians.
 
 Defaults are `tilt_gain=150`, `yaw_gain=3` and `rate_gain=(20,20,8)`.
-The source paper uses stronger tilt feedback than yaw feedback because yaw authority is limited.
-These are starting values, not proof of optimal gains for Borinot.
+Their numeric values are unchanged, but **the near-zero attitude feedback is twice
+as strong as before**, because the old quaternion-vector magnitude was `sin(angle/2)`.
+For pure 120-degree tilt, for example, the old raw request was about 129.90 rad/s²;
+the new one is 314.16 rad/s². Physical allocation and motor bounds still apply.
+To preserve the previous local attitude gains while increasing large-angle
+feedback, explicitly set `env.indi.tilt_gain=75.0 env.indi.yaw_gain=1.5`.
+Rate feedback, filters, allocation, motor dynamics, joint PID, action dimensions
+and observations are unchanged. Existing INDI checkpoints still load, but now
+run against a different controller. Exact historical replay needs the old revision.
+The shared controller affects both goalkeeper tasks and `Borinot-cmd-vel` in INDI mode.
+Other control modes are unchanged. No training-performance benefit has been established.
 
 ### Why `alpha_r=0` is deliberate
 
@@ -450,8 +482,8 @@ All controller settings below are under `env.indi` and are used only in INDI mod
 | `acceleration_scale` | `(8,8,8)` | World acceleration per unit action, m/s² |
 | `heading_range_degs` | `180` | Heading half-range around home yaw |
 | `joint_target_limit_degs` | `(90,90)` | Symmetric joint target half-ranges |
-| `tilt_gain` | `150` | Tilt-quaternion feedback gain |
-| `yaw_gain` | `3` | Yaw-quaternion feedback gain |
+| `tilt_gain` | `150` | Residual full-angle log-vector gain, 1/s² |
+| `yaw_gain` | `3` | Full-log z-projection gain, 1/s² |
 | `rate_gain` | `(20,20,8)` | Body-rate feedback gains, 1/s |
 | `filter_cutoff_hz` | `12` | Common second-order Butterworth cutoff; must be below physics Nyquist |
 | `allocation_weights` | `(1,10,10,1)` | Squared normalized wrench-error weights |
