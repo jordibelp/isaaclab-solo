@@ -51,7 +51,7 @@ def test_config_resolves_new_mode_without_changing_default_timing(sac, hz):
 @pytest.mark.parametrize("field,value", [("filter_cutoff_hz", 150), ("filter_cutoff_hz", float('nan')),
     ("acceleration_scale", [1, 2]), ("allocation_weights", [1, 0, 1, 1]),
     ("rotor_spin_inertia_kg_m2", -1e-5), ("joint_ki", -1), ("allocation_iterations", 0),
-    ("allocation_iterations", 1.5), ("joint_target_limit_degs", [100, 90])])
+    ("allocation_iterations", 1.5)])
 def test_invalid_indi_settings_fail_before_simulator(field, value):
     ctrl = fixture()
     setattr(ctrl.cfg, field, value)
@@ -63,6 +63,18 @@ def test_unbounded_rotors_are_rejected_only_in_indi():
     ctrl = fixture()
     ctrl.task.remove_thrust_clipping = True
     with pytest.raises(ValueError, match="physical rotor bounds"):
+        ctrl.cfg.validate(ctrl.task)
+
+
+@pytest.mark.parametrize("sac", [False, True])
+def test_normalized_joint_target_ranges_only_constrain_sac(sac):
+    ctrl = fixture()
+    ctrl.task.sac_action_mapping = sac
+    ctrl.cfg.joint_target_limit_degs = (100., 90.)
+    if sac:
+        with pytest.raises(ValueError, match="SAC joint targets"):
+            ctrl.cfg.validate(ctrl.task)
+    else:
         ctrl.cfg.validate(ctrl.task)
 
 
@@ -168,7 +180,7 @@ def test_joint_pid_antiwindup_and_physics_rate_feedback():
     actions[:, 7] = .01
     zeros, joints = torch.zeros(4, 3, dtype=torch.float64), torch.zeros(4, 2, dtype=torch.float64)
     _, effort = ctrl.step(actions, home_quat(ctrl), zeros, joints, joints)
-    error = math.pi/2*.01
+    error = .01  # PPO target is already radians, with no normalized-action scale.
     expected = ctrl.task.kp*error + ctrl.cfg.joint_ki*ctrl.dt*error
     assert effort[0, 0].item() == pytest.approx(expected, abs=1e-14)
     _, changed = ctrl.step(actions, home_quat(ctrl), zeros, joints+.005, joints+.1)

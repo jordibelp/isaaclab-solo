@@ -23,6 +23,7 @@ from isaaclab_tasks.controllers.borinot_indi import IndiControllerCfg
 @configclass
 class BorinotGoalkeeperSimpleEnvCfg(DirectRLEnvCfg):
     control_mode = "thrust_and_torque_control"
+    # INDI PPO uses unclipped physical-unit references; SAC uses normalized [-1, 1].
     indi = IndiControllerCfg()  # used only by control_mode="indi"; shared INDI_CONTROL.md
     # geom = method 3; alternatives: method_1, method_2. Definitions:
     # /home/jordibelp/Desktop/emmaDocs/2026-10-23-tau-log-exp-comparison.ipynb
@@ -89,7 +90,7 @@ class BorinotGoalkeeperSimpleEnvCfg(DirectRLEnvCfg):
     joint_target_scale = (1.1, 1.4)
     hold_arm = False  # neutral PD targets; this is NOT a mechanically welded arm
 
-    # Enabled by the SAC runner before env creation. PPO keeps its existing mapping/limits.
+    # Enabled by the SAC runner before env creation. INDI PPO uses raw physical units.
     sac_action_mapping = False
     sac_q_offset_init_actions = False  # Solo semantics: initialize mean at q_offset, not the soft midpoint
     sac_joint_pos_offset = (0.0, 0.0)  # rad, in joint_names order (thigh, calf)
@@ -155,7 +156,7 @@ class BorinotGoalkeeperSimpleEnvCfg(DirectRLEnvCfg):
     action_clamp = 10.0  # used only when remove_thrust_clipping=False
     remove_thrust_clipping = False  # False: clamp PPO actions; thrust cap is min(TWR * hover, rotor_thrust_limit_n)
     collective_action_scale = 0.7
-    body_rate_scale = (2.0, 2.0, 1.5)
+    body_rate_scale = (2.0, 2.0, 1.5)  # PI mode and INDI SAC only; INDI PPO is already rad/s
     rate_kp = (0.35, 0.35, 0.15)
     rate_ki = (0.10, 0.10, 0.04)
     motor_time_constant_s = 0.04  # motor lag; 0 disables filtering (instantaneous thrust commands)

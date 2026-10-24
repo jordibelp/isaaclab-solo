@@ -45,7 +45,7 @@ def main(cfg, agent_cfg):
         check("hydra_nested_controller_cfg", cfg.indi.filter_cutoff_hz == env._indi.cfg.filter_cutoff_hz)
         check("hydra_tilt_method", cfg.indi_tilt_method in ("geom", "method_1", "method_2")
               and env._indi.task.indi_tilt_method == cfg.indi_tilt_method)
-        from isaaclab_tasks.controllers.borinot_indi import IndiController, thrust_attitude
+        from isaaclab_tasks.controllers.borinot_indi import IndiController, thrust_attitude, attitude_acceleration
         from isaaclab_tasks.direct.borinot_goalkeeper.indi import IndiController as legacy_controller
         check("shared_controller_identity", type(env._indi) is IndiController and legacy_controller is IndiController)
         check("shared_source_is_snapshotted", inspect.getsourcefile(IndiController) in env.get_code_snapshot_files())
@@ -107,27 +107,39 @@ def main(cfg, agent_cfg):
         def traced_step(actions, quaternion, rates, joint_pos, joint_vel):
             before = env._indi.joint_integral.clone()
             commands, efforts = original_step(actions, quaternion, rates, joint_pos, joint_vel)
-            target = actions[:, 7:9].clamp(-1, 1)*env._indi.joint_scale
+            u = policy_actions.clamp(-1, 1) if cfg.sac_action_mapping else policy_actions
+            acceleration = u[:, :3]*env._indi.accel_scale if cfg.sac_action_mapping else u[:, :3]
+            reference_rates = u[:, 3:6]*env._indi.rate_scale if cfg.sac_action_mapping else u[:, 3:6]
+            heading = env._indi.home_yaw + u[:, 6]*(np.deg2rad(cfg.indi.heading_range_degs) if cfg.sac_action_mapping else 1.)
+            _, desired_rotation = thrust_attitude(acceleration, heading, env._indi.mass)
+            expected_alpha = attitude_acceleration(quaternion, desired_rotation, rates, reference_rates,
+                                                   cfg.indi, cfg.indi_tilt_method)
+            target = u[:, 7:9]*env._indi.joint_scale if cfg.sac_action_mapping else u[:, 7:9]
             if cfg.hold_arm:
-                target.zero_()
+                target = torch.zeros_like(target)
             error = target-joint_pos
             integral = (before+env.physics_dt*error).clamp(-cfg.indi.joint_integral_limit, cfg.indi.joint_integral_limit)
             effort = cfg.kp*error-cfg.kd*joint_vel+cfg.indi.joint_ki*integral
             frozen = ((effort > cfg.effort_lim_sim) & (error > 0)) | ((effort < -cfg.effort_lim_sim) & (error < 0))
             expected_integral = torch.where(frozen, before, integral)
             expected = (cfg.kp*error-cfg.kd*joint_vel+cfg.indi.joint_ki*expected_integral).clamp(-cfg.effort_lim_sim, cfg.effort_lim_sim)
-            calls.append((torch.allclose(efforts, expected, atol=1e-6), commands.min(), commands.max()))
+            calls.append((torch.allclose(efforts, expected, atol=1e-6), commands.min(), commands.max(),
+                          torch.equal(actions, u), torch.allclose(env._indi.alpha_desired, expected_alpha, atol=1e-5)))
             return commands, efforts
 
         env._indi.step = traced_step
-        actions = torch.zeros(args.num_envs, 9, device=env.device)
-        actions[:, 0], actions[:, 3], actions[:, 7], actions[:, 8] = .08, .02, .01, -.01
+        policy_actions = torch.tensor([24., -32., 48., 6., -7., 9., 4.2, .01, -.01],
+                                      device=env.device).expand(args.num_envs, -1).clone()
+        report['policy_actions'] = policy_actions.cpu().tolist()
+        report['policy_action_units'] = 'normalized SAC' if cfg.sac_action_mapping else 'physical PPO'
         max_residual = torch.zeros(4, device=env.device)
         for _ in range(16):
             calls.clear()
-            obs, reward, terminated, truncated, info = env.step(actions)
+            obs, reward, terminated, truncated, info = env.step(policy_actions)
             check("finite_rollout", torch.isfinite(reward).all() and all(torch.isfinite(v).all() for v in obs.values()))
             check("fresh_pid_every_physics_step", len(calls) == cfg.decimation and all(item[0] for item in calls))
+            check("ppo_raw_or_sac_clipped_references_reach_llc", all(item[3] for item in calls))
+            check("ppo_si_or_sac_scaled_units_match_feedback", all(item[4] for item in calls))
             check("bounded_rotors", all(item[1] >= 0 and item[2] <= env._indi.allocator.cap+1e-5 for item in calls))
             check("bounded_joint_efforts", env.robot.data.joint_effort_target[:, env.joint_ids].abs().max() <= cfg.effort_lim_sim)
             max_residual = torch.maximum(max_residual, env._indi.allocation_residual.abs().max(0).values)
@@ -149,7 +161,8 @@ def main(cfg, agent_cfg):
         # The standard timeout path must reset controller state too, not only explicit resets.
         env.episode_length_buf[:] = env.max_episode_length-1
         env._episode_steps[:] = env.max_episode_length-1
-        _, _, _, truncated, _ = env.step(torch.zeros_like(actions))
+        policy_actions.zero_()
+        _, _, _, truncated, _ = env.step(policy_actions)
         check("automatic_timeout_reset", truncated.all() and not env._indi.joint_integral.any()
               and not env._indi.angular_acceleration.any())
         report['passed'] = all(item['passed'] for item in report['checks'])

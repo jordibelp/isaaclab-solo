@@ -1,6 +1,6 @@
 # Borinot: physics-rate INDI and joint PID
 
-Date: 2026-10-22. Applies to both goalkeeper tasks.
+Updated: 2026-10-24. Applies to both goalkeeper tasks and the shared command-velocity controller.
 
 ## 1. What is implemented
 
@@ -39,7 +39,7 @@ We adapt the architecture to Borinot, rather than claim an exact reproduction of
 | Policy/physics rates? | Keep the task's 100/200 Hz defaults | Selecting a control mode does not silently retime an existing experiment. Set 150/300 Hz explicitly to match the paper's clocks. |
 
 The attitude gains and 12 Hz filters start from the low-level reference paper.
-The joint integral gain, action scales and normalized allocation weights are our engineering choices.
+The joint integral gain, SAC action scales and normalized allocation weights are our engineering choices.
 They are not reported DSAM gains or a tuned Borinot flight controller.
 
 ## 2. Run it
@@ -103,22 +103,41 @@ Keep each run's saved `params/env.yaml`, agent config and source revision with i
 
 ## 3. What the nine actions mean
 
-Write the normalized policy output as `u[0:9]`.
-The environment clips every component to `[-1,1]`, for both PPO and SAC.
-This bound does not use the old `action_clamp` setting.
-The observation stores the clipped action that the controller actually receives.
+### PPO: unclipped physical-unit outputs
 
-| Index | Reference | Default conversion | Frame / units |
+Write the raw policy output as `a[0:9]`. PPO INDI does not clip or scale any of these outputs.
+It only adds the home heading to action 6. Neither `action_clamp` nor the SAC action scales change this interface.
+For example, acceleration action 24 requests 24 m/s², and body-rate action 6 requests 6 rad/s.
+
+| Index | Reference | PPO conversion | Frame / units |
 | --- | --- | --- | --- |
-| 0 | Forward world acceleration | `8*u[0]` | World X, m/s² |
-| 1 | Sideways world acceleration | `8*u[1]` | World Y, m/s² |
-| 2 | Vertical world acceleration | `8*u[2]` | World Z, m/s²; gravity excluded |
-| 3 | Roll-rate feedforward | `2*u[3]` | Current body X, rad/s |
-| 4 | Pitch-rate feedforward | `2*u[4]` | Current body Y, rad/s |
-| 5 | Yaw-rate feedforward | `1.5*u[5]` | Current body Z, rad/s |
-| 6 | Heading | `home_yaw + pi*u[6]` | World heading, radians |
-| 7 | First joint angle | `(pi/2)*u[7]` | `joint_names[0]`, radians |
-| 8 | Second joint angle | `(pi/2)*u[8]` | `joint_names[1]`, radians |
+| 0 | World X acceleration | `a[0]` | World X, m/s² |
+| 1 | World Y acceleration | `a[1]` | World Y, m/s² |
+| 2 | World Z acceleration | `a[2]` | World Z, m/s²; gravity excluded |
+| 3 | Roll-rate feedforward | `a[3]` | Current body X, rad/s |
+| 4 | Pitch-rate feedforward | `a[4]` | Current body Y, rad/s |
+| 5 | Yaw-rate feedforward | `a[5]` | Current body Z, rad/s |
+| 6 | Heading | `home_yaw + a[6]` | World heading, radians |
+| 7 | First joint angle | `a[7]` | `joint_names[0]`, radians |
+| 8 | Second joint angle | `a[8]` | `joint_names[1]`, radians |
+
+The observation retains the raw PPO action. The same references are held between policy ticks.
+The low-level controller still runs on every physics step and uses fresh measured state.
+
+### SAC: bounded normalized outputs
+
+SAC retains its existing mapping. Write `u=clip(a,-1,1)` for each component.
+Its replay and observations store normalized references, not actuator outputs.
+
+| Indices | Default SAC conversion | Physical range |
+| --- | --- | --- |
+| 0–2 | `(8,8,8) * u[0:3]` | ±8 m/s² per world axis |
+| 3–5 | `(2,2,1.5) * u[3:6]` | ±2, ±2, ±1.5 rad/s in body axes |
+| 6 | `home_yaw + pi*u[6]` | Home heading ±180° |
+| 7–8 | `(pi/2) * u[7:9]` | ±90° per joint |
+
+The existing `sac_action_mapping` field selects this branch. The SAC runner enables it before environment creation.
+PPO leaves it false. No extra mapping flag is required.
 
 World X does not mean the direction in which the base currently points.
 Heading is an absolute heading centered on the configured reset heading, **not a yaw increment**.
@@ -126,14 +145,21 @@ For the default reset quaternion, `home_yaw=-90 degrees`.
 Zero action therefore requests zero world acceleration, the home heading, zero rate feedforward and neutral joints.
 It does not request zero rotor speed.
 
-The DSAM paper uses joint outputs in `[-2,2]`, then scales them by `pi/4`.
-Our normalized `[-1,1]` representation gives the same `[-pi/2,pi/2]` joint endpoints.
-It is a different raw normalization, not a different physical target range.
-The acceleration and rate scales are configurable because the DSAM paper does not specify all action bounds.
-
 INDI joint targets do not use the direct-mode `joint_target_scale` or SAC's direct-mode soft limits/offsets.
 That legacy scale still normalizes joint-position observations as before.
-INDI writes the configured physical joint stops to PhysX and requires its targets to fit inside them.
+The configured physical joint stops remain active in PhysX; PPO targets are not clipped to these stops.
+Only SAC's configured joint target range must fit within them. `hold_arm=True` overrides either policy's joint targets to zero.
+
+### Limits and checkpoint compatibility
+
+Requests can exceed what the plant can achieve. PPO references reach the LLC unchanged;
+the existing bounded rotor allocator inside the LLC and the final thrust cap still limit each rotor to physical thrust.
+The explicit joint PID still clips its output torque to `effort_lim_sim` and keeps anti-windup active.
+We have not removed physical actuator limits or changed the INDI feedback, filters, gains, or motor dynamics.
+
+**PPO INDI checkpoints trained before this change used different action units.** Their dimensions still load,
+but replaying them under the new code changes their meaning. Train a fresh PPO policy for this interface,
+or use the old source revision for historical playback. SAC INDI action semantics are unchanged.
 
 ## 4. One policy action, several physics steps
 
@@ -516,9 +542,9 @@ and are used only in INDI mode.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `acceleration_scale` | `(8,8,8)` | World acceleration per unit action, m/s² |
-| `heading_range_degs` | `180` | Heading half-range around home yaw |
-| `joint_target_limit_degs` | `(90,90)` | Symmetric joint target half-ranges |
+| `acceleration_scale` | `(8,8,8)` | SAC only: world acceleration per normalized action, m/s² |
+| `heading_range_degs` | `180` | SAC only: heading half-range around home yaw |
+| `joint_target_limit_degs` | `(90,90)` | SAC only: symmetric joint target half-ranges |
 | `tilt_gain` | `150` | Selected full-angle tilt/residual-vector gain, 1/s² |
 | `yaw_gain` | `3` | Selected twist/log-z-vector gain, 1/s² |
 | `rate_gain` | `(20,20,8)` | Body-rate feedback gains, 1/s |
@@ -532,7 +558,9 @@ and are used only in INDI mode.
 | `joint_integral_limit` | `0.3` | Integral bound, rad·s |
 
 Existing task fields still control `physics_hz`, `policy_hz`, `kp`, `kd`, `body_rate_scale`, `motor_time_constant_s`, `effort_lim_sim`, `velocity_lim_sim`, rotor positions/signs, `kf`, `km_over_kf`, and rotor limits.
-Use, for example, `env.indi.filter_cutoff_hz=10.0` or `'env.indi.acceleration_scale=[6.0,6.0,8.0]'`.
+In INDI, `body_rate_scale` affects SAC only. PPO already supplies body rates in rad/s.
+Use, for example, `env.indi.filter_cutoff_hz=10.0` for either algorithm,
+or `'env.indi.acceleration_scale=[6.0,6.0,8.0]'` for SAC.
 Derived spaces, actuator gains, validation and filter construction happen after Hydra overrides.
 
 ## 13. Diagnostics and verification

@@ -15,9 +15,10 @@ INDI_TILT_METHODS = ("geom", "method_1", "method_2")
 
 @dataclass
 class IndiControllerCfg:
-    acceleration_scale: tuple = (8.0, 8.0, 8.0)  # world m/s^2 per normalized action
-    heading_range_degs: float = 180.0  # offset from robot_home_quat yaw
-    joint_target_limit_degs: tuple = (90.0, 90.0)
+    # SAC normalized-action mapping only. PPO sends unclipped physical references.
+    acceleration_scale: tuple = (8.0, 8.0, 8.0)  # world m/s^2 per normalized SAC action
+    heading_range_degs: float = 180.0  # SAC heading offset half-range from robot_home_quat yaw
+    joint_target_limit_degs: tuple = (90.0, 90.0)  # SAC joint target half-ranges
     tilt_gain: float = 150.0  # 1/s^2, multiplying Log(q_error * inverse(q_z)) in radians
     yaw_gain: float = 3.0  # 1/s^2, multiplying the selected twist/log-z vector
     rate_gain: tuple = (20.0, 20.0, 8.0)  # 1/s
@@ -57,8 +58,10 @@ class IndiControllerCfg:
         for i, name in enumerate(("thigh", "calf")):
             low, high = getattr(task, f"joint_physical_limit_{name}")
             limit = self.joint_target_limit_degs[i]
-            if not math.isfinite(low) or not math.isfinite(high) or not low <= -limit < limit <= high:
-                raise ValueError(f"indi joint targets must fit inside joint_physical_limit_{name}.")
+            if not math.isfinite(low) or not math.isfinite(high) or low >= high:
+                raise ValueError(f"joint_physical_limit_{name} must contain ordered finite degrees.")
+            if task.sac_action_mapping and not low <= -limit < limit <= high:
+                raise ValueError(f"indi SAC joint targets must fit inside joint_physical_limit_{name}.")
 
 
 def rotation_from_quat(q):
@@ -314,11 +317,19 @@ class IndiController:
                           self.joint_integral / self.cfg.joint_integral_limit), -1)
 
     def step(self, actions, quaternion, rates, joint_pos, joint_vel):
-        u = actions.clamp(-1, 1)
-        collective, desired_rotation = thrust_attitude(
-            u[:, :3] * self.accel_scale, self.home_yaw + math.radians(self.cfg.heading_range_degs)*u[:, 6], self.mass)
+        if self.task.sac_action_mapping:
+            u = actions.clamp(-1, 1)
+            acceleration, reference_rates = u[:, :3] * self.accel_scale, u[:, 3:6] * self.rate_scale
+            heading = self.home_yaw + math.radians(self.cfg.heading_range_degs) * u[:, 6]
+            target = u[:, 7:9] * self.joint_scale
+        else:
+            # PPO: world m/s^2, body rad/s, heading offset rad, absolute joint rad.
+            # Do not bound references here; allocation and PID bound actuator outputs.
+            acceleration, reference_rates = actions[:, :3], actions[:, 3:6]
+            heading, target = self.home_yaw + actions[:, 6], actions[:, 7:9]
+        collective, desired_rotation = thrust_attitude(acceleration, heading, self.mass)
         self.alpha_desired.copy_(attitude_acceleration(quaternion, desired_rotation, rates,
-                                                      u[:, 3:6] * self.rate_scale, self.cfg, self.task.indi_tilt_method))
+                                                      reference_rates, self.cfg, self.task.indi_tilt_method))
         gyro = torch.linalg.cross(rates, rates @ self.inertia.T)
         requested = torch.cat((collective, self.alpha_desired @ self.inertia.T + gyro), -1)
         nominal = self.allocator.thrust(requested) @ self.allocator.allocation.T
@@ -342,7 +353,6 @@ class IndiController:
         self.transient_torque.copy_(((next_speed - self.rotor_speed) / self.dt) @ self.allocator.g2[1:].T)
         self.rotor_speed.copy_(next_speed)
 
-        target = u[:, 7:9] * self.joint_scale
         if self.task.hold_arm:
             target = torch.zeros_like(target)
         error = target - joint_pos

@@ -159,7 +159,8 @@ class BorinotCmdVelEnv(DirectRLEnv):
         self._update_pushes()
         self._previous_actuator_commands.copy_(self._actuator_commands)
         if self.cfg.control_mode == "indi":
-            actions = actions.clamp(-1.0, 1.0)
+            if self.cfg.sac_action_mapping:
+                actions = actions.clamp(-1.0, 1.0)
         elif not self.cfg.sac_action_mapping and not self.cfg.remove_thrust_clipping:
             actions = actions.clamp(-self.cfg.action_clamp, self.cfg.action_clamp)
         self.actions.copy_(actions)

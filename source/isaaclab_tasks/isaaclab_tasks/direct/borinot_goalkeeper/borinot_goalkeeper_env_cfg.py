@@ -17,6 +17,9 @@ from isaaclab_tasks.controllers.borinot_indi import IndiControllerCfg
 @configclass
 class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     control_mode = "thrust_and_torque_control"
+    # INDI PPO actions: world acceleration [m/s^2], body rates [rad/s], heading offset [rad],
+    # joint angles [rad]. No action clipping/scaling; heading adds robot_home_quat yaw.
+    # INDI SAC keeps normalized [-1, 1] references with scales in indi/body_rate_scale.
     indi = IndiControllerCfg()  # used only by control_mode="indi"; see INDI_CONTROL.md
     # geom = method 3; alternatives: method_1, method_2. Definitions:
     # /home/jordibelp/Desktop/emmaDocs/2026-10-23-tau-log-exp-comparison.ipynb
@@ -83,7 +86,7 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     joint_target_scale = (1.1, 1.4) # why this target scales? 
     hold_arm = False  # neutral PD/PID targets; this is NOT a mechanically welded arm
 
-    # Enabled by the SAC runner before env creation. PPO keeps its existing mapping/limits.
+    # Enabled by the SAC runner before env creation. INDI PPO uses raw physical units.
     sac_action_mapping = False
     sac_q_offset_init_actions = False  # Solo semantics: initialize mean at q_offset, not the soft midpoint
     sac_joint_pos_offset = (0.0, 0.0)  # rad, in joint_names order (thigh, calf)
@@ -150,7 +153,7 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     remove_action_clipping=True  # legacy unused field; remove_thrust_clipping controls clipping
     remove_thrust_clipping=False # False: cap thrust at min(TWR * nominal hover, rotor_thrust_limit_n)
     collective_action_scale = 0.7
-    body_rate_scale = (2.0, 2.0, 1.5)
+    body_rate_scale = (2.0, 2.0, 1.5)  # PI mode and INDI SAC only; INDI PPO is already rad/s
     rate_kp = (0.35, 0.35, 0.15)
     rate_ki = (0.10, 0.10, 0.04)
     motor_time_constant_s = 0.04  # motor lag; 0 disables filtering (instantaneous thrust commands)
