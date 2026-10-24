@@ -79,6 +79,7 @@ def test_actual_prephysics_preserves_ppo_actions_and_only_clips_sac(filename, sa
         _progress_active=torch.zeros(2, dtype=torch.bool), _touched=torch.zeros(2, dtype=torch.bool),
         _self_contact_bodies=zeros(2), _command_steps_left=torch.ones(2), _update_pushes=lambda: None,
         _power_sum_w=zeros(2), _power_samples=0, _physics_samples=0)
+    env._action_limit_costs, env._hover_per_rotor = zeros(2, 3), 5.
     raw = torch.tensor([[24., -32., 48., 6., -7., 9., 4.2, 2.3, -3.1],
                         [-.2, .3, -.4, .5, -.6, .7, -.8, .09, -.1]], dtype=torch.float64)
     before = raw.clone()

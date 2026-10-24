@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from pathlib import Path
+import inspect
 
 import torch
 
@@ -15,6 +16,7 @@ from isaaclab.sensors import ContactSensor
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 
 from .borinot_env_cfg import BorinotEnvCfg
+from .action_limits import raw_action_limit_costs
 
 
 # -----------------------
@@ -122,6 +124,7 @@ class BorinotEnv(DirectRLEnv):
 
         act_dim = self.cfg.action_space
         self.actions = torch.zeros((self.num_envs, act_dim), dtype=torch.float32, device=self.device)
+        self._action_limit_costs = torch.zeros(self.num_envs, 3, device=self.device)
         self._last_actions = torch.zeros_like(self.actions)
         self._last_contact_f = torch.zeros((self.num_envs,), dtype=torch.float32, device=self.device)
 
@@ -295,6 +298,8 @@ class BorinotEnv(DirectRLEnv):
 
 
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
+        self._action_limit_costs.copy_(raw_action_limit_costs(
+            actions, self.cfg, self.cfg.hover_thrust_per_rotor, legacy=True))
         # _pre_physics_step is called ONCE per env step before stepping physics, then _map_actions is called each demination step, finally _get_rewards/_get_dones is called once at the end. 
         self.actions = actions.clamp(-1.0, 1.0)
         self._cmd_step.copy_(self._cmd)
@@ -531,6 +536,11 @@ class BorinotEnv(DirectRLEnv):
         self._sample_power()  # final completed substep, before automatic resets
         mean_power_w = self._power_sum_w / self.cfg.decimation
         energy_reward = self.cfg.energy_reward_scale * mean_power_w.sum(-1)
+        limit_rewards = {
+            "thrust_limits": self.cfg.rwd_scale_thrust_limits * self._action_limit_costs[:, 0],
+            "torque_limits": self.cfg.rwd_scale_torque_limits * self._action_limit_costs[:, 1],
+            "action_limits": self.cfg.rwd_scale_action_limits * self._action_limit_costs[:, 2],
+        }
 
         def func_vel_err(err: torch.Tensor, sigma):
             absn = torch.linalg.norm(err, dim=-1)  # shape: (...)
@@ -605,10 +615,13 @@ class BorinotEnv(DirectRLEnv):
 
         reward = self.cfg.rwd_w_task * r_task - r_delta_action - r_contact_force_delta + energy_reward - omega_xy_pen - dq_penalty - ddq_pen - coll_pen - r_excess_torque  - r_contact_force_excess
         
+        reward += sum(limit_rewards.values())
         self._last_actions = self.actions.clone()
         log = {}
         log["rewards/r_task"] = r_task.mean()
         log['rewards/r_energy'] = energy_reward.mean()
+        log.update({f'rewards/{name}': value.mean() for name, value in limit_rewards.items()})
+        self.extras['action_limit_reward_terms'] = {name: value.clone() for name, value in limit_rewards.items()}
         self.extras['power_mean_w'] = {
             'rotor_mechanical': mean_power_w[:, 0].clone(),
             'rotor_dissipative': mean_power_w[:, 1].clone(),
@@ -709,6 +722,7 @@ class BorinotEnv(DirectRLEnv):
         )
 
         self.actions[env_ids_t] = 0.0
+        self._action_limit_costs[env_ids_t] = 0.0
         self._last_actions[env_ids_t] = 0.0
         self._thrusts[env_ids_t] = 0.0
         self._leg_torques[env_ids_t] = 0.0
@@ -719,4 +733,6 @@ class BorinotEnv(DirectRLEnv):
         # Reset commands for these envs
         self._reset_commands(env_ids_t)
 
+    def get_code_snapshot_files(self):
+        return [inspect.getsourcefile(raw_action_limit_costs)]
 

@@ -68,6 +68,10 @@ class BorinotEnvCfg(DirectRLEnvCfg):
     # Add energy_reward_scale * mean(mechanical + dissipative power) [W].
     # Negative scales penalize consumption; no additional dt multiplier.
     energy_reward_scale: float = 0.0
+    # Raw policy soft limits: signed scale * sum(squared excess), no extra dt.
+    rwd_scale_thrust_limits = -1.0  # excess thrust in N, before clipping
+    rwd_scale_torque_limits = -1.0  # excess direct torque in N*m, both signs
+    rwd_scale_action_limits = -1.0  # otherwise-clipped references (atan2 vector components)
     # Nominal Solo joint copper loss: c * joint_torque**2 [W], c in W/(N*m)^2.
     # Rounded from (3/2)*R_phase/(G*Kt)^2, R_phase=0.2324751 ohm, G=9, Kt=0.025 N*m/A.
     arm_copper_loss_coefficient: float = 7.0

@@ -17,6 +17,7 @@ tree=ast.parse((FOLDER/'borinot_goalkeeper_env.py').read_text())
 names=('_pre_physics_step','_interception','_get_dones','_get_rewards','_get_observations','_record_shots','_park_ball','_launch_ball')
 scope={name:getattr(math,name) for name in ('terminal_outcome','sample_shots','sample_shot_delay_steps','promotion_ready','plane_progress','predict_intercept')}
 scope.update(torch=torch,quat_apply_inverse=lambda q,v:v,matrix_from_quat=lambda q:torch.eye(3).expand(len(q),-1,-1))
+scope['raw_action_limit_costs'] = control.raw_action_limit_costs
 for node in ast.walk(tree):
     if isinstance(node,ast.FunctionDef) and node.name in names:
         exec(compile(ast.Module(body=[node],type_ignores=[]),str(FOLDER),'exec'),scope)
@@ -41,6 +42,7 @@ def env():
     noop=lambda *a,**kw:None
     e=SimpleNamespace(cfg=cfg,device='cpu',num_envs=n,step_dt=.01,max_episode_length=2000,
         actions=torch.zeros(n,8),_actuator_commands=torch.zeros(n,8),_previous_actuator_commands=torch.zeros(n,8),_rate_integral=torch.ones(n,3),
+        _action_limit_costs=torch.zeros(n,3),
         _previous_paddle=xyz.clone(),_old_progress_active=torch.zeros(n,dtype=torch.bool),
         _hit=torch.zeros(n,dtype=torch.bool),_clear=torch.zeros(n,dtype=torch.bool),_new_hit=torch.zeros(n,dtype=torch.bool),
         _center_quality=zero(),_recovery_time=zero(),_outcome=torch.zeros(n,dtype=torch.long),
@@ -53,7 +55,8 @@ def env():
         _rotor_thrust=torch.full((n,6),5.),_hover_per_rotor=5.,_home=torch.tensor([0.,0.,1.5]),
         _joint_scale=torch.ones(2),joint_ids=[0,1],_ball_parameters=torch.zeros(n,2),
         _previous_ball=xyz.clone(),_ball_masses=torch.ones(n,1),_ball_inertias=torch.ones(n,9),_ball_materials=torch.ones(n,1,3),
-        _episode_rewards=zero(),_episode_terms={k:zero() for k in ('plane_progress','outcome','floor_after_save','optional_rates','optional_hit','energy')},
+        _episode_rewards=zero(),_episode_terms={k:zero() for k in ('plane_progress','outcome','floor_after_save','optional_rates','optional_hit','energy',
+                                                               'thrust_limits','torque_limits','action_limits')},
         outcome_counts=torch.zeros(10,dtype=torch.long),shot_level=0,_stage_shots=0,_stage_start_step=0,common_step_counter=0,
         _curriculum_window=torch.zeros(8),_window_cursor=0,curriculum_stage_pure_episodes=0,
         extras={},scene=SimpleNamespace(env_origins=xyz),ball_contact=SimpleNamespace(reset=noop),

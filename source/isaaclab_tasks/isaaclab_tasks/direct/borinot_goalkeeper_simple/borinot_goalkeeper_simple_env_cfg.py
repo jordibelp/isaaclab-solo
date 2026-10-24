@@ -204,6 +204,10 @@ class BorinotGoalkeeperSimpleEnvCfg(DirectRLEnvCfg):
     # Desirability: prefer smooth, low-power motion.
     rwd_scale_action_rate = -5.0  # group-mean squared normalized thrust/torque command change, times policy dt
     rwd_scale_energy = -2.5e-5  # per watt of mean power each action (the original convention)
+    # Raw policy soft limits: signed scale * sum(squared excess), no extra dt.
+    rwd_scale_thrust_limits = -1.0  # excess direct thrust in N, both lower and upper bounds
+    rwd_scale_torque_limits = -1.0  # excess direct torque in N*m, both signs
+    rwd_scale_action_limits = -1.0  # otherwise-clipped PD/PI/SAC-INDI references; not PPO INDI
     minimize_energy_not_power = False  # True: pay the energy since the last payment when each shot ends
 
     # Robot resets. The penalties above do not depend on these switches.

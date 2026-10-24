@@ -13,12 +13,15 @@ FOLDER = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("cmd_vel_math", FOLDER / "task_math.py")
 task_math = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(task_math)
+limits_spec = importlib.util.spec_from_file_location("velocity_action_limits", FOLDER.parent / "borinot/action_limits.py")
+limits = importlib.util.module_from_spec(limits_spec)
+limits_spec.loader.exec_module(limits)
 
 
 def method(name, **extra):
     node = next(n for n in ast.parse((FOLDER / "borinot_cmd_vel_env.py").read_text()).body if isinstance(n, ast.ClassDef))
     function = next(n for n in node.body if isinstance(n, ast.FunctionDef) and n.name == name)
-    scope = {"torch": torch, "math": math, **vars(task_math), **extra}
+    scope = {"torch": torch, "math": math, "raw_action_limit_costs": limits.raw_action_limit_costs, **vars(task_math), **extra}
     exec(compile(ast.Module(body=[function], type_ignores=[]), name, "exec"), scope)
     return scope[name]
 
@@ -156,16 +159,18 @@ def reward_env():
     return SimpleNamespace(step_dt=.01, physics_dt=.005, joint_ids=[0, 1], extras={},
         cfg=SimpleNamespace(tracking_lin_std=.5, tracking_ang_std=.5, effort_lim_sim=2.,
             rwd_scale_lin_vel=1.5, rwd_scale_ang_vel=.5, rwd_scale_action_rate=0., rwd_scale_energy=0.,
+            rwd_scale_thrust_limits=-1., rwd_scale_torque_limits=-1., rwd_scale_action_limits=-1.,
             rwd_scale_base_collision=-2., rwd_scale_leave_area=-2., rwd_scale_self_collision=-2.25, rwd_scale_tilt=-1.),
         robot=SimpleNamespace(data=SimpleNamespace(root_lin_vel_w=torch.zeros(2, 3),
             root_ang_vel_w=torch.zeros(2, 3), root_quat_w=torch.tensor([[1., 0, 0, 0]]).expand(2, -1),
             applied_torque=torch.zeros(2, 2))), _commands=torch.zeros(2, 4),
         _actuator_commands=torch.zeros(2, 8), _previous_actuator_commands=torch.zeros(2, 8),
+        _action_limit_costs=torch.zeros(2, 3),
         _power_sum_w=torch.tensor([[20., 2., -4., 6.], [30., 4., 8., 10.]]), _power_samples=2,
         _events={name: torch.zeros(2, dtype=torch.bool) for name in ("base_collision", "leave_area", "tilt")},
         _self_contact_bodies=torch.zeros(2, 4, dtype=torch.bool),
         _episode_terms={name: torch.zeros(2) for name in ("track_lin_vel_xyz_exp", "track_ang_vel_z_exp", "action_rate", "energy",
-            "base_collision", "leave_area", "self_collision", "tilt")},
+            "base_collision", "leave_area", "self_collision", "tilt", "thrust_limits", "torque_limits", "action_limits")},
         _episode_xy_integral=torch.zeros(2), _episode_energy_j=torch.zeros(2))
 
 
@@ -275,7 +280,8 @@ def contact_env(n=5):
     cfg = SimpleNamespace(self_collision_force_threshold_n=.6, base_collision_force_threshold_n=1.,
         flight_height_range_m=(.15, 20.), flight_xy_limit_m=25., robot_tilt_threshold_degs=70.,
         reset_robot_on_tilt_threshold=True, reset_robot_on_robot_crash=True, self_collision_triggers_reset=False,
-        control_mode="thrust_and_torque_control", sac_action_mapping=False, remove_thrust_clipping=True)
+        control_mode="thrust_and_torque_control", sac_action_mapping=False, remove_thrust_clipping=True, hold_arm=False,
+        rwd_scale_thrust_limits=0., rwd_scale_torque_limits=0., rwd_scale_action_limits=0.)
     sensors = [SimpleNamespace(data=SimpleNamespace(force_matrix_w=torch.zeros(n, 1, 3, 3),
                                                    net_forces_w=torch.zeros(n, 1, 3))) for _ in range(4)]
     env = SimpleNamespace(cfg=cfg, extras={}, _body_contact_sensors=sensors, _base_contact_column=1,
@@ -287,6 +293,7 @@ def contact_env(n=5):
         _episode_steps=torch.zeros(n, dtype=torch.long), _command_steps_left=torch.ones(n, dtype=torch.long),
         _update_pushes=lambda: None, _actuator_commands=torch.zeros(n, 8), _previous_actuator_commands=torch.zeros(n, 8),
         actions=torch.zeros(n, 8), _power_sum_w=torch.zeros(n, 4), _power_samples=0, _physics_samples=0)
+    env._action_limit_costs, env._hover_per_rotor = torch.zeros(n, 3), 5.
     return env
 
 

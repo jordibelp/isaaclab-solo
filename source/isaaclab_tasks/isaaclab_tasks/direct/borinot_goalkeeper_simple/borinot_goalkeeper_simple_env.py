@@ -14,6 +14,7 @@ from isaaclab.sensors import ContactSensor, ContactSensorCfg
 from isaaclab.utils.math import matrix_from_quat, quat_apply, quat_apply_inverse
 
 from isaaclab_tasks.direct.borinot_goalkeeper.borinot_goalkeeper_env import BorinotGoalkeeperEnv
+from isaaclab_tasks.direct.borinot.action_limits import raw_action_limit_costs
 from isaaclab_tasks.direct.borinot_goalkeeper.events import configure_randomization
 from isaaclab_tasks.direct.borinot_goalkeeper.paddle import attach_paddle
 from isaaclab_tasks.direct.borinot_goalkeeper.task_math import (
@@ -30,7 +31,7 @@ EVENTS = ("hit_racket", "hit_arm", "hit_base", "goal", "base_crash", "self_colli
 REWARD_TERMS = {
     "task": ("progress", "hit_racket", "hit_arm", "hit_base", "goal"),
     "integrity": ("base_crash", "self_collision", "leave_area", "tilt"),
-    "desirability": ("action_rate", "energy"),
+    "desirability": ("action_rate", "energy", "thrust_limits", "torque_limits", "action_limits"),
 }
 
 
@@ -80,6 +81,7 @@ class BorinotGoalkeeperSimpleEnv(DirectRLEnv):
 
         # Control state read by the shared _apply_action() and _sample_power().
         self.actions = torch.zeros(self.num_envs, cfg.action_space, device=self.device)
+        self._action_limit_costs = torch.zeros(self.num_envs, 3, device=self.device)
         self._rate_integral = torch.zeros(self.num_envs, 3, device=self.device)
         self._joint_scale = torch.tensor(cfg.joint_target_scale, device=self.device)
         if cfg.sac_action_mapping:
@@ -213,6 +215,7 @@ class BorinotGoalkeeperSimpleEnv(DirectRLEnv):
         return position, quaternion, quat_apply(quaternion, self._x_axis)
 
     def _pre_physics_step(self, actions):
+        self._action_limit_costs.copy_(raw_action_limit_costs(actions, self.cfg, self._hover_per_rotor))
         self.extras.pop("log", None)
         self._episode_steps += 1
         self._next_launch_steps.sub_(1).clamp_min_(0)
@@ -360,7 +363,10 @@ class BorinotGoalkeeperSimpleEnv(DirectRLEnv):
             energy_j = self._unpaid_energy_j * pay
             self._unpaid_energy_j.masked_fill_(pay, 0.0)
         return {"action_rate": self.cfg.rwd_scale_action_rate * action_rate * self.step_dt,
-                "energy": self.cfg.rwd_scale_energy * energy_j / self.step_dt}
+                "energy": self.cfg.rwd_scale_energy * energy_j / self.step_dt,
+                "thrust_limits": self.cfg.rwd_scale_thrust_limits * self._action_limit_costs[:, 0],
+                "torque_limits": self.cfg.rwd_scale_torque_limits * self._action_limit_costs[:, 1],
+                "action_limits": self.cfg.rwd_scale_action_limits * self._action_limit_costs[:, 2]}
 
     def _get_observations(self):
         root_pos = self.robot.data.root_pos_w - self.scene.env_origins
@@ -524,7 +530,7 @@ class BorinotGoalkeeperSimpleEnv(DirectRLEnv):
             self.robot.data.default_joint_pos[env_ids][:, self.joint_ids], joint_ids=self.joint_ids, env_ids=env_ids)
         self.robot.set_joint_velocity_target(joint_zero, joint_ids=self.joint_ids, env_ids=env_ids)
         self.robot.set_joint_effort_target(joint_zero, joint_ids=self.joint_ids, env_ids=env_ids)
-        for buffer in (self.actions, self._rate_integral, self._touched, self._ball_done, self._outcome,
+        for buffer in (self.actions, self._action_limit_costs, self._rate_integral, self._touched, self._ball_done, self._outcome,
                        self._episode_rewards, self._episode_steps, self._shot_steps, self._episode_energy_j,
                        self._unpaid_energy_j,
                        *self._events.values(), *self._episode_terms.values(), *self._episode_counts.values()):

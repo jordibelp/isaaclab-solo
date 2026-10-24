@@ -254,3 +254,43 @@ This shows that the reward is computed as designed and that training and playbac
 - `playback.py`: playback class for the shared goalkeeper player.
 - `agents/`: the original PPO and SAC recipes with their own log names.
 - `tests/test_simple_reward.py`, `tests/simple_smoke.py`: CPU and simulator checks.
+
+
+## Soft policy-output limits
+
+All four Borinot tasks score the raw policy sample before environment clipping.
+The new signed scales default to **-1.0**. Set all three to `0.0` to disable them.
+Each term is a sum over channels, with no extra policy-dt multiplier.
+
+- `env.rwd_scale_thrust_limits`: squared excess of direct rotor requests, in N².
+  Requests below zero also pay a cost. The upper threshold uses the effective
+  thrust-to-weight ratio after the per-rotor hardware cap is resolved.
+- `env.rwd_scale_torque_limits`: squared excess of direct joint requests beyond
+  either signed `effort_lim_sim` limit, in (N·m)². At the default 2.7 N·m limit,
+  a 3.0 N·m request contributes 0.09 before its signed weight.
+- `env.rwd_scale_action_limits`: squared excess of other policy references that
+  are actually clipped. This covers PD/PI input clamps, normalized SAC INDI
+  inputs, and the legacy task's clipped angle-vector components.
+
+The helper is `../borinot/action_limits.py`. Direct thrust/torque costs use the
+original mapping and raw sample, including excursions hidden by `action_clamp`.
+The legacy task uses its own thrust and torque mapping. Unused held-arm outputs
+are ignored. An explicitly removed upper thrust cap has no upper-thrust cost
+for PPO, but negative thrust requests still pay a cost. SAC's direct rotor
+mapping still clips its normalized inputs to ±1.
+
+PPO INDI references are unbounded physical quantities; they are **not** given
+artificial ±1 limits. PD/PI/INDI controller saturation is not penalized here.
+Position targets are not mistaken for direct torque requests.
+
+The physical controls, clipping, motor dynamics and observation sizes are
+unchanged. In particular, this is a **soft reward cost**, not a new hard torque
+clamp. Direct PPO feed-forward requests can exceed the configured implicit
+actuator limit even when the reported torque estimate is clipped.
+
+The reward breakdown and episode logger expose `thrust_limits`, `torque_limits`
+and `action_limits` (under `desirability/` in the simple task). The legacy task
+uses `rewards/<term>` and `info["action_limit_reward_terms"]`. Physical resets
+clear only the selected environments' cost buffers; ball-only resets keep the
+current robot transition. Tests: `borinot_goalkeeper/tests/test_action_limits.py`
+and `borinot_goalkeeper/tests/action_limits_smoke.py`.

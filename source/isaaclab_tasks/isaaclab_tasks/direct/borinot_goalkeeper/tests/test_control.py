@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """Exercise the actual config resolver and action method without starting Isaac Sim."""
 import ast
+import importlib.util
 import math
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,6 +10,10 @@ import pytest
 import torch
 
 FOLDER = Path(__file__).resolve().parents[1]
+_limits_spec = importlib.util.spec_from_file_location("borinot_action_limits_test", FOLDER.parent / "borinot/action_limits.py")
+_limits = importlib.util.module_from_spec(_limits_spec)
+_limits_spec.loader.exec_module(_limits)
+raw_action_limit_costs = _limits.raw_action_limit_costs
 MODES = ("thrust_and_torque_control", "thrust_and_PD_joint_pos_control", "PI_rotors_PD_joint_pos_control")
 
 
@@ -18,7 +23,7 @@ def source_class(filename):
 
 def method(filename, name):
     node = next(n for n in source_class(filename).body if isinstance(n, ast.FunctionDef) and n.name == name)
-    scope = {"math": math, "torch": torch}
+    scope = {"math": math, "torch": torch, "raw_action_limit_costs": raw_action_limit_costs}
     exec(compile(ast.Module(body=[node], type_ignores=[]), filename, "exec"), scope)
     return scope[name]
 
@@ -210,6 +215,7 @@ def test_action_clipping_flag(remove, expected):
     cfg.remove_thrust_clipping, cfg.action_clamp, cfg.goal_center = remove, 2.0, (-0.45, 0.0, 1.2)
     zeros = lambda *shape, dtype=torch.float32: torch.zeros(*shape, dtype=dtype)
     env = SimpleNamespace(cfg=cfg, extras={}, _episode_steps=zeros(1), _next_launch_steps=torch.ones(1),
+        _action_limit_costs=zeros(1, 3), _hover_per_rotor=5.,
         _ball_active=torch.ones(1, dtype=torch.bool), _shot_steps=zeros(1), _outcome=zeros(1),
         actions=zeros(1, 4), _actuator_commands=zeros(1, 8), _previous_actuator_commands=zeros(1, 8), _previous_paddle=zeros(1, 3),
         _paddle_pose=lambda: (zeros(1, 3),), scene=SimpleNamespace(env_origins=zeros(1, 3)),

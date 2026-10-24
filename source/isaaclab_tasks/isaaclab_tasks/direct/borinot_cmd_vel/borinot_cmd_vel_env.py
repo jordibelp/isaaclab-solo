@@ -12,6 +12,7 @@ from isaaclab.envs import DirectRLEnv
 from isaaclab.sensors import ContactSensor, ContactSensorCfg
 from isaaclab.utils.math import matrix_from_quat, quat_apply_inverse, quat_from_euler_xyz, quat_mul
 from isaaclab_tasks.direct.borinot_goalkeeper.borinot_goalkeeper_env import BorinotGoalkeeperEnv
+from isaaclab_tasks.direct.borinot.action_limits import raw_action_limit_costs
 from isaaclab_tasks.direct.borinot_goalkeeper.events import configure_randomization
 from isaaclab_tasks.controllers.borinot_indi import IndiController
 from isaaclab_tasks.direct.borinot_goalkeeper.paddle import attach_paddle
@@ -47,6 +48,7 @@ class BorinotCmdVelEnv(DirectRLEnv):
         self._self_contact_bodies = torch.zeros(self.num_envs, len(self.contact_body_names),
                                                dtype=torch.bool, device=self.device)
         self.actions = torch.zeros(self.num_envs, cfg.action_space, device=self.device)
+        self._action_limit_costs = torch.zeros(self.num_envs, 3, device=self.device)
         self._rate_integral = torch.zeros(self.num_envs, 3, device=self.device)
         self._joint_scale = torch.tensor(cfg.joint_target_scale, device=self.device)
         if cfg.sac_action_mapping:
@@ -99,7 +101,7 @@ class BorinotCmdVelEnv(DirectRLEnv):
         self._episode_energy_j = torch.zeros_like(self._episode_xy_integral)
         self._episode_terms = {name: torch.zeros_like(self._episode_xy_integral) for name in (
             "track_lin_vel_xyz_exp", "track_ang_vel_z_exp", "action_rate", "energy",
-            "base_collision", "leave_area", "self_collision", "tilt")}
+            "base_collision", "leave_area", "self_collision", "tilt", "thrust_limits", "torque_limits", "action_limits")}
         self._curriculum_window = torch.zeros(cfg.curriculum_window_episodes, device=self.device)
         self._window_cursor = self._stage_episodes = self._stage_start_step = 0
         self.curriculum_stage_pure_episodes = 0
@@ -150,6 +152,7 @@ class BorinotCmdVelEnv(DirectRLEnv):
         self._base_push_steps_until_next.sub_(1)
 
     def _pre_physics_step(self, actions):
+        self._action_limit_costs.copy_(raw_action_limit_costs(actions, self.cfg, self._hover_per_rotor))
         self.extras.pop("log", None)  # keep episode-only log packets for RSL
         for event in self._events.values():
             event.zero_()
@@ -227,6 +230,9 @@ class BorinotCmdVelEnv(DirectRLEnv):
             "leave_area": self.cfg.rwd_scale_leave_area * self._events["leave_area"].float(),
             "self_collision": self.cfg.rwd_scale_self_collision * self._self_contact_bodies.sum(-1) * self.step_dt,
             "tilt": self.cfg.rwd_scale_tilt * self._events["tilt"].float(),
+            "thrust_limits": self.cfg.rwd_scale_thrust_limits * self._action_limit_costs[:, 0],
+            "torque_limits": self.cfg.rwd_scale_torque_limits * self._action_limit_costs[:, 1],
+            "action_limits": self.cfg.rwd_scale_action_limits * self._action_limit_costs[:, 2],
         }
         for name, value in terms.items():
             self._episode_terms[name] += value
@@ -314,7 +320,7 @@ class BorinotCmdVelEnv(DirectRLEnv):
         """Archive shared plant/control helpers alongside this task's source."""
         return [inspect.getsourcefile(obj) for obj in (
             BorinotGoalkeeperEnv, configure_randomization, attach_paddle, configure_end_effector,
-            IndiController, tracking_kernels)]
+            IndiController, tracking_kernels, raw_action_limit_costs)]
 
     def _reset_idx(self, env_ids):
         if env_ids is None:
@@ -342,7 +348,7 @@ class BorinotCmdVelEnv(DirectRLEnv):
                                              joint_ids=self.joint_ids, env_ids=env_ids)
         self.robot.set_joint_velocity_target(joint_zero, joint_ids=self.joint_ids, env_ids=env_ids)
         self.robot.set_joint_effort_target(joint_zero, joint_ids=self.joint_ids, env_ids=env_ids)
-        for buffer in (self.actions, self._rate_integral, self._episode_steps, self._episode_xy_integral,
+        for buffer in (self.actions, self._action_limit_costs, self._rate_integral, self._episode_steps, self._episode_xy_integral,
                        self._episode_energy_j, self._base_push_steps_left, self._base_push_force_z_w,
                        self._base_push_points_b, self._power_sum_w):
             buffer[env_ids] = 0

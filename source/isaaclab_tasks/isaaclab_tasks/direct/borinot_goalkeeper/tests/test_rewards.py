@@ -42,6 +42,7 @@ def make_env():
                           progress_use_prediction=False, shot_resampling_mode="launch")
     return SimpleNamespace(
         cfg=cfg, device="cpu", step_dt=1/60, _sample_power=lambda: None,
+        _action_limit_costs=torch.zeros(n, 3),
         _power_sum_w=torch.tensor([4., 8., 12., 16.]).repeat(n, 1),
         _previous_paddle=xyz.clone(), _paddle_pose=lambda: (xyz.clone(), None, normal),
         ball=SimpleNamespace(data=SimpleNamespace(root_pos_w=target, root_lin_vel_w=-normal)),
@@ -61,14 +62,15 @@ def make_env():
         _outcome=torch.arange(n), _center_quality=torch.full((n,), .5),
         _new_hit=torch.zeros(n, dtype=torch.bool), _flags={name: torch.zeros(n, dtype=torch.bool) for name in ("floor", "crash", "tilt")},
         _episode_rewards=zero.clone(), _episode_terms={
-            name: zero.clone() for name in ("plane_progress", "outcome", "floor_after_save", "optional_rates", "optional_hit", "energy")
+            name: zero.clone() for name in ("plane_progress", "outcome", "floor_after_save", "optional_rates", "optional_hit", "energy",
+                                          "thrust_limits", "torque_limits", "action_limits")
         }, extras={},
     )
 
 
 def test_all_reward_fields_use_signed_scale_names():
     scales = config_scales()
-    assert len(scales) == 20
+    assert len(scales) == 23
     for name in scales:
         assert not any(tag in name for tag in ("penalty", "bonus", "cost"))
     cfg_tree = ast.parse((folder / "borinot_goalkeeper_env_cfg.py").read_text())

@@ -13,6 +13,7 @@ from isaaclab.envs import DirectRLEnv
 from isaaclab.sensors import ContactSensor, ContactSensorCfg
 from isaaclab.utils.math import matrix_from_quat, quat_apply, quat_apply_inverse
 from isaaclab_tasks.controllers.borinot_indi import IndiController
+from isaaclab_tasks.direct.borinot.action_limits import raw_action_limit_costs
 
 from .borinot_goalkeeper_env_cfg import BorinotGoalkeeperEnvCfg
 from .events import configure_randomization
@@ -35,7 +36,7 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
 
     def get_code_snapshot_files(self):
         """Retain the shared implementation when archiving a training run."""
-        return [inspect.getsourcefile(obj) for obj in (BorinotGoalkeeperEnv, IndiController)]
+        return [inspect.getsourcefile(obj) for obj in (BorinotGoalkeeperEnv, IndiController, raw_action_limit_costs)]
 
     def __init__(self, cfg: BorinotGoalkeeperEnvCfg, render_mode=None, **kwargs):
         cfg.configure_control()
@@ -71,6 +72,7 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         self._x_axis = torch.tensor([1.0, 0.0, 0.0], device=self.device).expand(self.num_envs, -1)
         self._gravity = torch.tensor([0.0, 0.0, -1.0], device=self.device).expand(self.num_envs, -1)
         self.actions = torch.zeros(self.num_envs, cfg.action_space, device=self.device)
+        self._action_limit_costs = torch.zeros(self.num_envs, 3, device=self.device)
         self._rate_integral = torch.zeros(self.num_envs, 3, device=self.device)
         self._joint_scale = torch.tensor(cfg.joint_target_scale, device=self.device)
         if cfg.sac_action_mapping:
@@ -130,7 +132,8 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         self._episode_rewards = torch.zeros(self.num_envs, device=self.device)
         self._episode_terms = {
             name: torch.zeros(self.num_envs, device=self.device)
-            for name in ("plane_progress", "outcome", "floor_after_save", "optional_rates", "optional_hit", "energy")
+            for name in ("plane_progress", "outcome", "floor_after_save", "optional_rates", "optional_hit", "energy",
+                         "thrust_limits", "torque_limits", "action_limits")
         }
         self._shot_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self._episode_steps = torch.zeros_like(self._shot_steps)
@@ -236,6 +239,7 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         return target, time_s, valid, potential
 
     def _pre_physics_step(self, actions):
+        self._action_limit_costs.copy_(raw_action_limit_costs(actions, self.cfg, self._hover_per_rotor))
         self.extras.pop("log", None)
         self._episode_steps += 1
         self._next_launch_steps.sub_(1).clamp_min_(0)
@@ -477,7 +481,10 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         terms = {"plane_progress": progress, "outcome": event_values[self._outcome],
                  "floor_after_save": self.cfg.rwd_scale_ball_floor * floor_after_save,
                  "optional_rates": rate * self.step_dt, "optional_hit": hit_reward,
-                 "energy": self.cfg.rwd_scale_energy * mean_power_w.sum(-1)}
+                 "energy": self.cfg.rwd_scale_energy * mean_power_w.sum(-1),
+                 "thrust_limits": self.cfg.rwd_scale_thrust_limits * self._action_limit_costs[:, 0],
+                 "torque_limits": self.cfg.rwd_scale_torque_limits * self._action_limit_costs[:, 1],
+                 "action_limits": self.cfg.rwd_scale_action_limits * self._action_limit_costs[:, 2]}
         reward = sum(terms.values())
         self._episode_rewards += reward
         for name, term in terms.items():
@@ -684,7 +691,7 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
             self.robot.data.default_joint_pos[env_ids][:, self.joint_ids], joint_ids=self.joint_ids, env_ids=env_ids)
         self.robot.set_joint_velocity_target(joint_zero, joint_ids=self.joint_ids, env_ids=env_ids)
         self.robot.set_joint_effort_target(joint_zero, joint_ids=self.joint_ids, env_ids=env_ids)
-        for buffer in (self.actions, self._rate_integral, self._recovery_time,
+        for buffer in (self.actions, self._action_limit_costs, self._rate_integral, self._recovery_time,
                        self._hit, self._clear, self._new_hit, self._center_quality, self._outcome,
                        self._episode_rewards, self._episode_steps, self._episode_shots,
                        self._episode_saves, self._episode_paddle_hits, self._shot_steps):

@@ -45,6 +45,10 @@ SCOPE = {"torch": torch, "math": math, "quat_apply": quat_apply, "quat_apply_inv
          "matrix_from_quat": lambda q: torch.eye(3).expand(len(q), -1, -1)}
 SCOPE.update({name: getattr(task_math, name) for name in (
     "crosses_goal", "plane_progress", "predict_intercept", "promotion_ready", "sample_shots", "sample_shot_delay_steps")})
+limits_spec = importlib.util.spec_from_file_location("simple_action_limits", FOLDER.parent / "borinot/action_limits.py")
+limits = importlib.util.module_from_spec(limits_spec)
+limits_spec.loader.exec_module(limits)
+SCOPE["raw_action_limit_costs"] = limits.raw_action_limit_costs
 for node in ast.parse(SOURCE.read_text()).body:  # OUTCOME_*, EVENTS, REWARD_TERMS
     if isinstance(node, ast.Assign) and all(isinstance(t, ast.Name) and t.id.isupper() for t in node.targets):
         exec(compile(ast.Module(body=[node], type_ignores=[]), str(SOURCE), "exec"), SCOPE)
@@ -135,6 +139,7 @@ def make_env(**overrides):
         _area_min=torch.tensor([cfg.goal_area_x_m[0], cfg.goal_area_y_m[0], cfg.goal_area_z_m[0]]),
         _area_max=torch.tensor([cfg.goal_area_x_m[1], cfg.goal_area_y_m[1], cfg.goal_area_z_m[1]]),
         actions=torch.zeros(N, cfg.action_space), _rate_integral=torch.zeros(N, 3), _joint_scale=torch.ones(2),
+        _action_limit_costs=torch.zeros(N, 3),
         _hover_per_rotor=5.0, _rotor_thrust=torch.full((N, 6), 5.0),
         _actuator_commands=torch.full((N, 8), 0.0), _previous_actuator_commands=torch.zeros(N, 8),
         _power_sum_w=torch.zeros(N, 4), _power_samples=0, _physics_samples=0, _episode_energy_j=torch.zeros(N),
