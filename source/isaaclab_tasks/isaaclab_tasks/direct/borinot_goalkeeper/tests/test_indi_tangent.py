@@ -29,7 +29,7 @@ def test_feedback_matches_scipy_full_log_projection(dtype):
     q = torch.tensor(current.as_quat(scalar_first=True), dtype=dtype)
     rd = torch.tensor(desired.as_matrix(), dtype=dtype)
     actual = indi.attitude_acceleration(q, rd, torch.tensor(rates, dtype=dtype),
-                                        torch.tensor(reference, dtype=dtype), cfg)
+                                        torch.tensor(reference, dtype=dtype), cfg, "method_1")
     np.testing.assert_allclose(actual, oracle(current, desired, rates, reference, cfg),
                                atol=2e-4 if dtype == torch.float32 else 2e-11, rtol=2e-6)
     # A change of world frame must not change a current-body-axis error.
@@ -37,11 +37,11 @@ def test_feedback_matches_scipy_full_log_projection(dtype):
     changed = indi.attitude_acceleration(
         torch.tensor((world * current).as_quat(scalar_first=True), dtype=dtype),
         torch.tensor((world * desired).as_matrix(), dtype=dtype),
-        torch.tensor(rates, dtype=dtype), torch.tensor(reference, dtype=dtype), cfg)
+        torch.tensor(rates, dtype=dtype), torch.tensor(reference, dtype=dtype), cfg, "method_1")
     torch.testing.assert_close(actual, changed, atol=3e-4 if dtype == torch.float32 else 2e-11,
                                rtol=2e-6)
     torch.testing.assert_close(actual, indi.attitude_acceleration(
-        -q, rd, torch.tensor(rates, dtype=dtype), torch.tensor(reference, dtype=dtype), cfg))
+        -q, rd, torch.tensor(rates, dtype=dtype), torch.tensor(reference, dtype=dtype), cfg, "method_1"))
 
 
 @pytest.mark.parametrize("axis", [0, 1, 2])
@@ -64,7 +64,7 @@ def test_mixed_error_is_not_the_old_geometric_tilt_yaw_split():
     cfg = indi.IndiControllerCfg()
     zeros = torch.zeros(1, 3, dtype=torch.float64)
     actual = indi.attitude_acceleration(torch.tensor([[1., 0., 0., 0.]], dtype=torch.float64),
-        torch.from_numpy(desired.as_matrix()), zeros, zeros, cfg)
+        torch.from_numpy(desired.as_matrix()), zeros, zeros, cfg, "method_1")
     np.testing.assert_allclose(actual, oracle(current, desired, zeros.numpy(), zeros.numpy(), cfg), atol=1e-12)
     geometric = np.array([[cfg.tilt_gain*math.pi/2, 0., cfg.yaw_gain*math.pi/2]])
     assert np.linalg.norm(actual.numpy() - geometric) > 10

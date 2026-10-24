@@ -46,6 +46,7 @@ class BorinotGoalkeeperSimpleEnv(DirectRLEnv):
     _apply_action = BorinotGoalkeeperEnv._apply_action
     _sample_power = BorinotGoalkeeperEnv._sample_power
     _init_indi = BorinotGoalkeeperEnv._init_indi
+    get_code_snapshot_files = BorinotGoalkeeperEnv.get_code_snapshot_files
 
     def __init__(self, cfg: BorinotGoalkeeperSimpleEnvCfg, render_mode=None, **kwargs):
         cfg.configure_control()

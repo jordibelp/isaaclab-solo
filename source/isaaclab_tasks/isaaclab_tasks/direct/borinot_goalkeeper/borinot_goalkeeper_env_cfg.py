@@ -11,13 +11,16 @@ from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.utils import configclass
 
 from .events import BorinotEventCfg
-from .indi import IndiControllerCfg
+from isaaclab_tasks.controllers.borinot_indi import IndiControllerCfg
 
 
 @configclass
 class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     control_mode = "thrust_and_torque_control"
     indi = IndiControllerCfg()  # used only by control_mode="indi"; see INDI_CONTROL.md
+    # geom = method 3; alternatives: method_1, method_2. Definitions:
+    # /home/jordibelp/Desktop/emmaDocs/2026-10-23-tau-log-exp-comparison.ipynb
+    indi_tilt_method = "geom"  # used only by control_mode="indi"; inherited by Borinot-cmd-vel
     enabled_self_collisions = False  # env.enabled_self_collisions=True enables eligible nonadjacent body pairs
     physics_hz = 200
     policy_hz = 100

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """Live Hydra/PhysX integration for INDI in either goalkeeper task (one process per task)."""
 import argparse
+import inspect
 import json
 from pathlib import Path
 import sys
@@ -42,11 +43,19 @@ def main(cfg, agent_cfg):
         obs, _ = env.reset()
         check("hydra_nine_actions", cfg.control_mode == "indi" and env.action_space.shape[-1] == cfg.action_space == 9)
         check("hydra_nested_controller_cfg", cfg.indi.filter_cutoff_hz == env._indi.cfg.filter_cutoff_hz)
+        check("hydra_tilt_method", cfg.indi_tilt_method in ("geom", "method_1", "method_2")
+              and env._indi.task.indi_tilt_method == cfg.indi_tilt_method)
+        from isaaclab_tasks.controllers.borinot_indi import IndiController, thrust_attitude
+        from isaaclab_tasks.direct.borinot_goalkeeper.indi import IndiController as legacy_controller
+        check("shared_controller_identity", type(env._indi) is IndiController and legacy_controller is IndiController)
+        check("shared_source_is_snapshotted", inspect.getsourcefile(IndiController) in env.get_code_snapshot_files())
         check("physics_policy_timing", abs(env.physics_dt-1/cfg.physics_hz) < 1e-10
               and abs(env.step_dt-1/cfg.policy_hz) < 1e-10)
         simple = 'Simple' in args.task
-        check("actor_critic_dimensions", obs['policy'].shape == (args.num_envs, 53)
-              and obs['critic'].shape == (args.num_envs, 63 if simple else 65))
+        velocity = args.task in ("Borinot-cmd-vel", "Borinot-Cmd-Vel-Direct-v0")
+        actor_size, critic_size = (43, 43) if velocity else (53, 63 if simple else 65)
+        check("actor_critic_dimensions", obs['policy'].shape == (args.num_envs, actor_size)
+              and obs['critic'].shape == (args.num_envs, critic_size))
         view = env.robot.root_physx_view
         check("no_double_pd", not view.get_dof_stiffnesses()[:, env.joint_ids].any()
               and not view.get_dof_dampings()[:, env.joint_ids].any())
@@ -61,7 +70,6 @@ def main(cfg, agent_cfg):
               torch.tensor([1.]*6+[0.]*2, device=env.device).expand(args.num_envs, -1), atol=1e-6))
         # Exercise the live controller object at large, tiny and pi errors against
         # an independent SciPy oracle before resetting its state for the rollout.
-        from isaaclab_tasks.direct.borinot_goalkeeper.indi import thrust_attitude
         reference = torch.zeros(args.num_envs, 9, device=env.device)
         _, desired = thrust_attitude(reference[:, :3],
             torch.full((args.num_envs,), env._indi.home_yaw, device=env.device), env._indi.mass)
@@ -74,9 +82,19 @@ def main(cfg, agent_cfg):
             torch.tensor(current.as_quat(scalar_first=True), dtype=torch.float32, device=env.device),
             test_rates, test_rates[:, :2], test_rates[:, :2])
         tau_z = np.zeros((args.num_envs, 3))
-        tau_z[:, 2] = errors.as_rotvec()[:, 2]
-        expected = (cfg.indi.tilt_gain*(errors*Rotation.from_rotvec(-tau_z)).as_rotvec()
-                    + cfg.indi.yaw_gain*tau_z)
+        if cfg.indi_tilt_method == "geom":
+            z = errors.as_matrix()[:, :, 2]
+            cross = np.column_stack((-z[:, 1], z[:, 0], np.zeros(args.num_envs)))
+            sine = np.linalg.norm(cross, axis=-1)
+            angle = np.arctan2(sine, z[:, 2])
+            scale = np.divide(angle, sine, out=np.ones_like(angle), where=sine > 1e-14)
+            tilt = cross*scale[:, None]
+            tau_z = (Rotation.from_rotvec(tilt).inv()*errors).as_rotvec()
+        else:
+            tau_z[:, 2] = errors.as_rotvec()[:, 2]
+            tilt = ((errors*Rotation.from_rotvec(-tau_z)).as_rotvec()
+                    if cfg.indi_tilt_method == "method_1" else errors.as_rotvec()-tau_z)
+        expected = cfg.indi.tilt_gain*tilt + cfg.indi.yaw_gain*tau_z
         error_max = np.max(np.abs(env._indi.alpha_desired.cpu().numpy()-expected))
         report['tangent_alpha_max_error_rad_s2'] = float(error_max)
         check("live_tangent_feedback_matches_scipy", error_max < 3e-4)

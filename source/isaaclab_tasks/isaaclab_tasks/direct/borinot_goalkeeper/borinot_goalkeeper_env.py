@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+import inspect
 
 import torch
 from pxr import PhysxSchema
@@ -11,10 +12,10 @@ from isaaclab.assets import Articulation, RigidObject
 from isaaclab.envs import DirectRLEnv
 from isaaclab.sensors import ContactSensor, ContactSensorCfg
 from isaaclab.utils.math import matrix_from_quat, quat_apply, quat_apply_inverse
+from isaaclab_tasks.controllers.borinot_indi import IndiController
 
 from .borinot_goalkeeper_env_cfg import BorinotGoalkeeperEnvCfg
 from .events import configure_randomization
-from .indi import IndiController
 from .paddle import attach_paddle
 from .task_math import (
     crosses_goal, plane_progress, predict_intercept, promotion_ready, sample_robot_positions, sample_shots,
@@ -31,6 +32,10 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
 
     cfg: BorinotGoalkeeperEnvCfg
     contact_body_names = ("paddle", "base", "flying_arm_2__link1", "flying_arm_2__link2")
+
+    def get_code_snapshot_files(self):
+        """Retain the shared implementation when archiving a training run."""
+        return [inspect.getsourcefile(obj) for obj in (BorinotGoalkeeperEnv, IndiController)]
 
     def __init__(self, cfg: BorinotGoalkeeperEnvCfg, render_mode=None, **kwargs):
         cfg.configure_control()

@@ -13,7 +13,7 @@ from isaaclab.sensors import ContactSensor, ContactSensorCfg
 from isaaclab.utils.math import matrix_from_quat, quat_apply_inverse, quat_from_euler_xyz, quat_mul
 from isaaclab_tasks.direct.borinot_goalkeeper.borinot_goalkeeper_env import BorinotGoalkeeperEnv
 from isaaclab_tasks.direct.borinot_goalkeeper.events import configure_randomization
-from isaaclab_tasks.direct.borinot_goalkeeper.indi import IndiController
+from isaaclab_tasks.controllers.borinot_indi import IndiController
 from isaaclab_tasks.direct.borinot_goalkeeper.paddle import attach_paddle
 
 from .borinot_cmd_vel_env_cfg import BorinotCmdVelEnvCfg

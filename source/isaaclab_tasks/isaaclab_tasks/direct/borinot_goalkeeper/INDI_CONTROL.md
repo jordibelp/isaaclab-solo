@@ -186,7 +186,7 @@ There is **no low-level position controller** and **no translational INDI** here
 The policy must correct position drift, mass errors, contact forces and arm-induced translation using its observations.
 Zero action is a hover *request*, not a guarantee that a freely moving arm/base will remain in place.
 
-## 6. Tangent-space attitude control (updated 2026-10-23)
+## 6. Selectable tangent-space attitude control (updated 2026-10-24)
 
 We compare the current and desired orientation in **current body axes**.
 For Isaac's active, scalar-first quaternion convention, the corresponding error quaternion is:
@@ -198,28 +198,57 @@ q_error = inverse(q_current) * q_desired
 The multiplication order matters. A world-axis error fed into a body-axis torque law would be wrong at nonzero heading.
 The code uses the equivalent rotation-matrix construction and checks it against an independent quaternion calculation.
 
-We now follow Jordi's full-Log z-projection sketch. `Log` returns a three-component
+`Log` returns a three-component
 rotation vector whose length is the **full rotation angle in radians**.
-It is not the half-angle quaternion logarithm. The calculation is:
+It is not the half-angle quaternion logarithm. All methods use the same final law:
 
 ```text
-tau       = Log(q_error)
-tau_z     = (0, 0, tau[2])
-q_z       = Exp(tau_z)
-q_xy      = q_error * inverse(q_z)
-tau_xy    = Log(q_xy)
-
 alpha_d = tilt_gain * tau_xy
         + yaw_gain * tau_z
         + rate_gain * (Omega_r - Omega)
 ```
 
-Here `q_z` is a unit quaternion about body z. `q_xy` is the remaining quaternion,
-with the product order shown above. Both `tau_z` and `tau_xy` are three-component
-body-axis vectors in radians. The subscript `xy` is a label from the sketch:
-**the z component of `tau_xy` is generally nonzero** and is retained in feedback.
-Projecting the full log is not the old geometric thrust-axis tilt/yaw split.
-In particular, `tau[2]` is not in general Euler yaw or the old residual yaw angle.
+Set the top-level environment option `env.indi_tilt_method`:
+
+| Value | Meaning | Tilt vector | Twist vector |
+| --- | --- | --- | --- |
+| `geom` (default) | Notebook method 3: pure geometric tilt and twist | `Log(q_error * inverse(q_z))` | `Log(q_z)` |
+| `method_1` | Yesterday's full-Log z-removal method | `Log(q_error * inverse(Exp(Pz * Log(q_error))))` | `Pz * Log(q_error)` |
+| `method_2` | Direct projection of the full rotation log | `Pxy * Log(q_error)` | `Pz * Log(q_error)` |
+
+`Pz` keeps only z and sets x/y to zero. `Pxy` keeps x/y and sets z to zero.
+Both output vectors have three components in current body axes, measured in radians.
+For `geom`, write `q_error = (w,x,y,z)` and use:
+
+```text
+s     = sqrt(w*w + z*z)
+q_z   = (w,0,0,z) / s
+q_t   = q_error * inverse(q_z)
+tau_xy = Log(q_t)
+tau_z  = Log(q_z)
+```
+
+Here `s` is a dimensionless normalization factor, `q_z` is a unit pure-twist
+quaternion, and `q_t` is a unit pure-tilt quaternion. The z coordinate of `q_t`
+cancels algebraically. We retain the product's actual floating-point result;
+we do not force that coordinate to zero after multiplication.
+Only `geom` gives the notebook's pure tilt/twist quaternion factorization.
+`method_1` generally leaves a nonzero z coordinate in `tau_xy`, which we retain.
+`method_2` projects a vector; it is not a finite-rotation quaternion factorization.
+The z coordinate of the full rotation log is not generally Euler yaw or the
+geometric twist angle.
+
+The method numbers refer to Jordi's notebook, also cited in the config and code comments:
+
+```text
+/home/jordibelp/Desktop/emmaDocs/2026-10-23-tau-log-exp-comparison.ipynb
+```
+
+The geometric twist is undefined when the thrust axes are exactly opposite.
+When `s` is no larger than the tensor dtype's machine epsilon, we use identity
+for `q_z` (zero twist) and keep the full error as the half-turn tilt, up to roundoff.
+This gives finite outputs and preserves the rotation encoded by the error;
+the geometric twist is not uniquely defined at that point.
 
 For a unit quaternion `(w,v)`, we use `Log(q) = 2*atan2(norm(v),w)*v/norm(v)`.
 We first choose the shortest representative (`w >= 0`), and use the finite
@@ -239,15 +268,18 @@ discontinuity at 180 degrees is unavoidable; this is not a global stability clai
 The attitude gains now have units 1/s², multiplying rotation vectors in radians.
 
 Defaults are `tilt_gain=150`, `yaw_gain=3` and `rate_gain=(20,20,8)`.
-Their numeric values are unchanged, but **the near-zero attitude feedback is twice
-as strong as before**, because the old quaternion-vector magnitude was `sin(angle/2)`.
+Their numeric values are unchanged. All three methods have the same first-order
+behavior near zero. Selecting `geom` does not double yesterday's log-based gains.
+Relative to the older, pre-log quaternion-vector law, however, **the near-zero
+attitude feedback is twice as strong**, because its magnitude was `sin(angle/2)`.
 For pure 120-degree tilt, for example, the old raw request was about 129.90 rad/s²;
 the new one is 314.16 rad/s². Physical allocation and motor bounds still apply.
 To preserve the previous local attitude gains while increasing large-angle
 feedback, explicitly set `env.indi.tilt_gain=75.0 env.indi.yaw_gain=1.5`.
 Rate feedback, filters, allocation, motor dynamics, joint PID, action dimensions
 and observations are unchanged. Existing INDI checkpoints still load, but now
-run against a different controller. Exact historical replay needs the old revision.
+run against the selected controller. Use `env.indi_tilt_method=method_1` to retain
+yesterday's attitude law. Exact pre-log historical replay needs the old revision.
 The shared controller affects both goalkeeper tasks and `Borinot-cmd-vel` in INDI mode.
 Other control modes are unchanged. No training-performance benefit has been established.
 
@@ -475,15 +507,20 @@ A ball/shot-only reset preserves robot and controller state.
 
 ## 12. Configuration reference
 
-All controller settings below are under `env.indi` and are used only in INDI mode.
+The method selector is **top-level**: `env.indi_tilt_method=geom` (default),
+`env.indi_tilt_method=method_1`, or `env.indi_tilt_method=method_2`.
+It is exposed by both goalkeeper configs and inherited by command-velocity.
+Unknown methods fail during INDI config validation, before simulator creation.
+Other control modes ignore it. All numeric settings below are under `env.indi`
+and are used only in INDI mode.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `acceleration_scale` | `(8,8,8)` | World acceleration per unit action, m/s² |
 | `heading_range_degs` | `180` | Heading half-range around home yaw |
 | `joint_target_limit_degs` | `(90,90)` | Symmetric joint target half-ranges |
-| `tilt_gain` | `150` | Residual full-angle log-vector gain, 1/s² |
-| `yaw_gain` | `3` | Full-log z-projection gain, 1/s² |
+| `tilt_gain` | `150` | Selected full-angle tilt/residual-vector gain, 1/s² |
+| `yaw_gain` | `3` | Selected twist/log-z-vector gain, 1/s² |
 | `rate_gain` | `(20,20,8)` | Body-rate feedback gains, 1/s |
 | `filter_cutoff_hz` | `12` | Common second-order Butterworth cutoff; must be below physics Nyquist |
 | `allocation_weights` | `(1,10,10,1)` | Squared normalized wrench-error weights |
@@ -519,10 +556,24 @@ The environment keeps the following tensors on its controller object, `env.unwra
 
 These tensors are available for debugging. This change does not silently add a large W&B telemetry stream.
 
-The controller's runtime module is `indi.py` in this directory.
+The shared controller lives outside all individual environments:
+
+```text
+source/isaaclab_tasks/isaaclab_tasks/controllers/borinot_indi.py
+```
+
+Both goalkeeper tasks and command-velocity use this one implementation.
+It imports only Python standard-library modules and PyTorch, with no task or
+simulator imports. The old `borinot_goalkeeper/indi.py` is a compatibility import,
+not a second implementation. All three tasks include the shared controller in
+their training source snapshots.
 Both tasks use the original task's shared `_apply_action()`.
 The SAC action contract lives in `agents/rsl_rl_sac_cfg.py`.
-The numerical, live-physics and controller-scale benchmark drivers are in `tests/test_indi.py`, `tests/indi_smoke.py`, and `tests/indi_benchmark.py`.
+The numerical, live-physics and controller-scale benchmark drivers are in
+`tests/test_indi.py`, `tests/test_indi_tangent.py`, `tests/test_indi_methods.py`,
+`tests/indi_smoke.py`, and `tests/indi_benchmark.py`. The live driver supports all
+three tasks and archives the effective `indi_tilt_method`. The benchmark accepts
+`--method geom`, `--method method_1`, or `--method method_2`.
 
 Run the CPU suites separately to avoid importing simulator task packages before AppLauncher:
 

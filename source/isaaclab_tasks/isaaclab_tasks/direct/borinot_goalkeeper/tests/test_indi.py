@@ -14,7 +14,7 @@ import torch
 
 from test_control import action_env, config, method
 
-SPEC = importlib.util.spec_from_file_location("borinot_indi_test", Path(__file__).resolve().parents[1] / "indi.py")
+SPEC = importlib.util.spec_from_file_location("borinot_indi_test", Path(__file__).resolve().parents[3] / "controllers/borinot_indi.py")
 indi = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = indi
 SPEC.loader.exec_module(indi)
@@ -109,13 +109,13 @@ def test_attitude_error_matches_independent_so3_formula_and_global_yaw_invarianc
     cfg = indi.IndiControllerCfg()
     expected = cfg.tilt_gain*(error*Rotation.from_rotvec(-tau_z)).as_rotvec() + cfg.yaw_gain*tau_z
     zeros = torch.zeros(100, 3, dtype=torch.float64)
-    actual = indi.attitude_acceleration(q, rd, zeros, zeros, cfg)
+    actual = indi.attitude_acceleration(q, rd, zeros, zeros, cfg, "method_1")
     np.testing.assert_allclose(actual, expected, atol=1e-11)
     yaw = Rotation.from_euler('z', 1.73)
     changed = indi.attitude_acceleration(torch.from_numpy((yaw*current).as_quat(scalar_first=True)),
-        torch.from_numpy((yaw*desired).as_matrix()), zeros, zeros, cfg)
+        torch.from_numpy((yaw*desired).as_matrix()), zeros, zeros, cfg, "method_1")
     torch.testing.assert_close(actual, changed, atol=1e-10, rtol=0)
-    torch.testing.assert_close(actual, indi.attitude_acceleration(-q, rd, zeros, zeros, cfg))
+    torch.testing.assert_close(actual, indi.attitude_acceleration(-q, rd, zeros, zeros, cfg, "method_1"))
 
 
 def test_attitude_antipode_is_finite_with_deterministic_tilt_direction():

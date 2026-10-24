@@ -17,13 +17,16 @@ from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.utils import configclass
 
 from isaaclab_tasks.direct.borinot_goalkeeper.events import BorinotEventCfg
-from isaaclab_tasks.direct.borinot_goalkeeper.indi import IndiControllerCfg
+from isaaclab_tasks.controllers.borinot_indi import IndiControllerCfg
 
 
 @configclass
 class BorinotGoalkeeperSimpleEnvCfg(DirectRLEnvCfg):
     control_mode = "thrust_and_torque_control"
     indi = IndiControllerCfg()  # used only by control_mode="indi"; shared INDI_CONTROL.md
+    # geom = method 3; alternatives: method_1, method_2. Definitions:
+    # /home/jordibelp/Desktop/emmaDocs/2026-10-23-tau-log-exp-comparison.ipynb
+    indi_tilt_method = "geom"  # used only by control_mode="indi"
     enabled_self_collisions = True  # the self-collision penalty needs physical robot/robot contacts
     physics_hz = 200
     policy_hz = 100

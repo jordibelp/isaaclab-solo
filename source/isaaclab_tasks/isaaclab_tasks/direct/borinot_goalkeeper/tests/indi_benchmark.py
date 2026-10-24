@@ -15,13 +15,14 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--num-envs", type=int, default=10000)
 parser.add_argument("--device", default="cuda")
 parser.add_argument("--ip", type=float, default=0.0)
+parser.add_argument("--method", choices=("geom", "method_1", "method_2"), default="geom")
 parser.add_argument("--output", type=Path, required=True)
 args = parser.parse_args()
-spec = importlib.util.spec_from_file_location("benchmark_indi", Path(__file__).resolve().parents[1]/"indi.py")
+spec = importlib.util.spec_from_file_location("benchmark_indi", Path(__file__).resolve().parents[3]/"controllers/borinot_indi.py")
 indi = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = indi
 spec.loader.exec_module(indi)
-task = SimpleNamespace(indi=indi.IndiControllerCfg(rotor_spin_inertia_kg_m2=args.ip), physics_hz=300,
+task = SimpleNamespace(indi=indi.IndiControllerCfg(rotor_spin_inertia_kg_m2=args.ip), indi_tilt_method=args.method, physics_hz=300,
     thrust_to_weight=2.1, kf=3.847e-6, km_over_kf=5.361e-8/3.847e-6,
     rotor_spin=(1., -1., 1., -1., -1., 1.), body_rate_scale=(2., 2., 1.5),
     robot_home_quat=(math.sqrt(.5), 0., 0., -math.sqrt(.5)), motor_time_constant_s=.04,
@@ -48,7 +49,7 @@ with torch.inference_mode():
             torch.cuda.synchronize()
         if step >= 5:
             samples.append(1000*(time.perf_counter()-start))
-result = {"num_envs": args.num_envs, "device": args.device, "rotor_spin_inertia_kg_m2": args.ip,
+result = {"num_envs": args.num_envs, "device": args.device, "indi_tilt_method": args.method, "rotor_spin_inertia_kg_m2": args.ip,
     "allocation_iterations": task.indi.allocation_iterations, "nonlinear_iterations": task.indi.nonlinear_iterations,
     "physics_hz": task.physics_hz, "warmup_ticks": 5, "measured_ticks": len(samples),
     "samples_ms": samples, "median_ms": sorted(samples)[len(samples)//2], "mean_ms": sum(samples)/len(samples),
