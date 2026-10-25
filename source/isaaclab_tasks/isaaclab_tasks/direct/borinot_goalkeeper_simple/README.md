@@ -261,13 +261,17 @@ This shows that the reward is computed as designed and that training and playbac
 All four Borinot tasks score the raw policy sample before environment clipping.
 The new signed scales default to **-1.0**. Set all three to `0.0` to disable them.
 Each term is a sum over channels, with no extra policy-dt multiplier.
+Thrust and torque use `(excess / upper limit)^2`, so these costs are dimensionless.
+Both lower- and upper-bound excesses use the same positive upper-limit scale.
+Equal relative violations now have equal per-actuator costs; six rotors still
+contribute three times as much as two joints when every channel violates equally.
 
-- `env.rwd_scale_thrust_limits`: squared excess of direct rotor requests, in N².
+- `env.rwd_scale_thrust_limits`: squared relative excess of direct rotor requests.
   Requests below zero also pay a cost. The upper threshold uses the effective
   thrust-to-weight ratio after the per-rotor hardware cap is resolved.
-- `env.rwd_scale_torque_limits`: squared excess of direct joint requests beyond
-  either signed `effort_lim_sim` limit, in (N·m)². At the default 2.7 N·m limit,
-  a 3.0 N·m request contributes 0.09 before its signed weight.
+- `env.rwd_scale_torque_limits`: squared relative excess of direct joint requests
+  beyond either signed `effort_lim_sim` limit. At the default 2.7 N·m limit,
+  a 3.0 N·m request contributes `(0.3 / 2.7)^2`, about 0.01235, before its signed weight.
 - `env.rwd_scale_action_limits`: squared excess of other policy references that
   are actually clipped. This covers PD/PI input clamps, normalized SAC INDI
   inputs, and the legacy task's clipped angle-vector components.
@@ -276,7 +280,8 @@ The helper is `../borinot/action_limits.py`. Direct thrust/torque costs use the
 original mapping and raw sample, including excursions hidden by `action_clamp`.
 The legacy task uses its own thrust and torque mapping. Unused held-arm outputs
 are ignored. An explicitly removed upper thrust cap has no upper-thrust cost
-for PPO, but negative thrust requests still pay a cost. SAC's direct rotor
+for PPO, but negative thrust requests still pay a cost, normalized by the nominal
+upper thrust scale. SAC's direct rotor
 mapping still clips its normalized inputs to ±1.
 
 PPO INDI references are unbounded physical quantities; they are **not** given

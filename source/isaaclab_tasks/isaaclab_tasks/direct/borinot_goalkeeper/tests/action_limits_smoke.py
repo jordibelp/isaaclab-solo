@@ -31,12 +31,13 @@ def check(name, value):
 
 
 def expected(actions, cfg, hover, legacy):
-    """Scalar oracle: distance between raw physical requests and feasible commands."""
+    """Scalar oracle: relative distance between raw requests and feasible commands."""
     result = []
     for row in actions.double().cpu().tolist():
         thrust = torque = refs = 0.
         if legacy:
             hi = cfg.thrust_max if cfg.thrust_max > 0 else cfg.thrust_max_scale*hover
+            thrust_scale = hi if cfg.thrust_mode == 'absolute' else min(hi, hover*(1+cfg.delta_thrust_scale))
             for value in row[:6]:
                 bounded = min(1., max(-1., value))
                 if cfg.thrust_mode == 'absolute':
@@ -45,7 +46,7 @@ def expected(actions, cfg, hover, legacy):
                 else:
                     request = hover*(1+cfg.delta_thrust_scale*value)
                     command = min(hi, max(cfg.thrust_min, hover*(1+cfg.delta_thrust_scale*bounded)))
-                thrust += (request-command)**2
+                thrust += ((request-command)/thrust_scale)**2
             if cfg.des_joint_out:
                 refs = sum((value-min(1., max(-1., value)))**2 for value in row[6:])
             else:
@@ -55,8 +56,12 @@ def expected(actions, cfg, hover, legacy):
                     request = lo+(value+1)*.5*(hi-lo)+bias
                     command = lo+(min(1., max(-1., value))+1)*.5*(hi-lo)+bias
                     command = min(cfg.torque_lim, max(-cfg.torque_lim, command))
-                    torque += (request-command)**2
+                    torque_scale = min(hi+bias, cfg.torque_lim)
+                    torque += ((request-command)/torque_scale)**2
         elif cfg.control_mode in ('thrust_and_torque_control', 'thrust_and_PD_joint_pos_control'):
+            thrust_scale = hover*cfg.thrust_to_weight
+            if not cfg.sac_action_mapping and not cfg.remove_thrust_clipping:
+                thrust_scale = min(thrust_scale, hover*(1+abs(cfg.rotor_action_scale*cfg.action_clamp)))
             for value in row[:6]:
                 if cfg.sac_action_mapping:
                     request = hover*(1+(cfg.thrust_to_weight-1)*value if value >= 0 else 1+value)
@@ -67,12 +72,15 @@ def expected(actions, cfg, hover, legacy):
                     command = max(0., hover*(1+cfg.rotor_action_scale*bounded))
                     if not cfg.remove_thrust_clipping:
                         command = min(hover*cfg.thrust_to_weight, command)
-                thrust += (request-command)**2
+                thrust += ((request-command)/thrust_scale)**2
             if cfg.control_mode == 'thrust_and_torque_control' and not cfg.hold_arm:
                 for value in row[6:]:
                     request = value*cfg.effort_lim_sim
-                    command = min(cfg.effort_lim_sim, max(-cfg.effort_lim_sim, request))
-                    torque += (request-command)**2
+                    torque_scale = cfg.effort_lim_sim
+                    if not cfg.sac_action_mapping and not cfg.remove_thrust_clipping:
+                        torque_scale *= min(1., cfg.action_clamp)
+                    command = min(torque_scale, max(-torque_scale, request))
+                    torque += ((request-command)/torque_scale)**2
             elif not cfg.sac_action_mapping and not cfg.remove_thrust_clipping and not cfg.hold_arm:
                 refs = sum(max(abs(value)-cfg.action_clamp, 0.)**2 for value in row[-2:])
         elif cfg.control_mode == 'indi':

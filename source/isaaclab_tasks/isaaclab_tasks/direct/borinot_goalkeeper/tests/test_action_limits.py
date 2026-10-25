@@ -39,7 +39,7 @@ def test_torque_threshold_both_signs_and_channel_sum(dtype, sign):
     raw[:, 6] = sign * torch.tensor([.9, 1., 1.1, 2.], dtype=dtype)
     raw[3, 7] = -sign * 2
     result = raw_action_limit_costs(raw, cfg, 5.)
-    expected = torch.tensor([0., 0., .27**2, 2*2.7**2], dtype=dtype)
+    expected = torch.tensor([0., 0., .1**2, 2.], dtype=dtype)
     torch.testing.assert_close(result[:, 1], expected, atol=1e-7, rtol=1e-5)
     assert not result[:, 2].any()
 
@@ -54,7 +54,7 @@ def test_thrust_threshold_uses_effective_physical_cap_and_original_mapping(sac, 
     raw[:, 0] = torch.tensor([lo, hi, lo-.2, hi+.2, hi+.4])
     before = raw.clone()
     result = raw_action_limit_costs(raw, cfg, 4.)[:, 0]
-    span = 4. if sac else 4.*scale
+    span = (4. if sac else 4.*scale) / 8.
     torch.testing.assert_close(result, torch.tensor([0., 0., (span*.2)**2, (span*.2)**2, (span*.4)**2],
                                                    dtype=raw.dtype), atol=2e-6, rtol=1e-5)
     torch.testing.assert_close(raw, before, rtol=0, atol=0)
@@ -65,7 +65,7 @@ def test_thrust_sac_asymmetric_positive_scaling():
     cfg.sac_action_mapping, cfg.thrust_to_weight = True, 3.
     raw = torch.zeros(2, 8, dtype=torch.float64)
     raw[:, 0] = torch.tensor([-1.5, 1.5])
-    torch.testing.assert_close(raw_action_limit_costs(raw, cfg, 4.)[:, 0], torch.tensor([4., 16.], dtype=raw.dtype))
+    torch.testing.assert_close(raw_action_limit_costs(raw, cfg, 4.)[:, 0], torch.tensor([4/144, 16/144], dtype=raw.dtype))
 
 
 def test_disabled_thrust_cap_keeps_lower_bound_and_nominal_torque_soft_limit():
@@ -75,8 +75,8 @@ def test_disabled_thrust_cap_keeps_lower_bound_and_nominal_torque_soft_limit():
     raw[:, 0] = torch.tensor([100., -2.])
     raw[:, 6] = 2.
     result = raw_action_limit_costs(raw, cfg, 5.)
-    torch.testing.assert_close(result[:, 0], torch.tensor([0., 25.]))
-    torch.testing.assert_close(result[:, 1], torch.full((2,), 2.7**2))
+    torch.testing.assert_close(result[:, 0], torch.tensor([0., 25/(5*cfg.thrust_to_weight)**2]))
+    torch.testing.assert_close(result[:, 1], torch.ones(2))
 
 
 @pytest.mark.parametrize('mode', ['thrust_and_PD_joint_pos_control', 'PI_rotors_PD_joint_pos_control', 'indi'])
@@ -118,7 +118,7 @@ def test_tiny_excess_is_not_hidden_by_an_incorrect_absolute_tolerance():
     raw[:, 6] = torch.tensor([1.-1e-8, 1., 1.+1e-8], dtype=raw.dtype)
     actual = raw_action_limit_costs(raw, cfg, 5.)[:, 1]
     assert not actual[:2].any()
-    torch.testing.assert_close(actual[2], raw.new_tensor((2.7e-8)**2), atol=1e-23, rtol=1e-7)
+    torch.testing.assert_close(actual[2], raw.new_tensor(1e-16), atol=1e-24, rtol=1e-7)
 
 
 @pytest.mark.parametrize('angle', [False, True])
@@ -131,9 +131,32 @@ def test_legacy_mapping_and_angle_vectors(angle, mapping):
     raw[:, 0] = torch.tensor([-2., 2.])
     raw[:, 6:] = 2.
     result = raw_action_limit_costs(raw, cfg, 5., legacy=True)
-    torch.testing.assert_close(result[:, 0], torch.tensor([25., 25.], dtype=raw.dtype))
-    torch.testing.assert_close(result[:, 1], torch.full((2,), 0. if angle else 2*2.7**2, dtype=raw.dtype))
+    torch.testing.assert_close(result[:, 0], torch.tensor([.25, .25], dtype=raw.dtype))
+    torch.testing.assert_close(result[:, 1], torch.full((2,), 0. if angle else 2., dtype=raw.dtype))
     torch.testing.assert_close(result[:, 2], torch.full((2,), 4. if angle else 0., dtype=raw.dtype))
+
+
+@pytest.mark.parametrize('thrust_limit,torque_limit', [(4., 1.), (10., 2.7), (20., 5.)])
+@pytest.mark.parametrize('sign', [-1., 1.])
+def test_equal_fractional_excess_has_equal_per_actuator_cost(thrust_limit, torque_limit, sign):
+    cfg = config()
+    cfg.thrust_to_weight, cfg.effort_lim_sim = thrust_limit / 2., torque_limit
+    raw = torch.zeros(1, 8, dtype=torch.float64)
+    # Lower thrust violation is measured below zero, not below -F_max.
+    requested = -.1 * thrust_limit if sign < 0 else 1.1 * thrust_limit
+    raw[0, 0] = requested / 2. - 1.
+    raw[0, 6] = sign * 1.1
+    costs = raw_action_limit_costs(raw, cfg, 2.)
+    torch.testing.assert_close(costs, raw.new_tensor([[.01, .01, 0.]]), atol=1e-14, rtol=0)
+
+
+def test_relative_costs_still_sum_channels_rather_than_average_groups():
+    cfg = config()
+    cfg.thrust_to_weight = 2.
+    raw = torch.full((1, 8), 1.1, dtype=torch.float64)
+    costs = raw_action_limit_costs(raw, cfg, 5.)
+    # Each rotor exceeds its 10 N cap by 0.5 N; each torque exceeds by 10%.
+    torch.testing.assert_close(costs, raw.new_tensor([[6*.05**2, 2*.1**2, 0.]]), atol=1e-14, rtol=0)
 
 
 @pytest.mark.parametrize('policy_hz', [60, 100, 200])

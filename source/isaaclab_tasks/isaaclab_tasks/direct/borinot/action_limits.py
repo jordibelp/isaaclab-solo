@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """Soft limits on policy outputs, before any environment-side clipping.
 
-Columns are squared thrust excess [N^2], torque excess [(N*m)^2], and
-otherwise-clipped reference excess [action units^2]. Sum channels, not means.
+Columns are squared relative thrust excess, squared relative torque excess,
+and otherwise-clipped reference excess [action units^2]. Sum channels, not means.
+Normalize both physical excesses by their positive upper command limit before
+squaring. With the upper thrust cap disabled, retain its nominal scale only
+for normalizing the lower-bound violation; do not add an upper-bound cost.
 Controller saturation is deliberately not a policy-output limit: PPO INDI
 references are unbounded SI values, and PD position targets are not torques.
 """
@@ -38,7 +41,8 @@ def raw_action_limit_costs(actions, cfg, hover, *, legacy=False):
         excess = (lower - requested).clamp_min(0)
         if upper is not None:
             excess = excess + (requested - upper).clamp_min(0)
-        costs[:, 0] = excess.square().sum(-1)
+        thrust_limit = upper if upper is not None else hover * cfg.thrust_to_weight
+        costs[:, 0] = (excess / thrust_limit).square().sum(-1)
 
     torque_output = (not cfg.des_joint_out if legacy else
                      cfg.control_mode == "thrust_and_torque_control" and not cfg.hold_arm)
@@ -58,7 +62,7 @@ def raw_action_limit_costs(actions, cfg, hover, *, legacy=False):
                 limit *= min(1., cfg.action_clamp)
             lower, upper = -limit, limit
         excess = (lower - requested).clamp_min(0) + (requested - upper).clamp_min(0)
-        costs[:, 1] = excess.square().sum(-1)
+        costs[:, 1] = (excess / upper).square().sum(-1)
 
     if cfg.rwd_scale_action_limits:
         reference, limit = actions[:, :0], 1.
