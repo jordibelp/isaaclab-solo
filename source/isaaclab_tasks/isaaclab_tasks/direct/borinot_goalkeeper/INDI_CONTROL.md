@@ -672,3 +672,32 @@ The implementation reads the actual task's nominal USD base inertia; it does not
 
 The implementation makes this controller available in training now.
 It does not turn an untuned policy/controller pair into a validated hardware controller.
+
+
+## Soft limits on controller demands
+
+The goalkeeper, goalkeeper-simple and command-velocity tasks now score requested
+actuator outputs for PPO and SAC. The three `rwd_scale_*_limits` weights retain
+their existing names and signed values. The task README's soft-limit section
+lists the sources and timing for every control mode.
+
+For INDI, `requested_wrench` retains the collective thrust and body torque before
+the nominal feasibility projection. `requested_rotor_thrust` is its unweighted
+G1 pseudoinverse allocation, in N per rotor. This captures an excessive request
+that the bounded solver would otherwise hide. `requested_joint_effort` retains
+the PID demand after anti-windup and before the final torque clamp, in N·m.
+These buffers are diagnostics only and clear on selected-environment resets.
+They do not enter observations, feedback, allocation, or physical actuation.
+
+The two physical costs sum squared relative excess per actuator and average
+those costs over the physics substeps of the policy interval. Negative rotor
+requests and either torque sign are covered. No extra dt multiplier is applied.
+Physical-unit PPO references remain unclipped; `rwd_scale_action_limits` does
+not impose artificial limits on them. Set either physical weight to zero to
+skip that cost, independently of the other weights.
+
+Because G1 is 4×6, the minimum-norm rotor distribution is not unique among all
+solutions for a wrench. It can exceed a rotor bound even if another feasible
+distribution exists. This is an allocation-specific soft cost, not an exact
+wrench-feasibility metric. The physical bounded allocator and optional G2
+correction remain unchanged; this diagnostic uses the original static G1 model.

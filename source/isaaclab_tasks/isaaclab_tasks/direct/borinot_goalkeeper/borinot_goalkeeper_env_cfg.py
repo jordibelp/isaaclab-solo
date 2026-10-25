@@ -227,8 +227,9 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     # Negative scales penalize consumption; no additional dt multiplier.
     rwd_scale_energy = -0.0001
     # Physical soft limits: signed scale * sum((excess / upper limit)**2), no extra dt.
-    rwd_scale_thrust_limits = -1.0  # relative direct thrust excess, both lower and upper bounds
-    rwd_scale_torque_limits = -1.0  # relative direct torque excess, both signs
+    # Controller costs average the physics substeps in each policy step.
+    rwd_scale_thrust_limits = -1.0  # relative rotor-demand excess; raw policy or unconstrained controller
+    rwd_scale_torque_limits = -1.0  # relative joint-demand excess, both signs, before torque saturation
     rwd_scale_action_limits = -1.0  # otherwise-clipped PD/PI/SAC-INDI references; not PPO INDI
     # Nominal Solo joint copper loss: c * joint_torque**2 [W], c in W/(N*m)^2.
     # Rounded from (3/2)*R_phase/(G*Kt)^2, R_phase=0.2324751 ohm, G=9, Kt=0.025 N*m/A.

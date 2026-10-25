@@ -14,6 +14,7 @@ _limits_spec = importlib.util.spec_from_file_location("borinot_action_limits_tes
 _limits = importlib.util.module_from_spec(_limits_spec)
 _limits_spec.loader.exec_module(_limits)
 raw_action_limit_costs = _limits.raw_action_limit_costs
+relative_limit_cost = _limits.relative_limit_cost
 MODES = ("thrust_and_torque_control", "thrust_and_PD_joint_pos_control", "PI_rotors_PD_joint_pos_control")
 
 
@@ -23,7 +24,8 @@ def source_class(filename):
 
 def method(filename, name):
     node = next(n for n in source_class(filename).body if isinstance(n, ast.FunctionDef) and n.name == name)
-    scope = {"math": math, "torch": torch, "raw_action_limit_costs": raw_action_limit_costs}
+    scope = {"math": math, "torch": torch, "raw_action_limit_costs": raw_action_limit_costs,
+             "relative_limit_cost": relative_limit_cost}
     exec(compile(ast.Module(body=[node], type_ignores=[]), filename, "exec"), scope)
     return scope[name]
 
@@ -128,6 +130,7 @@ def action_env(mode, hold_arm=False, motor_time_constant_s=None):
         set_joint_effort_target=record("effort"))
     env = SimpleNamespace(cfg=cfg, robot=robot, num_envs=3, device="cpu", joint_ids=[0, 1], base_id=0,
         actions=torch.zeros(3, cfg.action_space, dtype=torch.float64), _physics_samples=0,
+        _action_limit_costs=torch.zeros(3, 3, dtype=torch.float64),
         _actuator_commands=torch.zeros(3, 8, dtype=torch.float64),
         _sample_power=lambda: None, _sample_physics_events=lambda: None, physics_dt=cfg.sim.dt,
         _rate_scale=torch.tensor(cfg.body_rate_scale), _rate_integral=torch.zeros(3, 3, dtype=torch.float64),

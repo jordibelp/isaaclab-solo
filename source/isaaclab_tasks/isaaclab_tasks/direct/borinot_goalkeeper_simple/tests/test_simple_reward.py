@@ -49,6 +49,7 @@ limits_spec = importlib.util.spec_from_file_location("simple_action_limits", FOL
 limits = importlib.util.module_from_spec(limits_spec)
 limits_spec.loader.exec_module(limits)
 SCOPE["raw_action_limit_costs"] = limits.raw_action_limit_costs
+SCOPE["relative_limit_cost"] = limits.relative_limit_cost
 for node in ast.parse(SOURCE.read_text()).body:  # OUTCOME_*, EVENTS, REWARD_TERMS
     if isinstance(node, ast.Assign) and all(isinstance(t, ast.Name) and t.id.isupper() for t in node.targets):
         exec(compile(ast.Module(body=[node], type_ignores=[]), str(SOURCE), "exec"), SCOPE)
@@ -131,6 +132,7 @@ def make_env(**overrides):
             root_pos_w=torch.tensor([0.0, 0.0, 1.5]).repeat(N, 1), root_quat_w=root_state[:, 3:7].clone(),
             root_lin_vel_w=zeros3.clone(), root_lin_vel_b=zeros3.clone(), root_ang_vel_b=zeros3.clone(),
             joint_pos=torch.zeros(N, 2), joint_vel=torch.zeros(N, 2), applied_torque=torch.zeros(N, 2),
+            computed_torque=torch.zeros(N, 2),
             body_pos_w=body_pos, body_quat_w=body_quat)),
         ball_contact=Sensor(5), base_contact=Sensor(4), paddle_contact=Sensor(1),
         base_id=0, paddle_id=1, joint_ids=[0, 1],

@@ -205,8 +205,9 @@ class BorinotGoalkeeperSimpleEnvCfg(DirectRLEnvCfg):
     rwd_scale_action_rate = -5.0  # group-mean squared normalized thrust/torque command change, times policy dt
     rwd_scale_energy = -2.5e-5  # per watt of mean power each action (the original convention)
     # Physical soft limits: signed scale * sum((excess / upper limit)**2), no extra dt.
-    rwd_scale_thrust_limits = -1.0  # relative direct thrust excess, both lower and upper bounds
-    rwd_scale_torque_limits = -1.0  # relative direct torque excess, both signs
+    # Controller costs average the physics substeps in each policy step.
+    rwd_scale_thrust_limits = -1.0  # relative rotor-demand excess; raw policy or unconstrained controller
+    rwd_scale_torque_limits = -1.0  # relative joint-demand excess, both signs, before torque saturation
     rwd_scale_action_limits = -1.0  # otherwise-clipped PD/PI/SAC-INDI references; not PPO INDI
     minimize_energy_not_power = False  # True: pay the energy since the last payment when each shot ends
 

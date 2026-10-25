@@ -228,6 +228,7 @@ def test_actual_apply_method_uses_indi_each_substep_and_no_implicit_pd():
     env._rotor_thrust = torch.full((4, 6), ctrl.hover, dtype=torch.float64)
     env._actuator_commands = torch.zeros(4, 8, dtype=torch.float64)
     env._base_com_offset = torch.zeros(4, 3, dtype=torch.float64)
+    env._action_limit_costs = torch.zeros(4, 3, dtype=torch.float64)
     env.robot.data.root_quat_w = home_quat(ctrl)
     env.robot.data.root_ang_vel_b = torch.zeros(4, 3, dtype=torch.float64)
     env.robot.data.joint_pos = env.robot.data.joint_vel = torch.zeros(4, 2, dtype=torch.float64)

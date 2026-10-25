@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from test_control import relative_limit_cost
 
 
 @pytest.fixture(params=["borinot", "borinot_goalkeeper"])
@@ -15,10 +16,11 @@ def task(request):
     tree = ast.parse((folder / f"{name}_env.py").read_text())
     methods = next(node for node in tree.body if isinstance(node, ast.ClassDef)).body
     sample = next(node for node in methods if isinstance(node, ast.FunctionDef) and node.name == "_sample_power")
-    namespace = {"torch": torch}
+    namespace = {"torch": torch, "relative_limit_cost": relative_limit_cost}
     exec(compile(ast.Module(body=[sample], type_ignores=[]), str(folder), "exec"), namespace)
     cfg = SimpleNamespace(kf=1.0, km=2.0, p_el_motor_efficiency=0.5,
-                          energy_reward_scale=0.0, rwd_scale_energy=0.0, arm_copper_loss_coefficient=7.0, decimation=4)
+                          energy_reward_scale=0.0, rwd_scale_energy=0.0, arm_copper_loss_coefficient=7.0, decimation=4,
+                          control_mode="thrust_and_torque_control", hold_arm=False, rwd_scale_torque_limits=0.)
     thrust = torch.zeros(3, 6, dtype=torch.float64)
     torque = torch.zeros(3, 2, dtype=torch.float64)
     dq = torch.zeros_like(torque)

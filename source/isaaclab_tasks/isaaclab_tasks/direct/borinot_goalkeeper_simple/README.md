@@ -256,9 +256,11 @@ This shows that the reward is computed as designed and that training and playbac
 - `tests/test_simple_reward.py`, `tests/simple_smoke.py`: CPU and simulator checks.
 
 
-## Soft policy-output limits
+## Soft action and controller-output limits
 
-All four Borinot tasks score the raw policy sample before environment clipping.
+All four Borinot tasks score raw direct policy outputs before environment clipping.
+Goalkeeper, goalkeeper simple and command velocity also score pre-saturation
+controller demands in PD, PI and INDI modes, for both PPO and supported SAC modes.
 The new signed scales default to **-1.0**. Set all three to `0.0` to disable them.
 Each term is a sum over channels, with no extra policy-dt multiplier.
 Thrust and torque use `(excess / upper limit)^2`, so these costs are dimensionless.
@@ -266,10 +268,10 @@ Both lower- and upper-bound excesses use the same positive upper-limit scale.
 Equal relative violations now have equal per-actuator costs; six rotors still
 contribute three times as much as two joints when every channel violates equally.
 
-- `env.rwd_scale_thrust_limits`: squared relative excess of direct rotor requests.
+- `env.rwd_scale_thrust_limits`: squared relative excess of requested per-rotor thrusts.
   Requests below zero also pay a cost. The upper threshold uses the effective
   thrust-to-weight ratio after the per-rotor hardware cap is resolved.
-- `env.rwd_scale_torque_limits`: squared relative excess of direct joint requests
+- `env.rwd_scale_torque_limits`: squared relative excess of requested joint torques
   beyond either signed `effort_lim_sim` limit. At the default 2.7 N·m limit,
   a 3.0 N·m request contributes `(0.3 / 2.7)^2`, about 0.01235, before its signed weight.
 - `env.rwd_scale_action_limits`: squared excess of other policy references that
@@ -278,15 +280,37 @@ contribute three times as much as two joints when every channel violates equally
 
 The helper is `../borinot/action_limits.py`. Direct thrust/torque costs use the
 original mapping and raw sample, including excursions hidden by `action_clamp`.
-The legacy task uses its own thrust and torque mapping. Unused held-arm outputs
-are ignored. An explicitly removed upper thrust cap has no upper-thrust cost
+The legacy task uses its own thrust and torque mapping. Unused held-arm policy
+outputs are ignored; the neutral hold controller can still incur a physical
+torque-demand cost when it saturates. An explicitly removed upper thrust cap has no upper-thrust cost
 for PPO, but negative thrust requests still pay a cost, normalized by the nominal
 upper thrust scale. SAC's direct rotor
 mapping still clips its normalized inputs to ±1.
 
 PPO INDI references are unbounded physical quantities; they are **not** given
-artificial ±1 limits. PD/PI/INDI controller saturation is not penalized here.
-Position targets are not mistaken for direct torque requests.
+artificial ±1 limits. Their physical controller demands now pay thrust/torque
+excess costs. Bounded SAC references can also make a controller saturate.
+
+| Control mode | Thrust-demand source | Joint-torque-demand source |
+| --- | --- | --- |
+| Direct thrust/torque | Raw policy mapping, before input clipping | Raw direct torque mapping |
+| Direct thrust + PD position | Raw policy thrust mapping | Unsaturated implicit PD demand estimate (`computed_torque`) |
+| PI flight + PD position | Unclipped allocation of collective thrust and PI body torque | Unsaturated implicit PD demand estimate |
+| INDI | Unweighted G1 pseudoinverse of the original requested wrench, before feasibility projection | Explicit PID demand after anti-windup, before torque saturation |
+
+Each controller contribution is the mean of the **per-substep costs**, not the
+cost of the mean demand. It is added once per policy step, without another dt
+multiplier. Direct policy costs keep their existing once-per-policy-step timing.
+The code selects one source per actuator group, so it does not count the same
+thrust or torque demand twice. `rwd_scale_action_limits` stays independent and
+covers only actual input clamps; it remains zero for physical-unit PPO INDI.
+
+Borinot's G1 has four rows and six rotor columns. Its pseudoinverse gives one
+minimum-norm rotor distribution. A violation in that distribution is the chosen
+soft cost, not proof that no other bounded rotor distribution can produce the
+same wrench. A bounded-allocation wrench residual would be a different objective.
+The constrained allocator still supplies all actual INDI motor commands.
+Implicit PD demand is a model estimate, not measured PhysX drive torque.
 
 The physical controls, clipping, motor dynamics and observation sizes are
 unchanged. In particular, this is a **soft reward cost**, not a new hard torque
@@ -298,4 +322,5 @@ and `action_limits` (under `desirability/` in the simple task). The legacy task
 uses `rewards/<term>` and `info["action_limit_reward_terms"]`. Physical resets
 clear only the selected environments' cost buffers; ball-only resets keep the
 current robot transition. Tests: `borinot_goalkeeper/tests/test_action_limits.py`
-and `borinot_goalkeeper/tests/action_limits_smoke.py`.
+`borinot_goalkeeper/tests/test_controller_limits.py`, and
+`borinot_goalkeeper/tests/action_limits_smoke.py`.

@@ -282,6 +282,12 @@ class IndiController:
         self.mass, self.hover = mass, hover
         self.allocator = RotorAllocator(allocation, hover * task.thrust_to_weight, task.kf,
                                         allocation.new_tensor(task.rotor_spin), self.dt, self.cfg)
+        # G1 is 4x6 for Borinot. This unweighted minimum-norm allocation is a
+        # reward diagnostic only; the bounded allocator below still controls physics.
+        self._allocation_inverse = torch.linalg.pinv(allocation)
+        self.requested_wrench = allocation.new_zeros((num_envs, 4))
+        self.requested_rotor_thrust = allocation.new_zeros((num_envs, 6))
+        self.requested_joint_effort = allocation.new_zeros((num_envs, 2))
         zeros = allocation.new_zeros((num_envs, 3))
         self.rotor_speed = allocation.new_full((num_envs, 6), math.sqrt(hover / task.kf))
         self.command_speed = self.rotor_speed.clone()
@@ -307,7 +313,8 @@ class IndiController:
         self.filtered_speeds[ids] = self.rotor_speed[ids]
         for buffer in (self.filtered_rates, self.angular_acceleration, self.alpha_desired, self.alpha_feasible,
                        self.nominal_wrench, self.desired_wrench, self.allocation_residual,
-                       self.transient_torque, self.joint_integral):
+                       self.transient_torque, self.joint_integral, self.requested_wrench,
+                       self.requested_rotor_thrust, self.requested_joint_effort):
             buffer[ids] = 0
         self.gyro_filter.reset(ids, self.filtered_rates[ids])
         self.rotor_filter.reset(ids, self.rotor_speed[ids])
@@ -332,6 +339,10 @@ class IndiController:
                                                       reference_rates, self.cfg, self.task.indi_tilt_method))
         gyro = torch.linalg.cross(rates, rates @ self.inertia.T)
         requested = torch.cat((collective, self.alpha_desired @ self.inertia.T + gyro), -1)
+        # Score the original request, before the nominal feasibility projection
+        # can hide excessive collective thrust or angular acceleration.
+        self.requested_wrench.copy_(requested)
+        self.requested_rotor_thrust.copy_(requested @ self._allocation_inverse.T)
         nominal = self.allocator.thrust(requested) @ self.allocator.allocation.T
         self.nominal_wrench.copy_(nominal)
         self.alpha_feasible.copy_((nominal[:, 1:] - gyro) @ self.inertia_inverse.T)
@@ -360,6 +371,7 @@ class IndiController:
         effort = self.task.kp*error - self.task.kd*joint_vel + self.cfg.joint_ki*integral
         winding_up = ((effort > self.task.effort_lim_sim) & (error > 0)) | ((effort < -self.task.effort_lim_sim) & (error < 0))
         self.joint_integral.copy_(torch.where(winding_up, self.joint_integral, integral))
-        effort = (self.task.kp*error - self.task.kd*joint_vel + self.cfg.joint_ki*self.joint_integral).clamp(
-            -self.task.effort_lim_sim, self.task.effort_lim_sim)
+        effort = self.task.kp*error - self.task.kd*joint_vel + self.cfg.joint_ki*self.joint_integral
+        self.requested_joint_effort.copy_(effort)  # after anti-windup, before output saturation
+        effort = effort.clamp(-self.task.effort_lim_sim, self.task.effort_lim_sim)
         return self.task.kf * command.square(), effort

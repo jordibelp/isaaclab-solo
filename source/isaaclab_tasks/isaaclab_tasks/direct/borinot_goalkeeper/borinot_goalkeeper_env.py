@@ -13,7 +13,7 @@ from isaaclab.envs import DirectRLEnv
 from isaaclab.sensors import ContactSensor, ContactSensorCfg
 from isaaclab.utils.math import matrix_from_quat, quat_apply, quat_apply_inverse
 from isaaclab_tasks.controllers.borinot_indi import IndiController
-from isaaclab_tasks.direct.borinot.action_limits import raw_action_limit_costs
+from isaaclab_tasks.direct.borinot.action_limits import raw_action_limit_costs, relative_limit_cost
 
 from .borinot_goalkeeper_env_cfg import BorinotGoalkeeperEnvCfg
 from .events import configure_randomization
@@ -276,6 +276,14 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
             commands, joint_effort = self._indi.step(
                 self.actions, self.robot.data.root_quat_w, self.robot.data.root_ang_vel_b,
                 self.robot.data.joint_pos[:, self.joint_ids], self.robot.data.joint_vel[:, self.joint_ids])
+            if self.cfg.rwd_scale_thrust_limits:
+                cap = self._hover_per_rotor * self.cfg.thrust_to_weight
+                self._action_limit_costs[:, 0] += relative_limit_cost(
+                    self._indi.requested_rotor_thrust, 0., cap, cap) / self.cfg.decimation
+            if self.cfg.rwd_scale_torque_limits:
+                limit = self.cfg.effort_lim_sim
+                self._action_limit_costs[:, 1] += relative_limit_cost(
+                    self._indi.requested_joint_effort, -limit, limit, limit) / self.cfg.decimation
         elif self.cfg.control_mode == "PI_rotors_PD_joint_pos_control":
             rates = self.robot.data.root_ang_vel_b
             error = self.actions[:, 1:4] * self._rate_scale - rates
@@ -283,6 +291,10 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
             torque = self._kp * error + self._ki * self._rate_integral
             collective = self._hover_total * (1 + self.cfg.collective_action_scale * self.actions[:, :1])
             commands = torch.cat((collective, torque), dim=-1) @ self._allocation_inverse.T
+            if self.cfg.rwd_scale_thrust_limits:
+                cap = self._hover_per_rotor * self.cfg.thrust_to_weight
+                self._action_limit_costs[:, 0] += relative_limit_cost(
+                    commands, 0., None if self.cfg.remove_thrust_clipping else cap, cap) / self.cfg.decimation
         else:
             if self.cfg.sac_action_mapping:
                 u = self.actions[:, :6].clamp(-1.0, 1.0)
@@ -331,6 +343,15 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         """Sample completed substeps using lagged thrust and the applied PD torque estimate."""
         if self._power_samples == self._physics_samples:
             return
+        # PD is implicit in PhysX. computed_torque is its unsaturated PD demand
+        # estimate from this completed substep, including the final substep.
+        # Direct torques and explicit INDI PID are already scored elsewhere.
+        use_pd = self.cfg.control_mode != "indi" and (
+            self.cfg.control_mode != "thrust_and_torque_control" or self.cfg.hold_arm)
+        if use_pd and self.cfg.rwd_scale_torque_limits:
+            limit = self.cfg.effort_lim_sim
+            self._action_limit_costs[:, 1] += relative_limit_cost(
+                self.robot.data.computed_torque[:, self.joint_ids], -limit, limit, limit) / self.cfg.decimation
         omega = torch.sqrt(self._rotor_thrust.clamp_min(0.0) / self.cfg.kf)
         rotor_mechanical_w = (self.cfg.km * omega**3).sum(-1)
         self._power_sum_w[:, 0] += rotor_mechanical_w
