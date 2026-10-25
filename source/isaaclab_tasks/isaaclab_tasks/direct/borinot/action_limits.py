@@ -61,10 +61,9 @@ def raw_action_limit_costs(actions, cfg, hover, *, legacy=False):
             lower = (lower + bias).clamp_min(-cfg.torque_lim)
             upper = (upper + bias).clamp_max(cfg.torque_lim)
         else:
-            requested = actions[:, 6:8] * cfg.effort_lim_sim
+            # Direct PPO actions already have N*m units; SAC actions remain normalized.
+            requested = actions[:, 6:8] * cfg.effort_lim_sim if cfg.sac_action_mapping else actions[:, 6:8]
             limit = cfg.effort_lim_sim
-            if not cfg.sac_action_mapping and not cfg.remove_thrust_clipping:
-                limit *= min(1., cfg.action_clamp)
             lower, upper = -limit, limit
         costs[:, 1] = relative_limit_cost(requested, lower, upper, upper)
 

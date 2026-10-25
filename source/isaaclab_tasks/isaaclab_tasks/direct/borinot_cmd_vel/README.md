@@ -156,10 +156,16 @@ The physical joint armature and friction are preserved. INDI uses the existing
 speed-lag model and explicit joint PID. No low-level flight controller is added
 to the direct modes.
 
-PPO and SAC retain their existing action transforms. SAC maps rotor -1/0/+1
+SAC maps rotor -1/0/+1
 to zero/hover/maximum thrust. Direct SAC joint torques remain normalized until
 the environment multiplies by `effort_lim_sim`. PPO uses its existing affine
-hover-centered rotor mapping. Torque and position checkpoints are not
+hover-centered rotor mapping. In direct-torque mode, PPO's last two actions
+are now joint torques in N·m: no scaling and no task-level torque action clamp.
+The squared relative excess beyond ±`effort_lim_sim` is penalized by
+`rwd_scale_torque_limits`; it does not clip the request. The default soft limit
+is ±2.7 N·m. PD/PI/INDI and neutral arm hold are unchanged. Older direct-torque
+PPO checkpoints need their original source revision because their torque units
+differ. SAC checkpoints are unchanged. Torque and position checkpoints are not
 interchangeable even though both have eight actions.
 
 The plant keeps the two-joint leg. There is no ball or goal. The racket is now

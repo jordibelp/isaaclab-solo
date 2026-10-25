@@ -4,6 +4,8 @@ Date: 2026-10-18. Task ID: `Borinot-Goalkeeper-Simple-Direct-v0`.
 
 ## Start here
 
+In `thrust_and_torque_control`, PPO's last two actions are joint torques in N·m, passed through without scaling or action clipping. `rwd_scale_torque_limits` penalizes squared relative excess beyond ±`effort_lim_sim` (default ±2.7 N·m); it does not hard-clamp the request. SAC keeps normalized [-1, 1] joint actions multiplied by `effort_lim_sim`. Rotor mappings, PD/PI/INDI modes and neutral arm hold are unchanged. Older direct-torque PPO checkpoints need their original source revision because their joint actions used different units. SAC checkpoints remain compatible.
+
 **New controller:** `env.control_mode=indi` selects the shared nine-action INDI + joint PID interface. Both low-level controllers run at physics rate during training and playback. PPO and both SAC critics are supported. Read the original task's [step-by-step INDI guide](../borinot_goalkeeper/INDI_CONTROL.md) for the full design and commands.
 
 This is a new task next to the original `Borinot-Goalkeeper-Direct-v0`. The original task's training code, config and rewards are unchanged. Only its playback file was split into a reusable part, so that one player can show both tasks. Playback of the original task behaves as before.

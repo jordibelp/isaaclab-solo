@@ -212,28 +212,35 @@ def test_thrust_clipping_flag(remove, requested):
     torch.testing.assert_close(env._rotor_thrust, expected.expand(3, -1))
 
 
-@pytest.mark.parametrize("remove,expected", [(True, [-7., -.5, 3., 12.]), (False, [-2., -.5, 2., 2.])])
-def test_action_clipping_flag(remove, expected):
+@pytest.mark.parametrize("mode,remove,expected", [
+    (MODES[0], True, [-7., -.5, 3., 12., -12., 0., 12.5, -15.]),
+    (MODES[0], False, [-2., -.5, 2., 2., -2., 0., 12.5, -15.]),
+    (MODES[1], False, [-2., -.5, 2., 2., -2., 0., 2., -2.]),
+])
+def test_action_clipping_flag(mode, remove, expected):
     cfg = config()
+    cfg.control_mode = mode
     cfg.remove_thrust_clipping, cfg.action_clamp, cfg.goal_center = remove, 2.0, (-0.45, 0.0, 1.2)
     zeros = lambda *shape, dtype=torch.float32: torch.zeros(*shape, dtype=dtype)
     env = SimpleNamespace(cfg=cfg, extras={}, _episode_steps=zeros(1), _next_launch_steps=torch.ones(1),
         _action_limit_costs=zeros(1, 3), _hover_per_rotor=5.,
         _ball_active=torch.ones(1, dtype=torch.bool), _shot_steps=zeros(1), _outcome=zeros(1),
-        actions=zeros(1, 4), _actuator_commands=zeros(1, 8), _previous_actuator_commands=zeros(1, 8), _previous_paddle=zeros(1, 3),
+        actions=zeros(1, 8), _actuator_commands=zeros(1, 8), _previous_actuator_commands=zeros(1, 8), _previous_paddle=zeros(1, 3),
         _paddle_pose=lambda: (zeros(1, 3),), scene=SimpleNamespace(env_origins=zeros(1, 3)),
         ball=SimpleNamespace(data=SimpleNamespace(root_pos_w=zeros(1, 3), root_lin_vel_w=zeros(1, 3))),
         _old_progress_active=zeros(1, dtype=torch.bool), _hit=zeros(1, dtype=torch.bool), _new_hit=zeros(1, dtype=torch.bool), _flags={},
         _physics_samples=1, _power_sum_w=zeros(1, 4), _power_samples=1)
-    method("borinot_goalkeeper_env.py", "_pre_physics_step")(env, torch.tensor([[-7., -.5, 3., 12.]]))
+    raw = torch.tensor([[-7., -.5, 3., 12., -12., 0., 12.5, -15.]])
+    method("borinot_goalkeeper_env.py", "_pre_physics_step")(env, raw)
     torch.testing.assert_close(env.actions, torch.tensor([expected]))
+    torch.testing.assert_close(raw, torch.tensor([[-7., -.5, 3., 12., -12., 0., 12.5, -15.]]))
 
 
-def test_torque_actions_have_signed_effort_limits_without_joint_pd():
+def test_ppo_torque_actions_are_joint_efforts_without_joint_pd():
     env, calls = action_env(MODES[0])
     env.actions[:, 6:] = torch.tensor([[-1., 1.], [.5, -.5], [0., 0.]])
     method("borinot_goalkeeper_env.py", "_apply_action")(env)
-    torch.testing.assert_close(calls["effort"], env.actions[:, 6:] * env.cfg.effort_lim_sim)
+    torch.testing.assert_close(calls["effort"], env.actions[:, 6:])
     assert "position" not in calls and "velocity" not in calls
 
 

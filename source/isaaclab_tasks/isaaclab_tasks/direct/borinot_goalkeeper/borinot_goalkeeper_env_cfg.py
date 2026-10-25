@@ -55,7 +55,7 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
 
     robot_home = (0.0, 0.0, 1.5)  # centre of the reset grid; also the observation/recovery reference
     robot_home_quat = (0.7071067811865476, 0.0, 0.0, -0.7071067811865476)  # wxyz; -90 deg yaw
-    effort_lim_sim = 2.7  # N*m; also maps unit torque actions to joint efforts
+    effort_lim_sim = 2.7  # N*m soft limit; scales SAC torque actions only. PPO outputs N*m directly.
     velocity_lim_sim = 100.0  # rad/s
     kp = 9.0  # N*m/rad; implicit PD in position modes, explicit PID in INDI
     kd = 0.2  # N*m*s/rad; disabled in direct torque mode unless hold_arm=True
@@ -149,7 +149,7 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     rotor_thrust_limit_n = 10.0  # hardware-profile ceiling per rotor; used when thrust clipping is enabled
     thrust_to_weight = 3.5  # further limits thrust; resolved against the 10 N ceiling at env creation
     rotor_action_scale = 1.0  # direct modes: hover_per_rotor * (1 + scale * action)
-    action_clamp=10.0  # used only when remove_thrust_clipping=False
+    action_clamp=10.0  # PPO rotor/reference clamp when remove_thrust_clipping=False; never direct joint torques
     remove_action_clipping=True  # legacy unused field; remove_thrust_clipping controls clipping
     remove_thrust_clipping=False # False: cap thrust at min(TWR * nominal hover, rotor_thrust_limit_n)
     collective_action_scale = 0.7

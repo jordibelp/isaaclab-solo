@@ -78,10 +78,8 @@ def expected(actions, cfg, hover, legacy):
                 thrust += ((request-command)/thrust_scale)**2
             if cfg.control_mode == 'thrust_and_torque_control' and not cfg.hold_arm:
                 for value in row[6:]:
-                    request = value*cfg.effort_lim_sim
+                    request = value*cfg.effort_lim_sim if cfg.sac_action_mapping else value
                     torque_scale = cfg.effort_lim_sim
-                    if not cfg.sac_action_mapping and not cfg.remove_thrust_clipping:
-                        torque_scale *= min(1., cfg.action_clamp)
                     command = min(torque_scale, max(-torque_scale, request))
                     torque += ((request-command)/torque_scale)**2
             elif not cfg.sac_action_mapping and not cfg.remove_thrust_clipping and not cfg.hold_arm:
@@ -99,6 +97,16 @@ def expected(actions, cfg, hover, legacy):
 def measured_step(env, cfg, hover, legacy):
     """Trace independent pre-saturation oracles, not the production cost buffers."""
     rotor_samples, joint_samples = [], []
+    direct_efforts = []
+    direct_torque = not legacy and cfg.control_mode == 'thrust_and_torque_control' and not cfg.hold_arm
+    if direct_torque:
+        original_effort = env.robot.set_joint_effort_target
+
+        def record_effort(value, **kwargs):
+            if kwargs.get('env_ids') is None:
+                direct_efforts.append(value.clone())
+            return original_effort(value, **kwargs)
+        env.robot.set_joint_effort_target = record_effort
     original_apply = env._apply_action
     cap = hover*cfg.thrust_to_weight if not legacy else None
     if not legacy and cfg.control_mode == 'indi':
@@ -162,7 +170,13 @@ def measured_step(env, cfg, hover, legacy):
     def step(actions):
         rotor_samples.clear()
         joint_samples.clear()
+        direct_efforts.clear()
         result = env.step(actions)
+        if direct_torque:
+            effort = actions[:, 6:8] * cfg.effort_lim_sim if cfg.sac_action_mapping else actions[:, 6:8]
+            check('direct_joint_requests_reach_each_physics_substep', len(direct_efforts) == cfg.decimation)
+            check('joint_request_units_and_no_ppo_clipping', all(torch.equal(value, effort) for value in direct_efforts))
+            report['forwarded_joint_efforts_nm'] = direct_efforts[-1].cpu().tolist()
         wanted = expected(actions, cfg, hover, legacy)
         if rotor_samples:
             check('all_rotor_controller_substeps_scored', len(rotor_samples) == cfg.decimation)

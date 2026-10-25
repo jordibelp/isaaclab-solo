@@ -253,7 +253,12 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
             if self.cfg.sac_action_mapping:
                 actions = actions.clamp(-1.0, 1.0)
         elif not self.cfg.sac_action_mapping and not self.cfg.remove_thrust_clipping:
-            actions = actions.clamp(-self.cfg.action_clamp, self.cfg.action_clamp)
+            if self.cfg.control_mode == "thrust_and_torque_control" and not self.cfg.hold_arm:
+                # PPO joint actions are unbounded N*m; retain only the rotor input clamp.
+                actions = torch.cat((actions[:, :6].clamp(-self.cfg.action_clamp, self.cfg.action_clamp),
+                                     actions[:, 6:]), dim=-1)
+            else:
+                actions = actions.clamp(-self.cfg.action_clamp, self.cfg.action_clamp)
         self.actions.copy_(actions)
         self._previous_paddle.copy_(self._paddle_pose()[0])
         ball_pos = self.ball.data.root_pos_w - self.scene.env_origins
@@ -327,8 +332,11 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
             # Implicit gains are zero: the software PID runs once per physics substep.
             self.robot.set_joint_effort_target(joint_effort, joint_ids=self.joint_ids)
         elif self.cfg.control_mode == "thrust_and_torque_control" and not self.cfg.hold_arm:
-            # SAC keeps these actions in [-1, 1]: -limit / zero / +limit at u=-1 / 0 / +1.
-            self.robot.set_joint_effort_target(self.actions[:, 6:8] * self.cfg.effort_lim_sim, joint_ids=self.joint_ids)
+            # PPO outputs N*m directly. SAC retains normalized -1 / 0 / +1 -> -limit / 0 / +limit.
+            effort = self.actions[:, 6:8]
+            if self.cfg.sac_action_mapping:
+                effort = effort * self.cfg.effort_lim_sim
+            self.robot.set_joint_effort_target(effort, joint_ids=self.joint_ids)
         else:
             targets = self.actions[:, -2:] * self._joint_scale
             if self.cfg.sac_action_mapping:

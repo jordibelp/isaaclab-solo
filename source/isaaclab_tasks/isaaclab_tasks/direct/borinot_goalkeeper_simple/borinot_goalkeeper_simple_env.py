@@ -229,7 +229,12 @@ class BorinotGoalkeeperSimpleEnv(DirectRLEnv):
             if self.cfg.sac_action_mapping:
                 actions = actions.clamp(-1.0, 1.0)
         elif not self.cfg.sac_action_mapping and not self.cfg.remove_thrust_clipping:
-            actions = actions.clamp(-self.cfg.action_clamp, self.cfg.action_clamp)
+            if self.cfg.control_mode == "thrust_and_torque_control" and not self.cfg.hold_arm:
+                # PPO joint actions are unbounded N*m; retain only the rotor input clamp.
+                actions = torch.cat((actions[:, :6].clamp(-self.cfg.action_clamp, self.cfg.action_clamp),
+                                     actions[:, 6:]), dim=-1)
+            else:
+                actions = actions.clamp(-self.cfg.action_clamp, self.cfg.action_clamp)
         self.actions.copy_(actions)
         # Progress compares racket positions across this interval, only before the ball's first contact.
         self._previous_paddle.copy_(self._paddle_pose()[0])

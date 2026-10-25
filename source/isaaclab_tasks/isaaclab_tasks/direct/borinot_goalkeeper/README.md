@@ -380,24 +380,27 @@ Changing rates also changes the number of actions in a shot. The three-second de
 
 ### Direct rotor modes: a and b
 
-The environment owns action clipping; the RSL-RL wrapper does not clip (`clip_actions=None`). Rotor thrust commands are always clipped below at zero: the rotors only push. With the default `remove_action_and_thrust_clippings=True`, actions are **not clipped**, and thrust has **no upper limit**. Large actions can therefore request very large thrust. With `False`, actions are clipped to `[-action_clamp, action_clamp]` and commands to `[0, thrust_to_weight * hover_per_rotor]`. Actions 0–5 independently request thrust from rotors 0–5:
+The environment owns action clipping; the RSL-RL wrapper does not clip (`clip_actions=None`). Rotor thrust commands are always clipped below at zero: the rotors only push. With the default `remove_thrust_clipping=False`, PPO rotor inputs are clipped to `[-action_clamp, action_clamp]` and thrust is capped at the smaller of `thrust_to_weight * nominal_hover_per_rotor` and `rotor_thrust_limit_n`. Setting it to `True` removes those upper/input rotor bounds, but never permits negative thrust. Direct PPO joint-torque actions are not clipped by this switch or `action_clamp`. Actions 0–5 independently request thrust from rotors 0–5:
 
 ```text
 requested rotor thrust = hover_per_rotor * (1 + rotor_action_scale * action)
 hover_per_rotor = simulated robot mass * 9.81 / 6
 ```
 
-With `rotor_action_scale=1.0`, action −1 requests zero thrust, action 0 requests nominal per-rotor hover thrust, and action +1 requests twice that thrust. Policies trained before this change used a wrapper clip of `[-1, 1]` and `thrust_to_weight=2.0`. To replay them, add `env.remove_action_and_thrust_clippings=False env.action_clamp=1.0 env.thrust_to_weight=2.0`.
+With `rotor_action_scale=1.0`, action −1 requests zero thrust, action 0 requests nominal per-rotor hover thrust, and action +1 requests twice that thrust before the physical command cap. Historical policies trained with different clipping or action units require their original configuration and source revision.
 
 There is **no body-rate PI feedback** in either direct mode. The rotor geometry maps the individual forces to the resulting base force and torque. The physical response still uses a first-order thrust filter with `motor_time_constant_s=0.04`. Zero thrust actions request nominal hover thrust, but do not stabilize position or attitude on their own. These are simulator assumptions, not calibrated ESC or motor limits.
 
 In mode **a**, actions 6–7 request shoulder and elbow torques:
 
 ```text
-joint torque target = effort_lim_sim * action
+PPO joint torque target [N*m] = action
+SAC joint torque target [N*m] = effort_lim_sim * action
 ```
 
-The default range is ±2.7 N·m per joint. Joint drive stiffness and damping are both zero: no position PD is added to the policy torque.
+PPO outputs physical N·m directly, with no task-level torque action clamp or scaling. `rwd_scale_torque_limits` penalizes requests outside `[-effort_lim_sim, +effort_lim_sim]` using the sum of squared relative excesses, without a policy-dt multiplier. At the default 2.7 N·m soft limit, action 3 requests 3 N·m and contributes `(0.3/2.7)^2` before the signed reward scale. The penalty does not clip the request. SAC keeps its normalized [-1, 1] mapping and default ±2.7 N·m request range. Joint drive stiffness and damping are zero: no position PD is added to either policy's torque.
+
+**Checkpoint compatibility:** older direct-torque PPO checkpoints used `effort_lim_sim * action` and a shared input clamp. Their tensor shapes still load, but their torque units differ. Use the original source revision for those checkpoints or train a new policy; there is no automatic conversion. SAC torque checkpoints are unchanged. `robot.data.applied_torque` remains a clipped implicit-actuator estimate, not measured PhysX feed-forward torque.
 
 In mode **b**, actions 6–7 request two scalar joint angles:
 
