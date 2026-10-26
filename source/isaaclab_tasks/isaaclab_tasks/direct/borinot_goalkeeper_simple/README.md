@@ -326,3 +326,12 @@ clear only the selected environments' cost buffers; ball-only resets keep the
 current robot transition. Tests: `borinot_goalkeeper/tests/test_action_limits.py`
 `borinot_goalkeeper/tests/test_controller_limits.py`, and
 `borinot_goalkeeper/tests/action_limits_smoke.py`.
+
+
+## Command delays and evaluation
+
+Use `env.actuator_delay=0.02` for a fixed 20 ms policy-command delay, or
+`env.actuator_delay=0.0 'env.actuator_delay_range=[0.0,0.04]'` to sample a new
+delay per robot episode. Defaults add no delay. Inner controllers still use
+current measurements. See [timing, training and evaluation commands](../borinot_goalkeeper/ACTUATOR_DELAY.md)
+for the shared conventions and the fixed-stage goalkeeper checkpoint evaluator.

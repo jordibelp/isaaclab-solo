@@ -157,6 +157,10 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     rate_kp = (0.35, 0.35, 0.15)
     rate_ki = (0.10, 0.10, 0.04)
     motor_time_constant_s = 0.04  # motor lag; 0 disables filtering (instantaneous thrust commands)
+    # Policy-command latency [s], in whole physics steps (5 ms at 200 Hz). The old command reaches
+    # INDI/PI/PD/PID and the motors; those loops still use current measurements. See README.
+    actuator_delay = 0.0  # fixed for every episode, e.g. env.actuator_delay=0.02 at evaluation
+    actuator_delay_range = None  # (min, max) [s]: a new uniform delay per environment at every robot reset
     critic_obs_includes_rotor_omega = False  # append six current post-lag rotor speed magnitudes (rad/s), critic only
     # Eagle/PX4 motor order, body-frame metres, 0.185 m radius; spin is the body-yaw torque sign.
     # Hardware profile: hidro-iri/eagle_mpc_lib@96c65ab, yaml/borinot_flying_arm_2/platform/borinot.yaml.

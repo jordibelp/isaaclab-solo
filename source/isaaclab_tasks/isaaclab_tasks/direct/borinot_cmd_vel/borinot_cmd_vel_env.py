@@ -11,6 +11,7 @@ from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
 from isaaclab.sensors import ContactSensor, ContactSensorCfg
 from isaaclab.utils.math import matrix_from_quat, quat_apply_inverse, quat_from_euler_xyz, quat_mul
+from isaaclab_tasks.direct.borinot_goalkeeper.actuator_delay import ActuatorDelay, actuator_delay_bounds
 from isaaclab_tasks.direct.borinot_goalkeeper.borinot_goalkeeper_env import BorinotGoalkeeperEnv
 from isaaclab_tasks.direct.borinot.action_limits import raw_action_limit_costs
 from isaaclab_tasks.direct.borinot_goalkeeper.events import configure_randomization
@@ -36,6 +37,7 @@ class BorinotCmdVelEnv(DirectRLEnv):
             cfg.events.racket_mass = None
         self.contact_body_names = (("paddle",) if cfg.arm_holds_racket else ()) + (
             "base", "flying_arm_2__link1", "flying_arm_2__link2")
+        actuator_delay_bounds(cfg)  # fail before the simulator starts
         super().__init__(cfg, render_mode, **kwargs)
         self.joint_ids, _ = self.robot.find_joints(list(cfg.joint_names), preserve_order=True)
         self.base_id = self.robot.find_bodies("base")[0][0]
@@ -48,6 +50,7 @@ class BorinotCmdVelEnv(DirectRLEnv):
         self._self_contact_bodies = torch.zeros(self.num_envs, len(self.contact_body_names),
                                                dtype=torch.bool, device=self.device)
         self.actions = torch.zeros(self.num_envs, cfg.action_space, device=self.device)
+        self._actuator_delay = ActuatorDelay(cfg, self.num_envs, cfg.action_space, self.device)
         self._action_limit_costs = torch.zeros(self.num_envs, 3, device=self.device)
         self._rate_integral = torch.zeros(self.num_envs, 3, device=self.device)
         self._joint_scale = torch.tensor(cfg.joint_target_scale, device=self.device)
@@ -302,6 +305,7 @@ class BorinotCmdVelEnv(DirectRLEnv):
             "Episode/return": sum(v[completed] for v in self._episode_terms.values()).mean(),
             "Episode/duration_s": duration.mean(),
             "Episode/energy_j": self._episode_energy_j[completed].mean(),
+            "Episode/actuator_delay_s": self._actuator_delay.seconds[completed].mean(),
             "Tracking/xy_mean": (self._episode_xy_integral[completed] / duration).mean(),
             "Curriculum/collection_stage": self._episode_stage[completed].float().mean(),
             "Curriculum/evaluated_stage": old_level,
@@ -325,7 +329,7 @@ class BorinotCmdVelEnv(DirectRLEnv):
         """Archive shared plant/control helpers alongside this task's source."""
         return [inspect.getsourcefile(obj) for obj in (
             BorinotGoalkeeperEnv, configure_randomization, attach_paddle, configure_end_effector,
-            IndiController, tracking_kernels, raw_action_limit_costs)]
+            IndiController, tracking_kernels, raw_action_limit_costs, ActuatorDelay)]
 
     def _reset_idx(self, env_ids):
         if env_ids is None:
@@ -362,6 +366,7 @@ class BorinotCmdVelEnv(DirectRLEnv):
         for event in self._events.values():
             event[env_ids] = False
         self._self_contact_bodies[env_ids] = False
+        self._actuator_delay.reset(env_ids)  # after _update_curriculum logged the finished episodes' delays
         self._rotor_thrust[env_ids] = self._hover_per_rotor
         self._episode_stage[env_ids] = self.force_level
         self._base_push_steps_until_next[env_ids] = sample_steps(

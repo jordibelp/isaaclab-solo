@@ -927,3 +927,12 @@ the corresponding reward has no upper bound; the chart reports that switch.
 
 The charts appear once episodes finish on a new launch using this source.
 Already-running processes do not load these edits automatically.
+
+
+## Command delays and evaluation
+
+Use `env.actuator_delay=0.02` for a fixed 20 ms policy-command delay, or
+`env.actuator_delay=0.0 'env.actuator_delay_range=[0.0,0.04]'` to sample a new
+delay per robot episode. Defaults add no delay. Inner controllers still use
+current measurements. See [timing, training and evaluation commands](ACTUATOR_DELAY.md)
+for the shared conventions and the fixed-stage goalkeeper checkpoint evaluator.

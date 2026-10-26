@@ -131,6 +131,7 @@ def main(env_cfg, agent_cfg):
         terminated_episodes = 0
         truncated_episodes = 0
         print(f"[INFO] {args_cli.task}: {env_cfg.control_mode}, {env_cfg.physics_hz}/{env_cfg.policy_hz} Hz, "
+              f"actuator_delay={env_cfg.actuator_delay} s, actuator_delay_range={env_cfg.actuator_delay_range}, "
               f"home={env_cfg.robot_home}, shot_level={env_cfg.shot_level}, curriculum={env_cfg.curriculum}, "
               f"reset_on_goal={env_cfg.reset_on_goal}, camera={args_cli.camera}, "
               f"keep_balls={args_cli.keep_balls}, {total_steps} policy steps", flush=True)
@@ -174,6 +175,7 @@ def main(env_cfg, agent_cfg):
                   "steps": completed_steps, "simulated_time_s": completed_steps * dt,
                   "num_envs": env.num_envs, "control_mode": env_cfg.control_mode,
                   "physics_hz": env_cfg.physics_hz, "policy_hz": env_cfg.policy_hz,
+                  "actuator_delay_s": env_cfg.actuator_delay, "actuator_delay_range_s": env_cfg.actuator_delay_range,
                   "robot_home": list(env_cfg.robot_home), "shot_level_start": env_cfg.shot_level,
                   "shot_level_end": env.unwrapped.shot_level, "curriculum": env_cfg.curriculum,
                   "reset_on_goal": env_cfg.reset_on_goal,

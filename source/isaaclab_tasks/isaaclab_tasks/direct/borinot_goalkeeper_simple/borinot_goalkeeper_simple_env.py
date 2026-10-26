@@ -13,6 +13,7 @@ from isaaclab.envs import DirectRLEnv
 from isaaclab.sensors import ContactSensor, ContactSensorCfg
 from isaaclab.utils.math import matrix_from_quat, quat_apply, quat_apply_inverse
 
+from isaaclab_tasks.direct.borinot_goalkeeper.actuator_delay import ActuatorDelay, actuator_delay_bounds
 from isaaclab_tasks.direct.borinot_goalkeeper.borinot_goalkeeper_env import BorinotGoalkeeperEnv
 from isaaclab_tasks.direct.borinot.action_limits import raw_action_limit_costs
 from isaaclab_tasks.direct.borinot_goalkeeper.events import configure_randomization
@@ -62,6 +63,7 @@ class BorinotGoalkeeperSimpleEnv(DirectRLEnv):
             raise ValueError("robot_crash_force_threshold_n must be positive.")
         if cfg.curriculum_min_steps < 1 or cfg.motor_time_constant_s < 0:
             raise ValueError("Curriculum dwell must be positive and motor time constant must be non-negative.")
+        actuator_delay_bounds(cfg)  # fail before the simulator starts
         super().__init__(cfg, render_mode, **kwargs)
         for sensor, filters in ((self.ball_contact, 5), (self.base_contact, 4), (self.paddle_contact, 1)):
             if sensor.contact_physx_view.filter_count != filters:
@@ -81,6 +83,7 @@ class BorinotGoalkeeperSimpleEnv(DirectRLEnv):
 
         # Control state read by the shared _apply_action() and _sample_power().
         self.actions = torch.zeros(self.num_envs, cfg.action_space, device=self.device)
+        self._actuator_delay = ActuatorDelay(cfg, self.num_envs, cfg.action_space, self.device)
         self._action_limit_costs = torch.zeros(self.num_envs, 3, device=self.device)
         self._rate_integral = torch.zeros(self.num_envs, 3, device=self.device)
         self._joint_scale = torch.tensor(cfg.joint_target_scale, device=self.device)
@@ -423,6 +426,7 @@ class BorinotGoalkeeperSimpleEnv(DirectRLEnv):
         log = {"Episode/return": self._episode_rewards[completed].mean(),
                "Episode/duration_s": (self._episode_steps[completed] * self.step_dt).mean(),
                "Episode/energy_j": self._episode_energy_j[completed].mean(),
+               "Episode/actuator_delay_s": self._actuator_delay.seconds[completed].mean(),
                "Goalkeeper/cumulative_save_fraction": (
                    self.outcome_counts[OUTCOME_SAVE] / self.outcome_counts.sum().clamp_min(1)),
                "Curriculum/collection_stage": self._episode_stage[completed].float().mean()}
@@ -540,6 +544,7 @@ class BorinotGoalkeeperSimpleEnv(DirectRLEnv):
                        self._unpaid_energy_j,
                        *self._events.values(), *self._episode_terms.values(), *self._episode_counts.values()):
             buffer[env_ids] = 0
+        self._actuator_delay.reset(env_ids)  # after _update_curriculum logged the finished episodes' delays
         self._rotor_thrust[env_ids] = self._hover_per_rotor
         if self.cfg.control_mode == "indi":
             self._indi.reset(env_ids)

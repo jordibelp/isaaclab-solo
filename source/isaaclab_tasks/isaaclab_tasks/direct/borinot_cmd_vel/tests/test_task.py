@@ -112,7 +112,8 @@ def curriculum_env():
         _episode_steps=torch.tensor([100, 100, 100, 0]), _episode_stage=torch.tensor([0, 0, 0, 0]),
         _episode_xy_integral=torch.tensor([8., 9., 10., 0.]), _episode_energy_j=torch.ones(4),
         _episode_terms={"track": torch.ones(4)}, _curriculum_window=torch.zeros(3),
-        _window_cursor=0, _stage_episodes=0, _stage_start_step=0, curriculum_stage_pure_episodes=0)
+        _window_cursor=0, _stage_episodes=0, _stage_start_step=0, curriculum_stage_pure_episodes=0,
+        _actuator_delay=SimpleNamespace(seconds=torch.zeros(4)))
 
 
 def test_curriculum_promotes_once_then_ignores_old_stage_episodes():
@@ -153,6 +154,13 @@ def test_curriculum_ring_retains_newest_episodes_when_batch_exceeds_capacity():
     method("_update_curriculum")(env, torch.arange(4))
     torch.testing.assert_close(env._curriculum_window, torch.tensor([.2, .3, .4]))
     assert env.extras["log"]["Curriculum/window_completed_episodes"] == 3
+
+
+def test_episode_log_reports_the_mean_actuator_delay_of_completed_episodes():
+    env = curriculum_env()
+    env._actuator_delay.seconds = torch.tensor([.01, .02, .03, .5])  # the last environment has no steps
+    method("_update_curriculum")(env, torch.arange(4))
+    torch.testing.assert_close(env.extras["log"]["Episode/actuator_delay_s"], torch.tensor(.02))
 
 
 def reward_env():

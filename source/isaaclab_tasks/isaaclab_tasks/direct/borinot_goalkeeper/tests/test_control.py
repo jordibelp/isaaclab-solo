@@ -15,6 +15,9 @@ _limits = importlib.util.module_from_spec(_limits_spec)
 _limits_spec.loader.exec_module(_limits)
 raw_action_limit_costs = _limits.raw_action_limit_costs
 relative_limit_cost = _limits.relative_limit_cost
+_delay_spec = importlib.util.spec_from_file_location("borinot_actuator_delay_test", FOLDER / "actuator_delay.py")
+actuator_delay = importlib.util.module_from_spec(_delay_spec)
+_delay_spec.loader.exec_module(actuator_delay)
 MODES = ("thrust_and_torque_control", "thrust_and_PD_joint_pos_control", "PI_rotors_PD_joint_pos_control")
 
 
@@ -130,6 +133,7 @@ def action_env(mode, hold_arm=False, motor_time_constant_s=None):
         set_joint_effort_target=record("effort"))
     env = SimpleNamespace(cfg=cfg, robot=robot, num_envs=3, device="cpu", joint_ids=[0, 1], base_id=0,
         actions=torch.zeros(3, cfg.action_space, dtype=torch.float64), _physics_samples=0,
+        _actuator_delay=actuator_delay.ActuatorDelay(cfg, 3, cfg.action_space, "cpu", torch.float64),
         _action_limit_costs=torch.zeros(3, 3, dtype=torch.float64),
         _actuator_commands=torch.zeros(3, 8, dtype=torch.float64),
         _sample_power=lambda: None, _sample_physics_events=lambda: None, physics_dt=cfg.sim.dt,

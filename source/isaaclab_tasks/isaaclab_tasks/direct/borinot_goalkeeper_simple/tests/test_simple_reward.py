@@ -162,6 +162,7 @@ def make_env(**overrides):
         shot_level=0, _stage_start_step=0, _curriculum_window=torch.zeros(cfg.curriculum_window_shots),
         _window_cursor=0, _stage_shots=0, curriculum_stage_pure_episodes=0,
         reset_buf=torch.zeros(N, dtype=torch.bool), reset_terminated=torch.zeros(N, dtype=torch.bool),
+        _actuator_delay=SimpleNamespace(seconds=torch.zeros(N)),
     )
     for name in BOUND:
         setattr(env, name, MethodType(SCOPE[name], env))
@@ -239,7 +240,7 @@ def test_shared_settings_match_the_original_task():
         "rwd_scale_hit_racket", "rwd_scale_hit_arm", "rwd_scale_hit_base", "rwd_scale_base_crash",
         "rwd_scale_self_collision", "rwd_scale_tilt", "minimize_energy_not_power", "reset_robot_on_leave_area"}
     assert original.keys() - simple.keys() == {
-        "remove_action_clipping", "clear_distance_m", "clear_speed_m_s", "recovery_dwell_s",
+        "critic_obs_includes_rotor_omega", "remove_action_clipping", "clear_distance_m", "clear_speed_m_s", "recovery_dwell_s",
         "recovery_position_tolerance_m", "recovery_speed_m_s", "recovery_angular_speed_rad_s", "recovery_tilt_rad",
         "recovery_joint_tolerance_rad", "require_recovery_for_save", "progress_use_prediction", "rwd_scale_save",
         "rwd_scale_ball_base_collision", "rwd_scale_ball_arm_collision", "rwd_scale_ball_floor", "rwd_scale_miss",
@@ -582,6 +583,15 @@ def test_episode_log_groups_terms_by_category():
     assert {"Episode/return", "Episode/energy_j", "Goalkeeper/cumulative_save_fraction",
             "Episode_Reward/task/hit_racket", "Episode_Reward/integrity/self_collision",
             "Episode_Reward/desirability/energy", "Power/total_estimate_mean_w"} <= log.keys()
+
+
+def test_episode_log_reports_the_mean_actuator_delay_of_completed_episodes():
+    env = make_env()
+    step(env, ball_force(RACKET, [0]), integrity_fixture)
+    env._actuator_delay.seconds = torch.linspace(0., .04, N)
+    env._episode_steps[0] = 0  # an initial reset is not a completed episode
+    env._update_curriculum(torch.arange(N))
+    torch.testing.assert_close(env.extras["log"]["Episode/actuator_delay_s"], env._actuator_delay.seconds[1:].mean())
 
 
 def test_launch_resets_only_per_shot_state():

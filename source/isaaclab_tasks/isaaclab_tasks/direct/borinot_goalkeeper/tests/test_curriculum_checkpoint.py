@@ -42,6 +42,7 @@ def make_env(n=8, promote=False):
         _episode_stage=torch.zeros(n, dtype=torch.long), _episode_rewards=torch.zeros(n),
         _hit=torch.ones(n, dtype=torch.bool), _clear=torch.ones(n, dtype=torch.bool),
         _episode_terms={"outcome": torch.zeros(n)}, curriculum_stage_pure_episodes=0,
+        _actuator_delay=SimpleNamespace(seconds=torch.zeros(n)),
     )
 
 

@@ -15,6 +15,7 @@ from isaaclab.utils.math import matrix_from_quat, quat_apply, quat_apply_inverse
 from isaaclab_tasks.controllers.borinot_indi import IndiController
 from isaaclab_tasks.direct.borinot.action_limits import raw_action_limit_costs, relative_limit_cost
 
+from .actuator_delay import ActuatorDelay, actuator_delay_bounds
 from .borinot_goalkeeper_env_cfg import BorinotGoalkeeperEnvCfg
 from .desired_actuation import DesiredActuationMetrics
 from .events import configure_randomization
@@ -38,7 +39,7 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
     def get_code_snapshot_files(self):
         """Retain the shared implementation when archiving a training run."""
         return [inspect.getsourcefile(obj) for obj in (
-            BorinotGoalkeeperEnv, IndiController, raw_action_limit_costs, DesiredActuationMetrics)]
+            BorinotGoalkeeperEnv, IndiController, raw_action_limit_costs, DesiredActuationMetrics, ActuatorDelay)]
 
     def __init__(self, cfg: BorinotGoalkeeperEnvCfg, render_mode=None, **kwargs):
         cfg.configure_control()
@@ -55,6 +56,7 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
             raise ValueError("robot_crash_force_threshold_n must be positive.")
         if cfg.curriculum_min_steps < 1 or cfg.motor_time_constant_s < 0:
             raise ValueError("Curriculum dwell must be positive and motor time constant must be non-negative.")
+        actuator_delay_bounds(cfg)  # fail before the simulator starts
         super().__init__(cfg, render_mode, **kwargs)
         self.joint_ids, _ = self.robot.find_joints(list(cfg.joint_names), preserve_order=True)
         self.base_id = self.robot.find_bodies("base")[0][0]
@@ -74,6 +76,7 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         self._x_axis = torch.tensor([1.0, 0.0, 0.0], device=self.device).expand(self.num_envs, -1)
         self._gravity = torch.tensor([0.0, 0.0, -1.0], device=self.device).expand(self.num_envs, -1)
         self.actions = torch.zeros(self.num_envs, cfg.action_space, device=self.device)
+        self._actuator_delay = ActuatorDelay(cfg, self.num_envs, cfg.action_space, self.device)
         self._action_limit_costs = torch.zeros(self.num_envs, 3, device=self.device)
         self._rate_integral = torch.zeros(self.num_envs, 3, device=self.device)
         self._joint_scale = torch.tensor(cfg.joint_target_scale, device=self.device)
@@ -284,9 +287,11 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         if self._physics_samples:
             self._sample_physics_events()
         self._physics_samples += 1
+        # The command reaching the controllers now; self.actions stays the newest policy output.
+        actions = self._actuator_delay(self.actions)
         if self.cfg.control_mode == "indi":
             commands, joint_effort = self._indi.step(
-                self.actions, self.robot.data.root_quat_w, self.robot.data.root_ang_vel_b,
+                actions, self.robot.data.root_quat_w, self.robot.data.root_ang_vel_b,
                 self.robot.data.joint_pos[:, self.joint_ids], self.robot.data.joint_vel[:, self.joint_ids])
             if self.cfg.rwd_scale_thrust_limits:
                 cap = self._hover_per_rotor * self.cfg.thrust_to_weight
@@ -298,10 +303,10 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
                     self._indi.requested_joint_effort, -limit, limit, limit) / self.cfg.decimation
         elif self.cfg.control_mode == "PI_rotors_PD_joint_pos_control":
             rates = self.robot.data.root_ang_vel_b
-            error = self.actions[:, 1:4] * self._rate_scale - rates
+            error = actions[:, 1:4] * self._rate_scale - rates
             self._rate_integral.add_(error * self.physics_dt).clamp_(-0.5, 0.5)
             torque = self._kp * error + self._ki * self._rate_integral
-            collective = self._hover_total * (1 + self.cfg.collective_action_scale * self.actions[:, :1])
+            collective = self._hover_total * (1 + self.cfg.collective_action_scale * actions[:, :1])
             commands = torch.cat((collective, torque), dim=-1) @ self._allocation_inverse.T
             if self.cfg.rwd_scale_thrust_limits:
                 cap = self._hover_per_rotor * self.cfg.thrust_to_weight
@@ -309,10 +314,10 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
                     commands, 0., None if self.cfg.remove_thrust_clipping else cap, cap) / self.cfg.decimation
         else:
             if self.cfg.sac_action_mapping:
-                u = self.actions[:, :6].clamp(-1.0, 1.0)
+                u = actions[:, :6].clamp(-1.0, 1.0)
                 commands = self._hover_per_rotor * (1 + torch.where(u >= 0, (self.cfg.thrust_to_weight - 1) * u, u))
             else:
-                commands = self._hover_per_rotor * (1 + self.cfg.rotor_action_scale * self.actions[:, :6])
+                commands = self._hover_per_rotor * (1 + self.cfg.rotor_action_scale * actions[:, :6])
         # Rotors only push: thrust is always >= 0. The flag removes only the upper thrust cap.
         cap = self._hover_per_rotor * self.cfg.thrust_to_weight
         commands.clamp_(min=0.0, max=None if self.cfg.remove_thrust_clipping else cap)
@@ -340,12 +345,12 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
             self.robot.set_joint_effort_target(joint_effort, joint_ids=self.joint_ids)
         elif self.cfg.control_mode == "thrust_and_torque_control" and not self.cfg.hold_arm:
             # PPO outputs N*m directly. SAC retains normalized -1 / 0 / +1 -> -limit / 0 / +limit.
-            effort = self.actions[:, 6:8]
+            effort = actions[:, 6:8]
             if self.cfg.sac_action_mapping:
                 effort = effort * self.cfg.effort_lim_sim
             self.robot.set_joint_effort_target(effort, joint_ids=self.joint_ids)
         else:
-            targets = self.actions[:, -2:] * self._joint_scale
+            targets = actions[:, -2:] * self._joint_scale
             if self.cfg.sac_action_mapping:
                 targets = targets + self._sac_joint_offset
             if self.cfg.hold_arm:
@@ -614,6 +619,7 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
                               "Episode/shots": self._episode_shots[completed].float().mean(),
                               "Episode/saves": self._episode_saves[completed].float().mean(),
                               "Episode/duration_s": (self._episode_steps[completed] * self.step_dt).mean(),
+                              "Episode/actuator_delay_s": self._actuator_delay.seconds[completed].mean(),
                               "Goalkeeper/cumulative_save_fraction": (
                                   self.outcome_counts[7] / self.outcome_counts.sum().clamp_min(1)
                               ),
@@ -744,6 +750,7 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
             flag[env_ids] = False
         for value in self._episode_terms.values():
             value[env_ids] = 0
+        self._actuator_delay.reset(env_ids)  # after _update_curriculum logged the finished episodes' delays
         self._rotor_thrust[env_ids] = self._hover_per_rotor
         if self.cfg.control_mode == "indi":
             self._indi.reset(env_ids)

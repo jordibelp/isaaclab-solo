@@ -17,6 +17,7 @@ from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 
 from .borinot_env_cfg import BorinotEnvCfg
 from .action_limits import raw_action_limit_costs
+from isaaclab_tasks.direct.borinot_goalkeeper.actuator_delay import ActuatorDelay, actuator_delay_bounds
 
 
 # -----------------------
@@ -104,6 +105,7 @@ class BorinotEnv(DirectRLEnv):
     cfg: BorinotEnvCfg
     
     def __init__(self, cfg: BorinotEnvCfg, render_mode: str | None = None, **kwargs):
+        actuator_delay_bounds(cfg)
         super().__init__(cfg, render_mode, **kwargs)
 
         self._leg_dof_ids, _ = self.robot.find_joints(list(self.cfg.leg_joint_names))
@@ -124,6 +126,7 @@ class BorinotEnv(DirectRLEnv):
 
         act_dim = self.cfg.action_space
         self.actions = torch.zeros((self.num_envs, act_dim), dtype=torch.float32, device=self.device)
+        self._actuator_delay = ActuatorDelay(cfg, self.num_envs, act_dim, self.device)
         self._action_limit_costs = torch.zeros(self.num_envs, 3, device=self.device)
         self._last_actions = torch.zeros_like(self.actions)
         self._last_contact_f = torch.zeros((self.num_envs,), dtype=torch.float32, device=self.device)
@@ -314,9 +317,10 @@ class BorinotEnv(DirectRLEnv):
         self._contact_force_overload.zero_()
 
 
-    def _map_actions_angle_des(self) -> torch.Tensor:
-        a_th = self.actions[:, :6].clip(-1.0, 1.0)
-        theta_des = self.actions[:, 6:10]
+    def _map_actions_angle_des(self, actions=None) -> torch.Tensor:
+        actions = self.actions if actions is None else actions
+        a_th = actions[:, :6].clip(-1.0, 1.0)
+        theta_des = actions[:, 6:10]
         r1 = theta_des[:, :2]
         r1 = r1 / torch.linalg.norm(r1, dim=-1, keepdim=True).clamp_min(1e-8) 
         qdes1 = torch.atan2(r1[:, 1], r1[:, 0])
@@ -367,15 +371,15 @@ class BorinotEnv(DirectRLEnv):
 
         return thrusts
 
-    def _map_actions(self) -> tuple[torch.Tensor, torch.Tensor]:
+    def _map_actions(self, actions=None) -> tuple[torch.Tensor, torch.Tensor]:
         """Maps actions in [-1,1] to:
           thrusts: (N,6) in Newtons
           leg_torques: (N,2) in Nm
         """
         # Ensure actions in -1,1
-        self.actions = self.actions.clamp(-1.0, 1.0)
-        a_th = self.actions[:, :6]
-        a_tau = self.actions[:, 6:]
+        actions = (self.actions if actions is None else actions).clamp(-1.0, 1.0)
+        a_th = actions[:, :6]
+        a_tau = actions[:, 6:]
 
         thrusts = self._map_thrust(a_th)
 
@@ -391,7 +395,9 @@ class BorinotEnv(DirectRLEnv):
         # Sample the completed substep before replacing its thrust and torque.
         self._sample_power()
         self._physics_samples += 1
-        thrusts, leg_torques = self._map_actions() if not self.cfg.des_joint_out else (self._map_actions_angle_des(), None)
+        actions = self._actuator_delay(self.actions)
+        thrusts, leg_torques = (self._map_actions(actions) if not self.cfg.des_joint_out
+                               else (self._map_actions_angle_des(actions), None))
 
 
         # this clips the joint torque by effort_limit before applying
@@ -722,6 +728,7 @@ class BorinotEnv(DirectRLEnv):
         )
 
         self.actions[env_ids_t] = 0.0
+        self._actuator_delay.reset(env_ids_t)
         self._action_limit_costs[env_ids_t] = 0.0
         self._last_actions[env_ids_t] = 0.0
         self._thrusts[env_ids_t] = 0.0
@@ -734,5 +741,4 @@ class BorinotEnv(DirectRLEnv):
         self._reset_commands(env_ids_t)
 
     def get_code_snapshot_files(self):
-        return [inspect.getsourcefile(raw_action_limit_costs)]
-
+        return [inspect.getsourcefile(obj) for obj in (raw_action_limit_costs, ActuatorDelay)]

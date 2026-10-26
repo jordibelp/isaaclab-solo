@@ -87,3 +87,11 @@ The task's `tests/test_playback.py` checks score and camera behaviour without Is
 ```
 
 Use separate simulator processes to check `--keep-balls 0`, `1`, and `5`. A real GUI check should also click Pause, Reset, all camera modes, speed controls, and Clear score. Inspect the captured viewport and panel; a callback-only check is not proof that the displayed buttons work.
+
+
+## Actuator-command latency
+
+Playback accepts `env.actuator_delay=0.02` (seconds). For seeded, complete-episode
+save-rate measurements, use `source/scripts/rsl_rl/eval_borinot_goalkeeper.py`.
+See [command-delay and evaluation guide](ACTUATOR_DELAY.md) for timing, randomized
+training, fixed-stage comparisons, and output definitions.

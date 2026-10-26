@@ -116,6 +116,7 @@ def main(env_cfg, agent_cfg):
         tracking = torch.zeros(3, device=env.device)
         applied_command = tuple(args.cmd_init)
         print(f"[INFO] Borinot: {env_cfg.control_mode}, {env_cfg.physics_hz}/{env_cfg.policy_hz} Hz, "
+              f"actuator_delay={env_cfg.actuator_delay} s, actuator_delay_range={env_cfg.actuator_delay_range}, "
               f"command={'random' if args.random_commands else applied_command} (vx vy vz wz), "
               f"force stage={env.unwrapped.force_level}, episode={env_cfg.episode_length_s:g} s, "
               f"checkpoint={Path(checkpoint).name}", flush=True)
@@ -153,6 +154,7 @@ def main(env_cfg, agent_cfg):
             "task": args.task, "control_mode": env_cfg.control_mode, "steps": completed,
             "checkpoint_name": Path(checkpoint).name, "checkpoint_path": checkpoint,
             "physics_hz": env_cfg.physics_hz, "policy_hz": env_cfg.policy_hz,
+            "actuator_delay_s": env_cfg.actuator_delay, "actuator_delay_range_s": env_cfg.actuator_delay_range,
             "episode_length_s": env_cfg.episode_length_s,
             "arm_holds_racket": env_cfg.arm_holds_racket,
             "ee_includes_puntual_mass_kg": env_cfg.ee_includes_puntual_mass,
