@@ -20,6 +20,31 @@ def relative_limit_cost(requested, lower, upper, scale):
     return (excess / scale).square().sum(-1)
 
 
+def direct_thrust_request(actions, cfg, hover):
+    """Raw direct-mode rotor demand [N], before action/thrust clipping or lag."""
+    u = actions[:, :6]
+    if cfg.sac_action_mapping:
+        return hover * (1 + torch.where(u >= 0, (cfg.thrust_to_weight - 1) * u, u))
+    return hover * (1 + cfg.rotor_action_scale * u)
+
+
+def direct_thrust_limits(cfg, hover):
+    """Bounds and normalization [N] used by the direct-mode soft-limit cost."""
+    lower, upper = 0., hover * cfg.thrust_to_weight
+    if not cfg.sac_action_mapping:
+        if cfg.remove_thrust_clipping:
+            upper = None
+        else:
+            span = hover * cfg.rotor_action_scale * cfg.action_clamp
+            lower, upper = max(lower, hover - abs(span)), min(upper, hover + abs(span))
+    return lower, upper, upper if upper is not None else hover * cfg.thrust_to_weight
+
+
+def direct_joint_torque_request(actions, cfg):
+    """Raw direct-mode joint demand [N*m]; PPO is physical, SAC normalized."""
+    return actions[:, 6:8] * cfg.effort_lim_sim if cfg.sac_action_mapping else actions[:, 6:8]
+
+
 def raw_action_limit_costs(actions, cfg, hover, *, legacy=False):
     costs = actions.new_zeros((actions.shape[0], 3))
     direct = legacy or cfg.control_mode in ("thrust_and_torque_control", "thrust_and_PD_joint_pos_control")
@@ -35,17 +60,9 @@ def raw_action_limit_costs(actions, cfg, hover, *, legacy=False):
                 requested = hover + span * u
                 # Include the earlier +/-1 policy clamp, not only the physical cap.
                 lower, upper = max(lower, hover - span), min(upper, hover + span)
-        elif cfg.sac_action_mapping:
-            requested = hover * (1 + torch.where(u >= 0, (cfg.thrust_to_weight - 1) * u, u))
-            # SAC's direct rotor mapping always clamps its input to +/-1.
-            lower, upper = 0., hover * cfg.thrust_to_weight
         else:
-            requested = hover * (1 + cfg.rotor_action_scale * u)
-            lower = 0.
-            upper = None if cfg.remove_thrust_clipping else hover * cfg.thrust_to_weight
-            if not cfg.remove_thrust_clipping:
-                span = hover * cfg.rotor_action_scale * cfg.action_clamp
-                lower, upper = max(lower, hover - abs(span)), min(upper, hover + abs(span))
+            requested = direct_thrust_request(actions, cfg, hover)
+            lower, upper, _ = direct_thrust_limits(cfg, hover)
         thrust_limit = upper if upper is not None else hover * cfg.thrust_to_weight
         costs[:, 0] = relative_limit_cost(requested, lower, upper, thrust_limit)
 
@@ -62,7 +79,7 @@ def raw_action_limit_costs(actions, cfg, hover, *, legacy=False):
             upper = (upper + bias).clamp_max(cfg.torque_lim)
         else:
             # Direct PPO actions already have N*m units; SAC actions remain normalized.
-            requested = actions[:, 6:8] * cfg.effort_lim_sim if cfg.sac_action_mapping else actions[:, 6:8]
+            requested = direct_joint_torque_request(actions, cfg)
             limit = cfg.effort_lim_sim
             lower, upper = -limit, limit
         costs[:, 1] = relative_limit_cost(requested, lower, upper, upper)

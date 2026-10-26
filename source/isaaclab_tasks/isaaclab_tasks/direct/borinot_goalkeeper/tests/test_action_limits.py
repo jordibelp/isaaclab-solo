@@ -15,7 +15,7 @@ def test_raw_excursion_is_scored_before_the_existing_input_clamp():
     n = 2
     zeros = lambda *shape: torch.zeros(*shape)
     env = SimpleNamespace(
-        cfg=cfg, extras={}, _episode_steps=zeros(n), _next_launch_steps=torch.ones(n),
+        cfg=cfg, extras={}, _desired_actuation=None, _episode_steps=zeros(n), _next_launch_steps=torch.ones(n),
         _ball_active=torch.ones(n, dtype=torch.bool), _shot_steps=zeros(n), _outcome=zeros(n),
         _previous_actuator_commands=zeros(n, 8), _actuator_commands=zeros(n, 8),
         actions=zeros(n, 8), _action_limit_costs=zeros(n, 3), _hover_per_rotor=5.,

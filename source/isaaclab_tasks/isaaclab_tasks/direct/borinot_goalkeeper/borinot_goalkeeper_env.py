@@ -16,6 +16,7 @@ from isaaclab_tasks.controllers.borinot_indi import IndiController
 from isaaclab_tasks.direct.borinot.action_limits import raw_action_limit_costs, relative_limit_cost
 
 from .borinot_goalkeeper_env_cfg import BorinotGoalkeeperEnvCfg
+from .desired_actuation import DesiredActuationMetrics
 from .events import configure_randomization
 from .paddle import attach_paddle
 from .task_math import (
@@ -36,7 +37,8 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
 
     def get_code_snapshot_files(self):
         """Retain the shared implementation when archiving a training run."""
-        return [inspect.getsourcefile(obj) for obj in (BorinotGoalkeeperEnv, IndiController, raw_action_limit_costs)]
+        return [inspect.getsourcefile(obj) for obj in (
+            BorinotGoalkeeperEnv, IndiController, raw_action_limit_costs, DesiredActuationMetrics)]
 
     def __init__(self, cfg: BorinotGoalkeeperEnvCfg, render_mode=None, **kwargs):
         cfg.configure_control()
@@ -110,6 +112,9 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         self._motor_alpha = (
             1.0 if cfg.motor_time_constant_s == 0 else 1 - math.exp(-self.physics_dt / cfg.motor_time_constant_s)
         )
+        self._desired_actuation = (
+            DesiredActuationMetrics(cfg, self._hover_per_rotor, self.num_envs, self.device)
+            if cfg.control_mode == "thrust_and_torque_control" and not cfg.hold_arm else None)
         if cfg.control_mode == "indi":
             self._init_indi()
         # Columns: rotor mechanical, rotor dissipative, arm mechanical, arm copper loss.
@@ -240,6 +245,8 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
 
     def _pre_physics_step(self, actions):
         self._action_limit_costs.copy_(raw_action_limit_costs(actions, self.cfg, self._hover_per_rotor))
+        if self._desired_actuation is not None:
+            self._desired_actuation.update(actions)
         self.extras.pop("log", None)
         self._episode_steps += 1
         self._next_launch_steps.sub_(1).clamp_min_(0)
@@ -619,6 +626,8 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
                                   for name, value in self.extras["power_mean_w"].items()})
         self.extras["log"].update({f"Episode_Reward/{name}": value[completed].mean()
                                   for name, value in self._episode_terms.items()})
+        if self._desired_actuation is not None:
+            self.extras["log"].update(self._desired_actuation.packet(completed))
         current = self._episode_stage[completed] == self.shot_level
         stale = (~current).nonzero()
         if len(stale):
@@ -707,6 +716,8 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         if env_ids is None:
             env_ids = self.robot._ALL_INDICES
         self._update_curriculum(env_ids)
+        if self._desired_actuation is not None:
+            self._desired_actuation.reset(env_ids)
         super()._reset_idx(env_ids)
         n = len(env_ids)
         root = self.robot.data.default_root_state[env_ids].clone()

@@ -222,7 +222,7 @@ def test_action_clipping_flag(mode, remove, expected):
     cfg.control_mode = mode
     cfg.remove_thrust_clipping, cfg.action_clamp, cfg.goal_center = remove, 2.0, (-0.45, 0.0, 1.2)
     zeros = lambda *shape, dtype=torch.float32: torch.zeros(*shape, dtype=dtype)
-    env = SimpleNamespace(cfg=cfg, extras={}, _episode_steps=zeros(1), _next_launch_steps=torch.ones(1),
+    env = SimpleNamespace(cfg=cfg, extras={}, _desired_actuation=None, _episode_steps=zeros(1), _next_launch_steps=torch.ones(1),
         _action_limit_costs=zeros(1, 3), _hover_per_rotor=5.,
         _ball_active=torch.ones(1, dtype=torch.bool), _shot_steps=zeros(1), _outcome=zeros(1),
         actions=zeros(1, 8), _actuator_commands=zeros(1, 8), _previous_actuator_commands=zeros(1, 8), _previous_paddle=zeros(1, 3),

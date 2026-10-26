@@ -69,7 +69,7 @@ def test_actual_prephysics_preserves_ppo_actions_and_only_clips_sac(filename, sa
     ctrl.task.action_clamp = .01  # the non-INDI fallback must not touch PPO INDI
     zeros = lambda *shape: torch.zeros(*shape, dtype=torch.float64)
     env = SimpleNamespace(
-        cfg=ctrl.task, extras={}, _episode_steps=zeros(2), _next_launch_steps=torch.ones(2),
+        cfg=ctrl.task, extras={}, _desired_actuation=None, _episode_steps=zeros(2), _next_launch_steps=torch.ones(2),
         _ball_active=torch.ones(2, dtype=torch.bool), _shot_steps=zeros(2), _outcome=zeros(2),
         _previous_actuator_commands=zeros(2, 8), _actuator_commands=zeros(2, 8),
         actions=zeros(2, 9), _previous_paddle=zeros(2, 3), _paddle_pose=lambda: (zeros(2, 3),),

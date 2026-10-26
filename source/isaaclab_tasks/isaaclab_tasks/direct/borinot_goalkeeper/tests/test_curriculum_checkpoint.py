@@ -32,7 +32,7 @@ def make_env(n=8, promote=False):
         curriculum=promote, curriculum_min_steps=1, curriculum_min_shots=1, curriculum_success_threshold=0.0,
     )
     return SimpleNamespace(
-        cfg=cfg, device="cpu", extras={"power_mean_w": {}}, common_step_counter=10,
+        cfg=cfg, device="cpu", extras={"power_mean_w": {}}, _desired_actuation=None, common_step_counter=10,
         shot_level=0, _stage_start_step=0, _stage_shots=0, _window_cursor=0,step_dt=.01,
         _curriculum_window=torch.zeros(16), outcome_counts=torch.zeros(10, dtype=torch.long),
         _shot_steps=torch.ones(n, dtype=torch.long), _outcome=torch.full((n,), 7),

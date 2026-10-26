@@ -883,3 +883,47 @@ clear only the selected environments' cost buffers; ball-only resets keep the
 current robot transition. Tests: `borinot_goalkeeper/tests/test_action_limits.py`
 `borinot_goalkeeper/tests/test_controller_limits.py`, and
 `borinot_goalkeeper/tests/action_limits_smoke.py`.
+
+### Desired direct actuation in W&B
+
+For `control_mode=thrust_and_torque_control` with `hold_arm=False`, the existing
+training command also logs these scalar charts. No extra flag is needed.
+
+| W&B metric group | Values |
+| --- | --- |
+| `Desired_Thrust/rotor_1` through `rotor_6` | `mean_n`, `rms_n`, `min_n`, `max_n`, `outside_limits_fraction` |
+| `Desired_Torque/<joint name>` | `mean_nm`, `rms_nm`, `min_nm`, `max_nm`, `outside_limits_fraction` |
+| `Desired_Actuation` | Actual soft bounds, normalization, and unweighted relative-excess costs |
+
+Rotor labels follow `rotor_pos_b` / action columns 0–5 (Eagle/PX4 motor order).
+Joint labels are `flying_arm_2__j_bl_link1` and `flying_arm_2__j_link1_link2`,
+in `joint_names` order. Torque means **arm-joint torque**, not body yaw torque.
+
+These are **raw requests before action/thrust clipping, torque saturation and
+motor lag**, using the same mapping and bounds as the soft-limit rewards.
+Negative thrust requests remain visible even though actual thrust cannot be
+negative. PPO torque actions are already N·m; SAC torque actions are multiplied
+by `effort_lim_sim`. No force, torque, reward, or observation behavior changes.
+
+Every policy-step sample enters the statistics, including the terminal step.
+On a robot reset, each chart averages the per-episode statistic across the same
+completed environments as `Episode_Reward/*`. Therefore `min` and `max` are the
+**mean of episode minima/maxima**, not global extrema. RMS is the mean of each
+episode's RMS and does not hide alternating positive/negative torque. The runner
+then averages reset-batch packets within its logging interval, just as it does
+for the reward terms. Ongoing episodes enter only when they finish. Ball-only
+relaunches do not clear these buffers. These summaries are not individual robot
+time traces. Other control modes do not emit the new metric groups.
+
+For an exact reward comparison, multiply
+`Desired_Actuation/thrust_relative_excess_episode_sum` by
+`rwd_scale_thrust_limits`: this equals `Episode_Reward/thrust_limits`.
+The analogous torque keys use `torque_relative_excess_episode_sum` and
+`rwd_scale_torque_limits`. The `*_relative_excess_mean_per_step` charts divide
+each episode's unweighted cost by its policy-step count. Costs sum actuator
+channels and have no policy-dt multiplier. Request/cost logging stays active
+when either reward weight is zero. Upper thrust excess is ignored only when
+the corresponding reward has no upper bound; the chart reports that switch.
+
+The charts appear once episodes finish on a new launch using this source.
+Already-running processes do not load these edits automatically.
