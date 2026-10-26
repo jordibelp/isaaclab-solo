@@ -37,7 +37,7 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     ball_park_position = (0.0, 0.0, -2.0)  # inactive ball is removed below the local floor
     action_space = 8  # derived: 8 direct, 6 PI, 9 INDI
     observation_space = 44  # derived: actor inputs selected by the obs_actor_includes_* flags, plus the current actions
-    state_space = 56  # derived: 48 + actions + controller state (9 PI, 8 INDI)
+    state_space = 56  # derived: 48 + actions + controller state (9 PI, 8 INDI) + optional rotor speeds (6)
     sim = sim_utils.SimulationCfg(
         dt=1 / 200,
         render_interval=decimation,
@@ -157,6 +157,7 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     rate_kp = (0.35, 0.35, 0.15)
     rate_ki = (0.10, 0.10, 0.04)
     motor_time_constant_s = 0.04  # motor lag; 0 disables filtering (instantaneous thrust commands)
+    critic_obs_includes_rotor_omega = False  # append six current post-lag rotor speed magnitudes (rad/s), critic only
     # Eagle/PX4 motor order, body-frame metres, 0.185 m radius; spin is the body-yaw torque sign.
     # Hardware profile: hidro-iri/eagle_mpc_lib@96c65ab, yaml/borinot_flying_arm_2/platform/borinot.yaml.
     rotor_pos_b = ((0.0, -0.185, 0.0), (0.0, 0.185, 0.0),
@@ -284,7 +285,7 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
         self.sim.render_interval = self.decimation
         self.action_space = 9 if self.control_mode == "indi" else (6 if self.control_mode == modes[2] else 8)
         controller_state = 8 if self.control_mode == "indi" else (9 if self.control_mode == modes[2] else 0)
-        self.state_space = 48 + self.action_space + controller_state
+        self.state_space = 48 + self.action_space + controller_state + 6 * self.critic_obs_includes_rotor_omega
         point, time = self.obs_actor_includes_ball_plane_intersection_point, self.obs_actor_includes_time_ball_collides_plane
         # Optional actor inputs: plane point (3), time (1), validity (1), phase (7), ball parameters (2).
         self.observation_space = (34 + self.action_space + controller_state + 3 * point + time + (point or time)

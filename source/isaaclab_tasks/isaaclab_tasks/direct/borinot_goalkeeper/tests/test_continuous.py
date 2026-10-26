@@ -138,6 +138,65 @@ def test_waiting_observations_hide_parked_ball_and_expose_schedule(env):
     assert torch.isfinite(obs['policy']).all() and torch.isfinite(obs['critic']).all()
 
 
+@pytest.mark.parametrize('mode', (*control.MODES, 'indi'))
+def test_rotor_omega_is_default_off_and_updates_only_critic_size(mode):
+    from test_indi import indi
+
+    cfg = control.config()
+    assert cfg.critic_obs_includes_rotor_omega is False
+    cfg.control_mode, cfg.indi = mode, indi.IndiControllerCfg()
+    configure = control.method('borinot_goalkeeper_env_cfg.py', 'configure_control')
+    configure(cfg)
+    original = cfg.action_space, cfg.observation_space, cfg.state_space
+    for enabled in (True, True, False, True, False):
+        cfg.critic_obs_includes_rotor_omega = enabled
+        configure(cfg)
+        assert (cfg.action_space, cfg.observation_space, cfg.state_space) == (
+            original[0], original[1], original[2] + 6 * enabled)
+
+
+@pytest.mark.parametrize('mode', (*control.MODES, 'indi'))
+def test_optional_rotor_omega_appends_current_speeds_without_changing_actor(env, mode):
+    env.cfg.control_mode = mode
+    env.actions = torch.full((env.num_envs, 9 if mode == 'indi' else 6 if mode == control.MODES[2] else 8), .25)
+    env._indi = SimpleNamespace(observation=lambda: torch.zeros(env.num_envs, 8))
+    # Deliberately unrelated commands and realized rotor speeds; preserve motor order.
+    omega = torch.tensor([0., 50., 400., 800., 1200., 1600.]).expand(env.num_envs, -1)
+    env._rotor_thrust = env.cfg.kf * omega.square()
+    before = env._get_observations()
+    env.cfg.critic_obs_includes_rotor_omega = True
+    after = env._get_observations()
+    assert torch.equal(after['policy'], before['policy'])
+    assert torch.equal(after['critic'][:, :-6], before['critic'])
+    torch.testing.assert_close(after['critic'][:, -6:], omega)
+    assert torch.equal(env._get_observations()['critic'], after['critic'])
+    assert torch.equal(env._rotor_thrust, env.cfg.kf * omega.square())
+    env.cfg.critic_obs_includes_rotor_omega = False
+    assert torch.equal(env._get_observations()['critic'], before['critic'])
+
+
+@pytest.mark.parametrize('tau', [0., .04])
+@pytest.mark.parametrize('sac', [False, True])
+def test_observed_rotor_speed_follows_actual_motor_response(env, tau, sac):
+    import math as python_math
+
+    motor, _ = control.action_env(control.MODES[0], motor_time_constant_s=tau)
+    motor.cfg.sac_action_mapping = sac
+    motor.actions[:, :6] = .5
+    requested = motor._hover_per_rotor * (1 + motor.cfg.rotor_action_scale * .5)
+    if sac:
+        requested = motor._hover_per_rotor + .5 * motor._hover_per_rotor * (motor.cfg.thrust_to_weight - 1)
+    env.cfg.critic_obs_includes_rotor_omega = True
+    for substep in range(1, 5):
+        control.method('borinot_goalkeeper_env.py', '_apply_action')(motor)
+        env._rotor_thrust = motor._rotor_thrust.repeat(3, 1)
+        expected_thrust = requested if tau == 0 else (
+            requested + (motor._hover_per_rotor - requested) * python_math.exp(-substep * motor.physics_dt / tau))
+        expected_speed = python_math.sqrt(expected_thrust / motor.cfg.kf)
+        torch.testing.assert_close(env._get_observations()['critic'][:, -6:],
+                                   torch.full((env.num_envs, 6), expected_speed, dtype=torch.float64))
+
+
 @pytest.mark.parametrize('mode',control.MODES)
 @pytest.mark.parametrize('point,time,phase,params',[
     (p,t,h,b) for p in (False,True) for t in (False,True) for h in (False,True) for b in (False,True)])

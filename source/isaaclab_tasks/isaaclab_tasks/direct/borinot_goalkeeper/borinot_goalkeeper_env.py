@@ -591,8 +591,12 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         policy = common + ball_parts[:2] + [value for used, value in optional if used] + tail
         if self.cfg.obs_actor_includes_ball_params:
             policy.append(self._ball_parameters)
+        critic = common + ball_parts + [phase] + tail + [self._ball_parameters]
+        if self.cfg.critic_obs_includes_rotor_omega:
+            # Applied thrust retains motor lag, unlike the latest policy command.
+            critic.append(torch.sqrt(self._rotor_thrust.clamp_min(0.0) / self.cfg.kf))
         return {"policy": torch.cat(policy, dim=-1),
-                "critic": torch.cat(common + ball_parts + [phase] + tail + [self._ball_parameters], dim=-1)}
+                "critic": torch.cat(critic, dim=-1)}
 
     def _update_curriculum(self, env_ids):
         """Log full episodes and gate stage-pure episode-return checkpoints."""
