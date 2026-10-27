@@ -93,6 +93,9 @@ For direct control, use its own checkpoint and
 ```
 
 The evaluator is headless by default. It does not train or upload to W&B.
+The space-separated `--actuator_delays` list can appear before or after Hydra
+overrides. You do not need to put it last; following `env.*=...` and `agent.*=...`
+arguments remain separate overrides in their original order.
 For SAC, add `--agent rsl_rl_sac_cfg_entry_point`. For the simple task, add its
 `--task` as above. Omit `--actuator_delays` to use the environment's fixed or
 random-range delay setting instead. Mixing the sweep flag with environment

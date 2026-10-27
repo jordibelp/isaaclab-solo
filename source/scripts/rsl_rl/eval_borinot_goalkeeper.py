@@ -25,6 +25,29 @@ from pathlib import Path
 
 from isaaclab.app import AppLauncher
 
+
+def parse_eval_args(parser, argv):
+    """Expand the delay-list shorthand so argparse cannot consume trailing Hydra overrides."""
+    cli = []
+    index = 0
+    while index < len(argv):
+        token = argv[index]
+        cli.append(token)
+        if token.split("=", 1)[0] == "--actuator_delays":
+            if "=" not in token:
+                index += 1
+                if index < len(argv):
+                    cli.append(argv[index])
+            while index + 1 < len(argv):
+                value = argv[index + 1]
+                if value.startswith("--") or "=" in value:
+                    break
+                cli.extend(("--actuator_delays", value))
+                index += 1
+        index += 1
+    return parser.parse_known_args(cli)
+
+
 TASKS = ("Borinot-Goalkeeper-Direct-v0", "Borinot-Goalkeeper-Simple-Direct-v0")
 OUTCOMES = ("ongoing", "base_hit", "arm_hit", "goal", "ball_floor", "leave_goal_area", "deadline", "save",
             "robot_crash", "miss")  # the simplified task uses only "goal" and "save" (no goal)
@@ -41,13 +64,14 @@ parser.add_argument("--checkpoint", required=True, help="RSL-RL checkpoint; opti
 parser.add_argument("--num_episodes", type=int, default=512, help="Complete robot episodes per evaluated delay.")
 parser.add_argument("--num_envs", type=int, default=256, help="Parallel environments, at most num_episodes.")
 parser.add_argument("--seed", type=int, default=0)
-parser.add_argument("--actuator_delays", type=float, nargs="+", default=None, metavar="SECONDS",
-                    help="Fixed policy-command delays to sweep. Omitted: env.actuator_delay or env.actuator_delay_range.")
+parser.add_argument("--actuator_delays", type=float, action="append", default=None, metavar="SECONDS",
+                    help="One or more space-separated delays to sweep; may precede Hydra overrides. "
+                         "Omitted: env.actuator_delay or env.actuator_delay_range.")
 parser.add_argument("--label", default=None, help="Policy name in summary.csv. Default: the checkpoint file stem.")
 parser.add_argument("--out_dir", type=Path, default=None, help="Default: <checkpoint folder>/eval.")
 AppLauncher.add_app_launcher_args(parser)
 parser.set_defaults(headless=True)
-args_cli, hydra_args = parser.parse_known_args()
+args_cli, hydra_args = parse_eval_args(parser, sys.argv[1:])
 if args_cli.num_episodes < 1 or args_cli.num_envs < 1:
     parser.error("num_episodes and num_envs must be positive.")
 command_line = list(sys.argv)
