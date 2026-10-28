@@ -4,6 +4,12 @@ Date: 2026-10-14. Task ID: `Borinot-Goalkeeper-Direct-v0`.
 
 ## Start here
 
+**Shared physical-model defaults:** six 5 g motor point masses and the reference
+inference leg mass/CoM/inertia are now enabled for all Borinot tasks. These are
+spawned-layer overrides; the source USD is unchanged. For switches, payload
+precedence, nominal mass and older-checkpoint opt-outs, see
+[shared inertial properties](../borinot/INERTIAL_PROPERTIES.md).
+
 **New controller:** `env.control_mode=indi` selects a nine-action acceleration/rate/heading/joint-target policy with physics-rate INDI and joint PID. It works with PPO and both SAC critics. See the shared [step-by-step INDI guide](INDI_CONTROL.md) for equations, design choices, training/playback commands and limits.
 
 This is a separate task. It does not change the existing Borinot locomotion task or the source USD.

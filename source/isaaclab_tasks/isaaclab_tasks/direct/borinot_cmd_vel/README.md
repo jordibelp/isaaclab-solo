@@ -168,32 +168,40 @@ PPO checkpoints need their original source revision because their torque units
 differ. SAC checkpoints are unchanged. Torque and position checkpoints are not
 interchangeable even though both have eight actions.
 
-The plant keeps the two-joint leg. There is no ball or goal. The racket is now
-**off by default**. The source robot USD and both goalkeeper tasks are unchanged.
+The plant keeps the two-joint leg. There is no ball or goal. The racket is
+**off by default**. All four Borinot tasks now default to shared motor point-mass
+and inference leg-inertia overrides. See [shared inertial properties](../borinot/INERTIAL_PROPERTIES.md).
+The source robot USD is unchanged. Nominal no-racket mass is now **2.940538 kg**.
 
 ### Optional racket and calf-tip payload
+
+**Precedence:** inference leg inertias are enabled by default. They use the
+reference 115 g calf, with its load already included, and replace the old
+shaft/point-payload description below. The tip-payload setting is ignored in
+that mode, so it cannot double-count a 100 g load. To use the legacy point model,
+set `env.inertial_properties.use_inference_leg_inertias=False`.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `env.arm_holds_racket` | `False` | Attach the goalkeeper racket, with its existing mass, shape and mount settings |
-| `env.ee_includes_puntual_mass` | `0.0` | Additional ideal point mass at the distal calf tip, in **kg** |
+| `env.ee_includes_puntual_mass` | `0.0` | Legacy ideal calf-tip mass in **kg**; ignored while inference leg inertias are enabled |
 
 For a 100 g tail payload, add these overrides to either training or playback:
 
 ```bash
-env.arm_holds_racket=False env.ee_includes_puntual_mass=0.1
+env.inertial_properties.use_inference_leg_inertias=False env.arm_holds_racket=False env.ee_includes_puntual_mass=0.1
 ```
 
 Use `env.ee_includes_puntual_mass=0.15` for 150 g. The two options are independent:
 you can include both a racket and a tip payload. Negative or non-finite payload
 masses are rejected.
 
-The bare shaft uses the existing 15 g, 160 mm rod approximation. The source USD
+In legacy leg mode, the bare shaft uses the existing 15 g, 160 mm rod approximation. The source USD
 has a 115 g distal-link mass. We replace that mass, rather than leaving its
-assumed 100 g ballast in place and adding another payload. With both new options
-at their defaults, the calf is therefore 15 g and the nominal total robot mass
-is about 2.810538 kg. A 100 g point payload makes the calf 115 g and the total
-robot about 2.910538 kg. These shaft/ballast assumptions are inherited prototype
+assumed 100 g ballast in place and adding another payload. With no racket or
+selected tip payload, the legacy calf is 15 g and the nominal total robot mass
+is about 2.810538 kg **with motor masses also disabled**. A 100 g point payload makes the calf 115 g and the total
+robot about 2.910538 kg under those legacy switches; enabling motor masses adds 30 g. These shaft/ballast assumptions are inherited prototype
 values, not a new measurement of the real robot.
 
 The point is at `(0.0, -0.136, -0.00495)` m in `flying_arm_2__link2` coordinates,
@@ -217,7 +225,7 @@ different payload changes the dynamics. The original `aunmwlq7` checkpoint was
 trained with the racket. To reproduce that setup, explicitly add:
 
 ```bash
-env.arm_holds_racket=True env.ee_includes_puntual_mass=0.0
+env.inertial_properties.include_motor_masses=False env.inertial_properties.use_inference_leg_inertias=False env.arm_holds_racket=True env.ee_includes_puntual_mass=0.0
 ```
 
 ## Randomization and vertical disturbances
@@ -403,7 +411,7 @@ the original training-style command sampler (no manual command panel).
 For the trained `aunmwlq7` PPO checkpoint:
 
 ```bash
-./isaaclab.sh -p source/scripts/rsl_rl/play_borinot_cmd_vel.py --task Borinot-cmd-vel --agent rsl_rl_cfg_entry_point --checkpoint /home/jordibelp/IsaacLab-dirty/logs/skrl/checkpoints/1023_aunmwlq7_best_model_curriculum_idx_2.pt --num_envs 1 --duration_s 2000 --cmd_init 0.1 0.0 0.0 0.0 --episode_length_s 80 env.control_mode=thrust_and_torque_control env.physics_hz=200 env.policy_hz=100 env.arm_holds_racket=True env.ee_includes_puntual_mass=0.0
+./isaaclab.sh -p source/scripts/rsl_rl/play_borinot_cmd_vel.py --task Borinot-cmd-vel --agent rsl_rl_cfg_entry_point --checkpoint /home/jordibelp/IsaacLab-dirty/logs/skrl/checkpoints/1023_aunmwlq7_best_model_curriculum_idx_2.pt --num_envs 1 --duration_s 2000 --cmd_init 0.1 0.0 0.0 0.0 --episode_length_s 80 env.control_mode=thrust_and_torque_control env.physics_hz=200 env.policy_hz=100 env.arm_holds_racket=True env.ee_includes_puntual_mass=0.0 env.inertial_properties.include_motor_masses=False env.inertial_properties.use_inference_leg_inertias=False
 ```
 
 The saved stage is 2. This run's recorded force levels are `[0.0,1.0,3.0]` N,
@@ -438,10 +446,10 @@ the simulator starts. The general live fixture is `tests/runtime_smoke.py`; laun
 through `isaaclab.sh` with `--headless --output /absolute/path/result.json` and
 the desired Hydra overrides. Run one simulator process at a time.
 
-`tests/payload_smoke.py` checks the actual cloned PhysX masses, centers of mass,
+`tests/payload_smoke.py` checks the legacy model's actual cloned PhysX masses, centers of mass,
 full inertias, selected body/contact sets, hover calibration, finite rollouts,
 and mass-property persistence across resets. Launch with `--headless --output
-/absolute/path/result.json` and the desired payload/racket Hydra overrides.
+/absolute/path/result.json`, both shared inertial switches set to `False`, and the desired payload/racket Hydra overrides.
 
 `tests/penalty_smoke.py` checks real self-only, floor-only and mixed contacts,
 reset switches, exact reward values, automatic-reset reward delivery and clean

@@ -17,7 +17,9 @@ class BorinotCmdVelEnvCfg(BorinotGoalkeeperEnvCfg):
     reset_z_noise_m = 0.0
     reset_rpy_noise_degs = (5.0, 5.0, 5.0)  # independent uniform +/- roll/pitch/yaw about robot_home_quat
     arm_holds_racket = False  # opt-in goalkeeper racket; independent of the calf-tip payload
-    ee_includes_puntual_mass = 0.0  # kg, additional ideal point mass at the distal calf tip
+    # Legacy shaft/point model only; inference leg properties already include a load.
+    # Ignored when inertial_properties.use_inference_leg_inertias=True (the default).
+    ee_includes_puntual_mass = 0.0  # kg, additional ideal point mass at the distal calf tip in legacy mode
 
     # [heading vx, heading vy, world vz, world-Z angular velocity], SI units.
     command_lin_vel_x_range = (-1.0, 1.0)

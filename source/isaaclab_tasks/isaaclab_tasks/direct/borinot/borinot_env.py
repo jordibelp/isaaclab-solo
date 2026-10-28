@@ -17,6 +17,8 @@ from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 
 from .borinot_env_cfg import BorinotEnvCfg
 from .action_limits import raw_action_limit_costs
+from .inertial_properties import apply_inertial_properties, validate_inertial_properties
+from .inertial_properties_cfg import BorinotInertialPropertiesCfg
 from isaaclab_tasks.direct.borinot_goalkeeper.actuator_delay import ActuatorDelay, actuator_delay_bounds
 
 
@@ -105,6 +107,7 @@ class BorinotEnv(DirectRLEnv):
     cfg: BorinotEnvCfg
     
     def __init__(self, cfg: BorinotEnvCfg, render_mode: str | None = None, **kwargs):
+        validate_inertial_properties(cfg.inertial_properties)
         actuator_delay_bounds(cfg)
         super().__init__(cfg, render_mode, **kwargs)
 
@@ -116,6 +119,12 @@ class BorinotEnv(DirectRLEnv):
         self._dt_control = self._dt_physics * self.cfg.decimation
 
         self._rotor_pos_b = torch.tensor(self.cfg.rotor_pos_b, dtype=torch.float32, device=self.device)  # (6,3)
+        if cfg.inertial_properties.include_motor_masses:
+            # Wrench torques are about the physical CoM, not the link origin.
+            base_com = self.robot.root_physx_view.get_coms()[0, self._base_body_id[0], :3].to(self.device)
+            self._rotor_pos_b -= base_com
+        if cfg.inertial_properties.include_motor_masses or cfg.inertial_properties.use_inference_leg_inertias:
+            cfg.hover_thrust_per_rotor = float(self.robot.data.default_mass[0].sum()) * 9.81 / 6
         self._rotor_spin = torch.tensor(self.cfg.rotor_spin, dtype=torch.float32, device=self.device)  # (6,)
         self._z_axis = torch.tensor([0.0, 0.0, 1.0], dtype=torch.float32, device=self.device)
 
@@ -166,6 +175,7 @@ class BorinotEnv(DirectRLEnv):
     def _setup_scene(self):
         # Robot
         self.robot = Articulation(self.cfg.robot_cfg)
+        apply_inertial_properties(sim_utils.get_current_stage(), "/World/envs/env_0/Robot", self.cfg.inertial_properties)
 
         # Ground plane - raises error
         # spawn_ground_plane(prim_path="/World/ground", cfg=GroundPlaneCfg())
@@ -741,4 +751,5 @@ class BorinotEnv(DirectRLEnv):
         self._reset_commands(env_ids_t)
 
     def get_code_snapshot_files(self):
-        return [inspect.getsourcefile(obj) for obj in (raw_action_limit_costs, ActuatorDelay)]
+        return [inspect.getsourcefile(obj) for obj in (
+            raw_action_limit_costs, ActuatorDelay, apply_inertial_properties, BorinotInertialPropertiesCfg)]

@@ -15,9 +15,11 @@ from isaaclab.sensors import ContactSensorCfg
 from isaaclab.utils import configclass
 from pathlib import Path
 import numpy as np 
+from .inertial_properties_cfg import BorinotInertialPropertiesCfg
 
 @configclass
 class BorinotEnvCfg(DirectRLEnvCfg):
+    inertial_properties: BorinotInertialPropertiesCfg = BorinotInertialPropertiesCfg()
 
     # control every N physics steps
     decimation = 2 # -> dt_control: 60Hz

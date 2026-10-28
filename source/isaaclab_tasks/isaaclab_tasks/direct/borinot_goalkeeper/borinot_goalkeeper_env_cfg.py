@@ -11,11 +11,13 @@ from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.utils import configclass
 
 from .events import BorinotEventCfg
+from isaaclab_tasks.direct.borinot.inertial_properties_cfg import BorinotInertialPropertiesCfg
 from isaaclab_tasks.controllers.borinot_indi import IndiControllerCfg
 
 
 @configclass
 class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
+    inertial_properties: BorinotInertialPropertiesCfg = BorinotInertialPropertiesCfg()
     control_mode = "thrust_and_torque_control"
     # INDI PPO actions: world acceleration [m/s^2], body rates [rad/s], heading offset [rad],
     # joint angles [rad]. No action clipping/scaling; heading adds robot_home_quat yaw.

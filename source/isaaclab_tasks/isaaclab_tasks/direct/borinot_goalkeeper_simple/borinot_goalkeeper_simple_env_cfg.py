@@ -17,11 +17,13 @@ from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.utils import configclass
 
 from isaaclab_tasks.direct.borinot_goalkeeper.events import BorinotEventCfg
+from isaaclab_tasks.direct.borinot.inertial_properties_cfg import BorinotInertialPropertiesCfg
 from isaaclab_tasks.controllers.borinot_indi import IndiControllerCfg
 
 
 @configclass
 class BorinotGoalkeeperSimpleEnvCfg(DirectRLEnvCfg):
+    inertial_properties: BorinotInertialPropertiesCfg = BorinotInertialPropertiesCfg()
     control_mode = "thrust_and_torque_control"
     # INDI PPO uses unclipped physical-unit references; SAC uses normalized [-1, 1].
     indi = IndiControllerCfg()  # used only by control_mode="indi"; shared INDI_CONTROL.md

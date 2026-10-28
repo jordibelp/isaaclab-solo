@@ -16,6 +16,7 @@ from isaaclab.utils.math import matrix_from_quat, quat_apply, quat_apply_inverse
 from isaaclab_tasks.direct.borinot_goalkeeper.actuator_delay import ActuatorDelay, actuator_delay_bounds
 from isaaclab_tasks.direct.borinot_goalkeeper.borinot_goalkeeper_env import BorinotGoalkeeperEnv
 from isaaclab_tasks.direct.borinot.action_limits import raw_action_limit_costs
+from isaaclab_tasks.direct.borinot.inertial_properties import apply_inertial_properties, validate_inertial_properties
 from isaaclab_tasks.direct.borinot_goalkeeper.events import configure_randomization
 from isaaclab_tasks.direct.borinot_goalkeeper.paddle import attach_paddle
 from isaaclab_tasks.direct.borinot_goalkeeper.task_math import (
@@ -51,6 +52,7 @@ class BorinotGoalkeeperSimpleEnv(DirectRLEnv):
     get_code_snapshot_files = BorinotGoalkeeperEnv.get_code_snapshot_files
 
     def __init__(self, cfg: BorinotGoalkeeperSimpleEnvCfg, render_mode=None, **kwargs):
+        validate_inertial_properties(cfg.inertial_properties)
         cfg.configure_control()
         configure_randomization(cfg)
         validate_reset_grid(cfg)
@@ -171,6 +173,7 @@ class BorinotGoalkeeperSimpleEnv(DirectRLEnv):
         self.robot = Articulation(self.cfg.robot)
         stage = sim_utils.get_current_stage()
         attach_paddle(stage, "/World/envs/env_0/Robot", self.cfg)
+        apply_inertial_properties(stage, "/World/envs/env_0/Robot", self.cfg.inertial_properties)
         self.ball = RigidObject(self.cfg.ball)
         ball_api = PhysxSchema.PhysxRigidBodyAPI.Apply(stage.GetPrimAtPath("/World/envs/env_0/Ball"))
         ball_api.CreateEnableSpeculativeCCDAttr().Set(True)

@@ -14,6 +14,8 @@ from isaaclab.utils.math import matrix_from_quat, quat_apply_inverse, quat_from_
 from isaaclab_tasks.direct.borinot_goalkeeper.actuator_delay import ActuatorDelay, actuator_delay_bounds
 from isaaclab_tasks.direct.borinot_goalkeeper.borinot_goalkeeper_env import BorinotGoalkeeperEnv
 from isaaclab_tasks.direct.borinot.action_limits import raw_action_limit_costs
+from isaaclab_tasks.direct.borinot.inertial_properties import apply_inertial_properties, validate_inertial_properties
+from isaaclab_tasks.direct.borinot.inertial_properties_cfg import BorinotInertialPropertiesCfg
 from isaaclab_tasks.direct.borinot_goalkeeper.events import configure_randomization
 from isaaclab_tasks.controllers.borinot_indi import IndiController
 from isaaclab_tasks.direct.borinot_goalkeeper.paddle import attach_paddle
@@ -30,6 +32,7 @@ class BorinotCmdVelEnv(DirectRLEnv):
     _init_indi = BorinotGoalkeeperEnv._init_indi
 
     def __init__(self, cfg: BorinotCmdVelEnvCfg, render_mode=None, **kwargs):
+        validate_inertial_properties(cfg.inertial_properties)
         cfg.configure_control()  # after Hydra, before spaces/physics
         configure_randomization(cfg)
         # The shared racket randomizer must not resolve a body that is absent.
@@ -112,6 +115,7 @@ class BorinotCmdVelEnv(DirectRLEnv):
     def _setup_scene(self):
         self.robot = Articulation(self.cfg.robot)
         configure_end_effector(sim_utils.get_current_stage(), "/World/envs/env_0/Robot", self.cfg)
+        apply_inertial_properties(sim_utils.get_current_stage(), "/World/envs/env_0/Robot", self.cfg.inertial_properties)
         ground = sim_utils.GroundPlaneCfg(physics_material=sim_utils.RigidBodyMaterialCfg(restitution=0.0))
         ground.func("/World/Ground", ground)
         self.scene.clone_environments(copy_from_source=False)
@@ -329,7 +333,8 @@ class BorinotCmdVelEnv(DirectRLEnv):
         """Archive shared plant/control helpers alongside this task's source."""
         return [inspect.getsourcefile(obj) for obj in (
             BorinotGoalkeeperEnv, configure_randomization, attach_paddle, configure_end_effector,
-            IndiController, tracking_kernels, raw_action_limit_costs, ActuatorDelay)]
+            IndiController, tracking_kernels, raw_action_limit_costs, ActuatorDelay,
+            apply_inertial_properties, BorinotInertialPropertiesCfg)]
 
     def _reset_idx(self, env_ids):
         if env_ids is None:
