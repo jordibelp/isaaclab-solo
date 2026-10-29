@@ -14,6 +14,8 @@ class BorinotGoalkeeperSAC(SAC):
         task = getattr(env, "unwrapped", env)
         if not task.cfg.sac_action_mapping:
             raise ValueError("Borinot SAC requires sac_action_mapping=True; use source/scripts/rsl_rl/train.py.")
+        if task.cfg.control_mode in ("cbrt", "cbrt_indi"):
+            return torch.ones(6, device=device), torch.ones(6, device=device)
         if task.cfg.control_mode in ("indi", "wrench"):
             return torch.ones(9, device=device), torch.ones(9, device=device)
         if task.cfg.control_mode == "thrust_and_torque_control":
@@ -56,10 +58,10 @@ class BorinotGoalkeeperSACRunnerCfg(Solo12SACRunnerCfg):
 
     def configure_environment(self, env_cfg):
         """Select the action contract before constructing the simulator and spaces."""
-        if env_cfg.control_mode not in ("thrust_and_torque_control", "thrust_and_PD_joint_pos_control", "indi", "wrench"):
+        if env_cfg.control_mode not in ("thrust_and_torque_control", "thrust_and_PD_joint_pos_control", "indi", "wrench", "cbrt", "cbrt_indi", "cbtr", "cbtr_indi"):
             raise ValueError(
                 "Borinot SAC requires env.control_mode=thrust_and_torque_control "
-                "or thrust_and_PD_joint_pos_control or indi/wrench."
+                "or thrust_and_PD_joint_pos_control or indi/wrench/cbrt/cbrt_indi."
             )
         env_cfg.sac_action_mapping = True
         env_cfg.configure_control()

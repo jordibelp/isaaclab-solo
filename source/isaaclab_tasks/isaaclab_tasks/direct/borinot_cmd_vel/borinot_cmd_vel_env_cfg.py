@@ -82,7 +82,7 @@ class BorinotCmdVelEnvCfg(BorinotGoalkeeperEnvCfg):
                 raise ValueError(f"{name} must be finite.")
         # State available to both networks: v_b, omega_b, q, dq, last action,
         # unit gravity_b, row-major R_world_body, command, optional acceleration.
-        controller_state = 6 if self.control_mode == "wrench" else (
+        controller_state = 6 if self.control_mode in ("wrench", "cbrt", "cbrt_indi") else (
             8 if self.control_mode == "indi" else (
                 9 if self.control_mode == "PI_rotors_PD_joint_pos_control" else 0))
         self.observation_space = 26 + self.action_space + controller_state + 3 * self.obs_include_base_lin_acc
