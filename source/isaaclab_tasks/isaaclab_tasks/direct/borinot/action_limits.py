@@ -89,7 +89,7 @@ def raw_action_limit_costs(actions, cfg, hover, *, legacy=False):
         if legacy and cfg.des_joint_out:
             reference = actions[:, 6:10]  # two atan2 vectors, clipped componentwise
         elif not legacy:
-            if cfg.control_mode == "indi":
+            if cfg.control_mode in ("indi", "wrench"):
                 if cfg.sac_action_mapping:
                     reference = actions[:, :-2] if cfg.hold_arm else actions  # normalized SAC references only
             elif not cfg.sac_action_mapping and not cfg.remove_thrust_clipping:

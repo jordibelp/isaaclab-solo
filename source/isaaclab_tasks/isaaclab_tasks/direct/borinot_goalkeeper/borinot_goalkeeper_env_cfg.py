@@ -13,6 +13,7 @@ from isaaclab.utils import configclass
 from .events import BorinotEventCfg
 from isaaclab_tasks.direct.borinot.inertial_properties_cfg import BorinotInertialPropertiesCfg
 from isaaclab_tasks.controllers.borinot_indi import IndiControllerCfg
+from isaaclab_tasks.controllers.borinot_wrench import WrenchControllerCfg
 
 
 @configclass
@@ -22,6 +23,7 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     # INDI PPO actions: world acceleration [m/s^2], body rates [rad/s], heading offset [rad],
     # joint angles [rad]. No action clipping/scaling; heading adds robot_home_quat yaw.
     # INDI SAC keeps normalized [-1, 1] references with scales in indi/body_rate_scale.
+    wrench = WrenchControllerCfg()  # control_mode="wrench"; see ../borinot/WRENCH_CONTROL.md
     indi = IndiControllerCfg()  # used only by control_mode="indi"; see INDI_CONTROL.md
     # geom = method 3; alternatives: method_1, method_2. Definitions:
     # /home/jordibelp/Desktop/emmaDocs/2026-10-23-tau-log-exp-comparison.ipynb
@@ -37,7 +39,7 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     shot_resampling_mode = "launch"  # "launch": launch-to-launch; "resolution": delay after each result
     reset_on_goal = False  # True resets the robot too; goal scoring/penalty stay unchanged
     ball_park_position = (0.0, 0.0, -2.0)  # inactive ball is removed below the local floor
-    action_space = 8  # derived: 8 direct, 6 PI, 9 INDI
+    action_space = 8  # derived: 8 direct, 6 PI, 9 INDI/wrench
     observation_space = 44  # derived: actor inputs selected by the obs_actor_includes_* flags, plus the current actions
     state_space = 56  # derived: 48 + actions + controller state (9 PI, 8 INDI) + optional rotor speeds (6)
     sim = sim_utils.SimulationCfg(
@@ -254,7 +256,7 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     def configure_control(self):
         """Refresh derived settings before simulator/space creation, including after Hydra."""
         self.robot.spawn.articulation_props.enabled_self_collisions = self.enabled_self_collisions
-        modes = ("thrust_and_torque_control", "thrust_and_PD_joint_pos_control", "PI_rotors_PD_joint_pos_control", "indi")
+        modes = ("thrust_and_torque_control", "thrust_and_PD_joint_pos_control", "PI_rotors_PD_joint_pos_control", "indi", "wrench")
         if self.control_mode not in modes:
             raise ValueError(f"Unknown control_mode {self.control_mode!r}; choose one of {modes}.")
         if self.physics_hz <= 0 or self.policy_hz <= 0:
@@ -270,9 +272,11 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
             raise ValueError("rotor_thrust_limit_n must be finite and positive.")
         if self.control_mode == "indi":
             self.indi.validate(self)
+        elif self.control_mode == "wrench":
+            self.wrench.validate(self)
         if self.sac_action_mapping:
-            if self.control_mode not in (*modes[:2], "indi"):
-                raise ValueError("sac_action_mapping requires direct thrust control (torque/PD position) or indi.")
+            if self.control_mode not in (*modes[:2], "indi", "wrench"):
+                raise ValueError("sac_action_mapping requires direct thrust control (torque/PD position) or indi/wrench.")
             if not math.isfinite(self.thrust_to_weight) or self.thrust_to_weight <= 1:
                 raise ValueError("SAC thrust_to_weight must be finite and greater than 1 (hover).")
             if len(self.joint_target_scale) != 2 or any(not math.isfinite(s) or s <= 0 for s in self.joint_target_scale):
@@ -289,15 +293,16 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
         self.decimation = round(ratio)
         self.sim.dt = 1 / self.physics_hz
         self.sim.render_interval = self.decimation
-        self.action_space = 9 if self.control_mode == "indi" else (6 if self.control_mode == modes[2] else 8)
-        controller_state = 8 if self.control_mode == "indi" else (9 if self.control_mode == modes[2] else 0)
+        self.action_space = 9 if self.control_mode in ("indi", "wrench") else (6 if self.control_mode == modes[2] else 8)
+        controller_state = 6 if self.control_mode == "wrench" else (
+            8 if self.control_mode == "indi" else (9 if self.control_mode == modes[2] else 0))
         self.state_space = 48 + self.action_space + controller_state + 6 * self.critic_obs_includes_rotor_omega
         point, time = self.obs_actor_includes_ball_plane_intersection_point, self.obs_actor_includes_time_ball_collides_plane
         # Optional actor inputs: plane point (3), time (1), validity (1), phase (7), ball parameters (2).
         self.observation_space = (34 + self.action_space + controller_state + 3 * point + time + (point or time)
                                  + 7 * self.obs_actor_includes_phase + 2 * self.obs_actor_includes_ball_params)
         actuator = self.robot.actuators["arm"]
-        use_pd = self.control_mode != "indi" and (self.control_mode != modes[0] or self.hold_arm)
+        use_pd = self.control_mode not in ("indi", "wrench") and (self.control_mode != modes[0] or self.hold_arm)
         actuator.stiffness = self.kp if use_pd else 0.0
         actuator.damping = self.kd if use_pd else 0.0
         actuator.effort_limit_sim = self.effort_lim_sim

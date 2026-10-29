@@ -49,6 +49,8 @@ class BorinotGoalkeeperSimpleEnv(DirectRLEnv):
     _apply_action = BorinotGoalkeeperEnv._apply_action
     _sample_power = BorinotGoalkeeperEnv._sample_power
     _init_indi = BorinotGoalkeeperEnv._init_indi
+    _init_wrench = BorinotGoalkeeperEnv._init_wrench
+    _step_wrench = BorinotGoalkeeperEnv._step_wrench
     get_code_snapshot_files = BorinotGoalkeeperEnv.get_code_snapshot_files
 
     def __init__(self, cfg: BorinotGoalkeeperSimpleEnvCfg, render_mode=None, **kwargs):
@@ -125,6 +127,8 @@ class BorinotGoalkeeperSimpleEnv(DirectRLEnv):
         )
         if cfg.control_mode == "indi":
             self._init_indi()
+        elif cfg.control_mode == "wrench":
+            self._init_wrench()
         # Columns: rotor mechanical, rotor dissipative, arm mechanical, arm copper loss.
         self._power_sum_w = torch.zeros((self.num_envs, 4), device=self.device)
         self._power_samples = 0
@@ -231,7 +235,7 @@ class BorinotGoalkeeperSimpleEnv(DirectRLEnv):
         self._shot_steps += self._ball_active
         self._outcome.zero_()
         self._previous_actuator_commands.copy_(self._actuator_commands)
-        if self.cfg.control_mode == "indi":
+        if self.cfg.control_mode in ("indi", "wrench"):
             if self.cfg.sac_action_mapping:
                 actions = actions.clamp(-1.0, 1.0)
         elif not self.cfg.sac_action_mapping and not self.cfg.remove_thrust_clipping:
@@ -410,6 +414,8 @@ class BorinotGoalkeeperSimpleEnv(DirectRLEnv):
             tail += [self._rotor_thrust / self._hover_per_rotor, self._rate_integral]
         elif self.cfg.control_mode == "indi":
             tail += [self._indi.observation()]
+        elif self.cfg.control_mode == "wrench":
+            tail += [self._wrench.observation()]
         # The flags simplify only the actor; the critic keeps every privileged input.
         point, time = self.cfg.obs_actor_includes_ball_plane_intersection_point, self.cfg.obs_actor_includes_time_ball_collides_plane
         optional = [(point, ball_parts[2]), (time, ball_parts[3]),
@@ -551,6 +557,8 @@ class BorinotGoalkeeperSimpleEnv(DirectRLEnv):
         self._rotor_thrust[env_ids] = self._hover_per_rotor
         if self.cfg.control_mode == "indi":
             self._indi.reset(env_ids)
+        elif self.cfg.control_mode == "wrench":
+            self._wrench.reset(env_ids)
         for buffer in (self._actuator_commands, self._previous_actuator_commands):
             buffer[env_ids, :6] = 1.0 / self.cfg.thrust_to_weight
             buffer[env_ids, 6:] = 0.0

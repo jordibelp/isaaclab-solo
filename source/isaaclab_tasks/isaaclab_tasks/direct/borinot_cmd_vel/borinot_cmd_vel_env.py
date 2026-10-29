@@ -18,6 +18,7 @@ from isaaclab_tasks.direct.borinot.inertial_properties import apply_inertial_pro
 from isaaclab_tasks.direct.borinot.inertial_properties_cfg import BorinotInertialPropertiesCfg
 from isaaclab_tasks.direct.borinot_goalkeeper.events import configure_randomization
 from isaaclab_tasks.controllers.borinot_indi import IndiController
+from isaaclab_tasks.controllers.borinot_wrench import WrenchController
 from isaaclab_tasks.direct.borinot_goalkeeper.paddle import attach_paddle
 
 from .borinot_cmd_vel_env_cfg import BorinotCmdVelEnvCfg
@@ -30,6 +31,8 @@ class BorinotCmdVelEnv(DirectRLEnv):
     cfg: BorinotCmdVelEnvCfg
     _sample_power = BorinotGoalkeeperEnv._sample_power
     _init_indi = BorinotGoalkeeperEnv._init_indi
+    _init_wrench = BorinotGoalkeeperEnv._init_wrench
+    _step_wrench = BorinotGoalkeeperEnv._step_wrench
 
     def __init__(self, cfg: BorinotCmdVelEnvCfg, render_mode=None, **kwargs):
         validate_inertial_properties(cfg.inertial_properties)
@@ -87,6 +90,8 @@ class BorinotCmdVelEnv(DirectRLEnv):
         self._motor_alpha = 1.0 if cfg.motor_time_constant_s == 0 else 1 - math.exp(-self.physics_dt / cfg.motor_time_constant_s)
         if cfg.control_mode == "indi":
             self._init_indi()
+        elif cfg.control_mode == "wrench":
+            self._init_wrench()
         self._power_sum_w = torch.zeros(self.num_envs, 4, device=self.device)
         self._power_samples = self._physics_samples = 0
 
@@ -168,7 +173,7 @@ class BorinotCmdVelEnv(DirectRLEnv):
         self._command_steps_left.sub_(1)
         self._update_pushes()
         self._previous_actuator_commands.copy_(self._actuator_commands)
-        if self.cfg.control_mode == "indi":
+        if self.cfg.control_mode in ("indi", "wrench"):
             if self.cfg.sac_action_mapping:
                 actions = actions.clamp(-1.0, 1.0)
         elif not self.cfg.sac_action_mapping and not self.cfg.remove_thrust_clipping:
@@ -273,6 +278,8 @@ class BorinotCmdVelEnv(DirectRLEnv):
             parts += [self._rotor_thrust / self._hover_per_rotor, self._rate_integral]
         elif self.cfg.control_mode == "indi":
             parts.append(self._indi.observation())
+        elif self.cfg.control_mode == "wrench":
+            parts.append(self._wrench.observation())
         observation = torch.cat(parts, -1)
         return {"policy": observation, "critic": observation}
 
@@ -333,7 +340,7 @@ class BorinotCmdVelEnv(DirectRLEnv):
         """Archive shared plant/control helpers alongside this task's source."""
         return [inspect.getsourcefile(obj) for obj in (
             BorinotGoalkeeperEnv, configure_randomization, attach_paddle, configure_end_effector,
-            IndiController, tracking_kernels, raw_action_limit_costs, ActuatorDelay,
+            IndiController, WrenchController, tracking_kernels, raw_action_limit_costs, ActuatorDelay,
             apply_inertial_properties, BorinotInertialPropertiesCfg)]
 
     def _reset_idx(self, env_ids):
@@ -380,4 +387,6 @@ class BorinotCmdVelEnv(DirectRLEnv):
             buffer[env_ids, :6], buffer[env_ids, 6:] = 1.0 / self.cfg.thrust_to_weight, 0.0
         if self.cfg.control_mode == "indi":
             self._indi.reset(env_ids)
+        elif self.cfg.control_mode == "wrench":
+            self._wrench.reset(env_ids)
         self._resample_commands(env_ids)

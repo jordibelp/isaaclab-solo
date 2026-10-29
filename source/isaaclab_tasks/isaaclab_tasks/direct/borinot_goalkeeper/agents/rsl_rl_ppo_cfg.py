@@ -10,4 +10,4 @@ class BorinotGoalkeeperPPORunnerCfg(BorinotPPORunnerCfg):
     experiment_name = "borinot_goalkeeper"
     run_name = "Borinot goalkeeper PPO"
     obs_groups = {"policy": ["policy"], "critic": ["critic"]}
-    clip_actions = None  # INDI PPO uses raw physical units; other modes keep environment-owned limits
+    clip_actions = None  # INDI/wrench PPO uses raw physical units; other modes keep environment-owned limits
