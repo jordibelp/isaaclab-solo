@@ -219,6 +219,7 @@ class BorinotGoalkeeperSimpleEnvCfg(DirectRLEnvCfg):
     rwd_scale_thrust_limits = -1.0  # relative rotor-demand excess; raw policy or unconstrained controller
     rwd_scale_torque_limits = -1.0  # relative joint-demand excess, both signs, before torque saturation
     rwd_scale_action_limits = -1.0  # otherwise-clipped PD/PI/SAC-INDI references; not PPO INDI
+    rwd_limits_max_penalty = 10.0  # clip each scaled limit term to +/- this per policy step; inf disables
     minimize_energy_not_power = False  # True: pay the energy since the last payment when each shot ends
 
     # Robot resets. The penalties above do not depend on these switches.

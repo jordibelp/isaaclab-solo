@@ -21,7 +21,8 @@ limits_spec.loader.exec_module(limits)
 def method(name, **extra):
     node = next(n for n in ast.parse((FOLDER / "borinot_cmd_vel_env.py").read_text()).body if isinstance(n, ast.ClassDef))
     function = next(n for n in node.body if isinstance(n, ast.FunctionDef) and n.name == name)
-    scope = {"torch": torch, "math": math, "raw_action_limit_costs": limits.raw_action_limit_costs, **vars(task_math), **extra}
+    scope = {"torch": torch, "math": math, "raw_action_limit_costs": limits.raw_action_limit_costs,
+             "clipped_limit_rewards": limits.clipped_limit_rewards, **vars(task_math), **extra}
     exec(compile(ast.Module(body=[function], type_ignores=[]), name, "exec"), scope)
     return scope[name]
 
@@ -167,7 +168,7 @@ def reward_env():
     return SimpleNamespace(step_dt=.01, physics_dt=.005, joint_ids=[0, 1], extras={},
         cfg=SimpleNamespace(tracking_lin_std=.5, tracking_ang_std=.5, effort_lim_sim=2.,
             rwd_scale_lin_vel=1.5, rwd_scale_ang_vel=.5, rwd_scale_action_rate=0., rwd_scale_energy=0.,
-            rwd_scale_thrust_limits=-1., rwd_scale_torque_limits=-1., rwd_scale_action_limits=-1.,
+            rwd_scale_thrust_limits=-1., rwd_scale_torque_limits=-1., rwd_scale_action_limits=-1., rwd_limits_max_penalty=10.,
             rwd_scale_base_collision=-2., rwd_scale_leave_area=-2., rwd_scale_self_collision=-2.25, rwd_scale_tilt=-1.),
         robot=SimpleNamespace(data=SimpleNamespace(root_lin_vel_w=torch.zeros(2, 3),
             root_ang_vel_w=torch.zeros(2, 3), root_quat_w=torch.tensor([[1., 0, 0, 0]]).expand(2, -1),
@@ -188,6 +189,15 @@ def test_exact_reward_ceiling_and_disabled_costs():
     torch.testing.assert_close(reward, torch.full((2,), .02))
     torch.testing.assert_close(env._episode_energy_j, torch.tensor([.12, .26]))
     assert not env._episode_terms["action_rate"].any() and not env._episode_terms["energy"].any()
+
+
+def test_each_limit_term_is_clipped_to_the_max_penalty():
+    env = reward_env()
+    env._action_limit_costs[:] = torch.tensor([[3., 12., 0.], [50., .5, 11.]])
+    reward = method("_get_rewards")(env)
+    for i, name in enumerate(("thrust_limits", "torque_limits", "action_limits")):
+        torch.testing.assert_close(env._episode_terms[name], (-env._action_limit_costs[:, i]).clamp_min(-10.))
+    torch.testing.assert_close(reward, torch.tensor([.02 - 13., .02 - 20.5]))
 
 
 def test_power_is_mean_watts_and_action_rate_is_group_means_times_dt():

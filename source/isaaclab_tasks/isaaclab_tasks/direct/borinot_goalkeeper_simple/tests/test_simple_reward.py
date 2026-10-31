@@ -50,6 +50,7 @@ limits = importlib.util.module_from_spec(limits_spec)
 limits_spec.loader.exec_module(limits)
 SCOPE["raw_action_limit_costs"] = limits.raw_action_limit_costs
 SCOPE["relative_limit_cost"] = limits.relative_limit_cost
+SCOPE["clipped_limit_rewards"] = limits.clipped_limit_rewards
 for node in ast.parse(SOURCE.read_text()).body:  # OUTCOME_*, EVENTS, REWARD_TERMS
     if isinstance(node, ast.Assign) and all(isinstance(t, ast.Name) and t.id.isupper() for t in node.targets):
         exec(compile(ast.Module(body=[node], type_ignores=[]), str(SOURCE), "exec"), SCOPE)
@@ -463,6 +464,16 @@ def test_action_rate_uses_group_means_of_normalized_commands_and_policy_dt():
     reward, *_ = step(env, command, nothing)
     signal = 0.3**2 / 6 + (2.7 / 5.4)**2 / 2
     torch.testing.assert_close(reward, torch.full((N,), -5.0 * signal * env.step_dt))
+
+
+def test_each_limit_term_is_clipped_to_the_max_penalty():
+    env = make_env()
+    env._action_limit_costs[:] = torch.linspace(0., 30., N)[:, None] * torch.tensor([1., .5, 2.])
+    terms = env._desirability_rewards()
+    for i, name in enumerate(("thrust_limits", "torque_limits", "action_limits")):
+        expected = (getattr(env.cfg, f"rwd_scale_{name}") * env._action_limit_costs[:, i]).clamp(-10., 10.)
+        torch.testing.assert_close(terms[name], expected)
+    assert terms["action_limits"].min() == -10.
 
 
 def write_power(index):

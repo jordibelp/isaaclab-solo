@@ -242,6 +242,7 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     rwd_scale_thrust_limits = -1.0  # relative rotor-demand excess; raw policy or unconstrained controller
     rwd_scale_torque_limits = -1.0  # relative joint-demand excess, both signs, before torque saturation
     rwd_scale_action_limits = -1.0  # otherwise-clipped PD/PI/SAC-INDI references; not PPO INDI
+    rwd_limits_max_penalty = 10.0  # clip each scaled limit term to +/- this per policy step; inf disables
     # Nominal Solo joint copper loss: c * joint_torque**2 [W], c in W/(N*m)^2.
     # Rounded from (3/2)*R_phase/(G*Kt)^2, R_phase=0.2324751 ohm, G=9, Kt=0.025 N*m/A.
     arm_copper_loss_coefficient = 6.888

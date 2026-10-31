@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from test_control import config, method, raw_action_limit_costs
+from test_control import clipped_limit_rewards, config, method, raw_action_limit_costs
 
 
 def test_raw_excursion_is_scored_before_the_existing_input_clamp():
@@ -174,6 +174,7 @@ def test_actual_reward_adds_unscaled_hinge_cost_once_per_policy_step(policy_hz, 
     env.cfg.rwd_scale_thrust_limits = scale
     env.cfg.rwd_scale_torque_limits = 2*scale
     env.cfg.rwd_scale_action_limits = 3*scale
+    env.cfg.rwd_limits_max_penalty = float('inf')  # clipping has its own tests
     for _ in range(2):
         torch.testing.assert_close(get_rewards(env), torch.full((10,), 36*scale), atol=1e-7, rtol=0)
 
@@ -187,3 +188,29 @@ def test_every_prephysics_scores_before_mutating_and_every_reset_clears_selected
         assert 'raw_action_limit_costs' in ast.unparse(pre.body[0])
         reset = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == '_reset_idx')
         assert '_action_limit_costs' in ast.unparse(reset)
+
+
+def test_every_task_clips_its_limit_rewards_with_a_configured_bound():
+    root = Path(__file__).resolve().parents[2]
+    for task in ('borinot', 'borinot_goalkeeper', 'borinot_goalkeeper_simple', 'borinot_cmd_vel'):
+        source = (root / task / f'{task}_env.py').read_text()
+        assert 'clipped_limit_rewards(self._action_limit_costs, self.cfg)' in source
+        assert 'self.cfg.rwd_scale_thrust_limits * self._action_limit_costs' not in source
+    # The velocity task inherits the goalkeeper configuration.
+    for task in ('borinot', 'borinot_goalkeeper', 'borinot_goalkeeper_simple'):
+        assert 'rwd_limits_max_penalty = 10.0' in (root / task / f'{task}_env_cfg.py').read_text()
+    assert 'class BorinotCmdVelEnvCfg(BorinotGoalkeeperEnvCfg)' in (root / 'borinot_cmd_vel/borinot_cmd_vel_env_cfg.py').read_text()
+
+
+@pytest.mark.parametrize('bound', [10., 2.5])
+def test_limit_reward_clip_is_per_term_and_symmetric(bound):
+    cfg = SimpleNamespace(rwd_scale_thrust_limits=-1., rwd_scale_torque_limits=2., rwd_scale_action_limits=-.5,
+                          rwd_limits_max_penalty=bound)
+    costs = torch.tensor([[1., 1., 1.], [8., 8., 8.], [30., 30., 30.]])
+    terms = clipped_limit_rewards(costs, cfg)
+    assert list(terms) == ['thrust_limits', 'torque_limits', 'action_limits']
+    torch.testing.assert_close(terms['thrust_limits'], (-costs[:, 0]).clamp(-bound, bound))
+    torch.testing.assert_close(terms['torque_limits'], (2 * costs[:, 1]).clamp(-bound, bound))
+    torch.testing.assert_close(terms['action_limits'], (-.5 * costs[:, 2]).clamp(-bound, bound))
+    cfg.rwd_limits_max_penalty = float('inf')
+    torch.testing.assert_close(clipped_limit_rewards(costs, cfg)['torque_limits'], 2 * costs[:, 1])

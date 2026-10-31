@@ -8,6 +8,7 @@ squaring. With the upper thrust cap disabled, retain its nominal scale only
 for normalizing the lower-bound violation; do not add an upper-bound cost.
 PPO INDI references remain unbounded SI values. Their actuator demands, not
 the references themselves, are scored at the physics clock by the environment.
+Each signed reward term is clipped to +/- cfg.rwd_limits_max_penalty per policy step.
 """
 import torch
 
@@ -100,3 +101,11 @@ def raw_action_limit_costs(actions, cfg, hover, *, legacy=False):
                     reference = actions[:, -2:]
         costs[:, 2] = (reference.abs() - limit).clamp_min(0).square().sum(-1)
     return costs
+
+
+def clipped_limit_rewards(costs, cfg):
+    """Signed soft-limit reward terms, each clipped to +/- cfg.rwd_limits_max_penalty."""
+    bound = cfg.rwd_limits_max_penalty
+    scales = {"thrust_limits": cfg.rwd_scale_thrust_limits, "torque_limits": cfg.rwd_scale_torque_limits,
+              "action_limits": cfg.rwd_scale_action_limits}
+    return {name: (scale * costs[:, i]).clamp(-bound, bound) for i, (name, scale) in enumerate(scales.items())}

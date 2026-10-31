@@ -16,7 +16,7 @@ from isaaclab.sensors import ContactSensor
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 
 from .borinot_env_cfg import BorinotEnvCfg
-from .action_limits import raw_action_limit_costs
+from .action_limits import clipped_limit_rewards, raw_action_limit_costs
 from .inertial_properties import apply_inertial_properties, validate_inertial_properties
 from .inertial_properties_cfg import BorinotInertialPropertiesCfg
 from isaaclab_tasks.direct.borinot_goalkeeper.actuator_delay import ActuatorDelay, actuator_delay_bounds
@@ -552,11 +552,7 @@ class BorinotEnv(DirectRLEnv):
         self._sample_power()  # final completed substep, before automatic resets
         mean_power_w = self._power_sum_w / self.cfg.decimation
         energy_reward = self.cfg.energy_reward_scale * mean_power_w.sum(-1)
-        limit_rewards = {
-            "thrust_limits": self.cfg.rwd_scale_thrust_limits * self._action_limit_costs[:, 0],
-            "torque_limits": self.cfg.rwd_scale_torque_limits * self._action_limit_costs[:, 1],
-            "action_limits": self.cfg.rwd_scale_action_limits * self._action_limit_costs[:, 2],
-        }
+        limit_rewards = clipped_limit_rewards(self._action_limit_costs, self.cfg)
 
         def func_vel_err(err: torch.Tensor, sigma):
             absn = torch.linalg.norm(err, dim=-1)  # shape: (...)

@@ -12,9 +12,12 @@ folder = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("goalkeeper_reward_math", folder / "task_math.py")
 task_math = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(task_math)
+spec = importlib.util.spec_from_file_location("goalkeeper_reward_limits", folder.parent / "borinot/action_limits.py")
+limits = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(limits)
 tree = ast.parse((folder / "borinot_goalkeeper_env.py").read_text())
 method = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "_get_rewards")
-namespace = {"torch": torch, "plane_progress": task_math.plane_progress}
+namespace = {"torch": torch, "plane_progress": task_math.plane_progress, "clipped_limit_rewards": limits.clipped_limit_rewards}
 exec(compile(ast.Module(body=[method], type_ignores=[]), str(folder), "exec"), namespace)
 get_rewards = namespace["_get_rewards"]
 
@@ -39,7 +42,7 @@ def make_env():
     normal = xyz.clone()
     normal[:, 0] = 1.0
     cfg = SimpleNamespace(**{name: 0.0 for name in config_scales()}, decimation=4, effort_lim_sim=2.7,
-                          progress_use_prediction=False, shot_resampling_mode="launch")
+                          rwd_limits_max_penalty=10.0, progress_use_prediction=False, shot_resampling_mode="launch")
     return SimpleNamespace(
         cfg=cfg, device="cpu", step_dt=1/60, _sample_power=lambda: None,
         _action_limit_costs=torch.zeros(n, 3),
@@ -77,7 +80,8 @@ def test_all_reward_fields_use_signed_scale_names():
     for n in ast.walk(cfg_tree):
         if isinstance(n, ast.Assign):
             for target in n.targets:
-                if isinstance(target, ast.Name):
+                # rwd_limits_max_penalty is an unsigned clip bound, not a reward scale.
+                if isinstance(target, ast.Name) and target.id != "rwd_limits_max_penalty":
                     assert not target.id.endswith(("_penalty", "_bonus", "_cost", "_reward_scale", "_reward_rate"))
     for name in ("goal", "ball_base_collision", "ball_arm_collision", "ball_floor", "robot_crash", "leave_goal_area", "miss", "deadline"):
         assert scales[f"rwd_scale_{name}"] < 0
@@ -122,6 +126,22 @@ def test_energy_scale_uses_watts_without_extra_dt(scale):
     env.cfg.rwd_scale_energy = scale
     reward = get_rewards(env)
     torch.testing.assert_close(reward, torch.full_like(reward, scale * 10.0))
+
+
+@pytest.mark.parametrize("scale", [-2., 2.])
+@pytest.mark.parametrize("column,field", enumerate(("rwd_scale_thrust_limits", "rwd_scale_torque_limits",
+                                                    "rwd_scale_action_limits")))
+def test_each_limit_term_is_clipped_symmetrically_to_the_max_penalty(column, field, scale):
+    env = make_env()
+    setattr(env.cfg, field, scale)
+    env._action_limit_costs[:, column] = torch.linspace(0., 10., 10)
+    reward = get_rewards(env)
+    expected = (scale * env._action_limit_costs[:, column]).clamp(-10., 10.)
+    torch.testing.assert_close(reward, expected)
+    torch.testing.assert_close(env.extras["goalkeeper_reward_terms"][field.removeprefix("rwd_scale_")], expected)
+    env.cfg.rwd_limits_max_penalty = float("inf")
+    env._episode_rewards.zero_()
+    torch.testing.assert_close(get_rewards(env), scale * env._action_limit_costs[:, column])
 
 
 @pytest.mark.parametrize("scale", [-.2, .2])

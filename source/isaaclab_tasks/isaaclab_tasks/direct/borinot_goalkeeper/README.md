@@ -852,6 +852,12 @@ for PPO, but negative thrust requests still pay a cost, normalized by the nomina
 upper thrust scale. SAC's direct rotor
 mapping still clips its normalized inputs to ±1.
 
+Each scaled limit term is then clipped to ±`env.rwd_limits_max_penalty`
+(default 10.0) in every policy step. So one huge request costs at most 10 per
+term and step. The clip acts on the reward term, not on the raw cost or the
+`Desired_Actuation/*` charts. Use `env.rwd_limits_max_penalty=inf` to turn it
+off. All four Borinot tasks share this setting.
+
 PPO INDI references are unbounded physical quantities; they are **not** given
 artificial ±1 limits. Their physical controller demands now pay thrust/torque
 excess costs. Bounded SAC references can also make a controller saturate.
@@ -923,7 +929,8 @@ time traces. Other control modes do not emit the new metric groups.
 
 For an exact reward comparison, multiply
 `Desired_Actuation/thrust_relative_excess_episode_sum` by
-`rwd_scale_thrust_limits`: this equals `Episode_Reward/thrust_limits`.
+`rwd_scale_thrust_limits`: this equals `Episode_Reward/thrust_limits` when no
+step reached `rwd_limits_max_penalty`. Clipped steps make the reward smaller in size.
 The analogous torque keys use `torque_relative_excess_episode_sum` and
 `rwd_scale_torque_limits`. The `*_relative_excess_mean_per_step` charts divide
 each episode's unweighted cost by its policy-step count. Costs sum actuator

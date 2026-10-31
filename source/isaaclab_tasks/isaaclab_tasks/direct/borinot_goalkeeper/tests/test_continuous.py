@@ -18,6 +18,7 @@ names=('_pre_physics_step','_interception','_get_dones','_get_rewards','_get_obs
 scope={name:getattr(math,name) for name in ('terminal_outcome','sample_shots','sample_shot_delay_steps','promotion_ready','plane_progress','predict_intercept')}
 scope.update(torch=torch,quat_apply_inverse=lambda q,v:v,matrix_from_quat=lambda q:torch.eye(3).expand(len(q),-1,-1))
 scope['raw_action_limit_costs'] = control.raw_action_limit_costs
+scope['clipped_limit_rewards'] = control.clipped_limit_rewards
 for node in ast.walk(tree):
     if isinstance(node,ast.FunctionDef) and node.name in names:
         exec(compile(ast.Module(body=[node],type_ignores=[]),str(FOLDER),'exec'),scope)

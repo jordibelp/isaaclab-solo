@@ -15,6 +15,7 @@ _limits = importlib.util.module_from_spec(_limits_spec)
 _limits_spec.loader.exec_module(_limits)
 raw_action_limit_costs = _limits.raw_action_limit_costs
 relative_limit_cost = _limits.relative_limit_cost
+clipped_limit_rewards = _limits.clipped_limit_rewards
 _delay_spec = importlib.util.spec_from_file_location("borinot_actuator_delay_test", FOLDER / "actuator_delay.py")
 actuator_delay = importlib.util.module_from_spec(_delay_spec)
 _delay_spec.loader.exec_module(actuator_delay)
@@ -28,7 +29,7 @@ def source_class(filename):
 def method(filename, name):
     node = next(n for n in source_class(filename).body if isinstance(n, ast.FunctionDef) and n.name == name)
     scope = {"math": math, "torch": torch, "raw_action_limit_costs": raw_action_limit_costs,
-             "relative_limit_cost": relative_limit_cost}
+             "relative_limit_cost": relative_limit_cost, "clipped_limit_rewards": clipped_limit_rewards}
     exec(compile(ast.Module(body=[node], type_ignores=[]), filename, "exec"), scope)
     return scope[name]
 

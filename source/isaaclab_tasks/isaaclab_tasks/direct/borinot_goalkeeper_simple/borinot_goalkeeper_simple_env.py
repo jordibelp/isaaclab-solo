@@ -15,7 +15,7 @@ from isaaclab.utils.math import matrix_from_quat, quat_apply, quat_apply_inverse
 
 from isaaclab_tasks.direct.borinot_goalkeeper.actuator_delay import ActuatorDelay, actuator_delay_bounds
 from isaaclab_tasks.direct.borinot_goalkeeper.borinot_goalkeeper_env import BorinotGoalkeeperEnv
-from isaaclab_tasks.direct.borinot.action_limits import raw_action_limit_costs
+from isaaclab_tasks.direct.borinot.action_limits import clipped_limit_rewards, raw_action_limit_costs
 from isaaclab_tasks.direct.borinot.inertial_properties import apply_inertial_properties, validate_inertial_properties
 from isaaclab_tasks.direct.borinot_goalkeeper.events import configure_randomization
 from isaaclab_tasks.direct.borinot_goalkeeper.paddle import attach_paddle
@@ -382,9 +382,7 @@ class BorinotGoalkeeperSimpleEnv(DirectRLEnv):
             self._unpaid_energy_j.masked_fill_(pay, 0.0)
         return {"action_rate": self.cfg.rwd_scale_action_rate * action_rate * self.step_dt,
                 "energy": self.cfg.rwd_scale_energy * energy_j / self.step_dt,
-                "thrust_limits": self.cfg.rwd_scale_thrust_limits * self._action_limit_costs[:, 0],
-                "torque_limits": self.cfg.rwd_scale_torque_limits * self._action_limit_costs[:, 1],
-                "action_limits": self.cfg.rwd_scale_action_limits * self._action_limit_costs[:, 2]}
+                **clipped_limit_rewards(self._action_limit_costs, self.cfg)}
 
     def _get_observations(self):
         root_pos = self.robot.data.root_pos_w - self.scene.env_origins

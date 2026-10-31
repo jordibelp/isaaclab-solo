@@ -77,6 +77,7 @@ class BorinotEnvCfg(DirectRLEnvCfg):
     rwd_scale_thrust_limits = -1.0  # relative thrust excess, before clipping
     rwd_scale_torque_limits = -1.0  # relative direct torque excess, both signs
     rwd_scale_action_limits = -1.0  # otherwise-clipped references (atan2 vector components)
+    rwd_limits_max_penalty = 10.0  # clip each scaled limit term to +/- this per policy step; inf disables
     # Nominal Solo joint copper loss: c * joint_torque**2 [W], c in W/(N*m)^2.
     # Rounded from (3/2)*R_phase/(G*Kt)^2, R_phase=0.2324751 ohm, G=9, Kt=0.025 N*m/A.
     arm_copper_loss_coefficient: float = 7.0
