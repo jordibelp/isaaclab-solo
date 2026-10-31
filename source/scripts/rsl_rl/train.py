@@ -392,7 +392,7 @@ parser.add_argument(
     help=(
         "Enable the symmetric PPO variants from arXiv:2403.04359. "
         "'augmentation' enables symmetry data augmentation; "
-        "'augmentation-left-right' augments race tasks with only the identity and left-right mirror; "
+        "'augmentation-left-right' augments supported tasks with only the identity and left-right mirror; "
         "'loss' enables mirror loss; 'both' combines the two."
     ),
 )
@@ -553,6 +553,7 @@ from isaaclab_tasks.direct.solo12_race.agents.rsl_rl_ppo_cfg import configure_ra
 import borinotIsaacLab.tasks  # noqa: F401
 import solo12_symmetry
 import solo12_race_symmetry
+from isaaclab_tasks.direct.borinot import symmetry as borinot_symmetry
 
 try:
     from isaaclab_tasks.direct.solo12_race.agents.shared_actor_critic import SharedActorCritic
@@ -2771,7 +2772,21 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if symmetry_enabled:
         if agent_cfg.class_name not in ("OnPolicyRunner", "OffPolicyRunner"):
             raise ValueError("Symmetry mode requires the RSL-RL PPO or SAC path.")
-        if args_cli.task in _SOLO12_DIRECT_SYMMETRY_TASKS:
+        if args_cli.task in {"Borinot-cmd-vel", "Borinot-Cmd-Vel-Direct-v0", "Borinot-Direct-v0"}:
+            # Resolve late Hydra changes before auditing action/observation layouts.
+            configure = getattr(agent_cfg, "configure_environment", None)
+            if configure is not None:
+                configure(env_cfg)
+            elif hasattr(env_cfg, "configure_control"):
+                env_cfg.configure_control()
+            if args_cli.symmetry_mode == "augmentation-left-right":
+                raise ValueError("Borinot body mirrors are not valid for the current rotor/leg geometry. "
+                                 "Use --symmetry-mode=augmentation for world-heading augmentation.")
+            transform = borinot_symmetry.BorinotSymmetry(env_cfg)
+            symmetry_fn = borinot_symmetry.compute_symmetric_observations_actions
+            print(f"[INFO]: Borinot symmetry transforms: {transform.transforms}; "
+                  f"body-mirror rotor audit: {transform.audit}. See borinot/SYMMETRY.md for geometry/initial-state limits.")
+        elif args_cli.task in _SOLO12_DIRECT_SYMMETRY_TASKS:
             symmetry_fn = solo12_symmetry.compute_symmetric_observations_actions
         elif args_cli.task in {
             "Isaac-Solo12-Race-Direct-v0",
@@ -2795,8 +2810,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             )
         else:
             raise ValueError(
-                "Symmetry mode is implemented for Solo12 direct locomotion/base-IMU tasks "
-                "and the Isaac-Solo12-Race-* direct tasks only."
+                "Symmetry mode is implemented for Solo12 direct locomotion/base-IMU tasks, "
+                "the Isaac-Solo12-Race-* direct tasks, and Borinot command-tracking tasks only. "
+                "Borinot goalkeepers have a fixed-goal/reset geometry that has not been certified for this augmentation."
             )
         if args_cli.symmetry_mode == "augmentation-left-right" and args_cli.task in _SOLO12_DIRECT_SYMMETRY_TASKS:
             raise ValueError("--symmetry-mode=augmentation-left-right is only supported for Solo12 race tasks.")
@@ -2903,7 +2919,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env_cfg_py = inspect.getsourcefile(type(env_cfg))
     env_py = inspect.getsourcefile(env.unwrapped.__class__)
     agent_cfg_py = inspect.getsourcefile(type(agent_cfg))
-    symmetry_py = inspect.getsourcefile(solo12_symmetry) if symmetry_enabled else None
+    symmetry_py = inspect.getsourcefile(inspect.unwrap(symmetry_fn)) if symmetry_enabled else None
 
     if isinstance(env.unwrapped, DirectMARLEnv):
         env = multi_agent_to_single_agent(env)
