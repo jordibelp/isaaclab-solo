@@ -4,12 +4,18 @@ import ast
 import importlib.util
 import math
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
+import sys
 
 import pytest
 import torch
 
 FOLDER = Path(__file__).resolve().parents[1]
+controllers = ModuleType("angle_test_controllers")
+controllers.__path__ = [str(FOLDER.parents[1] / "controllers")]
+sys.modules[controllers.__name__] = controllers
+import importlib
+angles = importlib.import_module(controllers.__name__ + ".borinot_angles")
 _limits_spec = importlib.util.spec_from_file_location("borinot_action_limits_test", FOLDER.parent / "borinot/action_limits.py")
 _limits = importlib.util.module_from_spec(_limits_spec)
 _limits_spec.loader.exec_module(_limits)
@@ -29,7 +35,7 @@ def source_class(filename):
 def method(filename, name):
     node = next(n for n in source_class(filename).body if isinstance(n, ast.FunctionDef) and n.name == name)
     scope = {"math": math, "torch": torch, "raw_action_limit_costs": raw_action_limit_costs,
-             "relative_limit_cost": relative_limit_cost, "clipped_limit_rewards": clipped_limit_rewards}
+             "relative_limit_cost": relative_limit_cost, "clipped_limit_rewards": clipped_limit_rewards, **vars(angles)}
     exec(compile(ast.Module(body=[node], type_ignores=[]), filename, "exec"), scope)
     return scope[name]
 

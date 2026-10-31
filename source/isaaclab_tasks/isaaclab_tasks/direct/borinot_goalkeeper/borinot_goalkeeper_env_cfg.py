@@ -12,6 +12,7 @@ from isaaclab.utils import configclass
 
 from .events import BorinotEventCfg
 from isaaclab_tasks.direct.borinot.inertial_properties_cfg import BorinotInertialPropertiesCfg
+from isaaclab_tasks.controllers.borinot_angles import angle_action_size
 from isaaclab_tasks.controllers.borinot_indi import IndiControllerCfg
 from isaaclab_tasks.controllers.borinot_wrench import WrenchControllerCfg
 from isaaclab_tasks.controllers.borinot_cbrt import CbrtControllerCfg
@@ -21,6 +22,10 @@ from isaaclab_tasks.controllers.borinot_cbrt import CbrtControllerCfg
 class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     inertial_properties: BorinotInertialPropertiesCfg = BorinotInertialPropertiesCfg()
     control_mode = "thrust_and_torque_control"
+    # Replace supported scalar angle channels with (cos, sin) pairs; see borinot/ANGLE_ACTIONS.md.
+    predict_yaw_as_sincos = False
+    predict_calf_joint_pos_as_sincos = False
+    predict_thigh_joint_pos_as_sincos = False
     # INDI PPO actions: world acceleration [m/s^2], body rates [rad/s], heading offset [rad],
     # joint angles [rad]. No action clipping/scaling; heading adds robot_home_quat yaw.
     # INDI SAC keeps normalized [-1, 1] references with scales in indi/body_rate_scale.
@@ -41,7 +46,7 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     shot_resampling_mode = "launch"  # "launch": launch-to-launch; "resolution": delay after each result
     reset_on_goal = False  # True resets the robot too; goal scoring/penalty stay unchanged
     ball_park_position = (0.0, 0.0, -2.0)  # inactive ball is removed below the local floor
-    action_space = 8  # derived: 8 direct, 6 PI/CBRT, 9 INDI/wrench
+    action_space = 8  # derived: 8 direct, 6 PI/CBRT, 9 INDI/wrench, plus optional angle-pair dimensions
     observation_space = 44  # derived: actor inputs selected by the obs_actor_includes_* flags, plus the current actions
     state_space = 56  # derived: 48 + actions + controller state (9 PI, 8 INDI) + optional rotor speeds (6)
     sim = sim_utils.SimulationCfg(
@@ -299,7 +304,7 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
         self.decimation = round(ratio)
         self.sim.dt = 1 / self.physics_hz
         self.sim.render_interval = self.decimation
-        self.action_space = 9 if self.control_mode in ("indi", "wrench") else (6 if self.control_mode in (modes[2], "cbrt", "cbrt_indi") else 8)
+        self.action_space = angle_action_size(self)
         controller_state = 6 if self.control_mode in ("wrench", "cbrt", "cbrt_indi") else (
             8 if self.control_mode == "indi" else (9 if self.control_mode == modes[2] else 0))
         self.state_space = 48 + self.action_space + controller_state + 6 * self.critic_obs_includes_rotor_omega

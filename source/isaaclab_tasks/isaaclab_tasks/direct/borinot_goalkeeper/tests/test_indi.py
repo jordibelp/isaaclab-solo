@@ -12,9 +12,9 @@ from scipy.signal import butter, lfilter, lfilter_zi
 from scipy.spatial.transform import Rotation
 import torch
 
-from test_control import action_env, config, method
+from test_control import action_env, config, method, controllers
 
-SPEC = importlib.util.spec_from_file_location("borinot_indi_test", Path(__file__).resolve().parents[3] / "controllers/borinot_indi.py")
+SPEC = importlib.util.spec_from_file_location(controllers.__name__+".borinot_indi", Path(__file__).resolve().parents[3] / "controllers/borinot_indi.py")
 indi = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = indi
 SPEC.loader.exec_module(indi)

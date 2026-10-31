@@ -5,6 +5,8 @@ from __future__ import annotations
 import math
 
 import torch
+
+from isaaclab_tasks.controllers.borinot_angles import clamp_scalar_actions, decode_angle_actions, joint_angle_targets
 from pxr import PhysxSchema
 
 import isaaclab.sim as sim_utils
@@ -240,14 +242,14 @@ class BorinotGoalkeeperSimpleEnv(DirectRLEnv):
         self._previous_actuator_commands.copy_(self._actuator_commands)
         if self.cfg.control_mode in ("indi", "wrench", "cbrt", "cbrt_indi"):
             if self.cfg.sac_action_mapping:
-                actions = actions.clamp(-1.0, 1.0)
+                actions = clamp_scalar_actions(actions, self.cfg, 1.0)
         elif not self.cfg.sac_action_mapping and not self.cfg.remove_thrust_clipping:
             if self.cfg.control_mode == "thrust_and_torque_control" and not self.cfg.hold_arm:
                 # PPO joint actions are unbounded N*m; retain only the rotor input clamp.
                 actions = torch.cat((actions[:, :6].clamp(-self.cfg.action_clamp, self.cfg.action_clamp),
                                      actions[:, 6:]), dim=-1)
             else:
-                actions = actions.clamp(-self.cfg.action_clamp, self.cfg.action_clamp)
+                actions = clamp_scalar_actions(actions, self.cfg, self.cfg.action_clamp)
         self.actions.copy_(actions)
         # Progress compares racket positions across this interval, only before the ball's first contact.
         self._previous_paddle.copy_(self._paddle_pose()[0])

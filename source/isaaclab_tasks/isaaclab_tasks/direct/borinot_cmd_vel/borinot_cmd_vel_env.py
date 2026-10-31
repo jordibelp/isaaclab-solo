@@ -6,6 +6,8 @@ import inspect
 
 import torch
 
+from isaaclab_tasks.controllers.borinot_angles import clamp_scalar_actions, decode_angle_actions, joint_angle_targets
+
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
@@ -179,14 +181,14 @@ class BorinotCmdVelEnv(DirectRLEnv):
         self._previous_actuator_commands.copy_(self._actuator_commands)
         if self.cfg.control_mode in ("indi", "wrench", "cbrt", "cbrt_indi"):
             if self.cfg.sac_action_mapping:
-                actions = actions.clamp(-1.0, 1.0)
+                actions = clamp_scalar_actions(actions, self.cfg, 1.0)
         elif not self.cfg.sac_action_mapping and not self.cfg.remove_thrust_clipping:
             if self.cfg.control_mode == "thrust_and_torque_control" and not self.cfg.hold_arm:
                 # PPO joint actions are unbounded N*m; retain only the rotor input clamp.
                 actions = torch.cat((actions[:, :6].clamp(-self.cfg.action_clamp, self.cfg.action_clamp),
                                      actions[:, 6:]), dim=-1)
             else:
-                actions = actions.clamp(-self.cfg.action_clamp, self.cfg.action_clamp)
+                actions = clamp_scalar_actions(actions, self.cfg, self.cfg.action_clamp)
         self.actions.copy_(actions)
         self._power_sum_w.zero_()
         self._power_samples = self._physics_samples = 0
@@ -344,7 +346,7 @@ class BorinotCmdVelEnv(DirectRLEnv):
         """Archive shared plant/control helpers alongside this task's source."""
         return [inspect.getsourcefile(obj) for obj in (
             BorinotGoalkeeperEnv, configure_randomization, attach_paddle, configure_end_effector,
-            IndiController, WrenchController, CbrtController, tracking_kernels, raw_action_limit_costs, ActuatorDelay,
+            IndiController, WrenchController, CbrtController, tracking_kernels, raw_action_limit_costs, decode_angle_actions, ActuatorDelay,
             apply_inertial_properties, BorinotInertialPropertiesCfg)]
 
     def _reset_idx(self, env_ids):

@@ -10,13 +10,13 @@ import torch
 from tensordict import TensorDict
 from rsl_rl_sac.algorithms import SAC
 
-from test_control import action_env, config, method
+from test_control import action_env, angles, config, method
 
 
 def algorithm_class():
     path = Path(__file__).resolve().parents[1] / "agents/rsl_rl_sac_cfg.py"
     node = next(n for n in ast.parse(path.read_text()).body if isinstance(n, ast.ClassDef))
-    scope = {"torch": torch, "SAC": SAC}
+    scope = {"torch": torch, "SAC": SAC, "angle_action_size": angles.angle_action_size}
     exec(compile(ast.Module(body=[node], type_ignores=[]), str(path), "exec"), scope)
     return scope[node.name]
 

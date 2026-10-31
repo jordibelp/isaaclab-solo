@@ -5,6 +5,8 @@ import math
 import inspect
 
 import torch
+
+from isaaclab_tasks.controllers.borinot_angles import clamp_scalar_actions, decode_angle_actions, joint_angle_targets
 from pxr import PhysxSchema, Usd, UsdPhysics
 
 import isaaclab.sim as sim_utils
@@ -43,7 +45,7 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
     def get_code_snapshot_files(self):
         """Retain the shared implementation when archiving a training run."""
         return [inspect.getsourcefile(obj) for obj in (
-            BorinotGoalkeeperEnv, IndiController, WrenchController, CbrtController, raw_action_limit_costs, DesiredActuationMetrics, ActuatorDelay,
+            BorinotGoalkeeperEnv, IndiController, WrenchController, CbrtController, raw_action_limit_costs, decode_angle_actions, DesiredActuationMetrics, ActuatorDelay,
             apply_inertial_properties, BorinotInertialPropertiesCfg)]
 
     def __init__(self, cfg: BorinotGoalkeeperEnvCfg, render_mode=None, **kwargs):
@@ -324,14 +326,14 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         self._previous_actuator_commands.copy_(self._actuator_commands)
         if self.cfg.control_mode in ("indi", "wrench", "cbrt", "cbrt_indi"):
             if self.cfg.sac_action_mapping:
-                actions = actions.clamp(-1.0, 1.0)
+                actions = clamp_scalar_actions(actions, self.cfg, 1.0)
         elif not self.cfg.sac_action_mapping and not self.cfg.remove_thrust_clipping:
             if self.cfg.control_mode == "thrust_and_torque_control" and not self.cfg.hold_arm:
                 # PPO joint actions are unbounded N*m; retain only the rotor input clamp.
                 actions = torch.cat((actions[:, :6].clamp(-self.cfg.action_clamp, self.cfg.action_clamp),
                                      actions[:, 6:]), dim=-1)
             else:
-                actions = actions.clamp(-self.cfg.action_clamp, self.cfg.action_clamp)
+                actions = clamp_scalar_actions(actions, self.cfg, self.cfg.action_clamp)
         self.actions.copy_(actions)
         self._previous_paddle.copy_(self._paddle_pose()[0])
         ball_pos = self.ball.data.root_pos_w - self.scene.env_origins
@@ -423,9 +425,8 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
                 effort = effort * self.cfg.effort_lim_sim
             self.robot.set_joint_effort_target(effort, joint_ids=self.joint_ids)
         else:
-            targets = actions[:, -2:] * self._joint_scale
-            if self.cfg.sac_action_mapping:
-                targets = targets + self._sac_joint_offset
+            targets = joint_angle_targets(decode_angle_actions(actions, self.cfg), self.cfg, self._joint_scale,
+                                          self._sac_joint_offset if self.cfg.sac_action_mapping else None)
             if self.cfg.hold_arm:
                 targets = torch.zeros_like(targets)
             self.robot.set_joint_position_target(targets, joint_ids=self.joint_ids)

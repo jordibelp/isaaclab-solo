@@ -18,6 +18,9 @@ SOURCE = FOLDER / "borinot_goalkeeper_simple_env.py"
 spec = importlib.util.spec_from_file_location("simple_task_math", ORIGINAL / "task_math.py")
 task_math = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(task_math)
+angle_spec = importlib.util.spec_from_file_location("simple_angle_actions", FOLDER.parents[1] / "controllers/borinot_angles.py")
+angles = importlib.util.module_from_spec(angle_spec)
+angle_spec.loader.exec_module(angles)
 N = 8
 RACKET, ARM1, ARM2, BASE, GOAL = range(5)  # ball sensor columns
 FLOOR, GOAL_BODY, LINK2, PADDLE = range(4)  # base sensor columns
@@ -84,7 +87,7 @@ def config(**overrides):
                                           effort_limit=None, velocity_limit=None)})
     cfg = SimpleNamespace(**{**values, **overrides})
     configure = methods(FOLDER / "borinot_goalkeeper_simple_env_cfg.py")["configure_control"]
-    scope = {"math": math}
+    scope = {"math": math, **vars(angles)}
     exec(compile(ast.Module(body=[configure], type_ignores=[]), "cfg", "exec"), scope)
     scope["configure_control"](cfg)
     return cfg

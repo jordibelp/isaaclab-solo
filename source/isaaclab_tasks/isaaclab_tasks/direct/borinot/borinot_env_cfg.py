@@ -34,6 +34,11 @@ class BorinotEnvCfg(DirectRLEnvCfg):
 
 
     des_joint_out = True
+    # Replace supported scalar angle channels with (cos, sin) pairs; see borinot/ANGLE_ACTIONS.md.
+    predict_yaw_as_sincos = False
+    predict_calf_joint_pos_as_sincos = False
+    predict_thigh_joint_pos_as_sincos = False
+    # Legacy des_joint_out already encodes BOTH joints as pairs, independent of these flags.
     enabled_self_collisions=True
 
     action_space = 8 if not des_joint_out else 10  

@@ -11,6 +11,8 @@ from dataclasses import dataclass
 
 import torch
 
+from .borinot_angles import clamp_scalar_actions, decode_angle_actions, joint_angle_targets
+
 from .borinot_indi import INDI_TILT_METHODS, attitude_acceleration, rotation_from_quat
 
 
@@ -157,10 +159,12 @@ class WrenchController:
 
     def step(self, actions, quaternion, rates, joint_pos, joint_vel, force_w, moment_b):
         if self.task.sac_action_mapping:
-            u = actions.clamp(-1, 1)
-            acceleration, heading = u[:, :3] * self.accel_scale, self.home_yaw + math.radians(self.cfg.heading_range_degs)*u[:, 3]
-            reference_rates, target = u[:, 4:7]*self.rate_scale, u[:, 7:9]*self.joint_scale
+            u = decode_angle_actions(clamp_scalar_actions(actions, self.task, 1.0), self.task)
+            heading_scale = 1.0 if self.task.predict_yaw_as_sincos else math.radians(self.cfg.heading_range_degs)
+            acceleration, heading = u[:, :3] * self.accel_scale, self.home_yaw + heading_scale*u[:, 3]
+            reference_rates, target = u[:, 4:7]*self.rate_scale, joint_angle_targets(u, self.task, self.joint_scale)
         else:
+            actions = decode_angle_actions(actions, self.task)
             acceleration, heading, reference_rates, target = actions[:, :3], actions[:, 3], actions[:, 4:7], actions[:, 7:9]
         self.external_force_w.copy_(torch.where(self.ready[:, None], force_w, 0.0))
         self.external_moment_b.copy_(torch.where(self.ready[:, None], moment_b, 0.0))

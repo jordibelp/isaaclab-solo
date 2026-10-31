@@ -90,15 +90,33 @@ def raw_action_limit_costs(actions, cfg, hover, *, legacy=False):
         if legacy and cfg.des_joint_out:
             reference = actions[:, 6:10]  # two atan2 vectors, clipped componentwise
         elif not legacy:
+            # Pairs are normalized, not component-clipped. Do not penalize their
+            # arbitrary magnitude, and exclude all encoded joints in hold mode.
+            mode = cfg.control_mode
+            joint_width = 2
+            if mode != "thrust_and_torque_control":
+                for joint in ("thigh", "calf"):
+                    joint_width += bool(getattr(cfg, f"predict_{joint}_joint_pos_as_sincos", False))
+            joint_start = actions.shape[-1] - joint_width
+            references = actions.clone()
+            if mode in ("indi", "wrench") and getattr(cfg, "predict_yaw_as_sincos", False):
+                slot = 6 if mode == "indi" else 3
+                references[:, slot:slot+2] = 0
+            start = joint_start
+            for joint in ("thigh", "calf"):
+                encoded = mode != "thrust_and_torque_control" and getattr(cfg, f"predict_{joint}_joint_pos_as_sincos", False)
+                if encoded:
+                    references[:, start:start+2] = 0
+                start += 2 if encoded else 1
             if cfg.control_mode in ("indi", "wrench", "cbrt", "cbrt_indi"):
                 if cfg.sac_action_mapping:
-                    reference = actions[:, :-2] if cfg.hold_arm else actions  # normalized SAC references only
+                    reference = references[:, :joint_start] if cfg.hold_arm else references
             elif not cfg.sac_action_mapping and not cfg.remove_thrust_clipping:
                 limit = cfg.action_clamp
                 if cfg.control_mode == "PI_rotors_PD_joint_pos_control":
-                    reference = actions[:, :-2] if cfg.hold_arm else actions
+                    reference = references[:, :joint_start] if cfg.hold_arm else references
                 elif not torque_output and not cfg.hold_arm:
-                    reference = actions[:, -2:]
+                    reference = references[:, joint_start:]
         costs[:, 2] = (reference.abs() - limit).clamp_min(0).square().sum(-1)
     return costs
 

@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: BSD-3-Clause
-"""Six-action collective/body-rate control, optionally with a second INDI solve.
+"""Collective/body-rate control, optionally with a second INDI solve.
 
-Actions: [omega_body(3), collective_thrust(1), q_leg(2)]. No attitude loop or hip sensor.
+Scalar layout: [omega_body(3), collective_thrust(1), q_leg(2)]. Joint pairs are optional.
+No attitude loop or hip sensor.
 """
 from __future__ import annotations
 
@@ -9,6 +10,8 @@ import math
 from dataclasses import dataclass
 
 import torch
+
+from .borinot_angles import clamp_scalar_actions, decode_angle_actions, joint_angle_targets
 
 from .borinot_indi import Butterworth
 from .borinot_wrench import WrenchAllocator, matvec
@@ -97,12 +100,13 @@ class CbrtController:
 
     def step(self, actions, rates, joint_pos, joint_vel):
         if self.task.sac_action_mapping:
-            u = actions.clamp(-1, 1)
+            u = decode_angle_actions(clamp_scalar_actions(actions, self.task, 1.0), self.task)
             reference_rates = u[:, :3]*self.rate_scale
             collective = self.hover_total*(1+torch.where(u[:, 3:4] >= 0,
                 (self.task.thrust_to_weight-1)*u[:, 3:4], u[:, 3:4]))
-            target = u[:, 4:6]*self.joint_scale
+            target = joint_angle_targets(u, self.task, self.joint_scale)
         else:
+            actions = decode_angle_actions(actions, self.task)
             reference_rates, collective, target = actions[:, :3], actions[:, 3:4], actions[:, 4:6]
         self.alpha_desired.copy_(self.rate_gain*(reference_rates-rates))
         gyro = torch.linalg.cross(rates, rates@self.inertia.T)

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 import torch
 
+from .borinot_angles import clamp_scalar_actions, decode_angle_actions, joint_angle_targets
 
 INDI_TILT_METHODS = ("geom", "method_1", "method_2")
 # Definitions and comparison (geom = method 3):
@@ -325,13 +326,15 @@ class IndiController:
 
     def step(self, actions, quaternion, rates, joint_pos, joint_vel):
         if self.task.sac_action_mapping:
-            u = actions.clamp(-1, 1)
+            u = decode_angle_actions(clamp_scalar_actions(actions, self.task, 1.0), self.task)
             acceleration, reference_rates = u[:, :3] * self.accel_scale, u[:, 3:6] * self.rate_scale
-            heading = self.home_yaw + math.radians(self.cfg.heading_range_degs) * u[:, 6]
-            target = u[:, 7:9] * self.joint_scale
+            heading_scale = 1.0 if self.task.predict_yaw_as_sincos else math.radians(self.cfg.heading_range_degs)
+            heading = self.home_yaw + heading_scale * u[:, 6]
+            target = joint_angle_targets(u, self.task, self.joint_scale)
         else:
             # PPO: world m/s^2, body rad/s, heading offset rad, absolute joint rad.
             # Do not bound references here; allocation and PID bound actuator outputs.
+            actions = decode_angle_actions(actions, self.task)
             acceleration, reference_rates = actions[:, :3], actions[:, 3:6]
             heading, target = self.home_yaw + actions[:, 6], actions[:, 7:9]
         collective, desired_rotation = thrust_attitude(acceleration, heading, self.mass)

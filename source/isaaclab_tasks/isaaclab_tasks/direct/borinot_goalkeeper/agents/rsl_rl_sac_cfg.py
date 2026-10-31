@@ -5,6 +5,7 @@ import torch
 from isaaclab.utils import configclass
 from isaaclab_rl.rsl_rl import RslRlLocalRedundancyCfg
 from isaaclab_tasks.direct.solo12.agents.rsl_rl_sac_cfg import Solo12SACRunnerCfg
+from isaaclab_tasks.controllers.borinot_angles import angle_action_size
 from rsl_rl_sac.algorithms import SAC
 
 
@@ -14,13 +15,10 @@ class BorinotGoalkeeperSAC(SAC):
         task = getattr(env, "unwrapped", env)
         if not task.cfg.sac_action_mapping:
             raise ValueError("Borinot SAC requires sac_action_mapping=True; use source/scripts/rsl_rl/train.py.")
-        if task.cfg.control_mode in ("cbrt", "cbrt_indi"):
-            return torch.ones(6, device=device), torch.ones(6, device=device)
-        if task.cfg.control_mode in ("indi", "wrench"):
-            return torch.ones(9, device=device), torch.ones(9, device=device)
-        if task.cfg.control_mode == "thrust_and_torque_control":
-            # All outputs stay normalized. The env scales each joint by effort_lim_sim.
-            return torch.ones(8, device=device), torch.ones(8, device=device)
+        if task.cfg.control_mode != "thrust_and_PD_joint_pos_control":
+            # Includes expanded (cos, sin) channels. Direct torque keeps eight outputs.
+            size = angle_action_size(task.cfg)
+            return torch.ones(size, device=device), torch.ones(size, device=device)
         # Rotor actions stay in [-1, 1]; the environment maps them around hover.
         # Joint actions retain the existing target-scale units, like Solo12 SAC.
         limits = task._sac_joint_soft_limits.to(device)
@@ -28,6 +26,11 @@ class BorinotGoalkeeperSAC(SAC):
         scale = task._joint_scale.to(device)
         upper = torch.cat((torch.ones(6, device=device), (limits[:, 1] - offset) / scale))
         lower = torch.cat((torch.ones(6, device=device), (offset - limits[:, 0]) / scale))
+        for index, joint in reversed(tuple(enumerate(("thigh", "calf")))):
+            if getattr(task.cfg, f"predict_{joint}_joint_pos_as_sincos", False):
+                slot = 6 + index
+                upper = torch.cat((upper[:slot], torch.ones(2, device=device), upper[slot+1:]))
+                lower = torch.cat((lower[:slot], torch.ones(2, device=device), lower[slot+1:]))
         return upper, lower
 
 
