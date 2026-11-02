@@ -407,6 +407,79 @@ Chase, Side, Top and mouse-controlled Free. Start with `--camera chase` or
 `--vz_range` and `--wz_range` change the slider ranges, not the training task.
 An explicit slider range must include the initial value and zero.
 
+### Live visual overlays
+
+The same command opens a **Visual overlays** section in the live control panel.
+Every checkbox starts **off**. There is no activation flag to add. The overlays
+follow robot 0; the rest of the clones are not drawn. Scroll the panel if needed.
+
+- **Rotor commands** (orange): six final clipped thrust commands, in N, before
+  motor speed lag. These are allocator outputs, not raw policy actions or an
+  infeasible requested wrench. Each arrow starts 2.5 cm above its rotor plane.
+- **Rotor realised thrust** (cyan): six current model thrusts, in N, after motor
+  speed lag. Both rotor groups point along body +Z and follow full body tilt.
+  Paired arrows have a small opposite 1.2 cm body-X offset so both remain visible.
+- **Policy body-rate target** (magenta): the policy's desired body angular
+  velocity in rad/s for `cbrt` and `cbrt_indi`. PPO already outputs rad/s; SAC
+  normalized outputs are clipped and scaled by `body_rate_scale`. This shows
+  the latest processed policy output **before optional actuator delay**, not
+  INDI angular acceleration or the user-commanded world-Z yaw rate. The checkbox
+  is disabled for other control modes.
+- **Measured angular velocity** (violet): current body rates, in rad/s. Both
+  angular arrows are rotation-axis vectors, transformed with full body attitude.
+- **Commanded velocity** (green): current `vx, vy, vz`, in m/s. XY follows the
+  instantaneous yaw-only heading frame; Z remains world up, even under tilt.
+- **Measured velocity** (blue): actual world linear velocity, shown with a
+  heading-frame numeric readout for comparison with the command.
+- **External push** (red): the signed world-Z disturbance force, in N, drawn at
+  its actual body application point.
+
+Arrow length is proportional to magnitude: 0.05 m/N for rotors, 1 m/(m/s) for
+linear velocity, 0.25 m/(rad/s) for angular velocity and 0.03 m/N for pushes.
+The **Visual size multiplier** scales all these lengths. It does not change
+commands, forces, rewards or controller gains. Zero vectors have no visible
+arrow. Enabled signals also have live numeric readouts; rotor values use the
+configured rotor order. **All off** hides every overlay immediately. Markers are
+local collision-free cylinder/cone geometry, with no asset download. With all
+features off, no marker prims or per-frame overlay tensors are created.
+
+These are play-only diagnostics. No training configuration, observation,
+controller, or checkpoint format is changed. Relaunch an existing player to
+load the updated UI. `--no-ui` and `--headless` leave overlays off.
+
+### Live training-style base pushes
+
+The **Base pushes** section controls the same world-vertical force and moment
+about the randomized base CoM as training. It applies independently to every
+clone. The initial automatic behavior is unchanged: the saved force stage,
+uniform magnitude from zero to that stage's limit, random sign, an area-uniform
+point on the base disk, and the configured duration/start-to-start intervals.
+
+- **Max |Fz| [N]** selects the next push's maximum magnitude. Its slider extends
+  to the largest force stage in the current environment configuration. It starts
+  at the checkpoint's selected stage. A new limit does not alter an active push.
+- **Automatic pushes** keeps the training timing, using your selected magnitude
+  and point settings. Uncheck it for manual-only pushes; an active pulse finishes
+  normally unless you press **Stop pushes**.
+- **Sample & apply now** samples a new magnitude, sign, duration and application
+  point. It replaces any active pulse and restarts the next automatic interval.
+- **+Fmax / -Fmax** applies exactly the slider magnitude upward/downward, with a
+  sampled training duration. These buttons avoid a nearly zero random sample.
+- **Sample a new application point** chooses the same area-uniform body-XY disk
+  as training. Uncheck it to choose the **Point radius** and **Point azimuth**
+  sliders. Radius is measured from the body-link origin, not the randomized CoM.
+  Zero azimuth is body +X; +90 degrees is body +Y. The Z face still follows the
+  training rule: bottom face for an upward force, top face for a downward force.
+- **Stop pushes** clears active/queued pulses and disables automatic pushes.
+  Pressing Apply while paused queues a pulse for the next physics step on resume.
+
+The panel reports robot 0's signed force, remaining pulse time and body XYZ
+application point. Enable the red **External push** overlay to see its location
+and direction. Robot resets cancel their active pulses. Automatic pushes resume
+after the usual randomized first interval; manual-only mode stays manual.
+UI settings persist through robot resets, but start fresh when the player is
+relaunched. They do not change training configs or the checkpoint's stage.
+
 `--episode_length_s 80` changes only the play timeout. Omitted keeps the task's
 10-second timeout. Crash, tilt and flight-bound resets still apply. Zero `vz`
 requests zero vertical speed; it does not hold a chosen altitude. A sustained

@@ -5,6 +5,7 @@ import math
 import torch
 
 from .borinot_cmd_vel_env import BorinotCmdVelEnv
+from .task_math import sample_steps, sample_vertical_pushes
 
 
 def checkpoint_force_level(infos, configured_level, override_keys):
@@ -22,6 +23,10 @@ class BorinotCmdVelPlayEnv(BorinotCmdVelEnv):
 
     def __init__(self, cfg, command=None, **kwargs):
         self.play_command = None
+        self.play_push_limit_n = None  # None delegates to the unchanged training scheduler.
+        self.play_push_automatic = True
+        self.play_push_point_xy = None
+        self.play_push_request = None
         super().__init__(cfg, **kwargs)
         if command is not None:
             self.set_play_command(command)
@@ -37,3 +42,60 @@ class BorinotCmdVelPlayEnv(BorinotCmdVelEnv):
             return super()._resample_commands(env_ids)
         self._commands[env_ids] = self.play_command
         self._command_steps_left[env_ids] = max(1, math.ceil(self.cfg.command_resampling_time_s / self.step_dt))
+
+    def configure_play_pushes(self, limit_n, automatic, point_xy=None):
+        """Play-only settings. A changed limit affects the NEXT push, not an active one."""
+        if not math.isfinite(limit_n) or limit_n < 0:
+            raise ValueError("Push magnitude must be finite and non-negative.")
+        if point_xy is not None:
+            if len(point_xy) != 2 or not all(math.isfinite(v) for v in point_xy):
+                raise ValueError("Push point must contain two finite body-link coordinates.")
+            if math.hypot(*point_xy) > self.cfg.base_push_application_radius_m + 1e-9:
+                raise ValueError("Push point must lie inside the training application disk.")
+            point_xy = tuple(point_xy)
+        self.play_push_limit_n = float(limit_n)
+        self.play_push_automatic = bool(automatic)
+        self.play_push_point_xy = point_xy
+
+    def request_play_push(self, mode="sample"):
+        if mode not in ("sample", "up", "down"):
+            raise ValueError("Push mode must be sample, up, or down.")
+        self.play_push_request = mode
+
+    def stop_play_pushes(self):
+        self.play_push_automatic = False
+        self.play_push_request = None
+        self._base_push_steps_left.zero_()
+        self._base_push_force_z_w.zero_()
+
+    def _update_pushes(self):
+        if self.play_push_limit_n is None and self.play_push_automatic and self.play_push_request is None:
+            return super()._update_pushes()
+        # Same sampler, policy-clock durations, start-to-start timing and physical
+        # force/CoM-moment path as training. Only scheduling and selection differ.
+        if self.play_push_request is not None:
+            ids = self.robot._ALL_INDICES
+        elif self.play_push_automatic:
+            ids = (self._base_push_steps_until_next <= 0).nonzero().flatten()
+        else:
+            ids = self.robot._ALL_INDICES[:0]
+        if len(ids):
+            limits = (self._force_limits[self._episode_stage[ids]] if self.play_push_limit_n is None else
+                      self._base_push_force_z_w.new_full((len(ids),), self.play_push_limit_n))
+            force, points = sample_vertical_pushes(limits, self.cfg.base_push_application_radius_m,
+                                                    self.cfg.base_push_application_half_height_m)
+            if self.play_push_request in ("up", "down"):
+                force = limits * (1 if self.play_push_request == "up" else -1)
+                points[:, 2] = torch.where(force >= 0, -self.cfg.base_push_application_half_height_m,
+                                           self.cfg.base_push_application_half_height_m)
+            if self.play_push_point_xy is not None:
+                points[:, :2] = points.new_tensor(self.play_push_point_xy)
+            self._base_push_force_z_w[ids], self._base_push_points_b[ids] = force, points
+            self._base_push_steps_left[ids] = sample_steps(len(ids), self.cfg.base_push_duration_range_s,
+                                                           self.step_dt, self.device)
+            self._base_push_steps_until_next[ids] = sample_steps(len(ids), self.cfg.base_push_interval_range_s,
+                                                                self.step_dt, self.device)
+        self.play_push_request = None
+        self._base_push_force_z_w[self._base_push_steps_left <= 0] = 0.
+        self._base_push_steps_left.sub_(1).clamp_min_(0)
+        self._base_push_steps_until_next.sub_(1)
