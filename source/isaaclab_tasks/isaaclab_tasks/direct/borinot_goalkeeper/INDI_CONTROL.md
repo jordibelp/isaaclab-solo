@@ -31,7 +31,7 @@ We adapt the architecture to Borinot, rather than claim an exact reproduction of
 | Four or six rotors? | Borinot's six actual mixer columns | Its geometry and spin order differ from the source quadrotor. |
 | Angular-acceleration feedforward `alpha_r`? | Zero | The policy supplies no jerk or snap trajectory. Differentiating held actions would create impulses. |
 | Joint controller? | Explicit software PID; default `ki=0.5` | It runs at a known physics clock. Set `env.indi.joint_ki=0.0` for PD. |
-| Motor lag? | First-order **speed** lag, 40 ms by default | The INDI feedback variable is rotor speed. Other modes retain their existing thrust lag. |
+| Motor lag? | First-order **speed** lag, 40 ms by default | INDI, Wrench, CBRT and direct rotor modes use speed lag. Only the legacy PI rotor mode retains thrust lag. |
 | Rotor spin inertia `Ip`? | Zero by default; nonzero supported | No calibrated Borinot value was found. We do not borrow another vehicle's value. |
 | Inertia used by INDI? | Nominal USD base-body inertia | This is a fixed controller model, not privileged knowledge of each randomized clone. |
 | Mass used for collective thrust? | Nominal mass of the whole robot | The rotors support the base, arm and racket. |

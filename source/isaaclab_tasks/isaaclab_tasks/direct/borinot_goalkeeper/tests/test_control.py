@@ -118,9 +118,10 @@ def test_invalid_control_settings_fail_before_simulation(field, value):
         method("borinot_goalkeeper_env_cfg.py", "configure_control")(cfg)
 
 
-def action_env(mode, hold_arm=False, motor_time_constant_s=None):
+def action_env(mode, hold_arm=False, motor_time_constant_s=None, physics_hz=200):
     cfg = config()
     cfg.control_mode, cfg.hold_arm = mode, hold_arm
+    cfg.physics_hz = physics_hz
     if motor_time_constant_s is not None:
         cfg.motor_time_constant_s = motor_time_constant_s
     method("borinot_goalkeeper_env_cfg.py", "configure_control")(cfg)
@@ -197,8 +198,8 @@ def test_direct_rotors_have_no_rate_feedback_and_keep_motor_lag(mode, tc):
     env.actions[:, :6] = torch.tensor([-1., -.5, 0., .5, 1., 0.])
     env.robot.data.root_ang_vel_b[:] = torch.tensor([5., -4., 3.])
     requested = torch.tensor([0., 2.5, 5., 7.5, 10., 5.], dtype=torch.float64)
-    alpha = 1 - math.exp(-env.physics_dt / tc)
-    expected = 5.0 + alpha * (requested - 5.0)
+    pole = math.exp(-env.physics_dt / tc)
+    expected = (math.sqrt(5.0) * pole + requested.sqrt() * (1 - pole)).square()
     apply = method("borinot_goalkeeper_env.py", "_apply_action")
     apply(env)
     torch.testing.assert_close(env._rotor_thrust, expected.expand(3, -1))
@@ -207,7 +208,30 @@ def test_direct_rotors_have_no_rate_feedback_and_keep_motor_lag(mode, tc):
     torch.testing.assert_close(calls["wrench"]["forces"][:, 0, 2], wrench[:, 0].float())
     torch.testing.assert_close(calls["wrench"]["torques"][:, 0], wrench[:, 1:])
     apply(env)
-    torch.testing.assert_close(env._rotor_thrust, (expected + env._motor_alpha * (requested-expected)).expand(3, -1))
+    expected = (math.sqrt(5.0) * pole**2 + requested.sqrt() * (1 - pole**2)).square()
+    torch.testing.assert_close(env._rotor_thrust, expected.expand(3, -1))
+
+
+@pytest.mark.parametrize("mode", MODES[:2])
+@pytest.mark.parametrize("sac", [False, True])
+@pytest.mark.parametrize("physics_hz", [200, 400])
+@pytest.mark.parametrize("initial,target", [(0.0, 10.0), (10.0, 0.0)])
+def test_direct_rotor_speed_matches_continuous_step_solution(mode, sac, physics_hz, initial, target):
+    """The analytic speed solution must precede squaring, including spin-down."""
+    env, _ = action_env(mode, motor_time_constant_s=.04, physics_hz=physics_hz)
+    env.cfg.sac_action_mapping = sac
+    env.cfg.thrust_to_weight = 2.0
+    env._sac_joint_offset = torch.zeros(2)
+    env.actions[:, :6] = target / env._hover_per_rotor - 1
+    env._rotor_thrust.fill_(initial)
+    apply = method("borinot_goalkeeper_env.py", "_apply_action")
+    for tick in range(1, int(4 * .04 * physics_hz) + 1):
+        apply(env)
+        decay = math.exp(-tick * env.physics_dt / .04)
+        speed = math.sqrt(target / env.cfg.kf) + (
+            math.sqrt(initial / env.cfg.kf) - math.sqrt(target / env.cfg.kf)) * decay
+        expected = torch.full_like(env._rotor_thrust, env.cfg.kf * speed**2)
+        torch.testing.assert_close(env._rotor_thrust, expected, rtol=1e-12, atol=1e-13)
 
 
 @pytest.mark.parametrize("remove,requested", [
@@ -219,7 +243,8 @@ def test_thrust_clipping_flag(remove, requested):
     env.cfg.remove_thrust_clipping, env.cfg.thrust_to_weight = remove, 2.0
     env.actions[:, :6] = torch.tensor([-2., -1., 0., 1., 3., 10.])
     method("borinot_goalkeeper_env.py", "_apply_action")(env)
-    expected = 5.0 + env._motor_alpha * (torch.tensor(requested, dtype=torch.float64) - 5.0)
+    pole = math.exp(-env.physics_dt / env.cfg.motor_time_constant_s)
+    expected = (math.sqrt(5.0) * pole + torch.tensor(requested, dtype=torch.float64).sqrt() * (1 - pole)).square()
     torch.testing.assert_close(env._rotor_thrust, expected.expand(3, -1))
 
 

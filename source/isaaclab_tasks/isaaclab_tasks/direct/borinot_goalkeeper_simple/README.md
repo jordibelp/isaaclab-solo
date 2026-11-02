@@ -9,6 +9,13 @@ inertial properties are enabled here too. Read
 [shared inertial properties](../borinot/INERTIAL_PROPERTIES.md) for the independent
 switches, payload precedence and older-checkpoint opt-outs.
 
+**Direct motor dynamics (2026-11-02):** both direct rotor modes share the
+original task's updated motor model: lag rotor angular speed with the existing
+40 ms time constant, then compute thrust as `kf * omega**2`. Zero lag is still
+instantaneous. Joint controls and command clipping are unchanged. INDI/Wrench/CBRT
+already use speed lag; legacy PI retains thrust lag. Use the original code
+revision for an exact replay of older direct policies' training dynamics.
+
 In `thrust_and_torque_control`, PPO's last two actions are joint torques in N·m, passed through without scaling or action clipping. `rwd_scale_torque_limits` penalizes squared relative excess beyond ±`effort_lim_sim` (default ±2.7 N·m); it does not hard-clamp the request. SAC keeps normalized [-1, 1] joint actions multiplied by `effort_lim_sim`. Rotor mappings, PD/PI/INDI modes and neutral arm hold are unchanged. Older direct-torque PPO checkpoints need their original source revision because their joint actions used different units. SAC checkpoints remain compatible.
 
 **New controller:** `env.control_mode=indi` selects the shared nine-action INDI + joint PID interface. Both low-level controllers run at physics rate during training and playback. PPO and both SAC critics are supported. Read the original task's [step-by-step INDI guide](../borinot_goalkeeper/INDI_CONTROL.md) for the full design and commands.

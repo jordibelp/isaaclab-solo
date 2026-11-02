@@ -398,11 +398,19 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         commands.clamp_(min=0.0, max=None if self.cfg.remove_thrust_clipping else cap)
         self._actuator_commands[:, :6] = commands / cap
         if self.cfg.control_mode in ("indi", "wrench", "cbrt", "cbrt_indi"):
-            # High-level controllers model speed lag; direct/PI retain their thrust lag.
+            # These controllers have already advanced their own speed-lag state once.
             self._rotor_thrust.copy_(self.cfg.kf * controller.rotor_speed.square())
         elif self.cfg.motor_time_constant_s == 0:
             self._rotor_thrust.copy_(commands)
+        elif self.cfg.control_mode in ("thrust_and_torque_control", "thrust_and_PD_joint_pos_control"):
+            # Recover positive speed from the realized thrust state so existing resets
+            # stay authoritative. Lag speed, then square; do not filter thrust itself.
+            rotor_speed = torch.sqrt(self._rotor_thrust / self.cfg.kf)
+            command_speed = torch.sqrt(commands / self.cfg.kf)
+            rotor_speed.add_(self._motor_alpha * (command_speed - rotor_speed))
+            self._rotor_thrust.copy_(self.cfg.kf * rotor_speed.square())
         else:
+            # Preserve the legacy PI mode's thrust-lag dynamics.
             self._rotor_thrust.add_(self._motor_alpha * (commands - self._rotor_thrust))
         wrench = self._rotor_thrust @ self._allocation.T
         if self.cfg.control_mode == "indi":

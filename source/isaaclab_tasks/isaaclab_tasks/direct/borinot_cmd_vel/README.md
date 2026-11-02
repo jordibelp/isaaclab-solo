@@ -168,6 +168,14 @@ PPO checkpoints need their original source revision because their torque units
 differ. SAC checkpoints are unchanged. Torque and position checkpoints are not
 interchangeable even though both have eight actions.
 
+**Direct motor dynamics (2026-11-02):** both direct rotor modes now lag rotor
+angular speed with `motor_time_constant_s=0.04`, then compute thrust as
+`kf * omega**2`. PPO/SAC mappings, clipping and joint control are unchanged.
+Zero lag still applies thrust commands immediately. Full resets restore hover
+speed through the existing hover-thrust state. INDI/Wrench/CBRT are unchanged;
+legacy PI retains thrust lag. Older direct-control policies still load, but
+need their original revision for an exact replay of their training dynamics.
+
 The plant keeps the two-joint leg. There is no ball or goal. The racket is
 **off by default**. All four Borinot tasks now default to shared motor point-mass
 and inference leg-inertia overrides. See [shared inertial properties](../borinot/INERTIAL_PROPERTIES.md).

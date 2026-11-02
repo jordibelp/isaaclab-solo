@@ -395,7 +395,19 @@ hover_per_rotor = simulated robot mass * 9.81 / 6
 
 With `rotor_action_scale=1.0`, action −1 requests zero thrust, action 0 requests nominal per-rotor hover thrust, and action +1 requests twice that thrust before the physical command cap. Historical policies trained with different clipping or action units require their original configuration and source revision.
 
-There is **no body-rate PI feedback** in either direct mode. The rotor geometry maps the individual forces to the resulting base force and torque. The physical response still uses a first-order thrust filter with `motor_time_constant_s=0.04`. Zero thrust actions request nominal hover thrust, but do not stabilize position or attitude on their own. These are simulator assumptions, not calibrated ESC or motor limits.
+There is **no body-rate PI feedback** in either direct mode. The rotor geometry maps the individual forces to the resulting base force and torque. Both direct modes apply `motor_time_constant_s=0.04` to **rotor angular speed**, then compute applied thrust from the squared speed, matching the speed-lag model in INDI, Wrench and CBRT:
+
+```text
+omega_command = sqrt(clipped_thrust_command / kf)
+omega_now = sqrt(applied_thrust / kf)
+alpha = 1 - exp(-physics_dt / motor_time_constant_s)
+omega_next = omega_now + alpha * (omega_command - omega_now)
+applied_thrust_next = kf * omega_next**2
+```
+
+At zero time constant, thrust follows the clipped command immediately. The existing hover-thrust reset also restores the corresponding hover speed; no second motor-state buffer can survive a reset. Command clipping, action-rate costs before motor lag, and joint control are unchanged. This applies to PPO and SAC and to the shared Simple Goalkeeper and command-velocity paths. The legacy PI rotor mode still filters thrust directly.
+
+**Dynamics change (2026-11-02):** older direct policies used a thrust-state filter. Their shapes and action units still load, but their transient response changes on this revision. Use the original source revision for an exact historical replay. Zero thrust actions still request nominal hover thrust, but do not stabilize position or attitude on their own. These are simulator assumptions, not new motor calibration results.
 
 In mode **a**, actions 6–7 request shoulder and elbow torques:
 
@@ -427,7 +439,7 @@ This keeps the previous action mapping:
 | 1–3 | Body-rate targets, scaled by `(2.0, 2.0, 1.5)` rad/s |
 | 4–5 | Shoulder and elbow angle targets, scaled by `(1.1, 1.4)` rad |
 
-At each physics step, the PI controller computes rate error, updates its bounded integral, and requests base torque. A six-rotor allocation matrix converts collective thrust and torque into individual thrust commands. The same thrust clipping and motor-response filter apply. The limb uses the same PD settings as mode b. The PI gains remain `rate_kp` and `rate_ki`; they do not affect modes a or b.
+At each physics step, the PI controller computes rate error, updates its bounded integral, and requests base torque. A six-rotor allocation matrix converts collective thrust and torque into individual thrust commands. The same thrust clipping applies, but this legacy PI mode retains its first-order **thrust-state** filter. The limb uses the same PD settings as mode b. The PI gains remain `rate_kp` and `rate_ki`; they do not affect modes a or b.
 
 ### Solo-style joint actuator
 
