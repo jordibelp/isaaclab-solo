@@ -40,6 +40,8 @@ def rotor_symmetry_audit(cfg):
 class BorinotSymmetry:
     def __init__(self, cfg):
         self.cfg = cfg
+        if getattr(cfg, "goal_conditioned", False):
+            raise ValueError("Go-to observations differ from velocity commands; use --symmetry-mode=none for Borinot-goto.")
         self.legacy = hasattr(cfg, "des_joint_out") and not hasattr(cfg, "control_mode")
         if not self.legacy and not hasattr(cfg, "command_lin_vel_x_range"):
             raise ValueError("Borinot symmetry currently supports command-tracking tasks only. "
