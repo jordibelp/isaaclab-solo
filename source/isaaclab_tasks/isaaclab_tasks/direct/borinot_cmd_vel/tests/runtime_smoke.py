@@ -154,9 +154,15 @@ def main(cfg, agent_cfg):
         offset = 3 if cfg.obs_include_base_lin_acc else 0
         check("previous_action_obs", torch.equal(obs["policy"][:, 10+offset:10+offset+cfg.action_space], env.actions))
         start = 10 + offset + cfg.action_space
-        check("gravity_and_full_rotation_obs", torch.allclose(obs["policy"][:, start:start+3], env.robot.data.projected_gravity_b, atol=1e-6)
-              and torch.equal(obs["policy"][:, start+3:start+12], matrix_from_quat(env.robot.data.root_quat_w).flatten(1)))
-        check("command_obs", torch.equal(obs["policy"][:, start+12:start+16], env._commands))
+        if cfg.projected_gravity_in_obs:
+            check("projected_gravity_obs", torch.allclose(obs["policy"][:, start:start+3], env.robot.data.projected_gravity_b, atol=1e-6))
+            start += 3
+        check("full_rotation_obs", torch.equal(obs["policy"][:, start:start+9], matrix_from_quat(env.robot.data.root_quat_w).flatten(1)))
+        start += 9
+        if cfg.include_base_height:
+            check("absolute_world_height_obs", torch.equal(obs["policy"][:, start:start+1], env.robot.data.root_pos_w[:, 2:3]))
+            start += 1
+        check("command_obs", torch.equal(obs["policy"][:, start:start+4], env._commands))
 
         # Partial reset must clear selected force/controller/effort state only.
         env._base_push_force_z_w[:] = 2.

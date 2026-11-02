@@ -276,8 +276,13 @@ class BorinotCmdVelEnv(DirectRLEnv):
         if self.cfg.obs_include_base_lin_acc:
             acceleration_b = quat_apply_inverse(q, data.body_lin_acc_w[:, self.base_id])
             parts.append(acceleration_b * (self._episode_steps > 0)[:, None])
-        parts += [data.joint_pos[:, self.joint_ids], data.joint_vel[:, self.joint_ids], self.actions,
-                  quat_apply_inverse(q, self._gravity), matrix_from_quat(q).flatten(1), self._commands]
+        parts += [data.joint_pos[:, self.joint_ids], data.joint_vel[:, self.joint_ids], self.actions]
+        if self.cfg.projected_gravity_in_obs:
+            parts.append(quat_apply_inverse(q, self._gravity))
+        parts.append(matrix_from_quat(q).flatten(1))
+        if self.cfg.include_base_height:
+            parts.append(data.root_pos_w[:, 2:3])
+        parts.append(self._commands)
         if self.cfg.control_mode == "PI_rotors_PD_joint_pos_control":
             parts += [self._rotor_thrust / self._hover_per_rotor, self._rate_integral]
         elif self.cfg.control_mode == "indi":

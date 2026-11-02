@@ -226,7 +226,8 @@ def test_time_limit_uses_task_clock_not_randomized_runner_clock():
 def test_command_changes_are_visible_before_the_policy_acts_and_observation_reads_are_stable():
     data = SimpleNamespace(root_lin_vel_b=torch.zeros(2, 3), root_ang_vel_b=torch.zeros(2, 3),
         root_quat_w=torch.tensor([[1., 0, 0, 0]]).expand(2, -1), joint_pos=torch.zeros(2, 2), joint_vel=torch.zeros(2, 2))
-    env = SimpleNamespace(cfg=SimpleNamespace(obs_include_base_lin_acc=False, control_mode="thrust_and_torque_control"),
+    env = SimpleNamespace(cfg=SimpleNamespace(obs_include_base_lin_acc=False, include_base_height=False,
+        projected_gravity_in_obs=True, control_mode="thrust_and_torque_control"),
         robot=SimpleNamespace(data=data), joint_ids=[0, 1], actions=torch.zeros(2, 8),
         _gravity=torch.tensor([[0., 0, -1.]]).expand(2, -1), _commands=torch.zeros(2, 4),
         _command_steps_left=torch.tensor([0, 2]))

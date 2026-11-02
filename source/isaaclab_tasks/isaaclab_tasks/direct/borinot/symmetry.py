@@ -117,8 +117,12 @@ class BorinotSymmetry:
         if not self.legacy or self.cfg.obs_include_prev_action:
             add("actions", self.action_size)
         if not self.legacy:
-            add("gravity", 3)
+            # Missing flags describe the original command-task layout.
+            if getattr(self.cfg, "projected_gravity_in_obs", True):
+                add("gravity", 3)
             add("rotation", 9)
+            if getattr(self.cfg, "include_base_height", False):
+                add("height", 1)
         add("commands", 3 if self.legacy else 4)
         if not self.legacy:
             if self.mode == "PI_rotors_PD_joint_pos_control":

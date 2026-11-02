@@ -116,8 +116,9 @@ power**, not episode energy.
 
 ## Observations and control modes
 
-Policy and critic receive the same simple vector. No absolute base position,
-force, force point, curriculum index, or randomized physics parameters are added.
+Policy and critic receive the same vector. Absolute base **world height** is
+included by default (`env.include_base_height=True`). Absolute world X/Y,
+force, force point, curriculum index, and randomized physics parameters are not added.
 
 Order:
 
@@ -127,10 +128,16 @@ Order:
 4. Two leg joint positions: 2, rad, in `joint_names` order.
 5. Two leg joint velocities: 2, rad/s.
 6. Previous executed policy action: action count below.
-7. Projected unit gravity in body axes: 3, dimensionless.
+7. Optional projected unit gravity in body axes: 3, dimensionless; off by default.
 8. Body-to-world rotation matrix, row-major: 9, dimensionless.
-9. Current velocity command: 4, in the mixed heading/world frames above.
-10. Controller state, only for PI or INDI, as below.
+9. Optional absolute base-link world Z: 1, metres; on by default. This is not
+   height relative to the reset pose or clone origin, and not a terrain clearance estimate.
+10. Current velocity command: 4, in the mixed heading/world frames above.
+11. Controller state for PI, INDI, Wrench or CBRT, as below.
+
+`env.projected_gravity_in_obs=False` removes the redundant gravity vector.
+The full rotation matrix stays, including yaw. Projected gravity alone would
+not encode yaw, so these two representations are not interchangeable in general.
 
 Acceleration is off by default. Enable `env.obs_include_base_lin_acc=True` to
 add it. This is simulated **kinematic acceleration**, not an accelerometer's
@@ -139,15 +146,35 @@ flag changes policy size and requires a compatible checkpoint.
 
 | `env.control_mode` | Actions | Observations | Agents |
 | --- | --- | --- | --- |
-| `thrust_and_torque_control` (default) | 6 rotor thrusts + 2 joint torques = 8 | 34 | PPO, SAC CE, SAC MSE |
-| `thrust_and_PD_joint_pos_control` | 6 rotor thrusts + 2 joint targets = 8 | 34 | PPO, SAC CE, SAC MSE |
-| `PI_rotors_PD_joint_pos_control` | Collective + body rates + 2 joint targets = 6 | 41 | PPO |
-| `indi` | World acceleration + body rates + heading + 2 joint targets = 9 | 43 | PPO, SAC CE, SAC MSE |
+| `thrust_and_torque_control` (default) | 6 rotor thrusts + 2 joint torques = 8 | 32 | PPO, SAC CE, SAC MSE |
+| `thrust_and_PD_joint_pos_control` | 6 rotor thrusts + 2 joint targets = 8 | 32 | PPO, SAC CE, SAC MSE |
+| `PI_rotors_PD_joint_pos_control` | Collective + body rates + 2 joint targets = 6 | 39 | PPO |
+| `indi` | World acceleration + body rates + heading + 2 joint targets = 9 | 41 | PPO, SAC CE, SAC MSE |
+| `wrench` | World acceleration + heading + body rates + 2 joint targets = 9 | 39 | PPO, SAC CE, SAC MSE |
+| `cbrt` / `cbrt_indi` | Body rates + collective + 2 joint targets = 6 | 36 | PPO, SAC CE, SAC MSE |
 
 Optional acceleration adds 3 observations in every mode. PI adds six actual
 rotor thrust states and three rate integrals. INDI adds its six thrust states and
-two joint integrals. As in goalkeeper, not all low-level filter memory is exposed.
-The common direct mode has only the requested features plus the command.
+two joint integrals. Wrench and both CBRT variants add six realized rotor thrusts.
+Rotor states are normalized by nominal hover thrust. As in goalkeeper, not all
+low-level filter memory is exposed. Turning height off removes one observation;
+turning projected gravity on adds three. The table assumes scalar angle actions.
+
+**Old-checkpoint observation compatibility (2026-11-02):** restore the exact
+previous feature order and dimensions with both overrides, in training/resume
+or playback:
+
+```bash
+env.include_base_height=False env.projected_gravity_in_obs=True
+```
+
+Also keep the old acceleration, angle-encoding and control-mode settings.
+The previous direct layout has 34 inputs; the new default has 32. This is an
+explicit layout switch, not a weight conversion. Observation normalization and
+network inputs must match the training layout. No motor-model or other historical
+code changes are undone by these observation flags. The existing symmetry
+augmentation handles every flag combination and leaves height unchanged under
+world-heading rotation. Goalkeeper and Simple Goalkeeper observations are unchanged.
 
 Controls and actuator dynamics reuse the current goalkeeper implementation:
 40 ms motor lag, nominal hover calibration, the 10 N per-rotor ceiling,

@@ -39,6 +39,7 @@ def cfg(mode="indi", bits=(False, False, False), sac=False, acceleration=False):
     result.predict_yaw_as_sincos, result.predict_thigh_joint_pos_as_sincos, result.predict_calf_joint_pos_as_sincos = bits
     result.indi, result.wrench, result.cbrt = indi.IndiControllerCfg(), wrench.WrenchControllerCfg(), cbrt.CbrtControllerCfg()
     result.obs_include_base_lin_acc = acceleration
+    result.include_base_height, result.projected_gravity_in_obs = True, False
     result.command_lin_vel_x_range = (-1., 1.)
     result.robot_home_quat = (1., 0., 0., 0.)
     if sac and mode == MODES[2]:
