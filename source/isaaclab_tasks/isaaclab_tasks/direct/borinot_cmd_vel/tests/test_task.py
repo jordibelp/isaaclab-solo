@@ -106,15 +106,19 @@ def test_push_pulses_have_exact_duration_no_stale_force_and_start_to_start_clock
 
 
 def curriculum_env():
-    return SimpleNamespace(device="cpu", extras={}, step_dt=.1, common_step_counter=100,
+    env = SimpleNamespace(device="cpu", extras={}, step_dt=.1, common_step_counter=100,
         cfg=SimpleNamespace(episode_length_s=10., curriculum=True, curriculum_min_episodes=2,
-            curriculum_min_steps=100, curriculum_tracking_threshold=.7),
+            curriculum_min_steps=100, curriculum_tracking_threshold=.7,
+            command_lin_vel_lim_curriculum=(), forces_applied_to_base_curriculum=(0., 5., 8.)),
         force_level=0, _force_limits=torch.tensor([0., 5., 8.]),
+        _command_ranges=torch.tensor([[[-1., 1.]] * 4] * 3),
         _episode_steps=torch.tensor([100, 100, 100, 0]), _episode_stage=torch.tensor([0, 0, 0, 0]),
         _episode_xy_integral=torch.tensor([8., 9., 10., 0.]), _episode_energy_j=torch.ones(4),
         _episode_terms={"track": torch.ones(4)}, _curriculum_window=torch.zeros(3),
         _window_cursor=0, _stage_episodes=0, _stage_start_step=0, curriculum_stage_pure_episodes=0,
         _actuator_delay=SimpleNamespace(seconds=torch.zeros(4)))
+    env._set_curriculum_level = lambda level: method("_set_curriculum_level")(env, level)
+    return env
 
 
 def test_curriculum_promotes_once_then_ignores_old_stage_episodes():

@@ -24,7 +24,7 @@ parser.add_argument("--camera", "--camera_mode", choices=("follow", "chase", "si
 parser.add_argument("--ui", action=argparse.BooleanOptionalAction, default=True)
 parser.add_argument("--random-commands", action="store_true", help="Use training command sampling instead of live controls.")
 parser.add_argument("--curriculum-level", type=int, default=None,
-                    help="Fixed force stage. Default: saved checkpoint stage, then environment default.")
+                    help="Fixed combined command/force stage. Default: saved checkpoint stage, then environment default.")
 for axis in ("vx", "vy", "vz", "wz"):
     parser.add_argument(f"--{axis}_range", type=float, nargs=2, default=None, metavar=("MIN", "MAX"))
 AppLauncher.add_app_launcher_args(parser)
@@ -118,7 +118,7 @@ def main(env_cfg, agent_cfg):
         print(f"[INFO] Borinot: {env_cfg.control_mode}, {env_cfg.physics_hz}/{env_cfg.policy_hz} Hz, "
               f"actuator_delay={env_cfg.actuator_delay} s, actuator_delay_range={env_cfg.actuator_delay_range}, "
               f"command={'random' if args.random_commands else applied_command} (vx vy vz wz), "
-              f"force stage={env.unwrapped.force_level}, episode={env_cfg.episode_length_s:g} s, "
+              f"curriculum stage={env.unwrapped.force_level}, episode={env_cfg.episode_length_s:g} s, "
               f"checkpoint={Path(checkpoint).name}", flush=True)
         with torch.inference_mode():
             while completed < total_steps and simulation_app.is_running():

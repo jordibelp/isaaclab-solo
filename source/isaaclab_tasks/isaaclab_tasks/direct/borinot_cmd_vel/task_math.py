@@ -10,6 +10,23 @@ CALF_TIP_B = (0.0, -0.136, -0.00495)
 SHAFT_COM_B = (0.0, -0.08, -0.021)
 
 
+def command_force_curriculum_stages(command_limits, force_limits):
+    """Return (XY half-range or None, force limit) for each combined stage.
+
+    Command stages are force-free. Share the final command stage with an
+    initial zero-force stage, so it must pass before any nonzero force starts.
+    Empty command limits preserve the configured independent X/Y ranges.
+    """
+    if (any(not math.isfinite(v) or v < 0 for v in command_limits)
+            or any(a > b for a, b in zip(command_limits, command_limits[1:]))):
+        raise ValueError("command_lin_vel_lim_curriculum must contain non-negative finite, non-decreasing limits.")
+    if not command_limits:
+        return [(None, force) for force in force_limits]
+    commands = command_limits[:-1] if force_limits[0] == 0 else command_limits
+    return ([(limit, 0.0) for limit in commands]
+            + [(command_limits[-1], force) for force in force_limits])
+
+
 def calf_payload_properties(shaft_mass_kg, payload_kg):
     """Merge an ideal point payload into the existing 160 mm rod shaft model.
 

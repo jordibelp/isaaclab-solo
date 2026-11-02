@@ -303,10 +303,35 @@ minimum start-to-start interval. Pulses clear when they end, at partial reset,
 and at automatic reset. Disturbance magnitude, duration and point dimensions are
 configurable assumptions, not a calibrated disturbance model.
 
-## Force curriculum
+## Command and force curriculum
 
-Defaults: `forces_applied_to_base_curriculum=(0.0, 5.0, 8.0)` N.
-Each entry is the maximum magnitude, not a fixed force.
+Set `'env.command_lin_vel_lim_curriculum=[1.0,3.0,5.0]'` to learn wider
+horizontal commands before adding disturbances. Each value sets **both** heading
+X and heading Y sampling ranges to `(-value, value)` m/s. Components are sampled
+independently; this is not a cap on the XY vector's length. Z and yaw-rate ranges
+do not change. Values must be finite, non-negative and non-decreasing.
+
+The default is `()`: no command curriculum, so `command_lin_vel_x_range` and
+`command_lin_vel_y_range` keep their independent configured values.
+
+During command stages, force limits are zero. The final command stage must pass
+the same performance gate before any nonzero force stage begins. With command
+limits `[1,3,5]` and force limits `[0,1,3,6,9]`, the combined stages are:
+
+| Stage | X and Y command ranges (m/s, each) | Maximum force magnitude (N) |
+| --- | --- | --- |
+| 0 | -1 to +1 | 0 |
+| 1 | -3 to +3 | 0 |
+| 2 | -5 to +5 | 0 |
+| 3 | -5 to +5 | 1 |
+| 4 | -5 to +5 | 3 |
+| 5 | -5 to +5 | 6 |
+| 6 | -5 to +5 | 9 |
+
+`forces_applied_to_base_curriculum` still controls the force schedule. Each entry
+is the maximum magnitude, not a fixed force. If its first value is zero, that
+stage is shared with the final command stage. If it starts above zero, all
+command stages remain force-free and must pass before the first force entry.
 
 Promotion uses the unweighted XY tracking kernel, with the same linear width as
 the XYZ reward. It excludes vertical and angular tracking. For each completed
@@ -322,14 +347,16 @@ Advance one level when all are true:
 The ring window retains at most `curriculum_window_episodes=256` episodes.
 Only episodes that started at the current level can contribute. A promoted level
 applies at each environment's next episode reset, not halfway through its flight.
+Timed command resampling also keeps that episode's original stage range.
 Old-stage episodes cannot promote again. Dwell and evidence reset on promotion.
 These settings do not depend on reward weights or on the number of parallel
 environments.
 
 Useful overrides:
 
-- No pushes: `env.curriculum=False env.curriculum_start_level=0`.
-- Fixed 5 N limit: `env.curriculum=False env.curriculum_start_level=1`.
+- Fixed stage: `env.curriculum=False env.curriculum_start_level=N`. The index
+  selects the **combined** command/force stage. With no command curriculum, it
+  retains its previous meaning as a force-list index.
 - Start at the last level: `--skip_curriculum` for training, or
   `env.skip_curriculum=True` for playback.
 - Use just two levels: `'env.forces_applied_to_base_curriculum=[0.0,8.0]'`.
@@ -338,6 +365,12 @@ The runner writes per-stage best checkpoints through `get_curriculum_global_idx`
 Its policy/optimizer checkpoint does not restore this environment's rolling
 evidence, clocks, or live physics state. For a resumed curriculum, select the
 intended `env.curriculum_start_level` explicitly; promotion evidence starts fresh.
+Playback's `--curriculum-level` uses the same combined index. Pass the same
+command and force schedules used during training; checkpoint stage metadata does
+not reconstruct those lists. `Curriculum/command_lin_vel_x_abs_m_s` and
+`Curriculum/command_lin_vel_y_abs_m_s` log the selected sampling limits alongside
+`Curriculum/force_limit_n`. Evaluated/collection-stage logs identify the difficulty
+of the episodes that triggered selection; old episodes may still be in flight.
 
 ## Safety boundaries
 

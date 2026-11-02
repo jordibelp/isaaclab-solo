@@ -13,7 +13,7 @@ from test_control import config as parent_config, method as parent_method
 from test_indi import indi
 from test_wrench import wrench
 from test_cbrt import cbrt
-from test_task import method
+from test_task import method, task_math
 from test_symmetry import symmetry
 
 FOLDER = Path(__file__).resolve().parents[1]
@@ -35,7 +35,8 @@ def config(mode=MODES[0], **overrides):
     # Compile the actual override with a real super() closure, without simulator imports.
     node.bases, node.decorator_list = [ast.Name(id="Parent", ctx=ast.Load())], []
     node.body = [n for n in node.body if isinstance(n, ast.FunctionDef) and n.name == "configure_control"]
-    scope = {"Parent": parent, "math": math}
+    scope = {"Parent": parent, "math": math,
+             "command_force_curriculum_stages": task_math.command_force_curriculum_stages}
     exec(compile(ast.fix_missing_locations(ast.Module(body=[node], type_ignores=[])), "cmd_config", "exec"), scope)
     result = scope[node.name]()
     result.__dict__.update(values)

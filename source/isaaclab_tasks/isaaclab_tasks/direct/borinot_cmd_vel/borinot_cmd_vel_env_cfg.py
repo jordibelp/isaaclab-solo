@@ -5,6 +5,8 @@ from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.utils import configclass
 from isaaclab_tasks.direct.borinot_goalkeeper.borinot_goalkeeper_env_cfg import BorinotGoalkeeperEnvCfg
 
+from .task_math import command_force_curriculum_stages
+
 
 @configclass
 class BorinotCmdVelEnvCfg(BorinotGoalkeeperEnvCfg):
@@ -24,6 +26,9 @@ class BorinotCmdVelEnvCfg(BorinotGoalkeeperEnvCfg):
     # [heading vx, heading vy, world vz, world-Z angular velocity], SI units.
     command_lin_vel_x_range = (-1.0, 1.0)
     command_lin_vel_y_range = (-1.0, 1.0)
+    # Optional symmetric +/- limits for BOTH X and Y (m/s), before force stages.
+    # Empty preserves the independent X/Y ranges above. Z/yaw are unchanged.
+    command_lin_vel_lim_curriculum = ()
     command_lin_vel_z_range = (-0.5, 0.5)
     command_ang_vel_z_range = (-1.0, 1.0)
     command_resampling_time_s = 5.0
@@ -53,7 +58,7 @@ class BorinotCmdVelEnvCfg(BorinotGoalkeeperEnvCfg):
     forces_applied_to_base_curriculum = (0.0, 1.0, 3.0)  # max |world-Z force|, N
     curriculum = True
     skip_curriculum = False
-    curriculum_start_level = 0  # also selects a fixed level when curriculum=False
+    curriculum_start_level = 0  # combined command/force stage; fixed when curriculum=False
     curriculum_tracking_threshold = 0.7
     curriculum_window_episodes = 256
     curriculum_min_episodes = 128
@@ -120,8 +125,9 @@ class BorinotCmdVelEnvCfg(BorinotGoalkeeperEnvCfg):
             raise ValueError("forces_applied_to_base_curriculum must contain non-negative finite force limits.")
         if any(a > b for a, b in zip(forces, forces[1:])):
             raise ValueError("Force curriculum limits must be non-decreasing.")
-        if not 0 <= self.curriculum_start_level < len(forces):
-            raise ValueError("curriculum_start_level must index forces_applied_to_base_curriculum.")
+        stages = command_force_curriculum_stages(self.command_lin_vel_lim_curriculum, forces)
+        if not 0 <= self.curriculum_start_level < len(stages):
+            raise ValueError("curriculum_start_level must index the combined command/force curriculum.")
         if not 1 <= self.curriculum_min_episodes <= self.curriculum_window_episodes or self.curriculum_min_steps < 1:
             raise ValueError("Require 1 <= min episodes <= window episodes and positive curriculum dwell.")
         if self.scene.env_spacing <= 2 * (self.flight_xy_limit_m + 1):

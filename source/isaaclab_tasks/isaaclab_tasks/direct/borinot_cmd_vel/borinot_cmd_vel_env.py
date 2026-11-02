@@ -26,7 +26,7 @@ from isaaclab_tasks.direct.borinot_goalkeeper.paddle import attach_paddle
 
 from .borinot_cmd_vel_env_cfg import BorinotCmdVelEnvCfg
 from .end_effector import configure_end_effector
-from .task_math import sample_steps, sample_vertical_pushes, tracking_kernels
+from .task_math import command_force_curriculum_stages, sample_steps, sample_vertical_pushes, tracking_kernels
 
 
 class BorinotCmdVelEnv(DirectRLEnv):
@@ -103,16 +103,12 @@ class BorinotCmdVelEnv(DirectRLEnv):
 
         self._commands = torch.zeros(self.num_envs, 4, device=self.device)
         self._command_steps_left = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
-        self._command_ranges = torch.tensor((cfg.command_lin_vel_x_range, cfg.command_lin_vel_y_range,
-                                            cfg.command_lin_vel_z_range, cfg.command_ang_vel_z_range), device=self.device)
+        self._init_command_curriculum()
         self._base_push_steps_left = torch.zeros_like(self._command_steps_left)
         self._base_push_steps_until_next = torch.zeros_like(self._command_steps_left)
         self._base_push_force_z_w = torch.zeros(self.num_envs, device=self.device)
         self._base_push_points_b = torch.zeros(self.num_envs, 3, device=self.device)
         self._gravity = torch.tensor([0.0, 0.0, -1.0], device=self.device).expand(self.num_envs, -1)
-        self._force_limits = torch.tensor(cfg.forces_applied_to_base_curriculum, device=self.device)
-        self.force_level = len(self._force_limits) - 1 if cfg.skip_curriculum else cfg.curriculum_start_level
-        self._episode_stage = torch.full_like(self._command_steps_left, self.force_level)
         self._episode_steps = torch.zeros_like(self._command_steps_left)
         self._episode_xy_integral = torch.zeros(self.num_envs, device=self.device)
         self._episode_energy_j = torch.zeros_like(self._episode_xy_integral)
@@ -122,6 +118,33 @@ class BorinotCmdVelEnv(DirectRLEnv):
         self._curriculum_window = torch.zeros(cfg.curriculum_window_episodes, device=self.device)
         self._window_cursor = self._stage_episodes = self._stage_start_step = 0
         self.curriculum_stage_pure_episodes = 0
+
+    def _init_command_curriculum(self):
+        cfg = self.cfg
+        stages = command_force_curriculum_stages(cfg.command_lin_vel_lim_curriculum,
+                                                 cfg.forces_applied_to_base_curriculum)
+        ranges = torch.tensor((cfg.command_lin_vel_x_range, cfg.command_lin_vel_y_range,
+                               cfg.command_lin_vel_z_range, cfg.command_ang_vel_z_range), device=self.device)
+        self._command_ranges = ranges.repeat(len(stages), 1, 1)
+        for stage, (limit, _) in enumerate(stages):
+            if limit is not None:
+                self._command_ranges[stage, :2] = torch.tensor((-limit, limit), device=self.device)
+        self._force_limits = torch.tensor([force for _, force in stages], device=self.device)
+        # Legacy name retained for playback consumers; now indexes combined stages.
+        self._set_curriculum_level(len(stages) - 1 if cfg.skip_curriculum else cfg.curriculum_start_level)
+        self._episode_stage = torch.full_like(self._command_steps_left, self.force_level)
+
+    def _set_curriculum_level(self, level):
+        self.force_level = level
+        commands = self.cfg.command_lin_vel_lim_curriculum
+        self._max_velx_range_curriculum_idx = min(level, len(commands) - 1) if commands else 0
+        command_prefix = len(commands) - int(bool(commands) and self.cfg.forces_applied_to_base_curriculum[0] == 0)
+        self._base_push_force_curriculum_idx = max(0, level - command_prefix)
+        if commands:
+            limit = commands[self._max_velx_range_curriculum_idx]
+            # Keep config/checkpoint metadata in sync with the selected stage.
+            # Ongoing episodes still sample from their stage-tagged range table.
+            self.cfg.command_lin_vel_x_range = self.cfg.command_lin_vel_y_range = (-limit, limit)
 
     def _setup_scene(self):
         self.robot = Articulation(self.cfg.robot)
@@ -147,7 +170,9 @@ class BorinotCmdVelEnv(DirectRLEnv):
 
     def _resample_commands(self, env_ids):
         values = torch.rand((len(env_ids), 4), device=self.device)
-        values = self._command_ranges[:, 0] + values * (self._command_ranges[:, 1] - self._command_ranges[:, 0])
+        # Ongoing episodes retain their stage even at timed command resampling.
+        ranges = self._command_ranges[self._episode_stage[env_ids]]
+        values = ranges[:, :, 0] + values * (ranges[:, :, 1] - ranges[:, :, 0])
         values[torch.rand(len(env_ids), device=self.device) < self.cfg.standing_env_prob] = 0.0
         self._commands[env_ids] = values
         self._command_steps_left[env_ids] = max(1, math.ceil(self.cfg.command_resampling_time_s / self.step_dt))
@@ -319,7 +344,7 @@ class BorinotCmdVelEnv(DirectRLEnv):
                 and self._stage_episodes >= self.cfg.curriculum_min_episodes
                 and self.common_step_counter - self._stage_start_step >= self.cfg.curriculum_min_steps
                 and mean > self.cfg.curriculum_tracking_threshold):
-            self.force_level += 1
+            self._set_curriculum_level(self.force_level + 1)
             self._stage_start_step = self.common_step_counter
             self._stage_episodes = self._window_cursor = self.curriculum_stage_pure_episodes = 0
             self._curriculum_window.zero_()
@@ -335,6 +360,8 @@ class BorinotCmdVelEnv(DirectRLEnv):
             "Curriculum/stage_pure_xy_tracking": mean.clone(),
             "Curriculum/window_completed_episodes": retained,
             "Curriculum/force_limit_n": self._force_limits[self.force_level],
+            "Curriculum/command_lin_vel_x_abs_m_s": self._command_ranges[self.force_level, 0].abs().max(),
+            "Curriculum/command_lin_vel_y_abs_m_s": self._command_ranges[self.force_level, 1].abs().max(),
         }
         self.extras["log"].update({f"Episode_Reward/{name}": value[completed].mean()
                                   for name, value in self._episode_terms.items()})

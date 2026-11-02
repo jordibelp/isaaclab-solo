@@ -202,7 +202,7 @@ class FlightControls:
             force = float(self.env._force_limits[self.env.force_level])
             self.status_label.text = (f"{'PAUSED' if self.paused else 'PLAYING'} · {time_s:.1f} s · "
                                      f"{self.camera} · manual resets {self.manual_resets}\n"
-                                     f"Force stage {self.env.force_level} · limit {force:g} N")
+                                     f"Curriculum stage {self.env.force_level} · force limit {force:g} N")
             self.visual_values_label.text = self.visuals.readout()
             point = self.env._base_push_points_b[0].cpu().tolist()
             force_z = float(self.env._base_push_force_z_w[0])
