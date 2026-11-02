@@ -55,7 +55,7 @@ class BorinotCmdVelEnvCfg(BorinotGoalkeeperEnvCfg):
     base_push_duration_range_s = (0.5, 2.0)
     base_push_application_radius_m = 0.12
     base_push_application_half_height_m = 0.03
-    forces_applied_to_base_curriculum = (0.0, 1.0, 3.0)  # max |world-Z force|, N
+    forces_applied_to_base_curriculum = (0.0,1.0,3.0,6.0,9.0)  # max |world-Z force|, N
     curriculum = True
     skip_curriculum = False
     curriculum_start_level = 0  # combined command/force stage; fixed when curriculum=False
