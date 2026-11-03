@@ -99,7 +99,7 @@ def raw_action_limit_costs(actions, cfg, hover, *, legacy=False):
                     joint_width += bool(getattr(cfg, f"predict_{joint}_joint_pos_as_sincos", False))
             joint_start = actions.shape[-1] - joint_width
             references = actions.clone()
-            if mode in ("indi", "wrench") and getattr(cfg, "predict_yaw_as_sincos", False):
+            if mode in ("indi", "wrench", "model_wrench") and getattr(cfg, "predict_yaw_as_sincos", False):
                 slot = 6 if mode == "indi" else 3
                 references[:, slot:slot+2] = 0
             start = joint_start
@@ -108,7 +108,7 @@ def raw_action_limit_costs(actions, cfg, hover, *, legacy=False):
                 if encoded:
                     references[:, start:start+2] = 0
                 start += 2 if encoded else 1
-            if cfg.control_mode in ("indi", "wrench", "cbrt", "cbrt_indi"):
+            if cfg.control_mode in ("indi", "wrench", "model_wrench", "cbrt", "cbrt_indi"):
                 if cfg.sac_action_mapping:
                     reference = references[:, :joint_start] if cfg.hold_arm else references
             elif not cfg.sac_action_mapping and not cfg.remove_thrust_clipping:

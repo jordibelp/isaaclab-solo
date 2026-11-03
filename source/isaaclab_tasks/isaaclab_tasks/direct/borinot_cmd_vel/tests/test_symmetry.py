@@ -29,7 +29,7 @@ spec = importlib.util.spec_from_file_location("borinot_tracking_test", FOLDER / 
 tracking = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(tracking)
 MODES = ("thrust_and_torque_control", "thrust_and_PD_joint_pos_control", "PI_rotors_PD_joint_pos_control",
-         "indi", "wrench", "cbrt", "cbrt_indi")
+         "indi", "wrench", "model_wrench", "cbrt", "cbrt_indi")
 BITS = tuple(itertools.product((False, True), repeat=3))
 
 
@@ -100,7 +100,7 @@ def test_world_rotation_changes_only_world_frame_and_heading_references(home_yaw
         assert torch.equal(result[:, sl], obs[:, sl])
 
 
-@pytest.mark.parametrize("mode", ["indi", "wrench"])
+@pytest.mark.parametrize("mode", ["indi", "wrench", "model_wrench"])
 @pytest.mark.parametrize("sac", [False, True])
 @pytest.mark.parametrize("pair", [False, True])
 def test_world_acceleration_and_decoded_yaw_rotate_together(mode, sac, pair):
