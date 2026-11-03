@@ -54,7 +54,7 @@ import isaaclab_tasks  # noqa: F401
 from isaaclab.utils.assets import retrieve_file_path
 from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
 from isaaclab_tasks.utils.hydra import hydra_task_config
-from isaaclab_tasks.direct.borinot_cmd_vel.playback import BorinotCmdVelPlayEnv, checkpoint_force_level
+from isaaclab_tasks.direct.borinot_cmd_vel.playback import BorinotCmdVelPlayEnv, configure_play_curriculum
 from isaaclab_tasks.direct.borinot_cmd_vel.playback_ui import FlightControls, RANGE_FIELDS, camera_pose
 
 
@@ -65,8 +65,9 @@ def main(env_cfg, agent_cfg):
     # Inspect saved stage before constructing the env; optimizer state is never restored.
     metadata = torch.load(checkpoint, map_location="cpu", weights_only=False)
     infos = metadata.get("infos") or {}
-    env_cfg.curriculum_start_level = (args.curriculum_level if args.curriculum_level is not None else
-                                     checkpoint_force_level(infos, env_cfg.curriculum_start_level, override_keys))
+    curriculum_config = configure_play_curriculum(env_cfg, infos, checkpoint, override_keys, args.curriculum_level)
+    if curriculum_config is not None:
+        print(f"[INFO] Playback command/force schedule: {curriculum_config}", flush=True)
     del metadata
     env_cfg.scene.num_envs = args.num_envs
     env_cfg.seed = agent_cfg.seed = args.seed
@@ -163,6 +164,9 @@ def main(env_cfg, agent_cfg):
             "simulated_s": completed * env.unwrapped.step_dt, "completed_episodes": episodes,
             "force_level": env.unwrapped.force_level,
             "force_limit_n": float(env.unwrapped._force_limits[env.unwrapped.force_level]),
+            "curriculum_enabled": env_cfg.curriculum,
+            "curriculum_config_path": None if curriculum_config is None else str(curriculum_config),
+            "command_xy_ranges_m_s": env.unwrapped._command_ranges[env.unwrapped.force_level, :2].cpu().tolist(),
             "play_push_settings": {"max_force_n": env.unwrapped.play_push_limit_n,
                                    "automatic": env.unwrapped.play_push_automatic,
                                    "point_body_xy_m": env.unwrapped.play_push_point_xy},

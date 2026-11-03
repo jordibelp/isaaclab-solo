@@ -365,9 +365,14 @@ The runner writes per-stage best checkpoints through `get_curriculum_global_idx`
 Its policy/optimizer checkpoint does not restore this environment's rolling
 evidence, clocks, or live physics state. For a resumed curriculum, select the
 intended `env.curriculum_start_level` explicitly; promotion evidence starts fresh.
-Playback's `--curriculum-level` uses the same combined index. Pass the same
-command and force schedules used during training; checkpoint stage metadata does
-not reconstruct those lists. `Curriculum/command_lin_vel_x_abs_m_s` and
+Playback's `--curriculum-level` uses the same combined index. It reads the recorded
+command/force schedules from the run's `params/env.yaml`, or from a
+`<checkpoint-stem>.env.yaml` file beside downloaded weights. Keep that config when
+copying a checkpoint. Without it, pass the training schedules as Hydra overrides;
+the checkpoint stage number alone cannot reconstruct those lists. Explicit Hydra
+schedule/range fields take priority over the saved config. If you supply a custom
+schedule without a stage, playback uses the configured start level (normally 0),
+not the old checkpoint's stage. `Curriculum/command_lin_vel_x_abs_m_s` and
 `Curriculum/command_lin_vel_y_abs_m_s` log the selected sampling limits alongside
 `Curriculum/force_limit_n`. Evaluated/collection-stage logs identify the difficulty
 of the episodes that triggered selection; old episodes may still be in flight.
@@ -451,7 +456,31 @@ policy inference. Evaluation freezes the curriculum by default. The force level
 comes from checkpoint metadata (`best_model_curriculum_idx`, then
 `curriculum_global_idx`), with the environment default as a fallback. An explicit
 `--curriculum-level N` takes priority. Explicit Hydra stage/skip overrides are
-also preserved instead of being overwritten by checkpoint metadata.
+also preserved instead of being overwritten by checkpoint metadata. Selecting a
+stage does not enable curriculum advancement. The saved YAML restores only the
+command/force schedules and four command-sampling ranges, not control mode,
+observation flags, physics, or other training settings.
+
+For the five checkpoints downloaded on 2026-11-03, the matching `.env.yaml` files
+are already beside the weights. The original wrench playback command works
+without extra schedule overrides. Add `--curriculum-level N` to choose any fixed
+stage:
+
+| Stage | XY command sampling range (m/s, each axis) | Maximum push magnitude (N) |
+| --- | --- | --- |
+| 0 | -1 to 1 | 0 |
+| 1 | -2.25 to 2.25 | 0 |
+| 2 | -4.5 to 4.5 | 0 |
+| 3 | -4.5 to 4.5 | 1 |
+| 4 | -4.5 to 4.5 | 3 |
+| 5 | -4.5 to 4.5 | 6 |
+| 6 | -4.5 to 4.5 | 9 |
+
+These ranges affect `--random-commands`. Manual `--cmd_init` and GUI commands
+remain independent of the sampling limits. To choose arbitrary pushes, use the
+existing play-only force controls. `env.curriculum=False` freezes progression; it
+does **not** mean zero force. Select stage 0, 1, or 2 for no automatic pushes in
+this recorded schedule.
 
 `--cmd_init` takes **four** numbers: `vx vy vz wz`. The first two are heading-frame
 speeds, `vz` is world-up speed in m/s, and `wz` is angular velocity about world Z
@@ -556,10 +585,10 @@ For the trained `aunmwlq7` PPO checkpoint:
 ```
 
 The saved stage is 2. This run's recorded force levels are `[0.0,1.0,3.0]` N,
-matching the current local config. Stage metadata selects an index; it does not
-restore the force magnitudes or other environment settings. For this run,
-`--curriculum-level 0` disables pushes. Match the recorded force list when
-playing a run trained with different magnitudes.
+matching the current local config. Stage metadata selects an index; its matching
+YAML restores the schedule magnitudes when available. For this run,
+`--curriculum-level 0` disables pushes. Without the original config or a sidecar,
+pass the recorded force list when playing a run trained with different magnitudes.
 
 Validated locally on 2026-10-23: 65 CPU checks (50 task and 15 playback tests),
 1,200 public-player steps with this exact checkpoint and nonzero `vz`/`wz`,

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+import yaml
 
 FOLDER = Path(__file__).resolve().parents[1]
 
@@ -29,10 +30,11 @@ def load_definitions(filename, scope):
     return scope
 
 
-PLAY = load_definitions("playback.py", {"torch": torch, "math": math, "BorinotCmdVelEnv": TrainingEnv})
+PLAY = load_definitions("playback.py", {"torch": torch, "math": math, "Path": Path, "yaml": yaml,
+                                      "BorinotCmdVelEnv": TrainingEnv})
 UI = load_definitions("playback_ui.py", {"math": math})
 MATH = load_definitions("task_math.py", {"torch": torch, "math": math})
-PLAY.update({name: MATH[name] for name in ("sample_steps", "sample_vertical_pushes")})
+PLAY.update({name: MATH[name] for name in ("command_force_curriculum_stages", "sample_steps", "sample_vertical_pushes")})
 _training = next(n for n in ast.parse((FOLDER / "borinot_cmd_vel_env.py").read_text()).body
                  if isinstance(n, ast.ClassDef))
 _update = next(n for n in _training.body if isinstance(n, ast.FunctionDef) and n.name == "_update_pushes")
@@ -79,6 +81,91 @@ def test_bad_command_does_not_replace_the_last_valid_command(command):
 ])
 def test_saved_stage_never_overwrites_explicit_environment_selection(infos, configured, overrides, expected):
     assert PLAY["checkpoint_force_level"](infos, configured, overrides) == expected
+
+
+def saved_schedule(tmp_path, original_run=False):
+    checkpoint = tmp_path / "best_model_curriculum_idx_6.pt"
+    source = tmp_path / "params/env.yaml" if original_run else checkpoint.with_suffix(".env.yaml")
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("command_lin_vel_lim_curriculum: !!python/tuple [1.0, 2.25, 4.5]\n"
+                      "forces_applied_to_base_curriculum: !!python/tuple [0.0, 1.0, 3.0, 6.0, 9.0]\n"
+                      "command_lin_vel_z_range: [-0.5, 0.5]\n"
+                      "control_mode: must_not_restore_unrelated_settings\n"
+                      "curriculum: true\n")
+    return checkpoint, source
+
+
+@pytest.mark.parametrize("original_run", [False, True])
+def test_saved_combined_stage_six_restores_schedule_before_config_validation(tmp_path, original_run):
+    from test_observation_flags import config
+    cfg = config("wrench", curriculum=False)
+    checkpoint, source = saved_schedule(tmp_path, original_run)
+    assert PLAY["configure_play_curriculum"](cfg, {"best_model_curriculum_idx": 6}, checkpoint, set()) == source
+    cfg.configure_control()  # Previously raised the user's exact out-of-range error.
+    assert cfg.curriculum_start_level == 6 and not cfg.curriculum
+    assert cfg.control_mode == "wrench"
+    assert MATH["command_force_curriculum_stages"](cfg.command_lin_vel_lim_curriculum,
+                                                  cfg.forces_applied_to_base_curriculum)[6] == (4.5, 9.)
+
+
+@pytest.mark.parametrize("level,expected", enumerate([(1., 0.), (2.25, 0.), (4.5, 0.),
+                                                    (4.5, 1.), (4.5, 3.), (4.5, 6.), (4.5, 9.)]))
+def test_any_recorded_stage_is_fixed_and_cli_level_beats_skip(tmp_path, level, expected):
+    from test_observation_flags import config
+    cfg = config("wrench", curriculum=False, skip_curriculum=True)
+    checkpoint, _ = saved_schedule(tmp_path)
+    PLAY["configure_play_curriculum"](cfg, {"best_model_curriculum_idx": 6}, checkpoint,
+                                      {"env.skip_curriculum"}, level)
+    cfg.configure_control()
+    assert cfg.curriculum_start_level == level and not cfg.curriculum and not cfg.skip_curriculum
+    stages = MATH["command_force_curriculum_stages"](cfg.command_lin_vel_lim_curriculum,
+                                                    cfg.forces_applied_to_base_curriculum)
+    assert stages[level] == expected
+    # The player builds its command-slider ranges before creating the environment.
+    assert cfg.command_lin_vel_x_range == cfg.command_lin_vel_y_range == (-expected[0], expected[0])
+
+
+def test_explicit_schedule_and_ranges_win_without_inheriting_old_checkpoint_stage(tmp_path):
+    from test_observation_flags import config
+    cfg = config(curriculum=False, command_lin_vel_lim_curriculum=(),
+                 forces_applied_to_base_curriculum=(0., 2.), command_lin_vel_z_range=(-2., 2.))
+    checkpoint, _ = saved_schedule(tmp_path)
+    fields = {"env.command_lin_vel_lim_curriculum", "env.forces_applied_to_base_curriculum",
+              "env.command_lin_vel_z_range"}
+    PLAY["configure_play_curriculum"](cfg, {"best_model_curriculum_idx": 6}, checkpoint, fields)
+    cfg.configure_control()
+    assert cfg.curriculum_start_level == 0
+    assert cfg.command_lin_vel_lim_curriculum == () and cfg.forces_applied_to_base_curriculum == (0., 2.)
+    assert cfg.command_lin_vel_z_range == (-2., 2.)
+
+
+@pytest.mark.parametrize("level,skip,expected", [(None, False, 2), (None, True, 6), (0, True, 0)])
+def test_hydra_fixed_stage_and_skip_override_checkpoint_metadata(tmp_path, level, skip, expected):
+    from test_observation_flags import config
+    cfg = config(curriculum=False, curriculum_start_level=2, skip_curriculum=skip)
+    checkpoint, _ = saved_schedule(tmp_path)
+    PLAY["configure_play_curriculum"](cfg, {"best_model_curriculum_idx": 6}, checkpoint,
+                                      {"env.curriculum_start_level", "env.skip_curriculum"}, level)
+    assert cfg.curriculum_start_level == expected
+
+
+def test_missing_schedule_has_actionable_error_and_explicit_stage_still_works(tmp_path):
+    from test_observation_flags import config
+    cfg = config(curriculum=False)
+    with pytest.raises(ValueError, match="stage 6 is outside.*stage index alone"):
+        PLAY["configure_play_curriculum"](cfg, {"best_model_curriculum_idx": 6}, tmp_path / "weights.pt", set())
+    PLAY["configure_play_curriculum"](cfg, {"best_model_curriculum_idx": 6}, tmp_path / "weights.pt", set(), 0)
+    cfg.configure_control()
+    assert cfg.curriculum_start_level == 0
+
+
+def test_empty_force_override_fails_with_config_error_not_index_error(tmp_path):
+    from test_observation_flags import config
+    cfg = config(curriculum=False)
+    cfg.forces_applied_to_base_curriculum = ()
+    with pytest.raises(ValueError, match="forces_applied_to_base_curriculum"):
+        PLAY["configure_play_curriculum"](cfg, {}, tmp_path / "weights.pt",
+                                          {"env.forces_applied_to_base_curriculum"})
 
 
 @pytest.mark.parametrize("yaw", [0, math.pi / 2, -math.pi / 2, math.pi])

@@ -1,21 +1,65 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """Play-only command ownership. The registered training environment is unchanged."""
 import math
+from pathlib import Path
 
 import torch
+import yaml
 
 from .borinot_cmd_vel_env import BorinotCmdVelEnv
-from .task_math import sample_steps, sample_vertical_pushes
+from .task_math import command_force_curriculum_stages, sample_steps, sample_vertical_pushes
 
 
 def checkpoint_force_level(infos, configured_level, override_keys):
     """Use checkpoint stage metadata only when the caller did not select a stage."""
-    if "env.curriculum_start_level" in override_keys or "env.skip_curriculum" in override_keys:
+    if override_keys.intersection(("env.curriculum_start_level", "env.skip_curriculum",
+                                   "env.command_lin_vel_lim_curriculum", "env.forces_applied_to_base_curriculum")):
         return configured_level
     level = infos.get("best_model_curriculum_idx")
     if level is None:
         level = infos.get("curriculum_global_idx")
     return configured_level if level is None else int(level)
+
+
+def configure_play_curriculum(cfg, infos, checkpoint, override_keys, level=None):
+    """Restore stage definitions, not training progression or other environment settings.
+
+    Downloaded checkpoints may carry <stem>.env.yaml; checkpoints in their
+    original run use params/env.yaml. Explicit Hydra fields always take priority.
+    BaseLoader reads numeric sequences without constructing Python YAML objects.
+    """
+    checkpoint = Path(checkpoint)
+    source = next((p for p in (checkpoint.with_suffix(".env.yaml"), checkpoint.parent / "params/env.yaml")
+                   if p.is_file()), None)
+    if source is not None:
+        saved = yaml.load(source.read_text(), Loader=yaml.BaseLoader)
+        for field in ("command_lin_vel_lim_curriculum", "forces_applied_to_base_curriculum",
+                      "command_lin_vel_x_range", "command_lin_vel_y_range",
+                      "command_lin_vel_z_range", "command_ang_vel_z_range"):
+            if field in saved and f"env.{field}" not in override_keys:
+                setattr(cfg, field, tuple(map(float, saved[field])))
+    selected = (checkpoint_force_level(infos, cfg.curriculum_start_level, override_keys)
+                if level is None else level)
+    if level is not None:
+        cfg.skip_curriculum = False
+    if not cfg.forces_applied_to_base_curriculum:
+        raise ValueError("forces_applied_to_base_curriculum must contain non-negative finite force limits.")
+    stages = command_force_curriculum_stages(cfg.command_lin_vel_lim_curriculum,
+                                             cfg.forces_applied_to_base_curriculum)
+    if cfg.skip_curriculum:
+        selected = len(stages) - 1
+    if not 0 <= selected < len(stages):
+        raise ValueError(
+            f"Playback curriculum stage {selected} is outside 0..{len(stages) - 1}. "
+            "The stage index alone does not contain the training schedule. Keep the run's params/env.yaml "
+            "or a <checkpoint-stem>.env.yaml beside downloaded weights, pass the training "
+            "env.command_lin_vel_lim_curriculum and env.forces_applied_to_base_curriculum, "
+            "or select a valid fixed --curriculum-level.")
+    cfg.curriculum_start_level = selected
+    command_limit = stages[selected][0]
+    if command_limit is not None:
+        cfg.command_lin_vel_x_range = cfg.command_lin_vel_y_range = (-command_limit, command_limit)
+    return source
 
 
 class BorinotCmdVelPlayEnv(BorinotCmdVelEnv):
