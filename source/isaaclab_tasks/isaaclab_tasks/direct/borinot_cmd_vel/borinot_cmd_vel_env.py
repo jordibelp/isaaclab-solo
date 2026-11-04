@@ -28,7 +28,7 @@ from isaaclab_tasks.direct.borinot_goalkeeper.paddle import attach_paddle
 
 from .borinot_cmd_vel_env_cfg import BorinotCmdVelEnvCfg
 from .end_effector import configure_end_effector
-from .task_math import command_force_curriculum_stages, sample_steps, sample_vertical_pushes, tracking_kernels
+from .task_math import command_force_curriculum_stages, sample_steps, sample_vertical_pushes, tracking_metrics
 
 
 class BorinotCmdVelEnv(DirectRLEnv):
@@ -113,6 +113,7 @@ class BorinotCmdVelEnv(DirectRLEnv):
         self._gravity = torch.tensor([0.0, 0.0, -1.0], device=self.device).expand(self.num_envs, -1)
         self._episode_steps = torch.zeros_like(self._command_steps_left)
         self._episode_xy_integral = torch.zeros(self.num_envs, device=self.device)
+        self._episode_velocity_error_integral = torch.zeros(self.num_envs, 2, device=self.device)
         self._episode_energy_j = torch.zeros_like(self._episode_xy_integral)
         self._episode_terms = {name: torch.zeros_like(self._episode_xy_integral) for name in (
             "track_lin_vel_xyz_exp", "track_ang_vel_z_exp", "action_rate", "energy",
@@ -264,7 +265,7 @@ class BorinotCmdVelEnv(DirectRLEnv):
         return failed, self._episode_steps >= self.max_episode_length
 
     def _get_rewards(self):
-        linear, angular, planar = tracking_kernels(
+        linear, angular, planar, xy_error, xyz_error = tracking_metrics(
             self._commands, self.robot.data.root_lin_vel_w, self.robot.data.root_ang_vel_w,
             self.robot.data.root_quat_w, self.cfg.tracking_lin_std, self.cfg.tracking_ang_std)
         self._actuator_commands[:, 6:] = self.robot.data.applied_torque[:, self.joint_ids] / (2 * self.cfg.effort_lim_sim)
@@ -285,8 +286,10 @@ class BorinotCmdVelEnv(DirectRLEnv):
         for name, value in terms.items():
             self._episode_terms[name] += value
         self._episode_xy_integral += planar * self.step_dt
+        self._episode_velocity_error_integral += torch.stack((xy_error, xyz_error), -1) * self.step_dt
         self._episode_energy_j += self._power_sum_w.sum(-1) * self.physics_dt
         self.extras["tracking"] = {"xyz": linear, "yaw": angular, "xy": planar}
+        self.extras["tracking_error_m_s"] = {"v_xy": xy_error, "v_xyz": xyz_error}
         self.extras["reward_terms"] = terms  # keep terminal contributions available after automatic reset
         self.extras["power_mean_w"] = {name: power[:, i] for i, name in enumerate(
             ("rotor_mechanical", "rotor_dissipative", "arm_mechanical", "arm_copper_loss"))}
@@ -356,6 +359,8 @@ class BorinotCmdVelEnv(DirectRLEnv):
             "Episode/energy_j": self._episode_energy_j[completed].mean(),
             "Episode/actuator_delay_s": self._actuator_delay.seconds[completed].mean(),
             "Tracking/xy_mean": (self._episode_xy_integral[completed] / duration).mean(),
+            "Tracking/v_xy_error_m_s": (self._episode_velocity_error_integral[completed, 0] / duration).mean(),
+            "Tracking/v_xyz_error_m_s": (self._episode_velocity_error_integral[completed, 1] / duration).mean(),
             "Curriculum/collection_stage": self._episode_stage[completed].float().mean(),
             "Curriculum/evaluated_stage": old_level,
             "Curriculum/selected_stage": self.force_level,
@@ -380,7 +385,7 @@ class BorinotCmdVelEnv(DirectRLEnv):
         """Archive shared plant/control helpers alongside this task's source."""
         return [inspect.getsourcefile(obj) for obj in (
             BorinotGoalkeeperEnv, configure_randomization, attach_paddle, configure_end_effector,
-            IndiController, WrenchController, ModelWrenchController, nominal_model_description, CbrtController, tracking_kernels, raw_action_limit_costs, decode_angle_actions, ActuatorDelay,
+            IndiController, WrenchController, ModelWrenchController, nominal_model_description, CbrtController, tracking_metrics, raw_action_limit_costs, decode_angle_actions, ActuatorDelay,
             apply_inertial_properties, BorinotInertialPropertiesCfg)]
 
     def _reset_idx(self, env_ids):
@@ -410,7 +415,7 @@ class BorinotCmdVelEnv(DirectRLEnv):
         self.robot.set_joint_velocity_target(joint_zero, joint_ids=self.joint_ids, env_ids=env_ids)
         self.robot.set_joint_effort_target(joint_zero, joint_ids=self.joint_ids, env_ids=env_ids)
         for buffer in (self.actions, self._action_limit_costs, self._rate_integral, self._episode_steps, self._episode_xy_integral,
-                       self._episode_energy_j, self._base_push_steps_left, self._base_push_force_z_w,
+                       self._episode_velocity_error_integral, self._episode_energy_j, self._base_push_steps_left, self._base_push_force_z_w,
                        self._base_push_points_b, self._power_sum_w):
             buffer[env_ids] = 0
         for value in self._episode_terms.values():

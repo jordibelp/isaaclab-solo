@@ -114,6 +114,7 @@ def curriculum_env():
         _command_ranges=torch.tensor([[[-1., 1.]] * 4] * 3),
         _episode_steps=torch.tensor([100, 100, 100, 0]), _episode_stage=torch.tensor([0, 0, 0, 0]),
         _episode_xy_integral=torch.tensor([8., 9., 10., 0.]), _episode_energy_j=torch.ones(4),
+        _episode_velocity_error_integral=torch.zeros(4, 2),
         _episode_terms={"track": torch.ones(4)}, _curriculum_window=torch.zeros(3),
         _window_cursor=0, _stage_episodes=0, _stage_start_step=0, curriculum_stage_pure_episodes=0,
         _actuator_delay=SimpleNamespace(seconds=torch.zeros(4)))
@@ -184,7 +185,8 @@ def reward_env():
         _self_contact_bodies=torch.zeros(2, 4, dtype=torch.bool),
         _episode_terms={name: torch.zeros(2) for name in ("track_lin_vel_xyz_exp", "track_ang_vel_z_exp", "action_rate", "energy",
             "base_collision", "leave_area", "self_collision", "tilt", "thrust_limits", "torque_limits", "action_limits")},
-        _episode_xy_integral=torch.zeros(2), _episode_energy_j=torch.zeros(2))
+        _episode_xy_integral=torch.zeros(2), _episode_energy_j=torch.zeros(2),
+        _episode_velocity_error_integral=torch.zeros(2, 2))
 
 
 def test_exact_reward_ceiling_and_disabled_costs():

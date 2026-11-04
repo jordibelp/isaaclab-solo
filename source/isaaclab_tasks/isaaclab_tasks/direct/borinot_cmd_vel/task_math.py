@@ -68,12 +68,21 @@ def heading_rotation(quaternion: torch.Tensor) -> torch.Tensor:
 
 def tracking_kernels(commands, velocity_w, angular_velocity_w, quaternion, linear_std, angular_std):
     """Return XYZ, world-Z yaw, and curriculum-only XY kernels, all in [0,1]."""
+    return tracking_metrics(commands, velocity_w, angular_velocity_w, quaternion, linear_std, angular_std)[:3]
+
+
+def tracking_metrics(commands, velocity_w, angular_velocity_w, quaternion, linear_std, angular_std):
+    """Return XYZ/yaw/XY kernels followed by raw XY/XYZ error norms in m/s.
+
+    Errors use the same heading frame as the kernels, before width scaling.
+    Compute them directly: inverting exp would lose errors when it underflows.
+    """
     velocity_h = torch.bmm(heading_rotation(quaternion).transpose(1, 2), velocity_w.unsqueeze(-1)).squeeze(-1)
     error = (commands[:, :3] - velocity_h).square()
     linear = torch.exp(-error.sum(-1) / linear_std**2)
     angular = torch.exp(-(commands[:, 3] - angular_velocity_w[:, 2]).square() / angular_std**2)
     planar = torch.exp(-error[:, :2].sum(-1) / linear_std**2)
-    return linear, angular, planar
+    return linear, angular, planar, error[:, :2].sum(-1).sqrt(), error.sum(-1).sqrt()
 
 
 def sample_vertical_pushes(limits_n, radius_m, half_height_m):
