@@ -17,7 +17,9 @@ spec = json.loads((root/args.run/"candidates.json").read_text())
 trace = np.load(root/args.run/"trace.npz")
 states = trace["states"]
 model = mujoco.MjModel.from_xml_path(str(Path(__file__).resolve().parents[3]/"mujoco/solo12.xml"))
-model.geom_group[mujoco.mj_name2id(model,mujoco.mjtObj.mjOBJ_GEOM,"ground")] = 0
+ground = mujoco.mj_name2id(model,mujoco.mjtObj.mjOBJ_GEOM,"ground")
+model.geom_group[ground] = 0
+model.geom_size[ground,:2] = 500  # Saved terrain-tile origins can lie outside the default visual plane.
 data = mujoco.MjData(model)
 indices = [model.jnt_qposadr[mujoco.mj_name2id(model,mujoco.mjtObj.mjOBJ_JOINT,n)] for n in meta["joint_names"]]
 renderer = mujoco.Renderer(model,height=360,width=480)
@@ -25,7 +27,7 @@ option = mujoco.MjvOption()
 option.geomgroup[3] = False
 font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",16)
 labels = ["Original", "Vertical-mode edit", "Antiphase compromise", "Stronger alternating edit"]
-steps = np.r_[np.arange(200,400,2),np.arange(700,900,2),np.arange(2700,2900,2),np.arange(3200,3400,2)]
+steps = np.r_[np.arange(200,300,2),np.arange(700,800,2),np.arange(2700,2800,2),np.arange(3200,3300,2)]
 with imageio.get_writer(root/"kinematic_comparison.mp4",fps=25,codec="libx264",quality=8) as writer:
     for sequence_index, step in enumerate(steps):
         images = []
