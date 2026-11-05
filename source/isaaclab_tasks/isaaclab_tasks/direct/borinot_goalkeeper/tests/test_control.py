@@ -60,6 +60,19 @@ def test_requested_default_selector_exists():
     assert getattr(config(), "control_mode", None) == MODES[0]
 
 
+@pytest.mark.parametrize("mode", ("model_wrench", "model_wrench_yawless"))
+def test_model_wrench_previous_alpha_option_is_available_to_both_model_variants(mode):
+    cfg = config()
+    cfg.control_mode = mode
+    cfg.model_wrench_use_prev_alpha = True
+    cfg.wrench = SimpleNamespace(validate=lambda _: None)  # AST fixture omits non-literal config objects.
+    method("borinot_goalkeeper_env_cfg.py", "configure_control")(cfg)
+    assert cfg.model_wrench_use_prev_alpha
+    cfg.model_wrench_use_prev_alpha = 1
+    with pytest.raises(ValueError, match="model_wrench_use_prev_alpha"):
+        method("borinot_goalkeeper_env_cfg.py", "configure_control")(cfg)
+
+
 def test_solo_style_pd_gain_defaults_and_overrides():
     cfg = config()
     assert (cfg.kp, cfg.kd) == (9.0, 0.2)

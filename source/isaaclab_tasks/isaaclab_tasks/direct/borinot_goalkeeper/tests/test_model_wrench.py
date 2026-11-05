@@ -93,6 +93,22 @@ def controller(n=8, sac=False, dtype=torch.float64):
     return model_module.ModelWrenchController(cfg, allocation, model, model.total_mass*9.81/6)
 
 
+def virtual_force_w(ctrl, action, quaternion, effort, virtual_alpha=None):
+    """Independent reconstruction of the direction-only virtual force."""
+    rotation = model_module.rotation_from_quat(quaternion)
+    acceleration = action[:, :3].clamp(-1, 1)*ctrl.accel_scale if ctrl.task.sac_action_mapping else action[:, :3]
+    desired_a = wrench.matvec(rotation.mT, acceleration)
+    matrix, bias = ctrl.mass_matrix, ctrl.bias
+    solved = torch.linalg.solve(matrix[:, 6:, 6:], torch.cat(
+        (matrix[:, 6:, :6], (effort-bias[:, 6:]).unsqueeze(-1)), -1))
+    effective = matrix[:, :6, :6] - matrix[:, :6, 6:] @ solved[:, :, :6]
+    effective_bias = bias[:, :6] + wrench.matvec(matrix[:, :6, 6:], solved[:, :, 6])
+    force_b = wrench.matvec(effective[:, :3, :3], desired_a) + effective_bias[:, :3]
+    if virtual_alpha is not None:
+        force_b = force_b + wrench.matvec(effective[:, :3, 3:], virtual_alpha)
+    return wrench.matvec(rotation, force_b)
+
+
 @pytest.mark.parametrize("sac", [False, True])
 def test_new_mode_resolves_and_has_same_interface_as_wrench(sac):
     ctrl = controller(sac=sac)
@@ -142,12 +158,39 @@ def test_partial_reset_and_fresh_first_tick():
     w, q = torch.zeros(8, 3, dtype=action.dtype), torch.zeros(8, 2, dtype=action.dtype)
     first, _ = ctrl.step(action, quaternion, w, q, q)
     speed = ctrl.rotor_speed.clone()
+    ctrl.previous_alpha_desired.fill_(1.0)
     ctrl.reset(torch.tensor([0]))
     torch.testing.assert_close(ctrl.rotor_speed[1:], speed[1:])
+    assert not ctrl.previous_alpha_desired[0].any()
+    assert ctrl.previous_alpha_desired[1:].eq(1.0).all()
     assert not ctrl.mass_matrix[0].any()
     ctrl.step(action, quaternion, w, q, q)
     assert ctrl.mass_matrix[0].any() and ctrl.ready.all()
     assert torch.isfinite(first).all()
+
+
+def test_virtual_force_default_ignores_previous_alpha():
+    ctrl = controller()
+    ctrl.previous_alpha_desired.copy_(torch.randn_like(ctrl.previous_alpha_desired))
+    action = torch.randn(8, 9, dtype=torch.float64)
+    quaternion = torch.tensor(Rotation.random(8, random_state=9).as_quat(scalar_first=True))
+    rates, q = torch.randn(8, 3, dtype=torch.float64), torch.randn(8, 2, dtype=torch.float64)
+    _, effort = ctrl.step(action, quaternion, rates, q, q)
+    torch.testing.assert_close(ctrl.desired_force_w, virtual_force_w(ctrl, action, quaternion, effort), atol=0, rtol=0)
+    torch.testing.assert_close(ctrl.previous_alpha_desired, ctrl.alpha_desired)
+
+
+def test_virtual_force_uses_previous_desired_alpha_when_enabled():
+    ctrl = controller()
+    ctrl.task.model_wrench_use_prev_alpha = True
+    quaternion = torch.tensor(Rotation.random(8, random_state=17).as_quat(scalar_first=True))
+    rates, q = torch.randn(8, 3, dtype=torch.float64), torch.randn(8, 2, dtype=torch.float64)
+    ctrl.step(torch.randn(8, 9, dtype=torch.float64), quaternion, rates, q, q)
+    previous = ctrl.alpha_desired.clone()
+    action = torch.randn(8, 9, dtype=torch.float64)
+    _, effort = ctrl.step(action, quaternion, rates, q, q)
+    torch.testing.assert_close(ctrl.desired_force_w, virtual_force_w(ctrl, action, quaternion, effort, previous))
+    torch.testing.assert_close(ctrl.previous_alpha_desired, ctrl.alpha_desired)
 
 
 @pytest.mark.parametrize("sac", [False, True])

@@ -72,11 +72,13 @@ class ModelWrenchYawlessController(ModelWrenchController):
             (matrix[:, 6:, :6], (effort-bias[:, 6:]).unsqueeze(-1)), -1))
         effective = matrix[:, :6, :6] - matrix[:, :6, 6:] @ solved[:, :, :6]
         effective_bias = bias[:, :6] + matvec(matrix[:, :6, 6:], solved[:, :, 6])
-        # Same explicit virtual-alpha=0 direction as model_wrench (not actual alpha=0).
-        self.desired_force_w.copy_(matvec(rotation, matvec(effective[:, :3, :3], desired_a)+effective_bias[:, :3]))
+        # Same explicit virtual-force direction choice as model_wrench: default
+        # alpha=0, or the previous desired alpha when that family option is enabled.
+        self.desired_force_w.copy_(self._virtual_force_w(rotation, effective, effective_bias, desired_a))
         tilt = minimal_tilt_error(self.desired_force_w, rotation)
         self.alpha_desired.copy_(self.cfg.tilt_gain*tilt
             + rates.new_tensor(self.cfg.rate_gain)*(reference_rates-rates))
+        self._remember_alpha_desired()
         # Same current-thrust-axis inverse dynamics; no projection removes gyro,
         # arm coupling or the torque needed to realize the requested body-z rate.
         c = matvec(effective[:, :3, 3:], self.alpha_desired) + effective_bias[:, :3]

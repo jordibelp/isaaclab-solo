@@ -22,6 +22,9 @@ from isaaclab_tasks.controllers.borinot_cbrt import CbrtControllerCfg
 class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     inertial_properties: BorinotInertialPropertiesCfg = BorinotInertialPropertiesCfg()
     control_mode = "thrust_and_torque_control"
+    # model_wrench / model_wrench_yawless only: include the prior physics tick's
+    # controller alpha_desired in the virtual-force direction reference.
+    model_wrench_use_prev_alpha = False
     # Replace supported scalar angle channels with (cos, sin) pairs; see borinot/ANGLE_ACTIONS.md.
     predict_yaw_as_sincos = False
     predict_calf_joint_pos_as_sincos = False
@@ -270,6 +273,9 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
             raise ValueError(f"Unknown control_mode {self.control_mode!r}; choose one of {modes}.")
         if self.control_mode == "model_wrench_yawless" and self.predict_yaw_as_sincos:
             raise ValueError("model_wrench_yawless has no yaw action; set predict_yaw_as_sincos=False.")
+        if self.control_mode in ("model_wrench", "model_wrench_yawless") and not isinstance(
+                self.model_wrench_use_prev_alpha, bool):
+            raise ValueError("model_wrench_use_prev_alpha must be a boolean.")
         if self.physics_hz <= 0 or self.policy_hz <= 0:
             raise ValueError("physics_hz and policy_hz must be positive.")
         ratio = self.physics_hz / self.policy_hz

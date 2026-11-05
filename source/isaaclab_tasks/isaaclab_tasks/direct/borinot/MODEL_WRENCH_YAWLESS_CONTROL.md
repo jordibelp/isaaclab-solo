@@ -7,6 +7,11 @@ The original virtual-force direction, predictive arm model, clipped joint PD,
 current-thrust-axis inverse dynamics, bounded allocation, and rotor-speed lag
 remain in use. Only the attitude reference and policy layout change.
 
+Like `model_wrench`, this mode accepts `env.model_wrench_use_prev_alpha=True`.
+It then includes the previous physics tick's controller `alpha_desired` in the
+virtual-force direction reference. The default remains `False`, which uses the
+original zero virtual angular acceleration.
+
 ## What “yawless” means
 
 There is **no yaw-angle target** and no yaw-angle restoring gain. We still use

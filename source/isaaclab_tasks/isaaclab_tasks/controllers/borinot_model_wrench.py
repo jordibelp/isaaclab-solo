@@ -157,11 +157,24 @@ class ModelWrenchController(WrenchController):
         self.bias = allocation.new_zeros((n, 8))
         self.predicted_acceleration_b = allocation.new_zeros((n, 3))
         self.predicted_joint_acceleration = allocation.new_zeros((n, 2))
+        self.previous_alpha_desired = allocation.new_zeros((n, 3))
 
     def reset(self, ids):
         super().reset(ids)
-        for buffer in (self.mass_matrix, self.bias, self.predicted_acceleration_b, self.predicted_joint_acceleration):
+        for buffer in (self.mass_matrix, self.bias, self.predicted_acceleration_b, self.predicted_joint_acceleration,
+                       self.previous_alpha_desired):
             buffer[ids] = 0
+
+    def _virtual_force_w(self, rotation, effective, effective_bias, desired_a):
+        """Virtual force used only to choose the next thrust-axis direction."""
+        force_b = matvec(effective[:, :3, :3], desired_a) + effective_bias[:, :3]
+        if self.task.model_wrench_use_prev_alpha:
+            force_b = force_b + matvec(effective[:, :3, 3:], self.previous_alpha_desired)
+        return matvec(rotation, force_b)
+
+    def _remember_alpha_desired(self):
+        """Make this tick's desired angular acceleration available on the next tick."""
+        self.previous_alpha_desired.copy_(self.alpha_desired)
 
     def step(self, actions, quaternion, rates, joint_pos, joint_vel):
         if self.task.sac_action_mapping:
@@ -188,11 +201,13 @@ class ModelWrenchController(WrenchController):
             (matrix[:, 6:, :6], (effort-bias[:, 6:]).unsqueeze(-1)), -1))
         effective = matrix[:, :6, :6] - matrix[:, :6, 6:] @ solved[:, :, :6]
         effective_bias = bias[:, :6] + matvec(matrix[:, :6, 6:], solved[:, :, 6])
-        # Explicit direction reference: virtual alpha=0, not a coupled fixed-point solve.
-        self.desired_force_w.copy_(matvec(rotation, matvec(effective[:, :3, :3], desired_a)+effective_bias[:, :3]))
+        # Explicit direction reference: default virtual alpha=0; optionally use the
+        # previous desired alpha, never a coupled same-tick solve.
+        self.desired_force_w.copy_(self._virtual_force_w(rotation, effective, effective_bias, desired_a))
         _, target_rotation = force_attitude(self.desired_force_w, heading, rotation)
         self.alpha_desired.copy_(attitude_acceleration(
             quaternion, target_rotation, rates, reference_rates, self.cfg, self.cfg.tilt_method))
+        self._remember_alpha_desired()
         # Actual force is T*e3. Keep a_parallel=e3^T*a_des, allow lateral acceleration
         # to follow mechanics, and solve torque for the requested angular acceleration.
         c = matvec(effective[:, :3, 3:], self.alpha_desired) + effective_bias[:, :3]

@@ -33,9 +33,11 @@ acceleration of the **base CoM**, expressed in body axes. It is not the time
 derivative of body-frame velocity. The model computes `M z + h = [F, tau, tau_j]`.
 
 We eliminate `ddq` from the two joint rows using the **clipped PD torque**.
-This gives a 6×6 effective base matrix `E` and bias `eta`. A virtual force
-`E_tt a_des + eta_t`, with virtual angular acceleration zero, generates the
-attitude reference. This explicit choice avoids a force/attitude algebraic loop.
+This gives a 6×6 effective base matrix `E` and bias `eta`. By default, a virtual
+force `E_tt a_des + eta_t`, with virtual angular acceleration zero, generates the
+attitude reference. Set `env.model_wrench_use_prev_alpha=True` to instead include
+the previous physics tick's controller `alpha_desired` in that direction-only
+force. Both choices avoid a same-tick force/attitude algebraic loop.
 It is a direction-reference design, not an exact solution for all six desired
 base accelerations at once.
 
@@ -67,6 +69,11 @@ tilt gain 150 s^-2, yaw gain 3 s^-2, rate gains (20,20,8) s^-1,
 allocation weights (1,10,10,1), and 128 allocation iterations. Joint gains,
 effort limit and motor lag remain `env.kp`, `env.kd`, `env.effort_lim_sim`, and
 `env.motor_time_constant_s`. Defaults remain unchanged for every old mode.
+
+`env.model_wrench_use_prev_alpha=False` is the default and preserves the original
+zero-virtual-alpha direction reference. It is read only by `model_wrench` and
+`model_wrench_yawless`; it has no effect on measured `wrench`, INDI, CBRT, or
+direct control modes.
 
 The scalar simulator armature is included only as two diagonal generalized
 joint inertias. It is not a full physical motor-rotor/transmission model. Use

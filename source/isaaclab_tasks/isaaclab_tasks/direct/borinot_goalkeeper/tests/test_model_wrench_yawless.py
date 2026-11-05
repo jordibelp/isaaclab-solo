@@ -150,6 +150,28 @@ def test_yaw_gain_heading_settings_and_quaternion_sign_have_no_effect():
         torch.testing.assert_close(x, y, atol=0, rtol=0)
 
 
+def test_previous_alpha_option_also_changes_yawless_virtual_force():
+    disabled, enabled = controller(), controller()
+    previous = torch.tensor([.3, -.2, .1], dtype=torch.float64).expand(8, -1)
+    disabled.previous_alpha_desired.copy_(previous)
+    enabled.previous_alpha_desired.copy_(previous)
+    enabled.task.model_wrench_use_prev_alpha = True
+    action = torch.randn(8, 8, dtype=torch.float64, generator=torch.Generator().manual_seed(7))
+    quaternion = torch.tensor(Rotation.random(8, random_state=19).as_quat(scalar_first=True))
+    rates, q = torch.randn(8, 3, dtype=torch.float64), torch.randn(8, 2, dtype=torch.float64)
+    disabled.step(action, quaternion, rates, q, q)
+    enabled.step(action, quaternion, rates, q, q)
+    matrix, bias = enabled.mass_matrix, enabled.bias
+    effort = enabled.requested_joint_effort.clamp(-enabled.task.effort_lim_sim, enabled.task.effort_lim_sim)
+    solved = torch.linalg.solve(matrix[:, 6:, 6:], torch.cat(
+        (matrix[:, 6:, :6], (effort-bias[:, 6:]).unsqueeze(-1)), -1))
+    effective = matrix[:, :6, :6] - matrix[:, :6, 6:] @ solved[:, :, :6]
+    expected_delta = wrench.matvec(yawless.rotation_from_quat(quaternion),
+                                   wrench.matvec(effective[:, :3, 3:], previous))
+    torch.testing.assert_close(enabled.desired_force_w-disabled.desired_force_w, expected_delta)
+    torch.testing.assert_close(enabled.previous_alpha_desired, enabled.alpha_desired)
+
+
 def test_partial_reset_clears_only_selected_controller_state():
     ctrl = controller()
     action, w, q = torch.zeros(8, 8).double(), torch.zeros(8, 3).double(), torch.zeros(8, 2).double()
