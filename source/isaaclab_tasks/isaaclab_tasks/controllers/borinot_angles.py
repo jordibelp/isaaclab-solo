@@ -15,7 +15,8 @@ def angle_action_slots(cfg):
     if mode in ("indi", "wrench", "model_wrench") and getattr(cfg, "predict_yaw_as_sincos", False):
         slots.append(6 if mode == "indi" else 3)
     if mode != "thrust_and_torque_control":
-        start = 7 if mode in ("indi", "wrench", "model_wrench") else (6 if mode == "thrust_and_PD_joint_pos_control" else 4)
+        start = 7 if mode in ("indi", "wrench", "model_wrench") else (
+            6 if mode in ("thrust_and_PD_joint_pos_control", "model_wrench_yawless") else 4)
         for index, joint in enumerate(("thigh", "calf")):
             if getattr(cfg, f"predict_{joint}_joint_pos_as_sincos", False):
                 slots.append(start + index)
@@ -24,7 +25,7 @@ def angle_action_slots(cfg):
 
 def angle_action_size(cfg):
     base = 9 if cfg.control_mode in ("indi", "wrench", "model_wrench") else (
-        8 if cfg.control_mode.startswith("thrust_and_") else 6)
+        8 if cfg.control_mode.startswith("thrust_and_") or cfg.control_mode == "model_wrench_yawless" else 6)
     return base + len(angle_action_slots(cfg))
 
 

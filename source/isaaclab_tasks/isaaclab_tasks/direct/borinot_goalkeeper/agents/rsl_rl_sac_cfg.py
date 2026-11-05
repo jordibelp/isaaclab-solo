@@ -61,7 +61,7 @@ class BorinotGoalkeeperSACRunnerCfg(Solo12SACRunnerCfg):
 
     def configure_environment(self, env_cfg):
         """Select the action contract before constructing the simulator and spaces."""
-        if env_cfg.control_mode not in ("thrust_and_torque_control", "thrust_and_PD_joint_pos_control", "indi", "wrench", "model_wrench", "cbrt", "cbrt_indi", "cbtr", "cbtr_indi"):
+        if env_cfg.control_mode not in ("thrust_and_torque_control", "thrust_and_PD_joint_pos_control", "indi", "wrench", "model_wrench", "model_wrench_yawless", "cbrt", "cbrt_indi", "cbtr", "cbtr_indi"):
             raise ValueError(
                 "Borinot SAC requires env.control_mode=thrust_and_torque_control "
                 "or thrust_and_PD_joint_pos_control or indi/wrench/cbrt/cbrt_indi."

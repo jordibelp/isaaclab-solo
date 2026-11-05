@@ -108,7 +108,7 @@ def raw_action_limit_costs(actions, cfg, hover, *, legacy=False):
                 if encoded:
                     references[:, start:start+2] = 0
                 start += 2 if encoded else 1
-            if cfg.control_mode in ("indi", "wrench", "model_wrench", "cbrt", "cbrt_indi"):
+            if cfg.control_mode in ("indi", "wrench", "model_wrench", "model_wrench_yawless", "cbrt", "cbrt_indi"):
                 if cfg.sac_action_mapping:
                     reference = references[:, :joint_start] if cfg.hold_arm else references
             elif not cfg.sac_action_mapping and not cfg.remove_thrust_clipping:

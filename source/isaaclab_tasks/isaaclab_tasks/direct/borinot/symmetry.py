@@ -80,6 +80,9 @@ class BorinotSymmetry:
         elif self.mode in ("cbrt", "cbrt_indi"):
             add("rates", 3)
             add("collective", 1)
+        elif self.mode == "model_wrench_yawless":
+            add("acceleration", 3)
+            add("rates", 3)
         elif self.mode in ("indi", "wrench", "model_wrench"):
             add("acceleration", 3)
             if self.mode == "indi":
@@ -130,7 +133,7 @@ class BorinotSymmetry:
             if self.mode == "PI_rotors_PD_joint_pos_control":
                 add("rotors", 6)
                 add("rate_integral", 3)
-            elif self.mode in ("indi", "wrench", "model_wrench", "cbrt", "cbrt_indi"):
+            elif self.mode in ("indi", "wrench", "model_wrench", "model_wrench_yawless", "cbrt", "cbrt_indi"):
                 add("rotors", 6)
                 if self.mode == "indi":
                     add("joint_integral", 2)
