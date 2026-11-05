@@ -61,12 +61,43 @@ def describe_result(result, number):
             f"closest {result['min_distance_m']:.3f} m, {arrival}.")
 
 
+def flight_state(env, time_s):
+    """Read robot 0 without changing physics, commands or clocks. XYZ uses world axes."""
+    data = env.robot.data
+    position = data.root_pos_w[0] - env.scene.env_origins[0]
+    goal = env._goal_position_w[0] - env.scene.env_origins[0]
+    velocity = data.root_lin_vel_w[0]
+    error = goal - position
+    w, x, y, z = data.root_quat_w[0].tolist()
+    return {
+        "time_s": float(time_s), "position_m": position.tolist(), "velocity_m_s": velocity.tolist(),
+        "goal_m": goal.tolist(), "error_m": error.tolist(), "distance_m": float(error.norm()),
+        "speed_m_s": float(velocity.norm()),
+        "yaw_deg": math.degrees(math.atan2(2 * (w*z + x*y), 1 - 2 * (y*y + z*z))),
+        "remaining_s": float((env._goal_deadline_steps[0] - env._episode_steps[0]).clamp_min(0)) * env.step_dt,
+        "phase": "HOLDING" if env._segment_hold[0] else "FLYING"}
+
+
+def xyz_text(values):
+    return "(" + ", ".join(f"{v:+.3f}" for v in values) + ")"
+
+
+def describe_state(state):
+    return (f"[STATE] t={state['time_s']:.2f} s robot 0 {state['phase']}: "
+            f"position XYZ={xyz_text(state['position_m'])} m, "
+            f"velocity XYZ={xyz_text(state['velocity_m_s'])} m/s, "
+            f"goal XYZ={xyz_text(state['goal_m'])} m, error XYZ={xyz_text(state['error_m'])} m, "
+            f"distance={state['distance_m']:.3f} m, speed={state['speed_m_s']:.3f} m/s, "
+            f"yaw={state['yaw_deg']:+.1f} deg, left={state['remaining_s']:.2f} s")
+
+
 class GoalControls:
     """UI callbacks queue intent; goal/reset changes are applied before inference."""
 
-    def __init__(self, env, goal, deadline_s, ranges, camera="goal", show_ui=True):
+    def __init__(self, env, goal, deadline_s, ranges, camera="goal", show_ui=True, relative=False):
         self.env, self.camera = env, camera
         self.goal = list(goal)
+        self.relative = bool(relative)
         self.auto_deadline = deadline_s is None
         self.deadline_s = 2.0 if deadline_s is None else float(deadline_s)
         self.go_requested = self.reset_requested = self.paused = False
@@ -86,8 +117,14 @@ class GoalControls:
         with self.window.frame, ui.ScrollingFrame():
             with ui.VStack(spacing=8, height=0):
                 ui.Label("BORINOT / GO-TO GOAL", height=28, style={"font_size": 20})
-                ui.Label("Goal in world metres, the frame of the robot home. z is height above ground.",
-                         height=22, word_wrap=True)
+                with ui.HStack(height=24, spacing=7):
+                    self._relative_model = ui.SimpleBoolModel(self.relative)
+                    ui.CheckBox(model=self._relative_model, width=22)
+                    ui.Label("Relative to base position (off: world XYZ)")
+                    self._subscriptions.append(self._relative_model.subscribe_value_changed_fn(
+                        lambda m: self.set_relative(m.get_value_as_bool())))
+                self.frame_label = ui.Label(self.frame_description(), height=58, word_wrap=True)
+                self.state_label = ui.Label("", height=100, word_wrap=True)
                 values = (*self.goal, self.deadline_s)
                 for index, (label, (low, high)) in enumerate(zip(("x [m]", "y [m]", "z [m]", "deadline [s]"), ranges)):
                     if index == 3:
@@ -144,7 +181,28 @@ class GoalControls:
     def request_go(self):
         self.go_requested = True
 
+    def set_relative(self, relative):
+        self.relative = bool(relative)
+        if self.window:
+            self.frame_label.text = self.frame_description()
+
+    def frame_description(self):
+        if self.relative:
+            return ("XYZ = displacement from the current base, along WORLD axes (not rotated by yaw). "
+                    "Each Go uses the same numbers from the new position. The sent target stays fixed.")
+        return "XYZ = world position in metres; z is height above ground. Switching mode does not send a goal."
+
+    def preview_goal(self):
+        """The next Go target for robot 0; a relative preview follows the base, not the active goal."""
+        if self.relative:
+            position = (self.env.robot.data.root_pos_w[0] - self.env.scene.env_origins[0]).cpu().tolist()
+            return [p + d for p, d in zip(position, self.goal)]
+        return list(self.goal)
+
     def fly_home(self):
+        self.set_relative(False)  # home is always an absolute target
+        if self.window:
+            self._relative_model.set_value(False)
         for index, value in enumerate(self.env.cfg.robot_home):
             self.set_component(index, value)
             if self._models:
@@ -188,8 +246,9 @@ class GoalControls:
 
     def _update_preview(self, active):
         """Yellow marker at an edited goal that was not sent yet. Writes USD only on change."""
-        pending = max(abs(p - a) for p, a in zip(self.goal, active)) > 1e-4  # float32 goal buffer
-        key = tuple(self.goal) if pending else None
+        goal = self.preview_goal()
+        pending = max(abs(p - a) for p, a in zip(goal, active)) > 1e-4  # float32 goal buffer
+        key = tuple(goal) if pending else None
         if key == self._preview_key:
             return
         self._preview_key = key
@@ -205,34 +264,40 @@ class GoalControls:
         self._preview.set_visibility(pending)
         if pending:
             origin = self.env.scene.env_origins[0]
-            self._preview.visualize(translations=(origin + origin.new_tensor(self.goal))[None])
+            self._preview.visualize(translations=(origin + origin.new_tensor(goal))[None])
 
     def _refresh_labels(self, time_s, position, active):
         env, data, cfg = self.env, self.env.robot.data, self.env.cfg
         origin = env.scene.env_origins[0]
-        offset_w = origin.new_tensor(self.goal) + origin - data.root_pos_w[0]
+        goal = self.preview_goal()
+        offset_w = origin.new_tensor(goal) + origin - data.root_pos_w[0]
         offset_b = quat_apply_inverse(data.root_quat_w[:1], offset_w[None])[0].cpu().tolist()
         distance = float(offset_w.norm())
         low, high = (float(v) for v in training_deadline_interval(
             cfg, env.play_difficulty, offset_w.new_tensor(distance)))
         deadline = (low + high) / 2 if self.auto_deadline else self.deadline_s
         speed = float(data.root_lin_vel_w[0].norm())
-        notes = training_region_notes(cfg, env.play_difficulty, offset_b, self.goal[2], speed,
+        notes = training_region_notes(cfg, env.play_difficulty, offset_b, goal[2], speed,
                                       deadline, (low, high), env.step_dt)
         self.preview_label.text = (
-            f"If sent now: goal {distance:.2f} m from robot 0, deadline {'auto ' if self.auto_deadline else ''}"
+            f"If sent now: world XYZ {xyz_text(goal)} m, {distance:.2f} m from robot 0, "
+            f"deadline {'auto ' if self.auto_deadline else ''}"
             f"{deadline:.2f} s (training {low:.2f}-{high:.2f} s for this distance).\n"
             + ("Outside the training region: " + "; ".join(notes) + "." if notes
                else f"Inside the training region of stage {env.goal_curriculum.level}."))
         remaining = float((env._goal_deadline_steps[0] - env._episode_steps[0]).clamp_min(0)) * env.step_dt
-        w, x, y, z = data.root_quat_w[0].cpu().tolist()
-        yaw = math.degrees(math.atan2(2 * (w*z + x*y), 1 - 2 * (y*y + z*z)))
+        current = flight_state(env, time_s)
+        self.state_label.text = (
+            f"CURRENT POSITION XYZ {xyz_text(current['position_m'])} m (world)\n"
+            f"Velocity XYZ {xyz_text(current['velocity_m_s'])} m/s; speed {current['speed_m_s']:.3f} m/s\n"
+            f"Goal error XYZ {xyz_text(current['error_m'])} m; distance {current['distance_m']:.3f} m\n"
+            f"Yaw {current['yaw_deg']:+.1f} deg; time left {current['remaining_s']:.2f} s")
         state = "HOLDING" if env._segment_hold[0] else "FLYING"
         self.goal_label.text = (
             f"Active goal ({', '.join(f'{v:+.2f}' for v in active)}) m: {state}, "
             f"{remaining:.2f} of {int(env._goal_deadline_steps[0]) * env.step_dt:.2f} s left, "
             f"distance {float((env._goal_position_w[0] - data.root_pos_w[0]).norm()):.3f} m.\n"
-            f"Robot 0: speed {speed:.2f} m/s, height {position[2]:.2f} m, yaw {yaw:+.1f} deg.")
+            f"Input mode: {'RELATIVE displacement' if self.relative else 'WORLD position'}.")
         totals, results = env.play_totals, env.play_results
         self.result_label.text = (
             (describe_result(results[-1], len(results)) if results else "No goal finished yet.")

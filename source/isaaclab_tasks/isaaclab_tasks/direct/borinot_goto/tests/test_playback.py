@@ -24,7 +24,7 @@ UI = load_definitions(FOLDER / "playback_ui.py", {
 GOAL = (1.0, -0.5, 2.0)
 
 
-def play_env(goal=GOAL, deadline_s=None, reset_at_deadline=False, **overrides):
+def play_env(goal=GOAL, deadline_s=None, reset_at_deadline=False, goal_relative=False, **overrides):
     """Real go-to and play methods over a fake flight plant whose reset puts robots at home."""
     goto = environment_class()
     flight = goto.__mro__[1]
@@ -46,7 +46,8 @@ def play_env(goal=GOAL, deadline_s=None, reset_at_deadline=False, **overrides):
         "torch": torch, "math": math, "BorinotGoToEnv": goto, "stage_settings": task_math.stage_settings,
         "training_deadline_interval": task_math.training_deadline_interval})
     cfg = config(goal_curriculum_start_level=9, **overrides)
-    env = scope["BorinotGoToPlayEnv"](cfg, goal=goal, deadline_s=deadline_s, reset_at_deadline=reset_at_deadline)
+    env = scope["BorinotGoToPlayEnv"](cfg, goal=goal, deadline_s=deadline_s,
+                                    reset_at_deadline=reset_at_deadline, goal_relative=goal_relative)
     env._reset_idx(None)  # the vector wrapper resets once before the first observation
     return env
 
@@ -283,3 +284,115 @@ def test_results_read_as_plain_sentences():
     assert "MISSED" in missed and "never inside" in missed
     failed = UI["describe_result"]({**base, "kind": "hold", "success": False, "failed": True, "elapsed_s": 0.4}, 5)
     assert failed.startswith("Hold #5") and "FAILED after 0.40 s" in failed
+
+
+def test_relative_start_uses_each_reset_base_position_not_absolute_height():
+    env = play_env(goal=(1.0, -0.5, 0.0), goal_relative=True)
+    torch.testing.assert_close(env._goal_position_w,
+                               env.robot.data.root_pos_w + torch.tensor([1., -.5, 0.], dtype=torch.float64))
+    assert env.play_goal_relative and env.play_goal.tolist() == [1., -.5, 0.]
+    assert env._commands.shape == (2, 4)
+
+
+def test_repeating_a_relative_goal_snapshots_each_current_base_along_world_axes():
+    env = play_env()
+    data = env.robot.data
+    data.root_pos_w += torch.tensor([[2., -1., .2], [-2., 1., -.2]], dtype=torch.float64)
+    data.root_quat_w[:] = torch.tensor([0., 0., 0., 1.], dtype=torch.float64)  # yaw 180 degrees
+    displacement = torch.tensor([1., .5, .1], dtype=torch.float64)
+    state = [v.clone() for v in (data.root_pos_w, data.root_quat_w, data.root_lin_vel_w)]
+    env.set_play_goal(displacement.tolist(), 1.5, relative=True)
+    target = data.root_pos_w + displacement
+    torch.testing.assert_close(env._goal_position_w, target)
+    for before, after in zip(state, (data.root_pos_w, data.root_quat_w, data.root_lin_vel_w)):
+        assert torch.equal(before, after)  # no teleport or yaw-dependent rotation
+    obs = env._get_observations()["policy"]
+    torch.testing.assert_close(env._commands[:, :3], inverse(data.root_quat_w, displacement.expand(2, -1)))
+    assert obs[:, -1].tolist() == [1.5, 1.5]
+    data.root_pos_w.copy_(target)  # arrive, then press Go again with unchanged input
+    env.set_play_goal(displacement.tolist(), 1.5, relative=True)
+    torch.testing.assert_close(env._goal_position_w, target + displacement)
+
+
+@pytest.mark.parametrize("reset_at_deadline", [False, True])
+def test_relative_goal_stays_fixed_across_holds_and_safety_or_episode_resets(reset_at_deadline):
+    env = play_env(goal=(1., 0., 0.), goal_relative=True, reset_at_deadline=reset_at_deadline)
+    target = env._goal_position_w.clone()
+    env.robot.data.root_pos_w.copy_(target)
+    env._episode_steps.copy_(env._goal_deadline_steps)
+    env._get_dones()
+    env._get_rewards()
+    torch.testing.assert_close(env._goal_position_w, target)  # not a moving target
+    env._reset_idx(torch.tensor([1]))
+    torch.testing.assert_close(env._goal_position_w, target)  # safety reset cannot add the offset again
+    assert env.play_goal_relative
+
+
+def test_relative_goal_rejects_all_robots_atomically_when_one_target_is_out_of_bounds():
+    env = play_env()
+    env.robot.data.root_pos_w[1, 0] = env.scene.env_origins[1, 0] + env.cfg.flight_xy_limit_m - 0.5
+    before = [v.clone() for v in (env.play_goal, env._play_goal_targets, env._goal_position_w,
+                                 env._goal_deadline_steps, env._episode_steps)]
+    with pytest.raises(ValueError, match="x and y"):
+        env.set_play_goal((1., 0., 0.), 2.0, relative=True)
+    for a, b in zip(before, (env.play_goal, env._play_goal_targets, env._goal_position_w,
+                            env._goal_deadline_steps, env._episode_steps)):
+        assert torch.equal(a, b)
+    assert not env.play_goal_relative and env.play_deadline_s is None
+    with pytest.raises(ValueError, match="Goal z"):
+        env.set_play_goal((0., 0., -2.), relative=True)
+
+
+def controls(env, goal, relative=False):
+    return UI["GoalControls"](env, goal, None, [(-6., 6.)] * 4, show_ui=False, relative=relative)
+
+
+def test_ui_mode_switch_preserves_input_without_sending_and_relative_preview_tracks_only_the_next_go():
+    env = play_env()
+    panel = controls(env, (1., -.5, 0.))
+    assert panel.preview_goal() == [1., -.5, 0.]
+    panel.set_relative(True)
+    assert panel.goal == [1., -.5, 0.] and not panel.go_requested
+    target = env._goal_position_w.clone()
+    panel.request_go()
+    assert panel.go_requested
+    env.set_play_goal(panel.goal, panel.requested_deadline(), relative=panel.relative)
+    expected = env.robot.data.root_pos_w[0] - env.scene.env_origins[0] + torch.tensor(panel.goal)
+    assert panel.preview_goal() == pytest.approx(expected.tolist())
+    sent = env._goal_position_w.clone()
+    env.robot.data.root_pos_w[:, 0] += 0.2
+    assert panel.preview_goal()[0] == pytest.approx(expected[0] + .2)
+    assert torch.equal(sent, env._goal_position_w) and not torch.equal(target, sent)
+    panel.go_requested = False
+    panel.fly_home()
+    assert not panel.relative and panel.goal == list(env.cfg.robot_home) and panel.go_requested
+    assert "world position" in panel.frame_description()
+
+
+def test_live_state_logs_and_labels_read_actual_position_velocity_error_and_time_without_mutation():
+    from types import SimpleNamespace
+    env = play_env()
+    env.robot.data.root_pos_w[0] = env.scene.env_origins[0] + torch.tensor([.2, -.1, 1.6])
+    env.robot.data.root_lin_vel_w[0] = torch.tensor([.3, -.4, 0.])
+    env._episode_steps[:] = 25
+    before = [v.clone() for v in (env._goal_position_w, env._episode_steps, env._commands,
+                                 env.robot.data.root_pos_w, env.robot.data.root_lin_vel_w)]
+    state = UI["flight_state"](env, 0.25)
+    assert state["position_m"] == pytest.approx([.2, -.1, 1.6])
+    assert state["velocity_m_s"] == pytest.approx([.3, -.4, 0.]) and state["speed_m_s"] == pytest.approx(.5)
+    assert state["goal_m"] == pytest.approx(list(GOAL))
+    assert state["error_m"] == pytest.approx([.8, -.4, .4])
+    assert state["distance_m"] == pytest.approx(math.sqrt(.8**2 + .4**2 + .4**2))
+    assert state["remaining_s"] == pytest.approx((int(env._goal_deadline_steps[0]) - 25) * .01)
+    text = UI["describe_state"](state)
+    assert "position XYZ=(+0.200, -0.100, +1.600) m" in text and "velocity XYZ=" in text and "error XYZ=" in text
+    panel = controls(env, (1., 0., 0.), relative=True)
+    for name in ("state_label", "goal_label", "preview_label", "result_label", "status_label"):
+        setattr(panel, name, SimpleNamespace(text=""))
+    panel._refresh_labels(.25, state["position_m"], state["goal_m"])
+    assert "CURRENT POSITION XYZ (+0.200, -0.100, +1.600) m" in panel.state_label.text
+    assert "RELATIVE displacement" in panel.goal_label.text
+    assert "world XYZ (+1.200, -0.100, +1.600) m" in panel.preview_label.text
+    for a, b in zip(before, (env._goal_position_w, env._episode_steps, env._commands,
+                            env.robot.data.root_pos_w, env.robot.data.root_lin_vel_w)):
+        assert torch.equal(a, b)

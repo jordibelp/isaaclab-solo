@@ -25,8 +25,10 @@ class BorinotGoToPlayEnv(BorinotGoToEnv):
     loop grows with the time left.
     """
 
-    def __init__(self, cfg, goal=None, deadline_s=None, reset_at_deadline=False, **kwargs):
+    def __init__(self, cfg, goal=None, deadline_s=None, reset_at_deadline=False, goal_relative=False, **kwargs):
         self.play_goal = self.play_deadline_s = None
+        self.play_goal_relative = bool(goal_relative)
+        self._play_goal_targets = None
         self.reset_at_deadline = bool(reset_at_deadline) or goal is None
         super().__init__(cfg, **kwargs)
         self._segment_hold = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
@@ -37,30 +39,47 @@ class BorinotGoToPlayEnv(BorinotGoToEnv):
         self.play_hold_worst_distance_m = 0.0
         if goal is not None:
             # Applied by the first reset; robot state is not valid before it.
-            self.play_goal, self.play_deadline_s = self._validated_goal(goal, deadline_s)
+            self.play_goal, self.play_deadline_s = self._validated_goal(goal, deadline_s, self.play_goal_relative)
 
     @property
     def play_difficulty(self):
         return stage_settings(self.cfg, self.goal_curriculum.level)[0]
 
-    def set_play_goal(self, goal, deadline_s=None):
-        """Own a new goal; an invalid request keeps the previous goal."""
-        self.play_goal, self.play_deadline_s = self._validated_goal(goal, deadline_s)
+    def set_play_goal(self, goal, deadline_s=None, relative=False):
+        """Snapshot each robot's target; relative displacements use world-aligned axes.
+
+        Resolve once per Go, not on every tick or safety reset. An invalid
+        request keeps the previous goal, clock and coordinate mode.
+        """
+        value, deadline = self._validated_goal(goal, deadline_s, relative)
+        targets = self._resolve_goal(value, relative)
+        self.play_goal, self.play_deadline_s = value, deadline
+        self.play_goal_relative, self._play_goal_targets = bool(relative), targets
         if not self.reset_at_deadline:
             self._start_segment(self.robot._ALL_INDICES, hold=False)
 
-    def _validated_goal(self, goal, deadline_s):
+    def _validated_goal(self, goal, deadline_s, relative=False):
         if len(goal) != 3 or not all(math.isfinite(v) for v in goal):
             raise ValueError("Goal needs three finite metres: x y z.")
         if deadline_s is not None and (not math.isfinite(deadline_s) or deadline_s <= 0):
             raise ValueError("Deadline must be positive and finite.")
-        low, high = self.cfg.flight_height_range_m
-        if not low < goal[2] < high:
-            raise ValueError(f"Goal z must lie strictly inside the flight heights {low:g}..{high:g} m.")
-        if max(abs(goal[0]), abs(goal[1])) >= self.cfg.flight_xy_limit_m:
-            raise ValueError(f"Goal x and y must lie strictly inside +/-{self.cfg.flight_xy_limit_m:g} m.")
         tensor = torch.tensor(goal, dtype=self._goal_position_w.dtype, device=self.device)
+        if not relative:
+            self._validate_targets(tensor[None])
         return tensor, None if deadline_s is None else float(deadline_s)
+
+    def _validate_targets(self, targets):
+        low, high = self.cfg.flight_height_range_m
+        if not bool(((targets[:, 2] > low) & (targets[:, 2] < high)).all()):
+            raise ValueError(f"Goal z must lie strictly inside the flight heights {low:g}..{high:g} m.")
+        if not bool((targets[:, :2].abs() < self.cfg.flight_xy_limit_m).all()):
+            raise ValueError(f"Goal x and y must lie strictly inside +/-{self.cfg.flight_xy_limit_m:g} m.")
+
+    def _resolve_goal(self, value, relative):
+        targets = (self.robot.data.root_pos_w - self.scene.env_origins + value if relative
+                   else value.expand(self.num_envs, -1).clone())
+        self._validate_targets(targets)
+        return targets
 
     def _play_deadline_steps(self, distance, hold):
         if hold or self.play_deadline_s is None:
@@ -75,7 +94,9 @@ class BorinotGoToPlayEnv(BorinotGoToEnv):
         """Restart the goal clock from the current state. Holds keep the current goal."""
         position = self.robot.data.root_pos_w[env_ids]
         if not hold:
-            self._goal_position_w[env_ids] = self.play_goal + self.scene.env_origins[env_ids]
+            if self._play_goal_targets is None:
+                self._play_goal_targets = self._resolve_goal(self.play_goal, self.play_goal_relative)
+            self._goal_position_w[env_ids] = self._play_goal_targets[env_ids] + self.scene.env_origins[env_ids]
             self._segment_start_w[env_ids] = position
         distance = (self._goal_position_w[env_ids] - position).norm(dim=-1)
         self._goal_deadline_steps[env_ids] = self._play_deadline_steps(distance, hold)
@@ -135,6 +156,8 @@ class BorinotGoToPlayEnv(BorinotGoToEnv):
             "kind": "hold" if hold[0] else ("sampled" if self.play_goal is None else "goal"),
             "goal_m": (self._goal_position_w[0] - origin).tolist(),
             "start_m": (self._segment_start_w[0] - origin).tolist(),
+            "position_m": (self.robot.data.root_pos_w[0] - origin).tolist(),
+            "velocity_m_s": self.robot.data.root_lin_vel_w[0].tolist(),
             "deadline_s": int(self._goal_deadline_steps[0]) * self.step_dt,
             "elapsed_s": int(self._episode_steps[0]) * self.step_dt,
             "distance_m": float(distance[0]),

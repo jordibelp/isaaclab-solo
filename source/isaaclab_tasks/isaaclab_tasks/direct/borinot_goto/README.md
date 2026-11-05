@@ -271,6 +271,18 @@ with X/Y/Z goal fields and sliders, a deadline field, and buttons. Give the
 first goal with `--goal_init X Y Z` (alias `--goal`). The goal is in world
 metres, in the same frame as `env.robot_home`: z is the height above ground.
 The default goal is the robot home, so the robot first hovers in place.
+Select **Relative to base position** in the panel to enter displacements
+instead. The switch keeps the same numbers and does not send a goal.
+Relative XYZ uses world-aligned axes, not axes rotated with the robot yaw.
+Each **Go to goal** adds the displacement to each robot's current base position.
+For example, `(1, 0, 0)` flies one metre along world X at the current height.
+Press Go again with unchanged inputs to repeat that displacement from the new
+position. Once sent, the target stays fixed, including across safety resets;
+the yellow sphere previews where the *next* Go would send it. Fly home
+switches back to world mode and sends the absolute home position.
+
+Start directly in relative mode with `--goal-frame=relative --goal_init 1 0 0`.
+In this mode the default input is `(0, 0, 0)`, keeping the initial position.
 
 ```bash
 ./isaaclab.sh -p source/scripts/rsl_rl/play_borinot_goto.py --checkpoint=/absolute/path/model.pt --num_envs=1 --duration_s=2000 --goal_init 3.0 0.0 1.5 env.control_mode=model_wrench env.use_terminal_speed_penalty=True
@@ -302,7 +314,20 @@ How a goal works in the player:
 
 Each finished goal prints one line, for example `[GOAL] ... SUCCESS. Final
 distance 0.004 m, speed 0.05 m/s ...`. The run ends with one
-`BORINOT_GOTO_PLAY {...}` JSON line with totals for all robots. The window
+`BORINOT_GOTO_PLAY {...}` JSON line with totals for all robots, the final
+state of robot 0, and explicit input frame labels. Goal results also include
+the final XYZ position and velocity before any reset.
+
+The panel shows the current XYZ position, XYZ velocity, XYZ error to the
+active goal, distance, speed, yaw and time left. Position and error use
+metres; velocity uses metres/second. All XYZ readouts use world axes. With
+multiple robots, the readouts describe robot 0, relative to its environment
+origin (the same frame as the world input fields).
+The terminal prints these values in a `[STATE]` line every simulated second.
+Set `--log_interval_s=0.5` for twice per second, or `--log_interval_s=0` to
+disable periodic terminal lines. The panel remains live in either case.
+
+The window
 also says when an edited goal leaves what the checkpoint stage sampled: a
 body-frame offset outside the stage box, a goal height outside the training
 heights (only when the policy observes height), a moving start (training goals
@@ -315,7 +340,8 @@ the training start (±5°); watch the yaw value in the window.
 Cameras: **Goal** (default) is a fixed side view that frames the start and
 the goal of the latest flight; Follow, Chase, Side, Top and Free work as in
 the command-velocity player. `--x_range`, `--y_range` and `--z_range` change
-the slider ranges; the default is home ± the stage goal box.
+the slider ranges; defaults cover both world positions near home and
+signed relative displacements at the checkpoint stage.
 
 Playback freezes curriculum. The stage comes from the checkpoint metadata
 (`best_model_curriculum_idx`), unless `--curriculum-level` or
