@@ -266,26 +266,65 @@ switch is the first useful ablation if a position-only policy learns fly-through
 
 ## Playback
 
-Sample goals at a fixed stage, showing a non-colliding green tolerance sphere:
+The player flies to a goal position that you choose, live. It opens a window
+with X/Y/Z goal fields and sliders, a deadline field, and buttons. Give the
+first goal with `--goal_init X Y Z` (alias `--goal`). The goal is in world
+metres, in the same frame as `env.robot_home`: z is the height above ground.
+The default goal is the robot home, so the robot first hovers in place.
 
 ```bash
-./isaaclab.sh -p source/scripts/rsl_rl/play_borinot_goto.py --checkpoint=/absolute/path/model.pt env.control_mode=cbrt --curriculum-level=4
+./isaaclab.sh -p source/scripts/rsl_rl/play_borinot_goto.py --checkpoint=/absolute/path/model.pt --num_envs=1 --duration_s=2000 --goal_init 3.0 0.0 1.5 env.control_mode=model_wrench env.use_terminal_speed_penalty=True
 ```
 
-Use a repeated fixed offset from each actual reset position, with an exact
-requested budget rounded up to a policy tick:
+How a goal works in the player:
 
-```bash
-./isaaclab.sh -p source/scripts/rsl_rl/play_borinot_goto.py --checkpoint=/absolute/path/model.pt env.control_mode=cbrt --goal-offset 1.0 0.0 0.2 --deadline_s=1.5
-```
+- **Deadline.** By default the deadline is automatic: the middle of the
+  deadlines that training assigns to this distance at the checkpoint stage.
+  `--deadline_s` or the deadline slider sets a fixed time instead. Moving the
+  slider switches Auto off.
+- **Go to goal.** Editing a field shows a yellow sphere: the goal is not sent
+  yet. **Go to goal** sends it, and the green sphere (success radius) moves
+  there. **Fly home** sends the robot home.
+- **Chain mode (default).** A new goal starts from the current state. The
+  robot is not teleported. The goal clock restarts, so the policy sees the new
+  body-frame offset, a full `t_norm` and the new remaining seconds.
+- **Hold.** At a clean deadline the robot keeps the same goal. A hold segment
+  starts by itself, with the shortest deadline that training assigns to the
+  current distance (1.0 s at the final stage). Stage rewards pay only the
+  position (and the optional speed) at the deadline. So the policy may loop
+  away and come back between deadlines, and the loop grows with the time left.
+- **Failures.** Crash, tilt or leaving the area still resets the robot to home.
+  Then it flies the same goal again.
+- **`--reset-at-deadline`.** Training episodes: every deadline resets the robot
+  to home and repeats the goal. A new goal also starts a new episode from home.
+- **`--random-goals`.** Training goal and deadline sampling at the checkpoint
+  stage, with a reset at every deadline. No goal window.
 
-Playback freezes curriculum by default. It does not extend the task deadline
-to fill `--duration_s`; that option controls how long the player runs across
-episodes. Match the trained controller, observation flags, physics settings,
-and algorithm. Add the SAC `--agent` key when playing SAC. Inference restores
-normalizers and weights, not optimizer state or a training-sized replay buffer.
-`--headless --no-real-time` is useful for a smoke check. The player is a simple
-goal viewer, not the command-velocity player's live command/push UI.
+Each finished goal prints one line, for example `[GOAL] ... SUCCESS. Final
+distance 0.004 m, speed 0.05 m/s ...`. The run ends with one
+`BORINOT_GOTO_PLAY {...}` JSON line with totals for all robots. The window
+also says when an edited goal leaves what the checkpoint stage sampled: a
+body-frame offset outside the stage box, a goal height outside the training
+heights (only when the policy observes height), a moving start (training goals
+start from rest), or a deadline outside the training range for the distance.
+Such goals are allowed, but the result is then out of the training
+distribution. The yaw is free in this task, and the rotation matrix is an
+observation. In long chained sessions the yaw can drift tens of degrees from
+the training start (±5°); watch the yaw value in the window.
+
+Cameras: **Goal** (default) is a fixed side view that frames the start and
+the goal of the latest flight; Follow, Chase, Side, Top and Free work as in
+the command-velocity player. `--x_range`, `--y_range` and `--z_range` change
+the slider ranges; the default is home ± the stage goal box.
+
+Playback freezes curriculum. The stage comes from the checkpoint metadata
+(`best_model_curriculum_idx`), unless `--curriculum-level` or
+`env.goal_curriculum_start_level` selects one. `--duration_s` is how long the
+player runs, not a deadline. Match the trained controller, observation flags,
+physics settings, and algorithm; add the SAC `--agent` key when playing SAC.
+Inference restores normalizers and weights, not optimizer state or a
+training-sized replay buffer. `--headless --no-real-time` is useful for a
+smoke check.
 
 ## Logs and interpretation
 

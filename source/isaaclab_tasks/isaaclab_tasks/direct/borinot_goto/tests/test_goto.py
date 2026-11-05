@@ -127,12 +127,12 @@ def test_config_is_idempotent_derived_horizon_follows_clock_and_not_runner_count
     cfg.configure_control()
     assert cfg.observation_space == 33
     cfg.physics_hz, cfg.policy_hz = 300, 150
-    cfg.goal_deadline_range_s = ((4.123, 4.123),) * 5
+    cfg.goal_deadline_range_s = ((4.123, 4.123),) * len(cfg.goal_half_extents_m)
     cfg.configure_control()
     assert cfg.episode_length_s == pytest.approx(math.ceil(4.123*150)/150)
 
 
-@pytest.mark.parametrize("difficulty", range(5))
+@pytest.mark.parametrize("difficulty", range(len(config().goal_half_extents_m)))
 def test_sampling_uniform_box_no_hidden_direction_bias_and_deadline_floors(difficulty):
     cfg = config()
     torch.manual_seed(13)
@@ -218,14 +218,18 @@ def test_curriculum_dwell_evidence_stage_purity_threshold_and_full_fade():
     assert not c.window.any() and c.count == 0
     c.observe(torch.ones(50), torch.zeros(50), 100)
     assert c.level == 1 and c.count == 0  # old episodes are not eligible
-    for level in range(1, 9):
+    geometry_levels = len(cfg.goal_half_extents_m)
+    final_level = geometry_levels + len(cfg.progress_reward_factors) - 2
+    for level in range(1, final_level + 1):
         assert c.level == level
         c.observe(torch.ones(10), torch.full((10,), level), 100 + level*10)
-    assert c.level == 8
-    for level, expected in enumerate([(0,1.),(1,1.),(2,1.),(3,1.),(4,1.),(4,.75),(4,.5),(4,.25),(4,0.)]):
+    assert c.level == final_level
+    expected_stages = [(level, 1.) for level in range(geometry_levels)]
+    expected_stages += [(geometry_levels - 1, factor) for factor in cfg.progress_reward_factors[1:]]
+    for level, expected in enumerate(expected_stages):
         assert task_math.stage_settings(cfg, level) == expected
-    c.observe(torch.ones(10), torch.full((10,), 8), 10000)
-    assert c.level == 8
+    c.observe(torch.ones(10), torch.full((10,), final_level), 10000)
+    assert c.level == final_level
 
 
 def test_curriculum_exact_threshold_rolling_window_and_manual_reset_exclusion():
@@ -247,7 +251,7 @@ def test_curriculum_exact_threshold_rolling_window_and_manual_reset_exclusion():
 @pytest.mark.parametrize("name,value", [
     ("goal_half_extents_m", ()), ("goal_half_extents_m", ((0.,0.,0.),)),
     ("goal_reference_speed_m_s", (1.,)), ("goal_reference_accel_m_s2", (0.,)*5),
-    ("goal_deadline_range_s", ((0.,1.),)*5), ("goal_curriculum_start_level", 9),
+    ("goal_deadline_range_s", ((0.,1.),)*5), ("goal_curriculum_start_level", -1),
     ("goal_curriculum_start_level", True), ("progress_reward_factors", (1.,.5,.6,0.)),
     ("progress_reward_factors", (1.,.5)), ("curriculum_success_threshold", float('nan')),
     ("goal_success_tolerance_m", 0.), ("failure_distance_floor_m", -1.),
@@ -258,6 +262,13 @@ def test_curriculum_exact_threshold_rolling_window_and_manual_reset_exclusion():
 def test_invalid_config_is_rejected_before_simulation(name, value):
     with pytest.raises(ValueError):
         config(**{name:value})
+
+
+def test_curriculum_start_beyond_the_current_schedule_is_rejected():
+    cfg = config()
+    first_invalid = len(cfg.goal_half_extents_m) + len(cfg.progress_reward_factors) - 1
+    with pytest.raises(ValueError):
+        config(goal_curriculum_start_level=first_invalid)
 
 
 def test_dense_telescoping_means_no_intrinsic_rush_for_same_terminal_state():
@@ -281,10 +292,11 @@ def test_existing_sincos_action_expansion_also_expands_goal_observations(mode):
 
 def test_skip_fixed_and_disabled_fade_curriculum_semantics():
     cfg = config(skip_curriculum=True)
-    assert task_math.SuccessCurriculum(cfg,"cpu").level == 8
+    final_geometry = len(cfg.goal_half_extents_m) - 1
+    assert task_math.SuccessCurriculum(cfg,"cpu").level == final_geometry + len(cfg.progress_reward_factors) - 1
     cfg = config(progress_reward_curriculum=False, skip_curriculum=True)
-    assert task_math.SuccessCurriculum(cfg,"cpu").level == 4
-    assert task_math.stage_settings(cfg,4) == (4,1.)
+    assert task_math.SuccessCurriculum(cfg,"cpu").level == final_geometry
+    assert task_math.stage_settings(cfg,final_geometry) == (final_geometry,1.)
     cfg = config(curriculum=False,goal_curriculum_start_level=6)
     c = task_math.SuccessCurriculum(cfg,"cpu")
     c.observe(torch.ones(10000),torch.full((10000,),6),100000)

@@ -1,43 +1,147 @@
 # SPDX-License-Identifier: BSD-3-Clause
-"""Play-only fixed commands. Training always samples goals at resets."""
+"""Play-only goal ownership. The registered training environment is unchanged."""
 import math
 
+import torch
+
 from .borinot_goto_env import BorinotGoToEnv
+from .task_math import stage_settings, training_deadline_interval
 
 
 class BorinotGoToPlayEnv(BorinotGoToEnv):
-    def __init__(self, cfg, goal_offset=None, deadline_s=None, **kwargs):
-        self._play_goal_offset = goal_offset
-        self._play_deadline_s = deadline_s
-        if (goal_offset is None) != (deadline_s is None):
-            raise ValueError("Fixed playback needs both --goal-offset and --deadline_s.")
-        if goal_offset is not None:
-            if len(goal_offset) != 3 or not all(map(math.isfinite, goal_offset)):
-                raise ValueError("goal-offset needs three finite metres.")
-            if not math.isfinite(deadline_s) or deadline_s <= 0:
-                raise ValueError("deadline_s must be finite and positive.")
-            low, high = cfg.flight_height_range_m
-            if not low < cfg.robot_home[2] + goal_offset[2] - cfg.reset_z_noise_m < high:
-                raise ValueError("The fixed goal must lie inside the flight height bounds.")
-            if not low < cfg.robot_home[2] + goal_offset[2] + cfg.reset_z_noise_m < high:
-                raise ValueError("The fixed goal plus reset noise must lie inside the flight height bounds.")
-            if any(abs(cfg.robot_home[i] + goal_offset[i]) + cfg.reset_xy_noise_m >= cfg.flight_xy_limit_m for i in (0, 1)):
-                raise ValueError("The fixed goal must lie inside the XY flight bounds.")
+    """Keep a live goal across deadlines and resets.
+
+    ``goal`` is env-local XYZ in metres, the frame of ``cfg.robot_home`` (z is
+    height). ``None`` keeps the training sampler and its reset at every
+    deadline. With a goal, a clean deadline ends the segment, not the flight:
+    a hold segment with the same goal starts from the current state, and
+    ``set_play_goal`` starts a new goal from the current state. Safety failures
+    still reset the robot to home, then the goal is flown again.
+    ``reset_at_deadline=True`` restores training episodes for the live goal;
+    callers reset the environment after ``set_play_goal`` in that mode.
+    ``deadline_s=None`` uses the middle of the training deadline range for each
+    environment's distance. Holds use the shortest training deadline: the
+    position-only stage reward lets the policy loop away and come back, and the
+    loop grows with the time left.
+    """
+
+    def __init__(self, cfg, goal=None, deadline_s=None, reset_at_deadline=False, **kwargs):
+        self.play_goal = self.play_deadline_s = None
+        self.reset_at_deadline = bool(reset_at_deadline) or goal is None
         super().__init__(cfg, **kwargs)
+        self._segment_hold = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self._segment_start_w = self.robot.data.root_pos_w.clone()
+        self.play_results = []  # environment 0: every goal/sampled outcome and failed holds, oldest first
+        self.play_totals = dict.fromkeys(("goals", "goal_successes", "goal_failures",
+                                          "holds", "hold_successes", "hold_failures"), 0)
+        self.play_hold_worst_distance_m = 0.0
+        if goal is not None:
+            # Applied by the first reset; robot state is not valid before it.
+            self.play_goal, self.play_deadline_s = self._validated_goal(goal, deadline_s)
+
+    @property
+    def play_difficulty(self):
+        return stage_settings(self.cfg, self.goal_curriculum.level)[0]
+
+    def set_play_goal(self, goal, deadline_s=None):
+        """Own a new goal; an invalid request keeps the previous goal."""
+        self.play_goal, self.play_deadline_s = self._validated_goal(goal, deadline_s)
+        if not self.reset_at_deadline:
+            self._start_segment(self.robot._ALL_INDICES, hold=False)
+
+    def _validated_goal(self, goal, deadline_s):
+        if len(goal) != 3 or not all(math.isfinite(v) for v in goal):
+            raise ValueError("Goal needs three finite metres: x y z.")
+        if deadline_s is not None and (not math.isfinite(deadline_s) or deadline_s <= 0):
+            raise ValueError("Deadline must be positive and finite.")
+        low, high = self.cfg.flight_height_range_m
+        if not low < goal[2] < high:
+            raise ValueError(f"Goal z must lie strictly inside the flight heights {low:g}..{high:g} m.")
+        if max(abs(goal[0]), abs(goal[1])) >= self.cfg.flight_xy_limit_m:
+            raise ValueError(f"Goal x and y must lie strictly inside +/-{self.cfg.flight_xy_limit_m:g} m.")
+        tensor = torch.tensor(goal, dtype=self._goal_position_w.dtype, device=self.device)
+        return tensor, None if deadline_s is None else float(deadline_s)
+
+    def _play_deadline_steps(self, distance, hold):
+        if hold or self.play_deadline_s is None:
+            low, high = training_deadline_interval(self.cfg, self.play_difficulty, distance)
+            seconds = low if hold else (low + high) / 2
+        else:
+            seconds = torch.full_like(distance, self.play_deadline_s)
+        # Round up to policy ticks without float noise turning 1.75 s into 176 ticks.
+        return torch.ceil(seconds / self.step_dt - 1e-4).long().clamp_min(1)
+
+    def _start_segment(self, env_ids, hold):
+        """Restart the goal clock from the current state. Holds keep the current goal."""
+        position = self.robot.data.root_pos_w[env_ids]
+        if not hold:
+            self._goal_position_w[env_ids] = self.play_goal + self.scene.env_origins[env_ids]
+            self._segment_start_w[env_ids] = position
+        distance = (self._goal_position_w[env_ids] - position).norm(dim=-1)
+        self._goal_deadline_steps[env_ids] = self._play_deadline_steps(distance, hold)
+        # The goal clock is the episode clock: remaining time and t_norm restart.
+        self._episode_steps[env_ids] = 0
+        self._initial_goal_distance[env_ids] = distance
+        self._previous_goal_distance[env_ids] = distance
+        self._minimum_goal_distance[env_ids] = distance
+        self._first_arrival_s[env_ids] = torch.where(distance <= self.cfg.goal_success_tolerance_m, 0.0, -1.0)
+        for buffer in (self._goal_failed, self._goal_deadline_reached, self._goal_finished, self._goal_success):
+            buffer[env_ids] = False
+        self._segment_hold[env_ids] = hold
 
     def _reset_idx(self, env_ids):
         if env_ids is None:
             env_ids = self.robot._ALL_INDICES
-        super()._reset_idx(env_ids)
-        if self._play_goal_offset is not None:
-            offset = self._goal_position_w.new_tensor(self._play_goal_offset)
-            self._goal_position_w[env_ids] = self.robot.data.root_pos_w[env_ids] + offset
-            self._goal_deadline_steps[env_ids] = max(1, math.ceil(self._play_deadline_s / self.step_dt))
-            distance = offset.norm()
-            self._initial_goal_distance[env_ids] = distance
-            self._previous_goal_distance[env_ids] = distance
-            self._minimum_goal_distance[env_ids] = distance
-            self._first_arrival_s[env_ids] = 0.0 if distance <= self.cfg.goal_success_tolerance_m else -1.0
+        super()._reset_idx(env_ids)  # samples a training goal; a live goal replaces it below
+        if self.play_goal is not None:
+            self._start_segment(env_ids, hold=False)
+        else:
+            self._segment_start_w[env_ids] = self.robot.data.root_pos_w[env_ids]
+            self._segment_hold[env_ids] = False
+
+    def _get_dones(self):
+        terminated, time_outs = super()._get_dones()
+        if self.reset_at_deadline:
+            return terminated, time_outs
+        return self._goal_failed.clone(), time_outs  # only safety failures reset the robot
+
+    def _get_rewards(self):
+        reward = super()._get_rewards()
+        ended = self._goal_finished.nonzero().flatten()
+        if len(ended):
+            self._record_outcomes(ended)
+            if not self.reset_at_deadline:
+                held = ended[~self._goal_failed[ended]]
+                if len(held):
+                    self._start_segment(held, hold=True)
+        return reward
+
+    def _record_outcomes(self, env_ids):
+        """Pre-reset outcomes; robot state is still the final state of the segment."""
+        info = self.extras["goal"]
+        hold, success, failed = self._segment_hold[env_ids], info["success"][env_ids], info["failed"][env_ids]
+        distance = info["distance_m"][env_ids]
+        for prefix, mask in (("goal", ~hold), ("hold", hold)):
+            self.play_totals[f"{prefix}s"] += int(mask.sum())
+            self.play_totals[f"{prefix}_successes"] += int((success & mask).sum())
+            self.play_totals[f"{prefix}_failures"] += int((failed & mask).sum())
+        if hold.any():
+            self.play_hold_worst_distance_m = max(self.play_hold_worst_distance_m, float(distance[hold].max()))
+        if env_ids[0] != 0 or (hold[0] and not failed[0]):
+            return
+        origin = self.scene.env_origins[0]
+        arrival = float(self._first_arrival_s[0])
+        self.play_results.append({
+            "kind": "hold" if hold[0] else ("sampled" if self.play_goal is None else "goal"),
+            "goal_m": (self._goal_position_w[0] - origin).tolist(),
+            "start_m": (self._segment_start_w[0] - origin).tolist(),
+            "deadline_s": int(self._goal_deadline_steps[0]) * self.step_dt,
+            "elapsed_s": int(self._episode_steps[0]) * self.step_dt,
+            "distance_m": float(distance[0]),
+            "speed_m_s": float(self.robot.data.root_lin_vel_w[0].norm()),
+            "min_distance_m": float(self._minimum_goal_distance[0]),
+            "first_arrival_s": None if arrival < 0 else arrival,
+            "success": bool(success[0]), "failed": bool(failed[0])})
 
 
 def checkpoint_goal_level(infos, fallback, override_keys):

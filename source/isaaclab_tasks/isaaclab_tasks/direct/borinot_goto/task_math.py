@@ -18,20 +18,32 @@ def max_curriculum_level(cfg):
         len(cfg.progress_reward_factors) - 1 if cfg.progress_reward_curriculum else 0)
 
 
-def sample_goals(start_position_w, cfg, difficulty, step_dt):
-    """Uniform box offsets and quantized deadlines with a distance-dependent floor.
+def deadline_floor(cfg, difficulty, distance):
+    """Shortest deadline the sampler assigns to a goal distance (tensor in, tensor out).
 
     The floor is a sampling heuristic, not a plant reachability certificate.
     It combines a cruise-speed bound and a triangular rest-to-rest profile.
     """
+    return torch.maximum(distance / cfg.goal_reference_speed_m_s[difficulty],
+                         2 * torch.sqrt(distance / cfg.goal_reference_accel_m_s2[difficulty]))
+
+
+def training_deadline_interval(cfg, difficulty, distance):
+    """Deadlines the sampler can assign to this distance, before rounding up to policy ticks."""
+    floor = deadline_floor(cfg, difficulty, distance)
+    low, high = cfg.goal_deadline_range_s[difficulty]
+    return floor.clamp_min(low), floor.clamp_min(high)
+
+
+def sample_goals(start_position_w, cfg, difficulty, step_dt):
+    """Uniform box offsets and quantized deadlines with a distance-dependent floor."""
     size = start_position_w.shape[0]
     extent = start_position_w.new_tensor(cfg.goal_half_extents_m[difficulty])
     offset = (2 * torch.rand(size, 3, device=start_position_w.device) - 1) * extent
     distance = offset.norm(dim=-1)
     low, high = cfg.goal_deadline_range_s[difficulty]
     requested = low + (high - low) * torch.rand(size, device=start_position_w.device)
-    floor = torch.maximum(distance / cfg.goal_reference_speed_m_s[difficulty],
-                          2 * torch.sqrt(distance / cfg.goal_reference_accel_m_s2[difficulty]))
+    floor = deadline_floor(cfg, difficulty, distance)
     deadline_steps = torch.ceil(torch.maximum(requested, floor) / step_dt).long().clamp_min(1)
     return start_position_w + offset, deadline_steps
 
