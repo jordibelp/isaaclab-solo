@@ -4,7 +4,7 @@ import math
 from isaaclab.utils import configclass
 from isaaclab_tasks.direct.borinot_cmd_vel.borinot_cmd_vel_env_cfg import BorinotCmdVelEnvCfg
 
-from .task_math import validate_goal_config
+from .task_math import deadline_references, validate_goal_config
 
 
 @configclass
@@ -15,8 +15,10 @@ class BorinotGoToEnvCfg(BorinotCmdVelEnvCfg):
     goal_half_extents_m = ((0.25, 0.25, 0.10), (0.5, 0.5, 0.20), (1.0, 1.0, 0.35),
                            (2.0, 2.0, 0.60), (3.0, 3.0, 0.80), (6.0, 6.0, 1.0))
     goal_deadline_range_s = ((2.5, 3.5), (2.0, 3.0), (1.5, 2.5), (1.0, 2.0), (0.7, 1.8), (1.0, 2.5))
-    goal_reference_speed_m_s = (0.4, 0.7, 1.2, 2.0, 3.0, 3.125)
-    goal_reference_accel_m_s2 = (0.8, 1.5, 3.0, 5.0, 8.0, 9.0)
+    # Optional deadline floors: zero disables, one value broadcasts to all stages.
+    # Omitted CLI references use only the configured phase time ranges.
+    goal_reference_speed_m_s = (0.0,)
+    goal_reference_accel_m_s2 = (0.0,)
     # Success, evaluated only at a clean deadline: all three must hold.
     goal_success_tolerance_m = 0.05  # 3D base-link distance <= this
     goal_success_lin_vel_tolerance_m_s = 0.1  # |base linear velocity| < this
@@ -64,8 +66,10 @@ class BorinotGoToEnvCfg(BorinotCmdVelEnvCfg):
         self.is_finite_horizon = True
         # A generic horizon must not cut short a sampled deadline. Derive the
         # metadata horizon from all sampling stages after Hydra overrides.
-        longest = max(max(bounds[1], math.sqrt(sum(v*v for v in extent)) / speed,
-                          2 * math.sqrt(math.sqrt(sum(v*v for v in extent)) / accel))
-                      for extent, bounds, speed, accel in zip(self.goal_half_extents_m, self.goal_deadline_range_s,
-                                                            self.goal_reference_speed_m_s, self.goal_reference_accel_m_s2))
+        longest = 0.0
+        for difficulty, (extent, bounds) in enumerate(zip(self.goal_half_extents_m, self.goal_deadline_range_s)):
+            distance = math.sqrt(sum(v*v for v in extent))
+            speed, accel = deadline_references(self, difficulty)
+            longest = max(longest, bounds[1], distance / speed if speed > 0 else 0.0,
+                          2 * math.sqrt(distance / accel) if accel > 0 else 0.0)
         self.episode_length_s = math.ceil(longest * self.policy_hz) / self.policy_hz

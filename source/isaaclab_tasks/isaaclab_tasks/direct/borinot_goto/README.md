@@ -187,22 +187,41 @@ We sample each goal as an independent uniform XYZ offset from the actual reset
 position. XY forms a square; Z forms a smaller vertical interval. We do not clip
 goals onto the safety boundary. Invalid goal boxes fail validation before startup.
 
-| Difficulty | XY half-width, m | Z half-width, m | Nominal sampled time, s | Reference speed, m/s | Reference acceleration, m/s² |
-| ---: | ---: | ---: | --- | ---: | ---: |
-| 0 | 0.25 | 0.10 | 2.5–3.5 | 0.4 | 0.8 |
-| 1 | 0.50 | 0.20 | 2.0–3.0 | 0.7 | 1.5 |
-| 2 | 1.00 | 0.35 | 1.5–2.5 | 1.2 | 3.0 |
-| 3 | 2.00 | 0.60 | 1.0–2.0 | 2.0 | 5.0 |
-| 4 | 3.00 | 0.80 | 0.7–1.8 | 3.0 | 8.0 |
-| 5 | 6.00 | 1.00 | 1.0–2.5 | 3.125 | 9.0 |
+| Difficulty | XY half-width, m | Z half-width, m | Sampled time, s |
+| ---: | ---: | ---: | --- |
+| 0 | 0.25 | 0.10 | 2.5–3.5 |
+| 1 | 0.50 | 0.20 | 2.0–3.0 |
+| 2 | 1.00 | 0.35 | 1.5–2.5 |
+| 3 | 2.00 | 0.60 | 1.0–2.0 |
+| 4 | 3.00 | 0.80 | 0.7–1.8 |
+| 5 | 6.00 | 1.00 | 1.0–2.5 |
 
-To avoid combining the furthest corner with an arbitrarily short time, the final
-budget is at least `distance / reference_speed` and
-`2 * sqrt(distance / reference_acceleration)`. The latter is the time for an
+By default, deadlines use **only the phase's time range**, rounded up to a
+policy tick. Both `goal_reference_speed_m_s` and `goal_reference_accel_m_s2`
+default to `(0.0,)`. Omit these CLI overrides or set either to `[0.0]` to
+disable its floor. Use `[0.0]`, not `[0.,]`: Hydra rejects the trailing comma.
+A single value applies to
+every difficulty, so adding goal stages does not require extending disabled
+reference arrays. Alternatively, provide one value per goal difficulty; zero
+disables that reference only for that difficulty. Negative or non-finite
+references, empty arrays, and other array lengths are invalid.
+
+Positive references optionally increase the final budget to at least
+`distance / reference_speed` and/or
+`2 * sqrt(distance / reference_acceleration)`. Each floor is independent: a
+positive speed with zero acceleration enables only the speed floor, and vice
+versa. The acceleration expression is the time for an
 ideal symmetric accelerate/brake profile starting and ending at rest. These
 are **sampling heuristics**, not physical controller limits or a reachability
 certificate. Real Borinot must tilt, handle its arm, and respect thrust limits.
 The floor can extend a budget beyond the table's nominal upper endpoint.
+The metadata episode horizon accounts for every stage and enabled floor.
+
+To reproduce the previous six-stage reference recipe, explicitly pass
+`'env.goal_reference_speed_m_s=[0.4,0.7,1.2,2.0,3.0,3.125]'` and
+`'env.goal_reference_accel_m_s2=[0.8,1.5,3.0,5.0,8.0,9.0]'`. Positive-reference
+sampling is unchanged. When replaying an older checkpoint, pass its original
+references if you need its training-time deadline distribution.
 
 The configurable arrays are `goal_half_extents_m`, `goal_deadline_range_s`,
 `goal_reference_speed_m_s`, and `goal_reference_accel_m_s2`. Defaults are a

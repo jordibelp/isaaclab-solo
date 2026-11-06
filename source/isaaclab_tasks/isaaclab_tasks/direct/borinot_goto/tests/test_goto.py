@@ -143,9 +143,57 @@ def test_config_is_idempotent_derived_horizon_follows_clock_and_not_runner_count
     assert cfg.episode_length_s == pytest.approx(math.ceil(4.123*150)/150)
 
 
+@pytest.mark.parametrize("references", [{},
+    {"goal_reference_speed_m_s": [0.], "goal_reference_accel_m_s2": [0.]},
+    {"goal_reference_speed_m_s": [0.] * 9, "goal_reference_accel_m_s2": [0.] * 9}])
+def test_nine_stage_command_uses_only_phase_times_without_references(references):
+    extents = [[.25,.25,.1], [.5,.5,.2], [1.,1.,.35], [2.,2.,.6], [3.,3.,.8],
+               [5.,5.,.8], [6.,6.,.8], [6.,6.,.8], [6.,6.,.8]]
+    times = [[2.5,3.5], [2.,3.], [1.5,2.5], [1.,2.], [.7,1.8], [1.,2.5], [1.,2.5], [1.,2.5], [1.,2.5]]
+    cfg = config("model_wrench_yawless", goal_half_extents_m=extents, goal_deadline_range_s=times, **references)
+    assert cfg.episode_length_s == 3.5
+    start = torch.zeros(10000, 3)
+    for difficulty, (low, high) in enumerate(times):
+        torch.manual_seed(230926 + difficulty)
+        goals, steps = task_math.sample_goals(start, cfg, difficulty, .01)
+        # Independent oracle: disabling references changes neither RNG draws nor time sampling.
+        torch.manual_seed(230926 + difficulty)
+        expected_goals = (2 * torch.rand_like(start) - 1) * start.new_tensor(extents[difficulty])
+        expected_steps = torch.ceil((low + (high-low) * torch.rand(len(start))) / .01).long()
+        assert torch.equal(goals, expected_goals) and torch.equal(steps, expected_steps)
+        lo, hi = task_math.training_deadline_interval(cfg, difficulty, goals.norm(dim=-1))
+        assert (lo == low).all() and (hi == high).all()
+        assert (steps * .01 >= low-1e-6).all() and (steps * .01 <= high+.01+1e-6).all()
+    cfg.configure_control()  # reference broadcasting must remain idempotent
+    assert cfg.episode_length_s == 3.5
+
+
+@pytest.mark.parametrize("speed,accel", [(0.,0.), (2.,0.), (0.,4.), (2.,4.)])
+@pytest.mark.parametrize("per_stage", [False, True])
+def test_reference_floors_are_independently_optional_and_horizon_covers_all_stages(speed, accel, per_stage):
+    cfg = config(goal_reference_speed_m_s=(speed,) * (6 if per_stage else 1),
+                 goal_reference_accel_m_s2=(accel,) * (6 if per_stage else 1))
+    distance = torch.tensor([0., .1, 3., 12.], dtype=torch.float64)
+    expected = torch.tensor([max(d/speed if speed else 0., 2*math.sqrt(d/accel) if accel else 0.)
+                             for d in distance.tolist()], dtype=distance.dtype)
+    for difficulty, (extent, (_, high)) in enumerate(zip(cfg.goal_half_extents_m, cfg.goal_deadline_range_s)):
+        torch.testing.assert_close(task_math.deadline_floor(cfg, difficulty, distance), expected)
+        corner = math.sqrt(sum(v*v for v in extent))
+        required = max(high, corner/speed if speed else 0., 2*math.sqrt(corner/accel) if accel else 0.)
+        assert cfg.episode_length_s >= required
+    # A stage-wise zero disables only that stage, not later positive references.
+    cfg.goal_reference_speed_m_s = (0., 1., 0., 1., 0., 1.)
+    cfg.goal_reference_accel_m_s2 = (0.,)
+    cfg.configure_control()
+    for difficulty in range(6):
+        floor = task_math.deadline_floor(cfg, difficulty, distance)
+        torch.testing.assert_close(floor, distance if difficulty % 2 else torch.zeros_like(distance))
+
+
 @pytest.mark.parametrize("difficulty", range(len(config().goal_half_extents_m)))
 def test_sampling_uniform_box_no_hidden_direction_bias_and_deadline_floors(difficulty):
-    cfg = config()
+    cfg = config(goal_reference_speed_m_s=(.4,.7,1.2,2.,3.,3.125),
+                 goal_reference_accel_m_s2=(.8,1.5,3.,5.,8.,9.))
     torch.manual_seed(13)
     start = torch.tensor([[100., -200., 1.5]], dtype=torch.float64).expand(30000, -1)
     goals, steps = task_math.sample_goals(start, cfg, difficulty, .01)
@@ -375,7 +423,9 @@ def test_curriculum_exact_threshold_rolling_window_and_manual_reset_exclusion():
 
 @pytest.mark.parametrize("name,value", [
     ("goal_half_extents_m", ()), ("goal_half_extents_m", ((0.,0.,0.),)),
-    ("goal_reference_speed_m_s", (1.,)), ("goal_reference_accel_m_s2", (0.,)*5),
+    ("goal_reference_speed_m_s", (1.,)*2), ("goal_reference_accel_m_s2", (0.,)*5),
+    ("goal_reference_speed_m_s", ()), ("goal_reference_speed_m_s", (-1.,)),
+    ("goal_reference_accel_m_s2", (float('nan'),)), ("goal_reference_speed_m_s", (float('inf'),)),
     ("goal_deadline_range_s", ((0.,1.),)*5), ("goal_curriculum_start_level", -1),
     ("goal_curriculum_start_level", True), ("progress_reward_factors", (1.,.5,.6,0.)),
     ("progress_reward_factors", (1.,.5)), ("curriculum_success_threshold", float('nan')),

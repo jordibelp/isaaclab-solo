@@ -54,8 +54,9 @@ def play_env(goal=GOAL, deadline_s=None, reset_at_deadline=False, goal_relative=
 
 def auto_steps(cfg, distance, difficulty=5, hold=False):
     """Independent oracle: middle (goal) or start (hold) of [max(low, floor), max(high, floor)], in 0.01 s ticks."""
-    floor = max(distance / cfg.goal_reference_speed_m_s[difficulty],
-                2 * math.sqrt(distance / cfg.goal_reference_accel_m_s2[difficulty]))
+    speed, accel = (v[0] if len(v) == 1 else v[difficulty]
+                    for v in (cfg.goal_reference_speed_m_s, cfg.goal_reference_accel_m_s2))
+    floor = max(distance / speed if speed else 0., 2 * math.sqrt(distance / accel) if accel else 0.)
     low, high = cfg.goal_deadline_range_s[difficulty]
     seconds = max(low, floor) if hold else (max(low, floor) + max(high, floor)) / 2
     return math.ceil(round(seconds / 0.01, 6))
@@ -100,7 +101,8 @@ def test_training_interval_contains_every_sampled_deadline_for_its_distance():
 
 
 def test_sampler_refactor_is_bit_exact_with_the_previous_inline_floor():
-    cfg = config()
+    cfg = config(goal_reference_speed_m_s=(.4,.7,1.2,2.,3.,3.125),
+                 goal_reference_accel_m_s2=(.8,1.5,3.,5.,8.,9.))
     start = torch.randn(5000, 3)
     for difficulty in range(len(cfg.goal_half_extents_m)):
         torch.manual_seed(difficulty)

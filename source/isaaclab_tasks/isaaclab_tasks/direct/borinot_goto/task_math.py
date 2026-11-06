@@ -35,14 +35,23 @@ def max_curriculum_level(cfg):
     return level
 
 
+def deadline_references(cfg, difficulty):
+    """Resolve each optional reference: a singleton applies to every difficulty."""
+    return tuple(values[0] if len(values) == 1 else values[difficulty]
+                 for values in (cfg.goal_reference_speed_m_s, cfg.goal_reference_accel_m_s2))
+
+
 def deadline_floor(cfg, difficulty, distance):
     """Shortest deadline the sampler assigns to a goal distance (tensor in, tensor out).
 
     The floor is a sampling heuristic, not a plant reachability certificate.
     It combines a cruise-speed bound and a triangular rest-to-rest profile.
+    Zero disables either bound independently; both zero leave phase times alone.
     """
-    return torch.maximum(distance / cfg.goal_reference_speed_m_s[difficulty],
-                         2 * torch.sqrt(distance / cfg.goal_reference_accel_m_s2[difficulty]))
+    speed, accel = deadline_references(cfg, difficulty)
+    speed_time = distance / speed if speed > 0 else torch.zeros_like(distance)
+    accel_time = 2 * torch.sqrt(distance / accel) if accel > 0 else torch.zeros_like(distance)
+    return torch.maximum(speed_time, accel_time)
 
 
 def training_deadline_interval(cfg, difficulty, distance):
@@ -69,9 +78,8 @@ def validate_goal_config(cfg):
     stages = len(cfg.goal_half_extents_m)
     if stages < 1:
         raise ValueError("goal_half_extents_m needs at least one difficulty.")
-    for name in ("goal_deadline_range_s", "goal_reference_speed_m_s", "goal_reference_accel_m_s2"):
-        if len(getattr(cfg, name)) != stages:
-            raise ValueError(f"{name} must have one entry per goal difficulty.")
+    if len(cfg.goal_deadline_range_s) != stages:
+        raise ValueError("goal_deadline_range_s must have one entry per goal difficulty.")
     for extent in cfg.goal_half_extents_m:
         if len(extent) != 3 or any(not math.isfinite(v) or v < 0 for v in extent) or not any(extent):
             raise ValueError("Each goal_half_extents_m entry needs three nonnegative finite values, not all zero.")
@@ -82,8 +90,11 @@ def validate_goal_config(cfg):
         if len(bounds) != 2 or not all(math.isfinite(v) and v > 0 for v in bounds) or bounds[0] > bounds[1]:
             raise ValueError("Each goal_deadline_range_s entry needs two ordered positive finite seconds.")
     for name in ("goal_reference_speed_m_s", "goal_reference_accel_m_s2"):
-        if any(not math.isfinite(v) or v <= 0 for v in getattr(cfg, name)):
-            raise ValueError(f"{name} must contain positive finite values.")
+        values = getattr(cfg, name)
+        if len(values) not in (1, stages):
+            raise ValueError(f"{name} must have one shared entry or one entry per goal difficulty.")
+        if any(not math.isfinite(v) or v < 0 for v in values):
+            raise ValueError(f"{name} must contain nonnegative finite values; zero disables the reference.")
     factors = cfg.progress_reward_factors
     if (not factors or factors[0] != 1.0 or factors[-1] != 0.0
             or any(not math.isfinite(v) or not 0 <= v <= 1 for v in factors)
