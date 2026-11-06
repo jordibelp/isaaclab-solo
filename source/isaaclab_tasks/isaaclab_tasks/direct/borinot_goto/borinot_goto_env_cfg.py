@@ -18,7 +18,7 @@ class BorinotGoToEnvCfg(BorinotCmdVelEnvCfg):
     goal_reference_speed_m_s = (0.4, 0.7, 1.2, 2.0, 3.0, 3.125)
     goal_reference_accel_m_s2 = (0.8, 1.5, 3.0, 5.0, 8.0, 9.0)
     # Success, evaluated only at a clean deadline: all three must hold.
-    goal_success_tolerance_m = 0.15  # 3D base-link distance <= this
+    goal_success_tolerance_m = 0.05  # 3D base-link distance <= this
     goal_success_lin_vel_tolerance_m_s = 0.1  # |base linear velocity| < this
     goal_success_ang_vel_tolerance_rad_s = 0.2  # |base angular velocity|, all three axes, < this
     goal_curriculum_start_level = 0
