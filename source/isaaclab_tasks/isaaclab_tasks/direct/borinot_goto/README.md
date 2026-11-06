@@ -329,7 +329,7 @@ The default goal is the robot home, so the robot first hovers in place.
 Select **Relative to base position** in the panel to enter displacements
 instead. The switch keeps the same numbers and does not send a goal.
 Relative XYZ uses world-aligned axes, not axes rotated with the robot yaw.
-Each **Go to goal** adds the displacement to each robot's current base position.
+Each edit or **Go to goal** adds the displacement to each robot's current base position.
 For example, `(1, 0, 0)` flies one metre along world X at the current height.
 Press Go again with unchanged inputs to repeat that displacement from the new
 position. Once sent, the target stays fixed, including across safety resets;
@@ -346,18 +346,23 @@ In this mode the default input is `(0, 0, 0)`, keeping the initial position.
 How a goal works in the player:
 
 - **Deadline.** By default the deadline is automatic: the middle of the
-  deadlines that training assigns to this distance at the checkpoint stage.
+  deadlines in the current training reference for this distance.
   `--deadline_s` or the deadline slider sets a fixed time instead. Moving the
-  slider switches Auto off.
-- **Go to goal.** Editing a field shows a yellow sphere: the goal is not sent
-  yet. **Go to goal** sends it, and the green sphere (success radius) moves
-  there. **Fly home** sends the robot home.
+  slider switches Auto off. Any positive finite manual time is accepted, rounded
+  up to policy ticks. It need not match a training range or the metadata horizon.
+- **Edits and Go to goal.** XYZ/time edits apply before the next policy action,
+  including while paused. **Go to goal** resends the current inputs.
+  The green sphere shows the active goal; yellow previews the next target.
+  **Fly home** sends the robot home.
+- **Reset robot.** Reset sends the latest inputs and starts one new rollout from
+  home, even if Go is also queued. Relative inputs snapshot the target before
+  the teleport, just as Go does in `--reset-at-deadline` mode.
 - **Chain mode (default).** A new goal starts from the current state. The
   robot is not teleported. The goal clock restarts, so the policy sees the new
   body-frame offset, a full `t_norm` and the new remaining seconds.
 - **Hold.** At a clean deadline the robot keeps the same goal. A hold segment
-  starts by itself, with the shortest deadline that training assigns to the
-  current distance (1.0 s at the final stage). Stage rewards pay only the
+  starts by itself. Manual time stays unchanged; Auto uses the shortest deadline
+  in the reference interval for the current distance. Stage rewards pay only the
   state at the deadline: position and, by default, linear and angular speed.
   So the policy may loop away and come back between deadlines, and the loop
   grows with the time left.
@@ -400,12 +405,17 @@ the training start (±5°); watch the yaw value in the window.
 Cameras: **Goal** (default) is a fixed side view that frames the start and
 the goal of the latest flight; Follow, Chase, Side, Top and Free work as in
 the command-velocity player. `--x_range`, `--y_range` and `--z_range` change
-the slider ranges; defaults cover both world positions near home and
-signed relative displacements at the checkpoint stage.
+the slider ranges; defaults cover the flight area, not a curriculum box.
+The exact-value fields are not clamped to slider ranges. Targets still have
+to lie inside the configured flight boundaries.
 
 Playback freezes curriculum. The stage comes from the checkpoint metadata
 (`best_model_curriculum_idx`), unless `--curriculum-level` or
-`env.goal_curriculum_start_level` selects one. `--duration_s` is how long the
+`env.goal_curriculum_start_level` selects one. A saved stage outside the current
+schedule is bounded to that schedule. It is only a reference for Auto time,
+training-region labels and random-goal sampling; it does not restrict live
+goals or manual deadlines. You do not need a curriculum-level argument for
+inference. `--duration_s` is how long the
 player runs, not a deadline. Match the trained controller, observation flags,
 physics settings, and algorithm; add the SAC `--agent` key when playing SAC.
 Inference restores normalizers and weights, not optimizer state or a

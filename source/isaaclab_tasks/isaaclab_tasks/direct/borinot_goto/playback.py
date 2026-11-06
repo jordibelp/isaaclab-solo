@@ -20,7 +20,7 @@ class BorinotGoToPlayEnv(BorinotGoToEnv):
     ``reset_at_deadline=True`` restores training episodes for the live goal;
     callers reset the environment after ``set_play_goal`` in that mode.
     ``deadline_s=None`` uses the middle of the training deadline range for each
-    environment's distance. Holds use the shortest training deadline: the
+    environment's distance. Automatic holds use the shortest training deadline: the
     position-only stage reward lets the policy loop away and come back, and the
     loop grows with the time left.
     """
@@ -82,7 +82,7 @@ class BorinotGoToPlayEnv(BorinotGoToEnv):
         return targets
 
     def _play_deadline_steps(self, distance, hold):
-        if hold or self.play_deadline_s is None:
+        if self.play_deadline_s is None:
             low, high = training_deadline_interval(self.cfg, self.play_difficulty, distance)
             seconds = low if hold else (low + high) / 2
         else:
@@ -168,10 +168,16 @@ class BorinotGoToPlayEnv(BorinotGoToEnv):
             "success": bool(success[0]), "failed": bool(failed[0])})
 
 
-def checkpoint_goal_level(infos, fallback, override_keys):
+def checkpoint_goal_level(infos, fallback, override_keys, max_level=None):
+    """Saved stage is a sampling/auto-time reference, not a live-goal constraint.
+
+    Old checkpoints can use a longer curriculum than the current configuration.
+    Bound their reference stage; leave explicit user overrides to config validation.
+    """
     if "env.goal_curriculum_start_level" in override_keys:
         return fallback
     for key in ("best_model_curriculum_idx", "curriculum_global_idx"):
         if infos.get(key) is not None:
-            return int(infos[key])
+            level = int(infos[key])
+            return level if max_level is None else max(0, min(level, max_level))
     return fallback

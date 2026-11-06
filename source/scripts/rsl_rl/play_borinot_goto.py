@@ -29,12 +29,13 @@ parser.add_argument("--reset-at-deadline", action="store_true",
                     help="Training episodes: reset the robot to home at every deadline and repeat the goal.")
 parser.add_argument("--random-goals", action="store_true", help="Use training goal/deadline sampling instead of live goals.")
 parser.add_argument("--curriculum-level", type=int, default=None,
-                    help="Fixed goal stage. Default: saved checkpoint stage, then environment default.")
+                    help="Sampling/auto-deadline reference only; no restriction on live goals or manual time. "
+                         "Default: saved checkpoint stage bounded to the current schedule.")
 parser.add_argument("--camera", choices=("goal", "follow", "chase", "side", "top", "free"), default="goal")
 parser.add_argument("--ui", action=argparse.BooleanOptionalAction, default=True)
 for axis in ("x", "y", "z"):
     parser.add_argument(f"--{axis}_range", type=float, nargs=2, default=None, metavar=("MIN", "MAX"),
-                        help=f"Goal {axis} slider range. Default: home +/- the stage goal box.")
+                        help=f"Goal {axis} slider range. Default: configured flight area; typed values are not clamped.")
 AppLauncher.add_app_launcher_args(parser)
 args, hydra_args = parser.parse_known_args()
 if args.num_envs < 1 or not math.isfinite(args.duration_s) or args.duration_s <= 0:
@@ -71,7 +72,7 @@ from isaaclab_tasks.direct.borinot_cmd_vel.playback_ui import camera_pose
 from isaaclab_tasks.direct.borinot_goto.playback import BorinotGoToPlayEnv, checkpoint_goal_level
 from isaaclab_tasks.direct.borinot_goto.playback_ui import (
     GoalControls, describe_result, describe_state, flight_state, goal_camera_pose)
-from isaaclab_tasks.direct.borinot_goto.task_math import stage_force_limit, stage_settings
+from isaaclab_tasks.direct.borinot_goto.task_math import max_curriculum_level, stage_force_limit, stage_settings
 
 
 @hydra_task_config(args.task, args.agent)
@@ -79,7 +80,8 @@ def main(env_cfg, agent_cfg):
     checkpoint = retrieve_file_path(str(Path(args.checkpoint).expanduser()))
     metadata = torch.load(checkpoint, map_location="cpu", weights_only=False)
     env_cfg.goal_curriculum_start_level = (args.curriculum_level if args.curriculum_level is not None else
-        checkpoint_goal_level(metadata.get("infos") or {}, env_cfg.goal_curriculum_start_level, override_keys))
+        checkpoint_goal_level(metadata.get("infos") or {}, env_cfg.goal_curriculum_start_level, override_keys,
+                              max_level=max_curriculum_level(env_cfg)))
     del metadata
     env_cfg.scene.num_envs = args.num_envs
     env_cfg.seed = agent_cfg.seed = args.seed
@@ -99,15 +101,15 @@ def main(env_cfg, agent_cfg):
     for index, axis in enumerate("xyz"):
         bounds = getattr(args, f"{axis}_range")
         if bounds is None:
-            extent = env_cfg.goal_half_extents_m[difficulty][index]
-            # Support both live input modes, including negative relative Z and absolute height.
-            bounds = (min(-extent, home[index] - extent), max(extent, home[index] + extent))
+            # Live inference is not restricted to a training-stage box.
+            bounds = ((-env_cfg.flight_xy_limit_m, env_cfg.flight_xy_limit_m) if index < 2
+                      else (-env_cfg.flight_height_range_m[1], env_cfg.flight_height_range_m[1]))
             if goal is not None:
                 bounds = (min(bounds[0], goal[index]), max(bounds[1], goal[index]))
         if goal is not None and not bounds[0] <= goal[index] <= bounds[1]:
             raise ValueError(f"{axis}_range must include the initial goal.")
         ranges.append(bounds)
-    ranges.append((0.1, max(5.0, args.deadline_s or 0.0)))
+    ranges.append((1.0 / env_cfg.policy_hz, max(30.0, args.deadline_s or 0.0)))
     env_cfg.viewer.origin_type, env_cfg.viewer.env_index = "env", 0
     camera_goal = tuple(h + d for h, d in zip(home, goal)) if relative and goal is not None else goal
     pose = goal_camera_pose(home, camera_goal or home) if args.camera == "goal" else camera_pose(args.camera, home)
@@ -136,7 +138,8 @@ def main(env_cfg, agent_cfg):
         mode = "random" if args.random_goals else ("episodes" if args.reset_at_deadline else "chain")
         print(f"[INFO] Borinot go-to: {mode} mode, {env_cfg.control_mode}, {env_cfg.physics_hz}/{env_cfg.policy_hz} Hz, "
               f"actuator_delay={env_cfg.actuator_delay} s, actuator_delay_range={env_cfg.actuator_delay_range}, "
-              f"goal stage {play_env.goal_curriculum.level} (box +/-{env_cfg.goal_half_extents_m[difficulty]} m, "
+              f"training reference stage {play_env.goal_curriculum.level} (not a live-goal limit; "
+              f"box +/-{env_cfg.goal_half_extents_m[difficulty]} m, "
               f"deadlines {env_cfg.goal_deadline_range_s[difficulty]} s, "
               f"vertical pushes up to {push_limit_n:g} N), goal={goal or 'sampled'} m, "
               f"input_frame={args.goal_frame}, deadline={args.deadline_s or 'auto'}, "
@@ -149,24 +152,9 @@ def main(env_cfg, agent_cfg):
         with torch.inference_mode():
             while completed < total_steps and simulation_app.is_running():
                 start = time.perf_counter()
-                if controls.reset_requested:
-                    observation, _ = env.reset()
+                observation, did_reset = controls.apply_requests(env, observation)
+                if did_reset:
                     model.reset(every_env)
-                    controls.reset_requested = False
-                    controls.manual_resets += 1
-                if controls.go_requested:
-                    controls.go_requested = False
-                    try:
-                        play_env.set_play_goal(controls.goal, controls.requested_deadline(), relative=controls.relative)
-                    except ValueError as error:
-                        controls.message = f"Goal not sent: {error}"
-                    else:
-                        controls.message = ""
-                        if play_env.reset_at_deadline:
-                            observation, _ = env.reset()  # a new goal starts a new training-style episode
-                            model.reset(every_env)
-                        else:
-                            observation = env.get_observations()
                 controls.update(completed * play_env.step_dt)
                 if controls.paused:
                     play_env.sim.render()

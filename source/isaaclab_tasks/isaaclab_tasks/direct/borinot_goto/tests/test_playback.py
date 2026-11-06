@@ -81,9 +81,9 @@ def test_auto_goal_deadline_is_the_middle_and_hold_deadline_the_start_of_the_tra
     distance_t = torch.tensor([distance], dtype=torch.float64)
     assert env._play_deadline_steps(distance_t, hold=False).tolist() == [auto_steps(env.cfg, distance)]
     assert env._play_deadline_steps(distance_t, hold=True).tolist() == [auto_steps(env.cfg, distance, hold=True)]
-    env.play_deadline_s = 4.0  # a fixed user deadline never changes the hold rule
+    env.play_deadline_s = 4.0  # manual inference time applies to goal and hold segments
     assert env._play_deadline_steps(distance_t, hold=False).tolist() == [400]
-    assert env._play_deadline_steps(distance_t, hold=True).tolist() == [auto_steps(env.cfg, distance, hold=True)]
+    assert env._play_deadline_steps(distance_t, hold=True).tolist() == [400]
 
 
 def test_training_interval_contains_every_sampled_deadline_for_its_distance():
@@ -347,6 +347,68 @@ def test_relative_goal_rejects_all_robots_atomically_when_one_target_is_out_of_b
 
 def controls(env, goal, relative=False):
     return UI["GoalControls"](env, goal, None, [(-6., 6.)] * 4, show_ui=False, relative=relative)
+
+
+@pytest.mark.parametrize("index,value", [(0, 7.5), (1, -7.5), (2, 4.0), (3, 12.345)])
+def test_slider_edits_queue_a_goal_before_the_next_policy_step(index, value):
+    env = play_env()
+    panel = controls(env, GOAL)
+    panel.set_component(index, value)
+    assert panel.go_requested
+    if index == 3:
+        assert not panel.auto_deadline and panel.requested_deadline() == value
+
+
+@pytest.mark.parametrize("episodes", [False, True])
+def test_reset_applies_latest_fields_once_even_while_paused(episodes):
+    from types import SimpleNamespace
+    env = play_env(reset_at_deadline=episodes)
+    panel = controls(env, GOAL)
+    panel.paused = True
+    panel.set_component(0, 8.0)
+    panel.set_component(3, 12.345)
+    panel.request_reset()
+    resets = []
+
+    def reset():
+        env._reset_idx(None)
+        resets.append(True)
+        return env._get_observations(), {}
+
+    wrapper = SimpleNamespace(reset=reset, get_observations=env._get_observations)
+    observation, did_reset = panel.apply_requests(wrapper, None)
+    assert did_reset and len(resets) == 1 and panel.manual_resets == 1
+    assert not panel.go_requested and not panel.reset_requested and panel.paused
+    assert env._goal_deadline_steps.tolist() == [1235, 1235]
+    assert not env._episode_steps.any()
+    torch.testing.assert_close(env._goal_position_w - env.scene.env_origins,
+                               torch.tensor([[8., -.5, 2.]] * 2, dtype=torch.float64))
+    assert observation["policy"][:, -1].tolist() == pytest.approx([12.35, 12.35])
+    assert panel.apply_requests(wrapper, observation) == (observation, False)
+
+
+def test_manual_deadline_survives_holds_outside_training_range_and_generic_horizon():
+    env = play_env(deadline_s=12.345)
+    assert env._goal_deadline_steps.tolist() == [1235, 1235]
+    env._episode_steps[:] = env.max_episode_length + 1
+    done, timeout = env._get_dones()
+    assert not done.any() and not timeout.any()  # generic training horizon cannot cut the command short
+    env._episode_steps.copy_(env._goal_deadline_steps)
+    assert not env._get_dones()[0].any()
+    env._get_rewards()
+    assert env._segment_hold.all() and env._goal_deadline_steps.tolist() == [1235, 1235]
+
+
+def test_auto_checkbox_changes_queue_a_goal_and_curriculum_metadata_is_only_a_bounded_reference():
+    env = play_env()
+    panel = controls(env, GOAL)
+    panel.set_auto_deadline(False)
+    assert panel.go_requested and panel.requested_deadline() == 2.0
+    scope = load_definitions(FOLDER / "playback.py", {
+        "BorinotGoToEnv": environment_class(), "max_curriculum_level": task_math.max_curriculum_level})
+    level = scope["checkpoint_goal_level"]
+    assert level({"best_model_curriculum_idx": 12}, 0, set(), max_level=9) == 9
+    assert level({"best_model_curriculum_idx": 12}, 4, {"env.goal_curriculum_start_level"}, max_level=9) == 4
 
 
 def test_ui_mode_switch_preserves_input_without_sending_and_relative_preview_tracks_only_the_next_go():

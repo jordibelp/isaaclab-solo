@@ -135,17 +135,19 @@ class GoalControls:
                             ui.CheckBox(model=self._auto_model, width=22)
                             ui.Label("Auto deadline: middle of the training range for the distance")
                             self._subscriptions.append(self._auto_model.subscribe_value_changed_fn(
-                                lambda m: setattr(self, "auto_deadline", m.get_value_as_bool())))
+                                lambda m: self.set_auto_deadline(m.get_value_as_bool())))
                     with ui.HStack(spacing=8, height=30):
                         ui.Label(label, width=100)
-                        model = ui.SimpleFloatModel(values[index], min=low, max=high)
+                        # Slider bounds are for dragging, not limits on typed inference commands.
+                        model = ui.SimpleFloatModel(values[index])
                         ui.FloatField(model, width=105)
                         ui.FloatSlider(model, min=low, max=high)
                         self._models.append(model)
                         self._subscriptions.append(model.subscribe_value_changed_fn(
                             lambda m, i=index: self.set_component(i, m.get_value_as_float())))
-                ui.Label("Moving the deadline switches Auto off. Click a number to type an exact value.",
-                         height=22, word_wrap=True)
+                ui.Label("Edits apply immediately, including while paused. Reset uses these inputs.\n"
+                         "Moving the deadline switches Auto off; typed values are not limited to slider ranges.",
+                         height=40, word_wrap=True)
                 self.preview_label = ui.Label("", height=75, word_wrap=True)
                 with ui.HStack(height=32):
                     ui.Button("Go to goal", clicked_fn=self.request_go)
@@ -162,10 +164,10 @@ class GoalControls:
                 self.status_label = ui.Label("", height=40, word_wrap=True)
                 ui.Label(("Every deadline resets the robot to home and repeats the goal, as in training."
                           if self.env.reset_at_deadline else
-                          "After the deadline the robot keeps the goal: a hold segment with the shortest training\n"
-                          "deadline starts by itself. The policy is only paid at deadlines, so it may move a little\n"
+                          "After the deadline the robot keeps the goal. Holds keep your manual deadline;\n"
+                          "Auto holds use the shortest reference deadline. The policy may move a little\n"
                           "between them. A new goal starts from the current state, without a teleport.")
-                         + "\nYellow sphere: goal not sent yet. Green sphere: active goal, success radius."
+                         + "\nYellow sphere: next target preview. Green sphere: active goal, success radius."
                          "\nFlight bounds and crash resets remain enabled.", height=75, word_wrap=True)
         self.window.deferred_dock_in("Stage", ui.DockPolicy.CURRENT_WINDOW_IS_ACTIVE)
 
@@ -179,6 +181,11 @@ class GoalControls:
             if self.auto_deadline and self.window:
                 self._auto_model.set_value(False)
             self.auto_deadline = False
+        self.request_go()
+
+    def set_auto_deadline(self, enabled):
+        self.auto_deadline = bool(enabled)
+        self.request_go()
 
     def request_go(self):
         self.go_requested = True
@@ -224,6 +231,24 @@ class GoalControls:
 
     def requested_deadline(self):
         return None if self.auto_deadline else self.deadline_s
+
+    def apply_requests(self, env, observation):
+        """Apply the latest inputs once before inference, also when Reset wins over Go."""
+        if not (self.go_requested or self.reset_requested):
+            return observation, False
+        reset = self.reset_requested
+        self.go_requested = self.reset_requested = False
+        try:
+            self.env.set_play_goal(self.goal, self.requested_deadline(), relative=self.relative)
+        except ValueError as error:
+            self.message = f"Goal not sent: {error}"
+            return observation, False
+        self.message = ""
+        if reset or self.env.reset_at_deadline:
+            observation, _ = env.reset()
+            self.manual_resets += int(reset)
+            return observation, True
+        return env.get_observations(), False
 
     def update(self, time_s):
         env, data = self.env, self.env.robot.data
@@ -285,8 +310,8 @@ class GoalControls:
             f"If sent now: world XYZ {xyz_text(goal)} m, {distance:.2f} m from robot 0, "
             f"deadline {'auto ' if self.auto_deadline else ''}"
             f"{deadline:.2f} s (training {low:.2f}-{high:.2f} s for this distance).\n"
-            + ("Outside the training region: " + "; ".join(notes) + "." if notes
-               else f"Inside the training region of stage {env.goal_curriculum.level}."))
+            + ("Training reference only (allowed in inference): " + "; ".join(notes) + "." if notes
+               else f"Inside reference stage {env.goal_curriculum.level}; not an inference limit."))
         remaining = float((env._goal_deadline_steps[0] - env._episode_steps[0]).clamp_min(0)) * env.step_dt
         current = flight_state(env, time_s)
         self.state_label.text = (
