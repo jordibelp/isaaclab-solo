@@ -58,6 +58,7 @@ def describe_result(result, number):
     arrival = "never inside" if result["first_arrival_s"] is None else f"first inside {result['first_arrival_s']:.2f} s"
     return (f"{kind} #{number} ({goal}) m, deadline {result['deadline_s']:.2f} s: {outcome}. "
             f"Final distance {result['distance_m']:.3f} m, speed {result['speed_m_s']:.2f} m/s, "
+            f"angular speed {result['ang_speed_rad_s']:.2f} rad/s, "
             f"closest {result['min_distance_m']:.3f} m, {arrival}.")
 
 
@@ -72,7 +73,7 @@ def flight_state(env, time_s):
     return {
         "time_s": float(time_s), "position_m": position.tolist(), "velocity_m_s": velocity.tolist(),
         "goal_m": goal.tolist(), "error_m": error.tolist(), "distance_m": float(error.norm()),
-        "speed_m_s": float(velocity.norm()),
+        "speed_m_s": float(velocity.norm()), "ang_speed_rad_s": float(data.root_ang_vel_w[0].norm()),
         "yaw_deg": math.degrees(math.atan2(2 * (w*z + x*y), 1 - 2 * (y*y + z*z))),
         "remaining_s": float((env._goal_deadline_steps[0] - env._episode_steps[0]).clamp_min(0)) * env.step_dt,
         "phase": "HOLDING" if env._segment_hold[0] else "FLYING"}
@@ -88,6 +89,7 @@ def describe_state(state):
             f"velocity XYZ={xyz_text(state['velocity_m_s'])} m/s, "
             f"goal XYZ={xyz_text(state['goal_m'])} m, error XYZ={xyz_text(state['error_m'])} m, "
             f"distance={state['distance_m']:.3f} m, speed={state['speed_m_s']:.3f} m/s, "
+            f"angular speed={state['ang_speed_rad_s']:.3f} rad/s, "
             f"yaw={state['yaw_deg']:+.1f} deg, left={state['remaining_s']:.2f} s")
 
 
@@ -156,7 +158,7 @@ class GoalControls:
                     for mode in CAMERAS:
                         ui.Button(mode.title(), clicked_fn=lambda m=mode: self.set_camera(m))
                 self.goal_label = ui.Label("", height=58, word_wrap=True)
-                self.result_label = ui.Label("", height=95, word_wrap=True)
+                self.result_label = ui.Label("", height=115, word_wrap=True)
                 self.status_label = ui.Label("", height=40, word_wrap=True)
                 ui.Label(("Every deadline resets the robot to home and repeats the goal, as in training."
                           if self.env.reset_at_deadline else
@@ -289,7 +291,8 @@ class GoalControls:
         current = flight_state(env, time_s)
         self.state_label.text = (
             f"CURRENT POSITION XYZ {xyz_text(current['position_m'])} m (world)\n"
-            f"Velocity XYZ {xyz_text(current['velocity_m_s'])} m/s; speed {current['speed_m_s']:.3f} m/s\n"
+            f"Velocity XYZ {xyz_text(current['velocity_m_s'])} m/s; speed {current['speed_m_s']:.3f} m/s; "
+            f"angular speed {current['ang_speed_rad_s']:.3f} rad/s\n"
             f"Goal error XYZ {xyz_text(current['error_m'])} m; distance {current['distance_m']:.3f} m\n"
             f"Yaw {current['yaw_deg']:+.1f} deg; time left {current['remaining_s']:.2f} s")
         state = "HOLDING" if env._segment_hold[0] else "FLYING"
@@ -301,10 +304,13 @@ class GoalControls:
         totals, results = env.play_totals, env.play_results
         self.result_label.text = (
             (describe_result(results[-1], len(results)) if results else "No goal finished yet.")
-            + f"\nAll robots: goals {totals['goals']} ({totals['goal_successes']} inside "
-              f"{cfg.goal_success_tolerance_m:g} m at the deadline, {totals['goal_failures']} failed); "
-              f"holds {totals['holds']} ({totals['hold_successes']} inside, {totals['hold_failures']} failed, "
-              f"worst {env.play_hold_worst_distance_m:.3f} m).")
+            + f"\nAll robots: goals {totals['goals']} ({totals['goal_successes']} successes, "
+              f"{totals['goal_failures']} failed); "
+              f"holds {totals['holds']} ({totals['hold_successes']} successes, {totals['hold_failures']} failed, "
+              f"worst {env.play_hold_worst_distance_m:.3f} m)."
+              f"\nSuccess at the deadline: distance <= {cfg.goal_success_tolerance_m:g} m, "
+              f"speed < {cfg.goal_success_lin_vel_tolerance_m_s:g} m/s, "
+              f"angular speed < {cfg.goal_success_ang_vel_tolerance_rad_s:g} rad/s.")
         self.status_label.text = (f"{'PAUSED' if self.paused else 'PLAYING'} - {time_s:.1f} s - camera {self.camera}"
                                   f" - manual resets {self.manual_resets}" + (f"\n{self.message}" if self.message else ""))
 

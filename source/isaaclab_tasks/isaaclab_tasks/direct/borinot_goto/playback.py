@@ -162,6 +162,7 @@ class BorinotGoToPlayEnv(BorinotGoToEnv):
             "elapsed_s": int(self._episode_steps[0]) * self.step_dt,
             "distance_m": float(distance[0]),
             "speed_m_s": float(self.robot.data.root_lin_vel_w[0].norm()),
+            "ang_speed_rad_s": float(self.robot.data.root_ang_vel_w[0].norm()),
             "min_distance_m": float(self._minimum_goal_distance[0]),
             "first_arrival_s": None if arrival < 0 else arrival,
             "success": bool(success[0]), "failed": bool(failed[0])})

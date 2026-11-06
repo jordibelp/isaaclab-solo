@@ -9,7 +9,8 @@ heading target, velocity-tracking reward, obstacle course, or physical goal obje
 The scene, robot inertias, motor lag, joint limits, startup randomization, reset
 noise, controller implementations, and policy/physics clocks come from the
 command-tracking task. The go-to task does not modify that task's settings.
-External push disturbances are disabled here, at every curriculum level.
+It also reuses that task's vertical push disturbances. Here they grow with the
+goal curriculum, from `start_forces_randn_curriculum_idx` on (see Curriculum).
 
 ## Start training
 
@@ -108,7 +109,9 @@ the fixed world-frame goal. On each policy transition:
 
 ```text
 progress = rwd_scale_progress * episode_progress_factor * (previous_d - d)
-terminal_distance = rwd_scale_terminal_distance * d   # only at the deadline
+terminal_distance = rwd_scale_terminal_distance * d               # only at the deadline
+terminal_linear_vel = rwd_scale_terminal_linear_vel * |v|²        # only at a clean deadline
+terminal_ang_vel = rwd_scale_terminal_ang_vel * |ω|²              # only at a clean deadline
 ```
 
 Defaults are `rwd_scale_terminal_distance=-10.0` and `rwd_scale_progress=1.0`.
@@ -116,6 +119,14 @@ Neither term has an extra `dt` multiplier. A measured 0.1 m reduction contribute
 +0.1 with the full progress factor. A clean deadline 0.3 m from the goal
 contributes -3, in addition to that transition's progress. Moving away gives
 negative progress; we do not clip it to zero.
+
+The two terminal velocity costs are **on by default**
+(`env.use_terminal_linear_vel_penalty=True`, `env.use_terminal_ang_vel_penalty=True`).
+Each scale is -1.0, so arriving at 1 m/s costs -1 and spinning at 1 rad/s costs -1.
+`v` is the base linear velocity and `ω` the base angular velocity, all three
+axes, both in world axes. They are paid once, at a deadline without a safety
+failure. These switches replace the old `env.use_terminal_speed_penalty`; the
+old name and `rwd_scale_terminal_speed` no longer exist, so old commands fail loudly.
 
 We keep the target fixed until reset. We measure progress against the same
 target on both sides of a physics interval. An observation read never resamples
@@ -158,12 +169,12 @@ override gamma, but it changes this timing behavior and the shaping argument.
 SAC entropy regularization and other optional costs are separate objectives;
 the telescoping statement is about the raw progress reward.
 
-The default task means **be at the goal at the deadline**. Reaching early and
-holding there is valid. Merely touching the goal early and leaving is not
-success. Conversely, a fast pass through the goal exactly at the deadline can
-succeed: the default objective does not require stopping. There is no guarantee
-of an aggressive response just because the normalized time is small; the
-policy must learn what is feasible from the distance, velocity, and time inputs.
+The default task means **be at the goal, and at rest, at the deadline**.
+Reaching early and holding there is valid. Merely touching the goal early and
+leaving is not success. A fast pass through the goal at the deadline is not a
+success either: success also needs low linear and angular speed. There is no
+guarantee of an aggressive response just because the normalized time is small;
+the policy must learn what is feasible from the distance, velocity, and time inputs.
 
 If you want **first arrival exactly at the requested time**, that is a different
 task. A future version should measure first-arrival time and score a time window.
@@ -183,6 +194,7 @@ goals onto the safety boundary. Invalid goal boxes fail validation before startu
 | 2 | 1.00 | 0.35 | 1.5–2.5 | 1.2 | 3.0 |
 | 3 | 2.00 | 0.60 | 1.0–2.0 | 2.0 | 5.0 |
 | 4 | 3.00 | 0.80 | 0.7–1.8 | 3.0 | 8.0 |
+| 5 | 6.00 | 1.00 | 1.0–2.5 | 3.125 | 9.0 |
 
 To avoid combining the furthest corner with an arbitrarily short time, the final
 budget is at least `distance / reference_speed` and
@@ -198,9 +210,16 @@ starting recipe, not a tuned learning result. For a difficult last stage,
 increase its times or reduce the reference speed/acceleration before concluding
 that a controller cannot perform the task.
 
-A success means: no safety failure, and distance ≤ `goal_success_tolerance_m`
-(default **0.15 m**) at the deadline. It does not depend on reward weights,
-minimum distance earlier in the flight, or the time of first entry.
+A success means: no safety failure, and at the deadline **all three** of:
+
+- 3D base-link distance ≤ `goal_success_tolerance_m` (the green sphere radius);
+- base linear speed `|v|` < `goal_success_lin_vel_tolerance_m_s` (default **0.1 m/s**);
+- base angular speed `|ω|` < `goal_success_ang_vel_tolerance_rad_s` (default **0.2 rad/s**).
+
+Speeds are vector norms over all three axes; yaw rate counts too. Success does
+not depend on reward weights, minimum distance earlier in the flight, or the
+time of first entry. The speed defaults are a first guess, not tuned values.
+Tighter values make the 80% promotion gate below harder to pass.
 
 Promotion requires all of the following:
 
@@ -217,31 +236,67 @@ Startup resets and manual aborted flights do not count as completed tasks.
 Only one promotion is possible per reset batch, and evidence clears on promotion.
 The window pools episode outcomes; it does not average unequal batch rates.
 
-| Global stage | Goal difficulty | Progress factor |
-| ---: | ---: | ---: |
-| 0–4 | 0–4 | 1.0 |
-| 5 | 4 | 0.75 |
-| 6 | 4 | 0.50 |
-| 7 | 4 | 0.25 |
-| 8 | 4 | 0.00 |
+| Global stage | Goal difficulty | Progress factor | Push limit, N |
+| ---: | ---: | ---: | ---: |
+| 0–4 | 0–4 | 1.0 | 0 |
+| 5 | 5 | 1.0 | 0 |
+| 6 | 5 | 0.75 | 1 |
+| 7 | 5 | 0.50 | 3 |
+| 8 | 5 | 0.25 | 6 |
+| 9 | 5 | 0.00 | 9 |
 
 We first learn the full goal/time distribution. We then require fresh success
 at each reduced progress weight. There is no automatic fade based only on
 training iteration, and no immediate removal at the first easy success.
 
+### Push disturbances
+
+The pushes are the command-velocity task's pulses: a vertical world-Z force on
+the base, with a uniform random size up to the stage limit and a random sign.
+Each push lasts 0.5–2 s, and pushes start 2–5 s apart. The force list is the
+inherited `forces_applied_to_base_curriculum = (0, 1, 3, 6, 9)` N.
+
+`start_forces_randn_curriculum_idx` (default 5) says where that list starts.
+Stage `start + k` uses list entry `k`. Earlier stages have no pushes; later
+stages keep the last entry. So with the default list, stage 5 still has 0 N and
+the first real push (1 N) appears at stage 6. Use `start - 1`, or drop the
+leading 0 from the list, if you want pushes to begin exactly at a chosen stage.
+Each episode keeps the push limit of the stage that started it.
+
+Geometry, time and pushes grow together. For example, with a 9-stage goal
+schedule (difficulties 0–8) and four fade stages, stages 6, 7 and 8 raise the
+goal box and the push limit (1, 3, 6 N) in parallel. Stages 9–12 fade the
+progress reward at 9 N. If the list runs past the last fade stage, the schedule
+gets extra final stages that only raise the force.
+
+Goal episodes last only about 1–3.5 s, shorter than the 2–5 s push spacing.
+The command-velocity task waits a full spacing interval after each reset, so
+almost no goal episode would see a push. Here, each reset instead starts the
+push clock at a random point of that interval: the first push may begin at
+any tick. Later pushes keep the normal spacing.
+
+To train or replay without pushes, set `env.forces_applied_to_base_curriculum=[0.0]`.
+A list with no positive force skips push sampling entirely, so the random
+stream matches a push-free run.
+
 Useful overrides:
 
 ```text
-env.curriculum=False env.goal_curriculum_start_level=4
+env.curriculum=False env.goal_curriculum_start_level=5
 env.skip_curriculum=True
 env.progress_reward_curriculum=False
 env.rwd_scale_progress=0.0
+env.start_forces_randn_curriculum_idx=3
+env.forces_applied_to_base_curriculum=[0.0]
 ```
 
-The first fixes the hardest geometry with full progress. The second starts at
-the last stage, including zero progress. The third keeps full progress and
-removes the four fade stages. The fourth is a sparse-reward ablation from the
-chosen stage. `curriculum_start_level` belongs to the unused inherited push
+The first fixes the hardest geometry with full progress and no pushes. The
+second starts at the last stage, including zero progress and the largest push.
+The third keeps full progress and removes the four fade stages; with the
+default forces, stages 6–9 then only raise the push limit. The fourth is a
+sparse-reward ablation from the chosen stage. The fifth starts pushes earlier,
+in parallel with the geometry. The sixth removes pushes.
+`curriculum_start_level` belongs to the unused inherited command/push
 curriculum; use **goal_curriculum_start_level** for this task.
 
 Policy/optimizer checkpoints do **not** restore the evidence window, stage age,
@@ -254,15 +309,15 @@ present; ordinary periodic checkpoints may need `--curriculum-level=N`.
 
 | Switch / scale | Behavior |
 | --- | --- |
-| `env.use_terminal_speed_penalty=True` | Adds `rwd_scale_terminal_speed * speed²` at a clean deadline; default scale -1.0. This favors arriving with low base-CoM velocity. Success still uses position only. |
-| `env.use_terminal_success_bonus=True` | Adds `rwd_scale_terminal_success` at a successful deadline; default scale +10.0. This sharpens the importance of entering the 0.15 m tolerance. |
+| `env.use_terminal_success_bonus=True` | Adds `rwd_scale_terminal_success` at a successful deadline; default scale +10.0. This rewards the full success test: inside the goal ball and nearly at rest. |
 | `env.rwd_scale_action_rate` | Existing normalized physical command-change cost, default 0.0, multiplied by policy dt. |
 | `env.rwd_scale_energy` | Existing modeled mean-power cost, default 0.0; no extra dt, matching the shared implementation. |
 
 Inherited collision/tilt and raw-action-limit reward scales are also zero by
 default. Their safety reset conditions are separate. Do not turn on several
-regularizers at once for the first controller comparison. The terminal-speed
-switch is the first useful ablation if a position-only policy learns fly-throughs.
+regularizers at once for the first controller comparison. To compare with older
+position-only runs, set `env.use_terminal_linear_vel_penalty=False
+env.use_terminal_ang_vel_penalty=False`. Success still needs low speeds then.
 
 ## Playback
 
@@ -285,7 +340,7 @@ Start directly in relative mode with `--goal-frame=relative --goal_init 1 0 0`.
 In this mode the default input is `(0, 0, 0)`, keeping the initial position.
 
 ```bash
-./isaaclab.sh -p source/scripts/rsl_rl/play_borinot_goto.py --checkpoint=/absolute/path/model.pt --num_envs=1 --duration_s=2000 --goal_init 3.0 0.0 1.5 env.control_mode=model_wrench env.use_terminal_speed_penalty=True
+./isaaclab.sh -p source/scripts/rsl_rl/play_borinot_goto.py --checkpoint=/absolute/path/model.pt --num_envs=1 --duration_s=2000 --goal_init 3.0 0.0 1.5 env.control_mode=model_wrench
 ```
 
 How a goal works in the player:
@@ -303,8 +358,13 @@ How a goal works in the player:
 - **Hold.** At a clean deadline the robot keeps the same goal. A hold segment
   starts by itself, with the shortest deadline that training assigns to the
   current distance (1.0 s at the final stage). Stage rewards pay only the
-  position (and the optional speed) at the deadline. So the policy may loop
-  away and come back between deadlines, and the loop grows with the time left.
+  state at the deadline: position and, by default, linear and angular speed.
+  So the policy may loop away and come back between deadlines, and the loop
+  grows with the time left.
+- **Pushes.** The player applies the vertical pushes of its reference stage.
+  The startup line and the final JSON report that push limit. Checkpoints
+  trained before pushes existed need `env.forces_applied_to_base_curriculum=[0.0]`
+  to replay their training conditions.
 - **Failures.** Crash, tilt or leaving the area still resets the robot to home.
   Then it flies the same goal again.
 - **`--reset-at-deadline`.** Training episodes: every deadline resets the robot
@@ -313,13 +373,13 @@ How a goal works in the player:
   stage, with a reset at every deadline. No goal window.
 
 Each finished goal prints one line, for example `[GOAL] ... SUCCESS. Final
-distance 0.004 m, speed 0.05 m/s ...`. The run ends with one
+distance 0.004 m, speed 0.05 m/s, angular speed 0.08 rad/s ...`. The run ends with one
 `BORINOT_GOTO_PLAY {...}` JSON line with totals for all robots, the final
 state of robot 0, and explicit input frame labels. Goal results also include
 the final XYZ position and velocity before any reset.
 
 The panel shows the current XYZ position, XYZ velocity, XYZ error to the
-active goal, distance, speed, yaw and time left. Position and error use
+active goal, distance, speed, angular speed, yaw and time left. Position and error use
 metres; velocity uses metres/second. All XYZ readouts use world axes. With
 multiple robots, the readouts describe robot 0, relative to its environment
 origin (the same frame as the world input fields).
@@ -359,9 +419,15 @@ smoke check.
 deadline/failure/success masks, and collection stage for every environment.
 The terminal snapshots remain valid after automatic reset.
 
-Episode logs include terminal distance, clean-deadline distance and speed,
-initial/minimum distance, first-arrival time when reached, energy, and counts
-of completed tasks, successes, clean deadlines, and early failures. The public
+Episode logs include terminal distance, clean-deadline distance, speed and
+angular speed, initial/minimum distance, first-arrival time when reached,
+energy, and counts of completed tasks, successes, clean deadlines, and early
+failures. To see which success condition fails, divide
+`Goal/deadline_inside_count`, `Goal/deadline_lin_vel_ok_count` and
+`Goal/deadline_ang_vel_ok_count` by `Goal/deadline_count`. "First arrival" and
+`Goal/ever_reached_count` use position only. `Curriculum/selected_force_limit_n`
+is the push limit of the current stage; `Goal/collection_force_limit_n` is the
+mean limit of the episodes that just finished. The public
 PPO trainer pools `Episode/success_count` and `Episode/completed_count` before
 reporting success rate. The existing SAC logger averages those two count fields
 over reset packets; their ratio still gives the pooled success fraction for that
@@ -378,8 +444,8 @@ The internal promotion uses the actual integer window and the exact rate.
 per-reset `info["log"]` packet preserves each exact promotion decision.
 
 For a fair controller comparison, evaluate the same fixed goals and budgets,
-seeds, model/randomization settings, and safety limits. Record success at the
-deadline, deadline distance, speed, and failures. First touch alone is not a
+seeds, model/randomization settings, push limits, and safety limits. Record success at the
+deadline, deadline distance, speeds, and failures. First touch alone is not a
 deadline success. Training to different curriculum levels is not a matched
 comparison. No short smoke test establishes learned performance or hardware
 transfer.
@@ -394,7 +460,8 @@ PYTHONPATH=source/rsl_rl_sac_vendor python -m pytest --confcutdir=source/isaacla
 
 `tests/runtime_smoke.py` checks the real registered task, spaces, body-frame goal,
 clocks, pre-reset terminal reward, failure handling, partial resets, shared
-controller stepping, and controlled curriculum promotion. It writes a numeric
+controller stepping, the speed conditions of success, stage-dependent pushes,
+and controlled curriculum promotion. It writes a numeric
 JSON receipt. Those deliberately controlled successes prove integration only.
 
 Initial local verification: 53 new CPU tests, 288 command-task regression tests,

@@ -10,7 +10,7 @@ from isaaclab_tasks.direct.borinot.action_limits import clipped_limit_rewards
 from isaaclab_tasks.direct.borinot_cmd_vel.borinot_cmd_vel_env import BorinotCmdVelEnv
 
 from .borinot_goto_env_cfg import BorinotGoToEnvCfg
-from .task_math import SuccessCurriculum, sample_goals, stage_settings
+from .task_math import SuccessCurriculum, goal_success_parts, sample_goals, stage_force_limit, stage_settings
 
 
 class BorinotGoToEnv(BorinotCmdVelEnv):
@@ -20,6 +20,10 @@ class BorinotGoToEnv(BorinotCmdVelEnv):
     def __init__(self, cfg: BorinotGoToEnvCfg, render_mode=None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
         self.goal_curriculum = SuccessCurriculum(cfg, self.device)
+        # The parent push scheduler reads _force_limits[_episode_stage]. Here both
+        # index goal-curriculum levels; _reset_idx tags each episode with its level.
+        self._force_limits = torch.tensor([stage_force_limit(cfg, level) for level in range(
+            self.goal_curriculum.max_level + 1)], device=self.device)
         self._goal_position_w = torch.zeros(self.num_envs, 3, device=self.device)
         self._goal_deadline_steps = torch.ones(self.num_envs, dtype=torch.long, device=self.device)
         self._goal_episode_level = torch.full_like(self._episode_steps, self.goal_curriculum.level)
@@ -33,8 +37,9 @@ class BorinotGoToEnv(BorinotCmdVelEnv):
         self._first_arrival_s = torch.full_like(self._initial_goal_distance, -1.0)
         self._minimum_goal_distance = torch.zeros_like(self._initial_goal_distance)
         self._episode_terms = {name: torch.zeros(self.num_envs, device=self.device) for name in (
-            "terminal_distance", "progress", "terminal_speed", "terminal_success", "action_rate", "energy",
-            "base_collision", "leave_area", "self_collision", "tilt", "thrust_limits", "torque_limits", "action_limits")}
+            "terminal_distance", "progress", "terminal_linear_vel", "terminal_ang_vel", "terminal_success",
+            "action_rate", "energy", "base_collision", "leave_area", "self_collision", "tilt",
+            "thrust_limits", "torque_limits", "action_limits")}
         self._goal_markers = None
 
     def _resample_commands(self, env_ids):
@@ -43,9 +48,10 @@ class BorinotGoToEnv(BorinotCmdVelEnv):
         pass
 
     def _update_pushes(self):
-        # No disturbance curriculum in this task. Controller and motor dynamics
-        # are otherwise exactly the shared flight implementation.
-        pass
+        # Same pulses as Borinot-cmd-vel. Without any nonzero force, skip the
+        # sampling so push-free runs keep their previous random stream.
+        if any(self.cfg.forces_applied_to_base_curriculum):
+            super()._update_pushes()
 
     def _pre_physics_step(self, actions):
         super()._pre_physics_step(actions)
@@ -58,8 +64,9 @@ class BorinotGoToEnv(BorinotCmdVelEnv):
         self._goal_deadline_reached.copy_(self._episode_steps >= self._goal_deadline_steps)
         self._goal_finished.copy_(failed | self._goal_deadline_reached)
         distance = (self._goal_position_w - self.robot.data.root_pos_w).norm(dim=-1)
-        reached = distance <= self.cfg.goal_success_tolerance_m
-        self._goal_success.copy_(reached & self._goal_deadline_reached & ~failed)
+        reached, slow, still = goal_success_parts(
+            self.cfg, distance, self.robot.data.root_lin_vel_w, self.robot.data.root_ang_vel_w)
+        self._goal_success.copy_(reached & slow & still & self._goal_deadline_reached & ~failed)
         first = reached & (self._first_arrival_s < 0)
         self._first_arrival_s[first] = self._episode_steps[first] * self.step_dt
         self._minimum_goal_distance.copy_(torch.minimum(self._minimum_goal_distance, distance))
@@ -77,8 +84,12 @@ class BorinotGoToEnv(BorinotCmdVelEnv):
         terms = {
             "terminal_distance": self.cfg.rwd_scale_terminal_distance * terminal_distance * self._goal_finished,
             "progress": self.cfg.rwd_scale_progress * self._goal_progress_factor * (self._previous_goal_distance - distance),
-            "terminal_speed": (self.cfg.rwd_scale_terminal_speed * self.robot.data.root_lin_vel_w.square().sum(-1)
-                               * clean_deadline if self.cfg.use_terminal_speed_penalty else torch.zeros_like(distance)),
+            "terminal_linear_vel": (self.cfg.rwd_scale_terminal_linear_vel * clean_deadline
+                                    * self.robot.data.root_lin_vel_w.square().sum(-1)
+                                    if self.cfg.use_terminal_linear_vel_penalty else torch.zeros_like(distance)),
+            "terminal_ang_vel": (self.cfg.rwd_scale_terminal_ang_vel * clean_deadline
+                                 * self.robot.data.root_ang_vel_w.square().sum(-1)
+                                 if self.cfg.use_terminal_ang_vel_penalty else torch.zeros_like(distance)),
             "terminal_success": (self.cfg.rwd_scale_terminal_success * self._goal_success
                                  if self.cfg.use_terminal_success_bonus else torch.zeros_like(distance)),
             "action_rate": self.cfg.rwd_scale_action_rate * action_rate * self.step_dt,
@@ -148,11 +159,20 @@ class BorinotGoToEnv(BorinotCmdVelEnv):
             **{f"Curriculum/{key}": value for key, value in decision.items()},
             "Curriculum/selected_difficulty": stage_settings(self.cfg, self.goal_curriculum.level)[0],
             "Curriculum/selected_progress_factor": stage_settings(self.cfg, self.goal_curriculum.level)[1],
+            "Curriculum/selected_force_limit_n": self._force_limits[self.goal_curriculum.level],
             "Goal/collection_progress_factor": self._goal_progress_factor[completed].mean(),
+            "Goal/collection_force_limit_n": self._force_limits[self._goal_episode_level[completed]].mean(),
         }
+        # Which success conditions hold at clean deadlines; divide by Goal/deadline_count.
+        ids, data = completed[deadline], self.robot.data
+        parts = goal_success_parts(self.cfg, goal_info["distance_m"][ids],
+                                   data.root_lin_vel_w[ids], data.root_ang_vel_w[ids])
+        logs.update({f"Goal/deadline_{name}_count": mask.sum()
+                     for name, mask in zip(("inside", "lin_vel_ok", "ang_vel_ok"), parts)})
         if deadline.any():
-            logs["Goal/deadline_distance_m"] = goal_info["distance_m"][completed][deadline].mean()
-            logs["Goal/deadline_speed_m_s"] = self.robot.data.root_lin_vel_w[completed][deadline].norm(dim=-1).mean()
+            logs["Goal/deadline_distance_m"] = goal_info["distance_m"][ids].mean()
+            logs["Goal/deadline_speed_m_s"] = data.root_lin_vel_w[ids].norm(dim=-1).mean()
+            logs["Goal/deadline_ang_speed_rad_s"] = data.root_ang_vel_w[ids].norm(dim=-1).mean()
         if (arrivals >= 0).any():
             logs["Goal/first_arrival_s_when_reached"] = arrivals[arrivals >= 0].mean()
         logs.update({f"Episode_Reward/{name}": value[completed].mean() for name, value in self._episode_terms.items()})
@@ -166,7 +186,14 @@ class BorinotGoToEnv(BorinotCmdVelEnv):
         goals, steps = sample_goals(self.robot.data.root_pos_w[env_ids], self.cfg, difficulty, self.step_dt)
         self._goal_position_w[env_ids] = goals
         self._goal_deadline_steps[env_ids] = steps
-        self._goal_episode_level[env_ids] = self.goal_curriculum.level
+        self._goal_episode_level[env_ids] = self._episode_stage[env_ids] = self.goal_curriculum.level
+        if any(self.cfg.forces_applied_to_base_curriculum):
+            # Episodes (about 1-3.5 s) are shorter than the 2-5 s push spacing, and the
+            # parent waits one full interval. Start the push clock at a random phase:
+            # the first push may begin at any tick of that interval.
+            interval = self._base_push_steps_until_next[env_ids]
+            self._base_push_steps_until_next[env_ids] = (
+                torch.rand(len(env_ids), device=self.device) * interval).long()
         self._goal_progress_factor[env_ids] = factor
         distance = (goals - self.robot.data.root_pos_w[env_ids]).norm(dim=-1)
         self._initial_goal_distance[env_ids] = distance

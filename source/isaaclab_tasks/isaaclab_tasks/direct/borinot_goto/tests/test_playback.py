@@ -156,7 +156,7 @@ def test_clean_deadline_holds_the_same_goal_without_reset_and_records_the_outcom
     start = env._segment_start_w.clone()
     data = env.robot.data
     data.root_pos_w.copy_(goal_w + torch.tensor([[0.05, 0.0, 0.0], [0.6, 0.0, 0.0]], dtype=torch.float64))
-    data.root_lin_vel_w = torch.tensor([[0.0, 0.1, 0.0], [1.0, 0.0, 0.0]], dtype=torch.float64)
+    data.root_lin_vel_w = torch.tensor([[0.0, 0.05, 0.0], [1.0, 0.0, 0.0]], dtype=torch.float64)
     env._episode_steps.copy_(env._goal_deadline_steps)
     done, timeout = env._get_dones()
     assert not done.any() and not timeout.any() and env._goal_finished.all()
@@ -166,7 +166,7 @@ def test_clean_deadline_holds_the_same_goal_without_reset_and_records_the_outcom
     [result] = env.play_results
     assert result["kind"] == "goal" and result["success"] and not result["failed"]
     assert result["goal_m"] == pytest.approx(list(GOAL)) and result["distance_m"] == pytest.approx(0.05)
-    assert result["speed_m_s"] == pytest.approx(0.1) and result["elapsed_s"] == pytest.approx(result["deadline_s"])
+    assert result["speed_m_s"] == pytest.approx(0.05) and result["elapsed_s"] == pytest.approx(result["deadline_s"])
     # Hold: same goal and start view, fresh shortest training clock from the current distance, no reset.
     assert env._segment_hold.all() and not env._episode_steps.any() and env.reset_calls == [[0, 1]]
     torch.testing.assert_close(env._goal_position_w, goal_w)
@@ -277,9 +277,11 @@ def test_training_region_notes_name_each_out_of_distribution_reason():
 
 def test_results_read_as_plain_sentences():
     base = {"kind": "goal", "goal_m": [3.0, 0.0, 1.5], "deadline_s": 1.83, "elapsed_s": 1.83, "distance_m": 0.0091,
-            "speed_m_s": 0.07, "min_distance_m": 0.004, "first_arrival_s": 1.62, "success": True, "failed": False}
+            "speed_m_s": 0.07, "ang_speed_rad_s": 0.12, "min_distance_m": 0.004, "first_arrival_s": 1.62,
+            "success": True, "failed": False}
     text = UI["describe_result"](base, 3)
     assert text.startswith("Goal #3 (+3.00, +0.00, +1.50) m, deadline 1.83 s: SUCCESS.") and "first inside 1.62 s" in text
+    assert "speed 0.07 m/s, angular speed 0.12 rad/s" in text
     missed = UI["describe_result"]({**base, "success": False, "first_arrival_s": None}, 4)
     assert "MISSED" in missed and "never inside" in missed
     failed = UI["describe_result"]({**base, "kind": "hold", "success": False, "failed": True, "elapsed_s": 0.4}, 5)
@@ -374,18 +376,21 @@ def test_live_state_logs_and_labels_read_actual_position_velocity_error_and_time
     env = play_env()
     env.robot.data.root_pos_w[0] = env.scene.env_origins[0] + torch.tensor([.2, -.1, 1.6])
     env.robot.data.root_lin_vel_w[0] = torch.tensor([.3, -.4, 0.])
+    env.robot.data.root_ang_vel_w[0] = torch.tensor([0., .6, -.8])
     env._episode_steps[:] = 25
     before = [v.clone() for v in (env._goal_position_w, env._episode_steps, env._commands,
                                  env.robot.data.root_pos_w, env.robot.data.root_lin_vel_w)]
     state = UI["flight_state"](env, 0.25)
     assert state["position_m"] == pytest.approx([.2, -.1, 1.6])
     assert state["velocity_m_s"] == pytest.approx([.3, -.4, 0.]) and state["speed_m_s"] == pytest.approx(.5)
+    assert state["ang_speed_rad_s"] == pytest.approx(1.)
     assert state["goal_m"] == pytest.approx(list(GOAL))
     assert state["error_m"] == pytest.approx([.8, -.4, .4])
     assert state["distance_m"] == pytest.approx(math.sqrt(.8**2 + .4**2 + .4**2))
     assert state["remaining_s"] == pytest.approx((int(env._goal_deadline_steps[0]) - 25) * .01)
     text = UI["describe_state"](state)
     assert "position XYZ=(+0.200, -0.100, +1.600) m" in text and "velocity XYZ=" in text and "error XYZ=" in text
+    assert "angular speed=1.000 rad/s" in text
     panel = controls(env, (1., 0., 0.), relative=True)
     for name in ("state_label", "goal_label", "preview_label", "result_label", "status_label"):
         setattr(panel, name, SimpleNamespace(text=""))

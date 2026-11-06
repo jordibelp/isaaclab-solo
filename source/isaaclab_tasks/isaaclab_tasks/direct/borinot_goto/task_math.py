@@ -8,14 +8,31 @@ import torch
 def stage_settings(cfg, level):
     """Increase geometry first; only then fade the dense reward."""
     difficulty = min(level, len(cfg.goal_half_extents_m) - 1)
-    fade = max(0, level - (len(cfg.goal_half_extents_m) - 1))
+    fade = min(max(0, level - (len(cfg.goal_half_extents_m) - 1)), len(cfg.progress_reward_factors) - 1)
     factor = cfg.progress_reward_factors[fade] if cfg.progress_reward_curriculum else 1.0
     return difficulty, factor
 
 
+def goal_success_parts(cfg, distance, lin_vel_w, ang_vel_w):
+    """Success conditions at a clean deadline: inside the goal ball, slow, and not rotating."""
+    return (distance <= cfg.goal_success_tolerance_m,
+            lin_vel_w.norm(dim=-1) < cfg.goal_success_lin_vel_tolerance_m_s,
+            ang_vel_w.norm(dim=-1) < cfg.goal_success_ang_vel_tolerance_rad_s)
+
+
+def stage_force_limit(cfg, level):
+    """Maximum |world-Z push| in N: entry k from level start_forces_randn_curriculum_idx + k, none before."""
+    forces, index = cfg.forces_applied_to_base_curriculum, level - cfg.start_forces_randn_curriculum_idx
+    return 0.0 if index < 0 else forces[min(index, len(forces) - 1)]
+
+
 def max_curriculum_level(cfg):
-    return len(cfg.goal_half_extents_m) - 1 + (
+    level = len(cfg.goal_half_extents_m) - 1 + (
         len(cfg.progress_reward_factors) - 1 if cfg.progress_reward_curriculum else 0)
+    # A force list running past the goal/fade schedule adds force-only final levels.
+    if any(cfg.forces_applied_to_base_curriculum):
+        level = max(level, cfg.start_forces_randn_curriculum_idx + len(cfg.forces_applied_to_base_curriculum) - 1)
+    return level
 
 
 def deadline_floor(cfg, difficulty, distance):
@@ -72,10 +89,13 @@ def validate_goal_config(cfg):
             or any(not math.isfinite(v) or not 0 <= v <= 1 for v in factors)
             or any(a < b for a, b in zip(factors, factors[1:]))):
         raise ValueError("progress_reward_factors must decrease from 1.0 to 0.0.")
-    for name in ("curriculum", "skip_curriculum", "progress_reward_curriculum", "use_terminal_speed_penalty",
-                 "use_terminal_success_bonus", "goal_debug_vis"):
+    for name in ("curriculum", "skip_curriculum", "progress_reward_curriculum", "use_terminal_linear_vel_penalty",
+                 "use_terminal_ang_vel_penalty", "use_terminal_success_bonus", "goal_debug_vis"):
         if not isinstance(getattr(cfg, name), bool):
             raise ValueError(f"{name} must be a boolean.")
+    start = cfg.start_forces_randn_curriculum_idx
+    if not isinstance(start, int) or isinstance(start, bool) or start < 0:
+        raise ValueError("start_forces_randn_curriculum_idx must be a nonnegative integer level.")
     if (not isinstance(cfg.goal_curriculum_start_level, int) or isinstance(cfg.goal_curriculum_start_level, bool)
             or not 0 <= cfg.goal_curriculum_start_level <= max_curriculum_level(cfg)):
         raise ValueError("goal_curriculum_start_level is outside the goal/fade curriculum.")
@@ -87,16 +107,19 @@ def validate_goal_config(cfg):
             raise ValueError(f"{name} must be a positive integer.")
     if cfg.curriculum_min_episodes > cfg.curriculum_window_episodes:
         raise ValueError("curriculum_min_episodes cannot exceed curriculum_window_episodes.")
-    for name in ("goal_success_tolerance_m", "failure_distance_floor_m"):
+    for name in ("goal_success_tolerance_m", "goal_success_lin_vel_tolerance_m_s",
+                 "goal_success_ang_vel_tolerance_rad_s", "failure_distance_floor_m"):
         if not math.isfinite(getattr(cfg, name)) or getattr(cfg, name) <= 0:
             raise ValueError(f"{name} must be positive and finite.")
     if cfg.rwd_scale_terminal_distance >= 0 or cfg.rwd_scale_progress < 0:
         raise ValueError("Use a negative terminal-distance scale and a nonnegative progress scale.")
-    for name in ("rwd_scale_terminal_distance", "rwd_scale_progress", "rwd_scale_terminal_speed", "rwd_scale_terminal_success"):
+    for name in ("rwd_scale_terminal_distance", "rwd_scale_progress", "rwd_scale_terminal_linear_vel",
+                 "rwd_scale_terminal_ang_vel", "rwd_scale_terminal_success"):
         if not math.isfinite(getattr(cfg, name)):
             raise ValueError(f"{name} must be finite.")
-    if cfg.rwd_scale_terminal_speed > 0 or cfg.rwd_scale_terminal_success < 0:
-        raise ValueError("Terminal speed must penalize; terminal success must reward.")
+    if (cfg.rwd_scale_terminal_linear_vel > 0 or cfg.rwd_scale_terminal_ang_vel > 0
+            or cfg.rwd_scale_terminal_success < 0):
+        raise ValueError("Terminal velocities must penalize; terminal success must reward.")
     # No clipping of goals: reject an unsafe sampling box instead of silently
     # putting a probability mass on a safety boundary.
     extent = cfg.goal_half_extents_m[-1]

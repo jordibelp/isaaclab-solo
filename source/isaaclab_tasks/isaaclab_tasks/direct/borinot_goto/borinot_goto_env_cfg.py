@@ -17,7 +17,10 @@ class BorinotGoToEnvCfg(BorinotCmdVelEnvCfg):
     goal_deadline_range_s = ((2.5, 3.5), (2.0, 3.0), (1.5, 2.5), (1.0, 2.0), (0.7, 1.8), (1.0, 2.5))
     goal_reference_speed_m_s = (0.4, 0.7, 1.2, 2.0, 3.0, 3.125)
     goal_reference_accel_m_s2 = (0.8, 1.5, 3.0, 5.0, 8.0, 9.0)
-    goal_success_tolerance_m = 0.15  # 3D base-link distance, evaluated only at the deadline
+    # Success, evaluated only at a clean deadline: all three must hold.
+    goal_success_tolerance_m = 0.15  # 3D base-link distance <= this
+    goal_success_lin_vel_tolerance_m_s = 0.1  # |base linear velocity| < this
+    goal_success_ang_vel_tolerance_rad_s = 0.2  # |base angular velocity|, all three axes, < this
     goal_curriculum_start_level = 0
     curriculum_success_threshold = 0.8  # >=, not reward-weight-dependent
     curriculum_window_episodes = 2048
@@ -29,11 +32,12 @@ class BorinotGoToEnvCfg(BorinotCmdVelEnvCfg):
     rwd_scale_terminal_distance = -10.0  # one-off per metre, no dt
     rwd_scale_progress = 1.0  # scale * (previous_distance - distance), no extra dt
     failure_distance_floor_m = 10.0  # early safety failure pays at least -100, rather than escaping the deadline cost
-    # Optional hypotheses, not part of the requested default objective.
-    use_terminal_speed_penalty = False
-    rwd_scale_terminal_speed = -1.0  # one-off per (m/s)^2, only at a clean deadline
+    use_terminal_linear_vel_penalty = True
+    rwd_scale_terminal_linear_vel = -1.0  # one-off per (m/s)^2, only at a clean deadline
+    use_terminal_ang_vel_penalty = True
+    rwd_scale_terminal_ang_vel = -1.0  # one-off per (rad/s)^2, only at a clean deadline
     use_terminal_success_bonus = False
-    rwd_scale_terminal_success = 10.0  # one-off, clean deadline inside goal tolerance
+    rwd_scale_terminal_success = 10.0  # one-off, at a successful deadline (inside and at rest)
     rwd_scale_action_rate = 0.0
     rwd_scale_energy = 0.0
     rwd_scale_base_collision = 0.0
@@ -44,9 +48,10 @@ class BorinotGoToEnvCfg(BorinotCmdVelEnvCfg):
     rwd_scale_ang_vel = 0.0
     goal_debug_vis = False  # marker only; no collider or goal object in the physics scene
 
-    # The inherited disturbance curriculum is not used. Keep the same plant
-    # without adding a confounding push curriculum to controller comparisons.
-    forces_applied_to_base_curriculum = (0.0,)
+    # Vertical base pushes: the inherited cmd-vel force list and push timing.
+    # Goal level start_forces_randn_curriculum_idx + k uses force entry k; earlier
+    # levels have no pushes, later ones keep the last entry. (0.0,) disables pushes.
+    start_forces_randn_curriculum_idx = 5
     curriculum_start_level = 0  # unused parent force level; use goal_curriculum_start_level
 
     def configure_control(self):

@@ -49,7 +49,8 @@ def environment_class():
     node.body = [n for n in node.body if isinstance(n, ast.FunctionDef) and n.name != "__init__"]
     parent = type("FlightMethods", (), {
         "_get_observations": flight_method("_get_observations", quat_apply_inverse=inverse, matrix_from_quat=matrix),
-        "_get_dones": lambda self: (self.safety_failures.clone(), self._episode_steps >= self.max_episode_length)})
+        "_get_dones": lambda self: (self.safety_failures.clone(), self._episode_steps >= self.max_episode_length),
+        "_update_pushes": flight_method("_update_pushes")})
     scope = {"Parent": parent, "torch": torch, "quat_apply_inverse": inverse,
              "clipped_limit_rewards": limits.clipped_limit_rewards, **vars(task_math)}
     exec(compile(ast.fix_missing_locations(ast.Module(body=[node], type_ignores=[])), "goto_env", "exec"), scope)
@@ -81,12 +82,14 @@ def fake_env(cfg=None):
     env._previous_actuator_commands = torch.zeros(2, 8)
     env.robot.data.applied_torque = torch.zeros(2, 2)
     env.robot.data.root_lin_vel_w = torch.tensor([[3., 4., 0.], [0., 0., 2.]])
+    env.robot.data.root_ang_vel_w = torch.zeros(2, 3)
     env._power_sum_w, env._power_samples = torch.zeros(2, 4), 2
     env._action_limit_costs = torch.zeros(2, 3)
     env._events = {name: torch.zeros(2, dtype=torch.bool) for name in ("base_collision", "leave_area", "tilt")}
     env._self_contact_bodies = torch.zeros(2, 3, dtype=torch.bool)
-    names = ("terminal_distance", "progress", "terminal_speed", "terminal_success", "action_rate", "energy",
-             "base_collision", "leave_area", "self_collision", "tilt", "thrust_limits", "torque_limits", "action_limits")
+    names = ("terminal_distance", "progress", "terminal_linear_vel", "terminal_ang_vel", "terminal_success",
+             "action_rate", "energy", "base_collision", "leave_area", "self_collision", "tilt",
+             "thrust_limits", "torque_limits", "action_limits")
     env._episode_terms = {name: torch.zeros(2, dtype=torch.float64) for name in names}
     env._episode_energy_j = torch.zeros(2)
     env._actuator_delay = SimpleNamespace(seconds=torch.zeros(2))
@@ -94,6 +97,14 @@ def fake_env(cfg=None):
     env.common_step_counter = 1000
     env.curriculum_stage_pure_episodes = 0
     env.goal_curriculum = task_math.SuccessCurriculum(cfg, "cpu")
+    # Parent push state after a parent reset: a full first interval, no push active.
+    env._episode_stage = torch.zeros(2, dtype=torch.long)
+    env._force_limits = torch.tensor([task_math.stage_force_limit(cfg, level)
+                                      for level in range(env.goal_curriculum.max_level + 1)])
+    env._base_push_steps_until_next = torch.tensor([300, 500])
+    env._base_push_steps_left = torch.zeros(2, dtype=torch.long)
+    env._base_push_force_z_w = torch.zeros(2)
+    env._base_push_points_b = torch.zeros(2, 3)
     return env
 
 
@@ -160,21 +171,36 @@ def test_progress_is_signed_no_dt_and_dense_factor_is_frozen_per_episode():
     assert not env._get_rewards().any()
 
 
-def test_terminal_distance_is_one_off_failure_floor_and_optional_rewards_are_off():
+def test_terminal_distance_floor_velocity_costs_on_by_default_and_success_bonus_off():
     env = fake_env()
     env._goal_finished[:] = True
     env._goal_deadline_reached[:] = True
     env._goal_failed[1] = True
     env._goal_success[0] = True
+    env.robot.data.root_ang_vel_w = torch.tensor([[1., -2., 2.], [3., 0., 0.]])
     distance = (env._goal_position_w-env.robot.data.root_pos_w).norm(dim=-1)
     env._get_rewards()
     terms = env.extras["reward_terms"]
     torch.testing.assert_close(terms["terminal_distance"], -10*torch.tensor([distance[0], 10.], dtype=distance.dtype))
-    assert not terms["terminal_speed"].any() and not terms["terminal_success"].any()
-    env.cfg.use_terminal_speed_penalty = env.cfg.use_terminal_success_bonus = True
+    # Clean deadline only: the failed robot pays the distance floor, not velocity costs.
+    torch.testing.assert_close(terms["terminal_linear_vel"], torch.tensor([-25., 0.]))
+    torch.testing.assert_close(terms["terminal_ang_vel"], torch.tensor([-9., 0.]))
+    assert not terms["terminal_success"].any()
+    env.cfg.rwd_scale_terminal_linear_vel, env.cfg.rwd_scale_terminal_ang_vel = -.5, -.25
+    env.cfg.use_terminal_success_bonus = True
     env._get_rewards()
-    torch.testing.assert_close(env.extras["reward_terms"]["terminal_speed"], torch.tensor([-25., 0.]))
+    torch.testing.assert_close(env.extras["reward_terms"]["terminal_linear_vel"], torch.tensor([-12.5, 0.]))
+    torch.testing.assert_close(env.extras["reward_terms"]["terminal_ang_vel"], torch.tensor([-2.25, 0.]))
     assert env.extras["reward_terms"]["terminal_success"].tolist() == [10., 0.]
+    env._goal_deadline_reached[0] = False  # failure-free but before the deadline: no terminal costs
+    env._get_rewards()
+    assert not env.extras["reward_terms"]["terminal_linear_vel"].any()
+    assert not env.extras["reward_terms"]["terminal_ang_vel"].any()
+    env._goal_deadline_reached[0] = True
+    env.cfg.use_terminal_linear_vel_penalty = env.cfg.use_terminal_ang_vel_penalty = False
+    env._get_rewards()
+    assert not env.extras["reward_terms"]["terminal_linear_vel"].any()
+    assert not env.extras["reward_terms"]["terminal_ang_vel"].any()
     saved_failed = env.extras["goal"]["failed"].clone()
     env._goal_failed.zero_()
     assert torch.equal(env.extras["goal"]["failed"], saved_failed)
@@ -183,6 +209,7 @@ def test_terminal_distance_is_one_off_failure_floor_and_optional_rewards_are_off
 def test_deadline_is_terminal_not_timeout_early_arrival_not_success_and_failure_wins_tie():
     env = fake_env()
     env._goal_position_w.copy_(env.robot.data.root_pos_w)
+    env.robot.data.root_lin_vel_w = torch.zeros(2, 3)
     env._episode_steps[:] = torch.tensor([99, 499])
     # Generic runner counter / horizon must not shorten the independent goal clock.
     env.episode_length_buf = torch.tensor([10000, 10000])
@@ -195,6 +222,104 @@ def test_deadline_is_terminal_not_timeout_early_arrival_not_success_and_failure_
     done, timeout = env._get_dones()
     assert done.all() and not timeout.any() and env._goal_success.tolist() == [True, False]
     assert not env._get_observations()["policy"][:, -1].any()
+
+
+def test_success_needs_the_goal_ball_and_both_speeds_strictly_below_their_tolerances():
+    cfg = config(goal_success_tolerance_m=.25, goal_success_lin_vel_tolerance_m_s=.5,
+                 goal_success_ang_vel_tolerance_rad_s=.25)
+    env = fake_env(cfg)
+    data = env.robot.data
+    env._goal_position_w = data.root_pos_w + torch.tensor([[0., 0., .25], [0., 0., .125]], dtype=torch.float64)
+    env._episode_steps.copy_(env._goal_deadline_steps)  # clean deadline for both robots
+
+    def success(lin, ang):
+        data.root_lin_vel_w = torch.tensor(lin, dtype=torch.float64)
+        data.root_ang_vel_w = torch.tensor(ang, dtype=torch.float64)
+        done, _ = env._get_dones()
+        assert torch.equal(done, env._goal_deadline_reached)
+        return env._goal_success.tolist()
+
+    slow, still = [[0., 0., .25]] * 2, [[0., 0., .125]] * 2
+    assert success(slow, still) == [True, True]  # the ball edge counts as inside
+    assert success([[0., 0., .5], [0., -.25, 0.]], still) == [False, True]  # |v| == tolerance fails
+    assert success(slow, [[.25, 0., 0.], [0., .125, 0.]]) == [False, True]  # |omega| on any axis
+    assert success([[.3, .3, .3], [0., 0., 0.]], [[0., 0., 0.], [.15, .15, .15]]) == [False, False]  # norms, not axes
+    env._goal_position_w[1, 2] += .25  # robot 1 is now 0.375 m from its goal
+    assert success(slow, still) == [True, False]
+    # Before the deadline nothing succeeds; first arrival still uses position only.
+    env._episode_steps -= 1
+    env._first_arrival_s[:] = -1.
+    assert success([[3., 0., 0.]] * 2, [[2., 0., 0.]] * 2) == [False, False]
+    assert env._first_arrival_s[0] >= 0 and env._first_arrival_s[1] < 0
+
+
+def test_force_entries_start_at_their_goal_level_and_extend_a_short_schedule():
+    cfg = config()  # 6 geometry + 4 fade levels, the inherited cmd-vel force list from level 5
+    assert cfg.forces_applied_to_base_curriculum == (0., 1., 3., 6., 9.)
+    assert cfg.start_forces_randn_curriculum_idx == 5 and task_math.max_curriculum_level(cfg) == 9
+    assert [task_math.stage_force_limit(cfg, level) for level in range(10)] == [0.] * 6 + [1., 3., 6., 9.]
+    # Forces running past the fade add force-only final levels at the final geometry and factor.
+    cfg = config(start_forces_randn_curriculum_idx=7)
+    assert task_math.max_curriculum_level(cfg) == 11
+    assert [task_math.stage_force_limit(cfg, level) for level in range(12)] == [0.] * 8 + [1., 3., 6., 9.]
+    assert [task_math.stage_settings(cfg, level) for level in (9, 10, 11)] == [(5, 0.)] * 3
+    assert task_math.SuccessCurriculum(config(start_forces_randn_curriculum_idx=7, skip_curriculum=True),
+                                       "cpu").level == 11
+    config(start_forces_randn_curriculum_idx=7, goal_curriculum_start_level=11)  # a valid stage now
+    # Early start: the last force holds through the fade.
+    cfg = config(start_forces_randn_curriculum_idx=1)
+    assert task_math.max_curriculum_level(cfg) == 9
+    assert [task_math.stage_force_limit(cfg, level) for level in range(10)] == [0., 0., 1., 3., 6.] + [9.] * 5
+    # A push-free list never lengthens the schedule.
+    cfg = config(forces_applied_to_base_curriculum=(0.,), start_forces_randn_curriculum_idx=50)
+    assert task_math.max_curriculum_level(cfg) == 9 and task_math.stage_force_limit(cfg, 60) == 0.
+
+
+def test_pushes_follow_the_episode_goal_level_and_push_free_lists_keep_the_random_stream():
+    cfg = config(base_push_duration_range_s=(.05, .05), base_push_interval_range_s=(.1, .1))
+    env = fake_env(cfg)
+    env._episode_stage = torch.tensor([5, 9])  # level 5 is the zero entry; level 9 allows 9 N
+    env._base_push_steps_until_next.zero_()
+    torch.manual_seed(3)
+    forces = []
+    for _ in range(200):
+        env._update_pushes()
+        forces.append(env._base_push_force_z_w.clone())
+    forces = torch.stack(forces)
+    assert not forces[:, 0].any()
+    assert (forces[:, 1].abs() <= 9.).all() and forces[:, 1].abs().max() > 6.
+    assert (forces[:, 1] > 0).any() and (forces[:, 1] < 0).any()
+    env = fake_env(config(forces_applied_to_base_curriculum=(0.,)))
+    env._base_push_steps_until_next.zero_()
+    state = torch.get_rng_state()
+    env._update_pushes()
+    assert torch.equal(torch.get_rng_state(), state) and not env._base_push_steps_left.any()
+
+
+def test_reset_tags_the_push_level_and_starts_the_push_clock_at_a_random_phase():
+    goto = environment_class()
+
+    def flight_reset(self, env_ids):
+        self._episode_stage[env_ids] = 0  # the parent's unused force level
+        self._base_push_steps_until_next[env_ids] = 400  # the parent's full first interval
+
+    goto.__mro__[1]._reset_idx = flight_reset
+    env = goto()
+    env.__dict__.update(vars(fake_env()))
+    env.goal_curriculum.level = 7
+    env.robot._ALL_INDICES = torch.arange(2)
+    phases = []
+    for seed in range(300):
+        torch.manual_seed(seed)
+        env._reset_idx(None)
+        phases.append(env._base_push_steps_until_next.clone())
+    phases = torch.stack(phases)
+    assert env._episode_stage.tolist() == env._goal_episode_level.tolist() == [7, 7]
+    assert (phases >= 0).all() and (phases < 400).all()
+    assert phases.float().mean() == pytest.approx(199.5, abs=12) and phases.min() < 10 and phases.max() > 390
+    env.cfg.forces_applied_to_base_curriculum = (0.,)
+    env._reset_idx(None)
+    assert env._base_push_steps_until_next.tolist() == [400, 400]  # push-free: parent clock unchanged
 
 
 def test_curriculum_episode_weighting_unequal_batches_not_mean_of_rates():
@@ -257,7 +382,11 @@ def test_curriculum_exact_threshold_rolling_window_and_manual_reset_exclusion():
     ("goal_success_tolerance_m", 0.), ("failure_distance_floor_m", -1.),
     ("rwd_scale_terminal_distance", 10.), ("rwd_scale_progress", -1.),
     ("curriculum_min_episodes", 2.5), ("curriculum_min_steps", 0),
-    ("use_terminal_speed_penalty", "False"), ("robot_home", (0.,0.,.5)),
+    ("use_terminal_linear_vel_penalty", "False"), ("use_terminal_ang_vel_penalty", 1), ("robot_home", (0.,0.,.5)),
+    ("goal_success_lin_vel_tolerance_m_s", 0.), ("goal_success_ang_vel_tolerance_rad_s", float('nan')),
+    ("rwd_scale_terminal_linear_vel", float('inf')), ("rwd_scale_terminal_ang_vel", .5),
+    ("start_forces_randn_curriculum_idx", -1), ("start_forces_randn_curriculum_idx", True),
+    ("start_forces_randn_curriculum_idx", 2.),
 ])
 def test_invalid_config_is_rejected_before_simulation(name, value):
     with pytest.raises(ValueError):
@@ -294,9 +423,13 @@ def test_skip_fixed_and_disabled_fade_curriculum_semantics():
     cfg = config(skip_curriculum=True)
     final_geometry = len(cfg.goal_half_extents_m) - 1
     assert task_math.SuccessCurriculum(cfg,"cpu").level == final_geometry + len(cfg.progress_reward_factors) - 1
-    cfg = config(progress_reward_curriculum=False, skip_curriculum=True)
+    cfg = config(progress_reward_curriculum=False, skip_curriculum=True, forces_applied_to_base_curriculum=(0.,))
     assert task_math.SuccessCurriculum(cfg,"cpu").level == final_geometry
     assert task_math.stage_settings(cfg,final_geometry) == (final_geometry,1.)
+    # Without the fade, the default forces (levels 5-9) keep force-only levels after the geometry.
+    cfg = config(progress_reward_curriculum=False, skip_curriculum=True)
+    assert task_math.SuccessCurriculum(cfg,"cpu").level == 9
+    assert task_math.stage_settings(cfg,9) == (final_geometry,1.) and task_math.stage_force_limit(cfg,9) == 9.
     cfg = config(curriculum=False,goal_curriculum_start_level=6)
     c = task_math.SuccessCurriculum(cfg,"cpu")
     c.observe(torch.ones(10000),torch.full((10000,),6),100000)
@@ -316,6 +449,15 @@ def test_episode_log_includes_failures_and_preserves_pre_promotion_decision():
     logs = env.extras["log"]
     assert logs["Episode/completed_count"] == 2 and logs["Episode/success_count"] == 1
     assert logs["Curriculum/window_success_rate"] == .5 and env.goal_curriculum.level == 0
+    # Only robot 0 reached a clean deadline: about 0.94 m away, 5 m/s, not rotating.
+    assert logs["Goal/deadline_count"] == 1 and logs["Goal/deadline_inside_count"] == 0
+    assert logs["Goal/deadline_lin_vel_ok_count"] == 0 and logs["Goal/deadline_ang_vel_ok_count"] == 1
+    assert logs["Goal/deadline_speed_m_s"] == pytest.approx(5.) and logs["Goal/deadline_ang_speed_rad_s"] == 0
+    assert logs["Curriculum/selected_force_limit_n"] == 0 and logs["Goal/collection_force_limit_n"] == 0
+    env._goal_episode_level[:] = torch.tensor([6, 9])
+    env._update_curriculum(torch.tensor([0,1]))
+    assert env.extras["log"]["Goal/collection_force_limit_n"] == pytest.approx(5.)  # mean of 1 N and 9 N
+    env._goal_episode_level.zero_()
     cfg.curriculum_success_threshold = .5
     env._update_curriculum(torch.tensor([0,1]))
     assert env.goal_curriculum.level == 1

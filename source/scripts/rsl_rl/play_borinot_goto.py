@@ -71,7 +71,7 @@ from isaaclab_tasks.direct.borinot_cmd_vel.playback_ui import camera_pose
 from isaaclab_tasks.direct.borinot_goto.playback import BorinotGoToPlayEnv, checkpoint_goal_level
 from isaaclab_tasks.direct.borinot_goto.playback_ui import (
     GoalControls, describe_result, describe_state, flight_state, goal_camera_pose)
-from isaaclab_tasks.direct.borinot_goto.task_math import stage_settings
+from isaaclab_tasks.direct.borinot_goto.task_math import stage_force_limit, stage_settings
 
 
 @hydra_task_config(args.task, args.agent)
@@ -132,11 +132,13 @@ def main(env_cfg, agent_cfg):
         controls = GoalControls(play_env, goal or home, args.deadline_s, ranges, args.camera,
                                 show_ui=args.ui and not args.random_goals and play_env.sim.has_gui(), relative=relative)
         initial_goal = (play_env._goal_position_w[0] - play_env.scene.env_origins[0]).tolist()
+        push_limit_n = stage_force_limit(env_cfg, play_env.goal_curriculum.level)
         mode = "random" if args.random_goals else ("episodes" if args.reset_at_deadline else "chain")
         print(f"[INFO] Borinot go-to: {mode} mode, {env_cfg.control_mode}, {env_cfg.physics_hz}/{env_cfg.policy_hz} Hz, "
               f"actuator_delay={env_cfg.actuator_delay} s, actuator_delay_range={env_cfg.actuator_delay_range}, "
               f"goal stage {play_env.goal_curriculum.level} (box +/-{env_cfg.goal_half_extents_m[difficulty]} m, "
-              f"deadlines {env_cfg.goal_deadline_range_s[difficulty]} s), goal={goal or 'sampled'} m, "
+              f"deadlines {env_cfg.goal_deadline_range_s[difficulty]} s, "
+              f"vertical pushes up to {push_limit_n:g} N), goal={goal or 'sampled'} m, "
               f"input_frame={args.goal_frame}, deadline={args.deadline_s or 'auto'}, "
               f"checkpoint={Path(checkpoint).name}", flush=True)
         observation = env.get_observations()
@@ -196,7 +198,8 @@ def main(env_cfg, agent_cfg):
             "actuator_delay_s": env_cfg.actuator_delay, "actuator_delay_range_s": env_cfg.actuator_delay_range,
             "observation_dimension": env_cfg.observation_space, "action_dimension": env_cfg.action_space,
             "curriculum_level": play_env.goal_curriculum.level, "goal_difficulty": difficulty,
-            "progress_reward_factor": factor, "initial_goal_m": initial_goal, "deadline_s": args.deadline_s,
+            "progress_reward_factor": factor, "push_force_limit_n": push_limit_n,
+            "initial_goal_m": initial_goal, "deadline_s": args.deadline_s,
             "initial_goal_input_m": goal, "initial_goal_frame": args.goal_frame,
             "final_goal_input_m": None if args.random_goals else controls.goal,
             "final_goal_frame": "relative" if controls.relative else "world",

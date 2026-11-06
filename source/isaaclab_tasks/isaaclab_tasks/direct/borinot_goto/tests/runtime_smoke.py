@@ -88,7 +88,67 @@ def main(cfg, agent_cfg):
                       and (obs["policy"][:, -1] > 0).all() and (env._commands[:, 3] == 1).all())
                 check("terminal_observations_have_zero_time", not info["time_outs_obs"]["policy"][:, -1].any())
                 check("requested_rewards_only", all(not info["reward_terms"][name].any() for name in (
-                    "terminal_speed", "terminal_success", "action_rate", "energy", "base_collision", "leave_area", "self_collision", "tilt")))
+                    "terminal_success", "action_rate", "energy", "base_collision", "leave_area", "self_collision", "tilt")))
+                check("terminal_velocity_costs_are_costs", all(
+                    torch.isfinite(info["reward_terms"][name]).all() and (info["reward_terms"][name] <= 0).all()
+                    for name in ("terminal_linear_vel", "terminal_ang_vel")))
+        # Inside the goal ball at a clean deadline, but moving or spinning: not a success.
+        env.reset()
+        root = env.robot.data.root_state_w.clone()
+        root[:, 7:] = 0.0
+        root[:4, 7] = 1.0  # m/s along world x
+        root[4:, 12] = 1.0  # rad/s about world z
+        env.robot.write_root_state_to_sim(root)
+        env._goal_position_w.copy_(env.robot.data.root_pos_w)
+        env._previous_goal_distance.zero_()
+        env._goal_deadline_steps[:] = 1
+        env._episode_steps.zero_()
+        _, _, done, timeout, info = env.step(action)
+        report["moving_inside_goal"] = {name: info["reward_terms"][name].cpu().tolist()
+                                        for name in ("terminal_linear_vel", "terminal_ang_vel")}
+        report["moving_inside_goal"]["distance_m"] = info["goal"]["distance_m"].cpu().tolist()
+        check("moving_inside_goal_is_not_success", done.all() and not timeout.any()
+              and not info["goal"]["failed"].any() and not info["goal"]["success"].any()
+              and (info["goal"]["distance_m"] <= cfg.goal_success_tolerance_m).all())
+        check("terminal_velocity_costs_see_the_motion", (info["reward_terms"]["terminal_linear_vel"][:4] < -0.5).all()
+              and (info["reward_terms"]["terminal_ang_vel"][4:] < -0.5).all())
+        check("success_counts_split_by_condition", info["log"]["Goal/deadline_count"] == 8
+              and info["log"]["Goal/deadline_inside_count"] == 8
+              and info["log"]["Goal/deadline_lin_vel_ok_count"] == 4
+              and info["log"]["Goal/deadline_ang_vel_ok_count"] == 4)
+        # Pushes follow each episode's goal level; the push clock starts at a random phase.
+        env.goal_curriculum.level = level = env.goal_curriculum.max_level
+        limit = float(env._force_limits[level])
+        env.reset()
+        interval_max = -(-cfg.base_push_interval_range_s[1] // env.step_dt)
+        phase = env._base_push_steps_until_next
+        check("push_level_and_random_phase", (env._episode_stage == level).all() and limit > 0
+              and (phase >= 0).all() and (phase < interval_max).all()
+              and (phase < cfg.base_push_interval_range_s[0] / env.step_dt).any())
+        env._goal_deadline_steps[:] = 10**6
+        env._base_push_steps_until_next.zero_()
+        _, _, _, _, info = env.step(action)
+        force = env._base_push_force_z_w.clone()
+        report["push_force_n"] = force.cpu().tolist()
+        check("pushes_active_within_limit", (force.abs() <= limit).all() and (force != 0).all()
+              and (env._base_push_steps_left > 0).all() and torch.isfinite(info["reward_terms"]["progress"]).all())
+        # The push reaches the physics. Zero actions do not oppose it, but each robot also
+        # drifts a little on its own, so fit dv_z = a + b * F across robots: b should be t/m.
+        vz = env.robot.data.root_lin_vel_w[:, 2].clone()
+        for _ in range(10):
+            env.step(action)
+        dv = env.robot.data.root_lin_vel_w[:, 2] - vz
+        f, d = force - force.mean(), dv - dv.mean()
+        slope = float((f * d).sum() / f.square().sum())
+        correlation = float((f * d).sum() / (f.square().sum() * d.square().sum()).sqrt())
+        expected_slope = 10 * env.step_dt / env.robot_mass_kg
+        report["push_dv_z_m_s"] = {"measured": dv.cpu().tolist(), "force_n": force.cpu().tolist(),
+                                   "slope_m_s_per_n": slope, "expected_slope_t_over_m": expected_slope,
+                                   "correlation": correlation}
+        check("push_changes_vertical_velocity", torch.equal(env._base_push_force_z_w, force)
+              and abs(slope / expected_slope - 1) < 0.3 and correlation > 0.8)
+        env.goal_curriculum.level = 0
+        env.reset()
         # Real physics safety failure, before the goal clock, still pays a cost.
         env.reset()
         root = env.robot.data.root_state_w[0:1].clone()
