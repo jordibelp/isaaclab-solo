@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import inspect
+import math
 
 import torch
 
@@ -208,6 +209,17 @@ class BorinotGoToEnv(BorinotCmdVelEnv):
 
     def get_curriculum_max_global_idx(self):
         return self.goal_curriculum.max_level
+
+    def get_curriculum_sampling_metrics(self):
+        """Current stage's configured bounds, not averages over completed episodes."""
+        difficulty, _ = stage_settings(self.cfg, self.goal_curriculum.level)
+        low, high = self.cfg.goal_deadline_range_s[difficulty]
+        return {
+            "Curriculum/selected_deadline_min_s": low,
+            "Curriculum/selected_deadline_max_s": high,
+            "Curriculum/selected_goal_distance_max_m": math.sqrt(
+                sum(v * v for v in self.cfg.goal_half_extents_m[difficulty])),
+        }
 
     def get_code_snapshot_files(self):
         return super().get_code_snapshot_files() + [inspect.getsourcefile(obj) for obj in (

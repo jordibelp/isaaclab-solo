@@ -516,6 +516,68 @@ def test_episode_log_includes_failures_and_preserves_pre_promotion_decision():
     assert not env.curriculum_stage_pure_episodes
 
 
+def test_sampling_metrics_follow_current_stage_not_unfinished_episode_levels():
+    cfg = config("wrench", curriculum_min_episodes=1, curriculum_min_steps=1,
+                 goal_half_extents_m=((.25,.25,.1), (.5,.5,.2), (1.,1.,.35),
+                                      (3.,1.,.5), (5.,1.,.5), (7.,1.,.5)),
+                 goal_deadline_range_s=((1.5,2.5), (1.5,2.5), (.7,1.8),
+                                        (.98,1.5), (1.59,2.1), (2.2,2.6)))
+    env = fake_env(cfg)
+    rng = torch.get_rng_state()
+    expected_distances = (.3674234614, .7348469228, 1.4568802284,
+                          3.2015621187, 5.1234753830, 7.0887234394)
+    for level in range(env.goal_curriculum.max_level + 1):
+        env.goal_curriculum.level = level
+        difficulty = min(level, 5)
+        metrics = env.get_curriculum_sampling_metrics()
+        assert metrics == pytest.approx({
+            "Curriculum/selected_deadline_min_s": cfg.goal_deadline_range_s[difficulty][0],
+            "Curriculum/selected_deadline_max_s": cfg.goal_deadline_range_s[difficulty][1],
+            "Curriculum/selected_goal_distance_max_m": expected_distances[difficulty],
+        })
+    assert torch.equal(torch.get_rng_state(), rng)
+    assert not env._goal_episode_level.any()  # unfinished episodes still belong to stage 0
+
+    # A promotion changes the snapshot immediately, even with old-stage episodes alive.
+    env.goal_curriculum.level = 3
+    env._goal_episode_level[:] = 3
+    env._goal_finished[:] = env._goal_deadline_reached[:] = env._goal_success[:] = True
+    env._episode_steps[:] = 100
+    env._get_rewards()
+    env._update_curriculum(torch.tensor([0]))
+    assert env.goal_curriculum.level == 4 and env._goal_episode_level[1] == 3
+    assert env.get_curriculum_sampling_metrics()["Curriculum/selected_deadline_min_s"] == 1.59
+
+
+def test_ppo_logs_sampling_snapshot_without_completed_episodes():
+    # Execute the real public trainer's logging prefix without starting Isaac Sim.
+    source = FOLDER.parents[3] / "scripts/rsl_rl/train.py"
+    tree = ast.parse(source.read_text())
+    hook = max((n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+                and n.name == "_log_with_best_model"), key=lambda n: n.lineno)
+    prefix = []
+    for statement in hook.body:
+        if isinstance(statement, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == "rewbuffer" for t in statement.targets):
+            break
+        if not isinstance(statement, ast.Nonlocal):
+            prefix.append(statement)
+    hook.body = prefix
+    env, logged = fake_env(), {}
+    runner = SimpleNamespace(env=SimpleNamespace(unwrapped=env), log_dir="unused", tot_timesteps=240000,
+                             writer=SimpleNamespace(add_scalar=lambda key, value, step: logged.update({key:(value, step)})))
+    scope = {"runner": runner, "original_log": lambda *a, **kw: None,
+             "_update_backward_force_curriculum": lambda *a: None,
+             "_log_plasticity_metrics": lambda *a: None, "local_redundancy": SimpleNamespace(log=lambda *a: None),
+             "args_cli": SimpleNamespace(plasticity_metrics_interval=1)}
+    exec(compile(ast.Module(body=[hook], type_ignores=[]), str(source), "exec"), scope)
+    for level in (0, 4, env.goal_curriculum.max_level):
+        env.goal_curriculum.level = level
+        scope[hook.name]({"it": level, "ep_infos": []})
+        for key, value in env.get_curriculum_sampling_metrics().items():
+            assert logged[key] == (value, level)
+
+
 def test_goal_task_is_not_mistaken_for_velocity_symmetry_layout():
     from test_symmetry import symmetry
     with pytest.raises(ValueError, match="Go-to"):

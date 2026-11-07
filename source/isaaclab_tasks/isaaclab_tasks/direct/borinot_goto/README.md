@@ -471,6 +471,14 @@ over reset packets within a rollout, so displayed window counts can be fractiona
 The internal promotion uses the actual integer window and the exact rate.
 `Curriculum/global_idx` is the trainer's current stage at logging time; the
 per-reset `info["log"]` packet preserves each exact promotion decision.
+The public PPO trainer also logs `Curriculum/selected_deadline_min_s`,
+`Curriculum/selected_deadline_max_s`, and `Curriculum/selected_goal_distance_max_m`
+once per iteration from that current stage, without reset-packet averaging.
+The times are the configured `goal_deadline_range_s` bounds, before optional
+distance-based floors and policy-tick rounding. The distance is the norm of the
+current goal box's half-extents: its maximum sampled displacement from the
+episode's starting base position, not the robot's remaining distance to its goal.
+Reward-fade and force-only stages keep the final geometry/time row.
 
 For a fair controller comparison, evaluate the same fixed goals and budgets,
 seeds, model/randomization settings, push limits, and safety limits. Record success at the

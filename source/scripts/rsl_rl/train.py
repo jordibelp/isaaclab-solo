@@ -3304,6 +3304,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             _log_plasticity_metrics(runner, locs, args_cli.plasticity_metrics_interval)
             local_redundancy.log(runner, locs)
             raw_env = getattr(runner.env, "unwrapped", None)
+            if raw_env is not None and hasattr(raw_env, "get_curriculum_sampling_metrics"):
+                # Snapshot the selected stage once; reset-packet means can mix stages.
+                for key, value in raw_env.get_curriculum_sampling_metrics().items():
+                    runner.writer.add_scalar(key, value, locs["it"])
             if raw_env is not None and hasattr(raw_env, "current_backward_force"):
                 # Keep the existing post-update force metric, and disambiguate the force used to collect this row.
                 runner.writer.add_scalar("Curriculum/backward_force_rollout_N", rollout_backward_force, locs["it"])
