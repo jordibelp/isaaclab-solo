@@ -24,6 +24,7 @@ from isaaclab_tasks.controllers.borinot_cbrt import CbrtController
 from isaaclab_tasks.controllers.borinot_wrench import WrenchController
 from isaaclab_tasks.controllers.borinot_model_wrench import ModelWrenchController
 from isaaclab_tasks.controllers.borinot_model_wrench_yawless import ModelWrenchYawlessController
+from isaaclab_tasks.controllers.borinot_model_wrench_indi import ModelWrenchIndiController, ModelWrenchYawlessIndiController
 from isaaclab_tasks.direct.borinot.model_description import nominal_model_description
 from isaaclab_tasks.direct.borinot_goalkeeper.paddle import attach_paddle
 
@@ -100,7 +101,7 @@ class BorinotCmdVelEnv(DirectRLEnv):
         self._motor_alpha = 1.0 if cfg.motor_time_constant_s == 0 else 1 - math.exp(-self.physics_dt / cfg.motor_time_constant_s)
         if cfg.control_mode == "indi":
             self._init_indi()
-        elif cfg.control_mode in ("wrench", "model_wrench", "model_wrench_yawless"):
+        elif cfg.control_mode in ("wrench", "model_wrench", "model_wrench_indi", "model_wrench_yawless", "model_wrench_yawless_indi"):
             self._init_wrench()
         elif cfg.control_mode in ("cbrt", "cbrt_indi"):
             self._init_cbrt()
@@ -211,7 +212,7 @@ class BorinotCmdVelEnv(DirectRLEnv):
         self._command_steps_left.sub_(1)
         self._update_pushes()
         self._previous_actuator_commands.copy_(self._actuator_commands)
-        if self.cfg.control_mode in ("indi", "wrench", "model_wrench", "model_wrench_yawless", "cbrt", "cbrt_indi"):
+        if self.cfg.control_mode in ("indi", "wrench", "model_wrench", "model_wrench_indi", "model_wrench_yawless", "model_wrench_yawless_indi", "cbrt", "cbrt_indi"):
             if self.cfg.sac_action_mapping:
                 actions = clamp_scalar_actions(actions, self.cfg, 1.0)
         elif not self.cfg.sac_action_mapping and not self.cfg.remove_thrust_clipping:
@@ -330,7 +331,7 @@ class BorinotCmdVelEnv(DirectRLEnv):
             parts += [self._rotor_thrust / self._hover_per_rotor, self._rate_integral]
         elif self.cfg.control_mode == "indi":
             parts.append(self._indi.observation())
-        elif self.cfg.control_mode in ("wrench", "model_wrench", "model_wrench_yawless"):
+        elif self.cfg.control_mode in ("wrench", "model_wrench", "model_wrench_indi", "model_wrench_yawless", "model_wrench_yawless_indi"):
             parts.append(self._wrench.observation())
         elif self.cfg.control_mode in ("cbrt", "cbrt_indi"):
             parts.append(self._cbrt.observation())
@@ -398,7 +399,7 @@ class BorinotCmdVelEnv(DirectRLEnv):
         """Archive shared plant/control helpers alongside this task's source."""
         return [inspect.getsourcefile(obj) for obj in (
             BorinotGoalkeeperEnv, configure_randomization, attach_paddle, configure_end_effector,
-            IndiController, WrenchController, ModelWrenchController, ModelWrenchYawlessController, nominal_model_description, CbrtController, tracking_metrics, raw_action_limit_costs, decode_angle_actions, ActuatorDelay,
+            IndiController, WrenchController, ModelWrenchController, ModelWrenchYawlessController, ModelWrenchIndiController, ModelWrenchYawlessIndiController, nominal_model_description, CbrtController, tracking_metrics, raw_action_limit_costs, decode_angle_actions, ActuatorDelay,
             apply_inertial_properties, BorinotInertialPropertiesCfg)]
 
     def _reset_idx(self, env_ids):
@@ -447,7 +448,7 @@ class BorinotCmdVelEnv(DirectRLEnv):
             buffer[env_ids, :6], buffer[env_ids, 6:] = 1.0 / self.cfg.thrust_to_weight, 0.0
         if self.cfg.control_mode == "indi":
             self._indi.reset(env_ids)
-        elif self.cfg.control_mode in ("wrench", "model_wrench", "model_wrench_yawless"):
+        elif self.cfg.control_mode in ("wrench", "model_wrench", "model_wrench_indi", "model_wrench_yawless", "model_wrench_yawless_indi"):
             self._wrench.reset(env_ids)
         elif self.cfg.control_mode in ("cbrt", "cbrt_indi"):
             self._cbrt.reset(env_ids)

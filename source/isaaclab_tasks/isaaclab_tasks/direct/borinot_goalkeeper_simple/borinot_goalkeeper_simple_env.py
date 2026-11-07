@@ -130,7 +130,7 @@ class BorinotGoalkeeperSimpleEnv(DirectRLEnv):
         )
         if cfg.control_mode == "indi":
             self._init_indi()
-        elif cfg.control_mode in ("wrench", "model_wrench", "model_wrench_yawless"):
+        elif cfg.control_mode in ("wrench", "model_wrench", "model_wrench_indi", "model_wrench_yawless", "model_wrench_yawless_indi"):
             self._init_wrench()
         elif cfg.control_mode in ("cbrt", "cbrt_indi"):
             self._init_cbrt()
@@ -240,7 +240,7 @@ class BorinotGoalkeeperSimpleEnv(DirectRLEnv):
         self._shot_steps += self._ball_active
         self._outcome.zero_()
         self._previous_actuator_commands.copy_(self._actuator_commands)
-        if self.cfg.control_mode in ("indi", "wrench", "model_wrench", "model_wrench_yawless", "cbrt", "cbrt_indi"):
+        if self.cfg.control_mode in ("indi", "wrench", "model_wrench", "model_wrench_indi", "model_wrench_yawless", "model_wrench_yawless_indi", "cbrt", "cbrt_indi"):
             if self.cfg.sac_action_mapping:
                 actions = clamp_scalar_actions(actions, self.cfg, 1.0)
         elif not self.cfg.sac_action_mapping and not self.cfg.remove_thrust_clipping:
@@ -417,7 +417,7 @@ class BorinotGoalkeeperSimpleEnv(DirectRLEnv):
             tail += [self._rotor_thrust / self._hover_per_rotor, self._rate_integral]
         elif self.cfg.control_mode == "indi":
             tail += [self._indi.observation()]
-        elif self.cfg.control_mode in ("wrench", "model_wrench", "model_wrench_yawless"):
+        elif self.cfg.control_mode in ("wrench", "model_wrench", "model_wrench_indi", "model_wrench_yawless", "model_wrench_yawless_indi"):
             tail += [self._wrench.observation()]
         elif self.cfg.control_mode in ("cbrt", "cbrt_indi"):
             tail += [self._cbrt.observation()]
@@ -562,7 +562,7 @@ class BorinotGoalkeeperSimpleEnv(DirectRLEnv):
         self._rotor_thrust[env_ids] = self._hover_per_rotor
         if self.cfg.control_mode == "indi":
             self._indi.reset(env_ids)
-        elif self.cfg.control_mode in ("wrench", "model_wrench", "model_wrench_yawless"):
+        elif self.cfg.control_mode in ("wrench", "model_wrench", "model_wrench_indi", "model_wrench_yawless", "model_wrench_yawless_indi"):
             self._wrench.reset(env_ids)
         elif self.cfg.control_mode in ("cbrt", "cbrt_indi"):
             self._cbrt.reset(env_ids)

@@ -95,7 +95,7 @@ class BorinotCmdVelEnvCfg(BorinotGoalkeeperEnvCfg):
             raise ValueError("obs_include_base_lin_acc_steps must be a positive integer.")
         # Both networks: v_b, omega_b, optional acceleration, q, dq, last action,
         # optional gravity_b, row-major R_world_body, optional world height, command.
-        controller_state = 6 if self.control_mode in ("wrench", "model_wrench", "model_wrench_yawless", "cbrt", "cbrt_indi") else (
+        controller_state = 6 if self.control_mode in ("wrench", "model_wrench", "model_wrench_indi", "model_wrench_yawless", "model_wrench_yawless_indi", "cbrt", "cbrt_indi") else (
             8 if self.control_mode == "indi" else (
                 9 if self.control_mode == "PI_rotors_PD_joint_pos_control" else 0))
         self.observation_space = (23 + self.action_space + controller_state

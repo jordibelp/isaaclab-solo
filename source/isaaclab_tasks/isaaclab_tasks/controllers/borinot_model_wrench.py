@@ -176,6 +176,10 @@ class ModelWrenchController(WrenchController):
         """Make this tick's desired angular acceleration available on the next tick."""
         self.previous_alpha_desired.copy_(self.alpha_desired)
 
+    def _correct_model_torque(self, thrust, torque, effective, effective_bias):
+        """Nominal law is unchanged; hybrid subclasses add residual feedback here."""
+        return torque
+
     def step(self, actions, quaternion, rates, joint_pos, joint_vel):
         if self.task.sac_action_mapping:
             u = decode_angle_actions(clamp_scalar_actions(actions, self.task, 1.0), self.task)
@@ -221,7 +225,8 @@ class ModelWrenchController(WrenchController):
         self.predicted_acceleration_b.copy_(actual_a)
         base_a = torch.cat((actual_a, self.alpha_desired), -1)
         self.predicted_joint_acceleration.copy_(solved[:, :, 6]-matvec(solved[:, :, :6], base_a))
-        self.requested_wrench.copy_(torch.cat((thrust[:, None], torque), -1))
+        corrected = self._correct_model_torque(thrust, torque, effective, effective_bias)
+        self.requested_wrench.copy_(torch.cat((thrust[:, None], corrected), -1))
         # Diagnostic arm-on-base reaction about BASE CoM, not a second plant force.
         self.external_force_w.copy_(matvec(rotation, self.mass[:, None]*(actual_a-gravity_b)-axis*thrust[:, None]))
         self.external_moment_b.copy_(matvec(self.inertia, self.alpha_desired)

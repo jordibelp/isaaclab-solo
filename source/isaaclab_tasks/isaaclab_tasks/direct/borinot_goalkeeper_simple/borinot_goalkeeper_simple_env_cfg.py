@@ -21,6 +21,7 @@ from isaaclab_tasks.direct.borinot.inertial_properties_cfg import BorinotInertia
 from isaaclab_tasks.controllers.borinot_angles import angle_action_size
 from isaaclab_tasks.controllers.borinot_indi import IndiControllerCfg
 from isaaclab_tasks.controllers.borinot_wrench import WrenchControllerCfg
+from isaaclab_tasks.controllers.borinot_model_wrench_indi import ModelWrenchIndiCfg
 from isaaclab_tasks.controllers.borinot_cbrt import CbrtControllerCfg
 
 
@@ -28,12 +29,14 @@ from isaaclab_tasks.controllers.borinot_cbrt import CbrtControllerCfg
 class BorinotGoalkeeperSimpleEnvCfg(DirectRLEnvCfg):
     inertial_properties: BorinotInertialPropertiesCfg = BorinotInertialPropertiesCfg()
     control_mode = "thrust_and_torque_control"
+    model_wrench_use_prev_alpha = False
     # Replace supported scalar angle channels with (cos, sin) pairs; see borinot/ANGLE_ACTIONS.md.
     predict_yaw_as_sincos = False
     predict_calf_joint_pos_as_sincos = False
     predict_thigh_joint_pos_as_sincos = False
     # INDI PPO uses unclipped physical-unit references; SAC uses normalized [-1, 1].
     cbrt = CbrtControllerCfg()  # control_mode=cbrt or cbrt_indi; shared CBRT_CONTROL.md
+    model_wrench_indi = ModelWrenchIndiCfg()  # hybrid residual filter; nominal gains stay in wrench
     wrench = WrenchControllerCfg()  # shared gains: wrench / model_wrench; see ../borinot/*WRENCH_CONTROL.md
     indi = IndiControllerCfg()  # used only by control_mode="indi"; shared INDI_CONTROL.md
     # geom = method 3; alternatives: method_1, method_2. Definitions:
@@ -247,11 +250,13 @@ class BorinotGoalkeeperSimpleEnvCfg(DirectRLEnvCfg):
         """Refresh derived settings before simulator/space creation, including after Hydra."""
         self.robot.spawn.articulation_props.enabled_self_collisions = self.enabled_self_collisions
         self.control_mode = {"cbtr": "cbrt", "cbtr_indi": "cbrt_indi"}.get(self.control_mode, self.control_mode)
-        modes = ("thrust_and_torque_control", "thrust_and_PD_joint_pos_control", "PI_rotors_PD_joint_pos_control", "indi", "wrench", "model_wrench", "model_wrench_yawless", "cbrt", "cbrt_indi")
+        modes = ("thrust_and_torque_control", "thrust_and_PD_joint_pos_control", "PI_rotors_PD_joint_pos_control", "indi", "wrench", "model_wrench", "model_wrench_indi", "model_wrench_yawless", "model_wrench_yawless_indi", "cbrt", "cbrt_indi")
         if self.control_mode not in modes:
             raise ValueError(f"Unknown control_mode {self.control_mode!r}; choose one of {modes}.")
-        if self.control_mode == "model_wrench_yawless" and self.predict_yaw_as_sincos:
+        if self.control_mode in ("model_wrench_yawless", "model_wrench_yawless_indi") and self.predict_yaw_as_sincos:
             raise ValueError("model_wrench_yawless has no yaw action; set predict_yaw_as_sincos=False.")
+        if self.control_mode in ("model_wrench", "model_wrench_indi", "model_wrench_yawless", "model_wrench_yawless_indi") and not isinstance(self.model_wrench_use_prev_alpha, bool):
+            raise ValueError("model_wrench_use_prev_alpha must be a boolean.")
         if self.physics_hz <= 0 or self.policy_hz <= 0:
             raise ValueError("physics_hz and policy_hz must be positive.")
         ratio = self.physics_hz / self.policy_hz
@@ -265,12 +270,14 @@ class BorinotGoalkeeperSimpleEnvCfg(DirectRLEnvCfg):
             raise ValueError("rotor_thrust_limit_n must be finite and positive.")
         if self.control_mode == "indi":
             self.indi.validate(self)
-        elif self.control_mode in ("wrench", "model_wrench", "model_wrench_yawless"):
+        elif self.control_mode in ("wrench", "model_wrench", "model_wrench_indi", "model_wrench_yawless", "model_wrench_yawless_indi"):
             self.wrench.validate(self)
         elif self.control_mode in ("cbrt", "cbrt_indi"):
             self.cbrt.validate(self)
+        if self.control_mode in ("model_wrench_indi", "model_wrench_yawless_indi"):
+            self.model_wrench_indi.validate(self)
         if self.sac_action_mapping:
-            if self.control_mode not in (*modes[:2], "indi", "wrench", "model_wrench", "model_wrench_yawless", "cbrt", "cbrt_indi"):
+            if self.control_mode not in (*modes[:2], "indi", "wrench", "model_wrench", "model_wrench_indi", "model_wrench_yawless", "model_wrench_yawless_indi", "cbrt", "cbrt_indi"):
                 raise ValueError("sac_action_mapping requires direct thrust control (torque/PD position) or indi/wrench/CBRT.")
             if not math.isfinite(self.thrust_to_weight) or self.thrust_to_weight <= 1:
                 raise ValueError("SAC thrust_to_weight must be finite and greater than 1 (hover).")
@@ -289,7 +296,7 @@ class BorinotGoalkeeperSimpleEnvCfg(DirectRLEnvCfg):
         self.sim.dt = 1 / self.physics_hz
         self.sim.render_interval = self.decimation
         self.action_space = angle_action_size(self)
-        controller_state = 6 if self.control_mode in ("wrench", "model_wrench", "model_wrench_yawless", "cbrt", "cbrt_indi") else (
+        controller_state = 6 if self.control_mode in ("wrench", "model_wrench", "model_wrench_indi", "model_wrench_yawless", "model_wrench_yawless_indi", "cbrt", "cbrt_indi") else (
             8 if self.control_mode == "indi" else (9 if self.control_mode == modes[2] else 0))
         self.state_space = 46 + self.action_space + controller_state
         point, time = self.obs_actor_includes_ball_plane_intersection_point, self.obs_actor_includes_time_ball_collides_plane
@@ -297,7 +304,7 @@ class BorinotGoalkeeperSimpleEnvCfg(DirectRLEnvCfg):
         self.observation_space = (34 + self.action_space + controller_state + 3 * point + time + (point or time)
                                  + 5 * self.obs_actor_includes_phase + 2 * self.obs_actor_includes_ball_params)
         actuator = self.robot.actuators["arm"]
-        use_pd = self.control_mode not in ("indi", "wrench", "model_wrench", "model_wrench_yawless", "cbrt", "cbrt_indi") and (self.control_mode != modes[0] or self.hold_arm)
+        use_pd = self.control_mode not in ("indi", "wrench", "model_wrench", "model_wrench_indi", "model_wrench_yawless", "model_wrench_yawless_indi", "cbrt", "cbrt_indi") and (self.control_mode != modes[0] or self.hold_arm)
         actuator.stiffness = self.kp if use_pd else 0.0
         actuator.damping = self.kd if use_pd else 0.0
         actuator.effort_limit_sim = self.effort_lim_sim

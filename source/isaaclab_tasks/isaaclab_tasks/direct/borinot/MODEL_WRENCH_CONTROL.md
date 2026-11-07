@@ -72,7 +72,7 @@ effort limit and motor lag remain `env.kp`, `env.kd`, `env.effort_lim_sim`, and
 
 `env.model_wrench_use_prev_alpha=False` is the default and preserves the original
 zero-virtual-alpha direction reference. It is read only by `model_wrench` and
-`model_wrench_yawless`; it has no effect on measured `wrench`, INDI, CBRT, or
+`model_wrench_yawless` and their `_indi` variants; it has no effect on measured `wrench`, standalone `indi`, CBRT, or
 direct control modes.
 
 The scalar simulator armature is included only as two diagonal generalized
@@ -133,3 +133,10 @@ The delivery folder also contains a standalone package, nominal JSON calibration
 an executable numerical example and verification receipts. This is integration
 and mechanics evidence, not a demonstration of trained flight quality or hardware
 transfer. No cluster or hardware experiment is part of this change.
+
+## Add residual feedback
+
+Select `model_wrench_indi` or `model_wrench_yawless_indi` to retain this nominal
+model and correct its requested rotor torque from completed motion. See
+[Model-wrench + INDI](MODEL_WRENCH_INDI_CONTROL.md) for sensing, timing, filtering
+and launch settings. The original nominal modes remain available.

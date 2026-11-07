@@ -2,6 +2,8 @@
 
 Gym IDs: **Borinot-goto** and **Borinot-GoTo-Direct-v0**.
 
+**Arm-aware INDI modes:** `env.control_mode=model_wrench_indi` and `env.control_mode=model_wrench_yawless_indi` retain the corresponding explicit-arm model and add a causal, physics-rate torque-residual correction. Both support PPO and SAC. See the shared [hybrid method, sensing, timing and configuration guide](../borinot/MODEL_WRENCH_INDI_CONTROL.md). Collective thrust remains model-based; the first post-reset tick is nominal.
+
 This is a separate task beside `borinot_cmd_vel`. We ask Borinot to put its base
 at a sampled 3D position when a sampled time budget ends. There is no ball,
 heading target, velocity-tracking reward, obstacle course, or physical goal object.
@@ -32,7 +34,7 @@ PPO, using your usual 10,000-environment training scale:
 This is an example command, **not a claim that 10,000 environments were tested on
 the laptop**. Use your training machine and usual memory/compile settings.
 
-Choose any of the seven existing PPO control modes:
+Choose an existing or hybrid model-wrench control mode:
 
 | `env.control_mode` | Scalar-angle actions | Default observations |
 | --- | ---: | ---: |
@@ -41,6 +43,8 @@ Choose any of the seven existing PPO control modes:
 | `PI_rotors_PD_joint_pos_control` | 6 | 40 |
 | `indi` | 9 | 42 |
 | `wrench` | 9 | 40 |
+| `model_wrench` / `model_wrench_indi` | 9 | 40 |
+| `model_wrench_yawless` / `model_wrench_yawless_indi` | 8 | 39 |
 | `cbrt` | 6 | 37 |
 | `cbrt_indi` | 6 | 37 |
 

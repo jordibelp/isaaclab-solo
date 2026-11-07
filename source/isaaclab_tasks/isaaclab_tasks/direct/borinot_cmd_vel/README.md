@@ -2,6 +2,8 @@
 
 A free-flight velocity task for Borinot. There is no ball or goal.
 
+**Arm-aware INDI modes:** `env.control_mode=model_wrench_indi` and `env.control_mode=model_wrench_yawless_indi` retain the corresponding explicit-arm model and add a causal, physics-rate torque-residual correction. Both support PPO and SAC. See the shared [hybrid method, sensing, timing and configuration guide](../borinot/MODEL_WRENCH_INDI_CONTROL.md). Collective thrust remains model-based; the first post-reset tick is nominal.
+
 Gym IDs: `Borinot-cmd-vel` and the equivalent `Borinot-Cmd-Vel-Direct-v0`.
 
 ## What the task tracks
@@ -164,6 +166,8 @@ checkpoint trained with the single acceleration sample, explicitly set
 | `PI_rotors_PD_joint_pos_control` | Collective + body rates + 2 joint targets = 6 | 39 | PPO |
 | `indi` | World acceleration + body rates + heading + 2 joint targets = 9 | 41 | PPO, SAC CE, SAC MSE |
 | `wrench` | World acceleration + heading + body rates + 2 joint targets = 9 | 39 | PPO, SAC CE, SAC MSE |
+| `model_wrench` / `model_wrench_indi` | Same nine-action wrench layout; explicit arm model, optional INDI correction | 39 | PPO, SAC CE, SAC MSE |
+| `model_wrench_yawless` / `model_wrench_yawless_indi` | World acceleration + body rates + 2 joint targets = 8; no heading target | 38 | PPO, SAC CE, SAC MSE |
 | `cbrt` / `cbrt_indi` | Body rates + collective + 2 joint targets = 6 | 36 | PPO, SAC CE, SAC MSE |
 
 Optional acceleration adds `3 * obs_include_base_lin_acc_steps` observations in

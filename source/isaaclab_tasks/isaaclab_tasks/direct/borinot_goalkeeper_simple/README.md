@@ -2,6 +2,8 @@
 
 Date: 2026-10-18. Task ID: `Borinot-Goalkeeper-Simple-Direct-v0`.
 
+**Arm-aware INDI modes:** `env.control_mode=model_wrench_indi` and `env.control_mode=model_wrench_yawless_indi` retain the corresponding explicit-arm model and add a causal, physics-rate torque-residual correction. Both support PPO and SAC. See the shared [hybrid method, sensing, timing and configuration guide](../borinot/MODEL_WRENCH_INDI_CONTROL.md). Collective thrust remains model-based; the first post-reset tick is nominal.
+
 ## Start here
 
 **Shared physical-model defaults:** motor point masses and inference leg
