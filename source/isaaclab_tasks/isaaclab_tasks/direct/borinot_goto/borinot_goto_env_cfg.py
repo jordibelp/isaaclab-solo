@@ -45,8 +45,8 @@ class BorinotGoToEnvCfg(BorinotCmdVelEnvCfg):
     rwd_scale_terminal_success = 10.0  # one-off, on successful termination (inside and at rest)
     rwd_scale_action_rate = 0.0
     rwd_scale_energy = 0.0
-    rwd_scale_base_collision = 0.0
-    rwd_scale_leave_area = 0.0
+    rwd_scale_base_collision = -5.0
+    rwd_scale_leave_area = -2.0
     rwd_scale_self_collision = 0.0
     rwd_scale_tilt = 0.0
     rwd_scale_lin_vel = 0.0  # no command-velocity reward in this task
