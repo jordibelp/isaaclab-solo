@@ -29,7 +29,7 @@ class BorinotGoToPlayEnv(BorinotGoToEnv):
         self.play_goal = self.play_deadline_s = None
         self.play_goal_relative = bool(goal_relative)
         self._play_goal_targets = None
-        self.reset_at_deadline = bool(reset_at_deadline) or goal is None
+        self.reset_at_deadline = bool(reset_at_deadline) or goal is None or cfg.reset_at_success
         super().__init__(cfg, **kwargs)
         self._segment_hold = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self._segment_start_w = self.robot.data.root_pos_w.clone()

@@ -333,7 +333,8 @@ class GoalControls:
               f"{totals['goal_failures']} failed); "
               f"holds {totals['holds']} ({totals['hold_successes']} successes, {totals['hold_failures']} failed, "
               f"worst {env.play_hold_worst_distance_m:.3f} m)."
-              f"\nSuccess at the deadline: distance <= {cfg.goal_success_tolerance_m:g} m, "
+              f"\nSuccess {'on first settled arrival' if cfg.reset_at_success else 'at the deadline'}: "
+              f"distance <= {cfg.goal_success_tolerance_m:g} m, "
               f"speed < {cfg.goal_success_lin_vel_tolerance_m_s:g} m/s, "
               f"angular speed < {cfg.goal_success_ang_vel_tolerance_rad_s:g} rad/s.")
         self.status_label.text = (f"{'PAUSED' if self.paused else 'PLAYING'} - {time_s:.1f} s - camera {self.camera}"

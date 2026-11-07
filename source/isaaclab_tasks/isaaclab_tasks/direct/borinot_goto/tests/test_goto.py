@@ -89,7 +89,7 @@ def fake_env(cfg=None):
     env._self_contact_bodies = torch.zeros(2, 3, dtype=torch.bool)
     names = ("terminal_distance", "progress", "terminal_linear_vel", "terminal_ang_vel", "terminal_success",
              "action_rate", "energy", "base_collision", "leave_area", "self_collision", "tilt",
-             "thrust_limits", "torque_limits", "action_limits")
+             "thrust_limits", "torque_limits", "action_limits", "time")
     env._episode_terms = {name: torch.zeros(2, dtype=torch.float64) for name in names}
     env._episode_energy_j = torch.zeros(2)
     env._actuator_delay = SimpleNamespace(seconds=torch.zeros(2))

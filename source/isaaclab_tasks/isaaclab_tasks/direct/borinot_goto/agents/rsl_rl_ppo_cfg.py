@@ -8,3 +8,9 @@ class BorinotGoToPPORunnerCfg(BorinotCmdVelPPORunnerCfg):
     experiment_name = "borinot_goto"
     run_name = "Borinot go-to PPO"
     algorithm = BorinotCmdVelPPORunnerCfg().algorithm.replace(gamma=1.0)
+
+
+@configclass
+class BorinotGoToMinTimePPORunnerCfg(BorinotGoToPPORunnerCfg):
+    experiment_name = "borinot_goto_min_time"
+    run_name = "Borinot minimum-time go-to PPO"

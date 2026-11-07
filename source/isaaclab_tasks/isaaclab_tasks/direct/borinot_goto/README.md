@@ -2,6 +2,76 @@
 
 Gym IDs: **Borinot-goto** and **Borinot-GoTo-Direct-v0**.
 
+## Minimum-time variant
+
+Use **Borinot-goto-minTime** (alias **Borinot-GoTo-MinTime-Direct-v0**) to train
+arrival-and-stop behavior with an explicit cost of time. The original task keeps
+its existing deadline-only behavior.
+
+| Setting | Original task | Minimum-time task |
+| --- | --- | --- |
+| `env.reset_at_success` | `False` | `True` |
+| `env.per_step_penalty_weight` | `-0.0` | `-0.015` |
+| `env.remove_time_from_actor_obs` | `False` | `False` |
+
+The minimum-time task ends on the first policy step that meets **all three**
+existing success conditions: distance at or below `goal_success_tolerance_m`,
+linear speed below `goal_success_lin_vel_tolerance_m_s`, and angular speed below
+`goal_success_ang_vel_tolerance_rad_s`. It does not count a fast fly-through.
+There is no extra dwell requirement. A safety failure still wins a simultaneous
+success, and the sampled deadline still ends an unsuccessful episode. Both early
+success and the deadline are true terminal states, not bootstrapped timeouts.
+
+The time term adds **-0.015 on every policy step**, including the terminal step.
+It is not multiplied by the timestep. At the default 100 Hz policy rate this is
+-1.5 reward per simulated second. Changing the policy rate changes that rate;
+for example, 50 Hz gives -0.75 per second with the same setting. Set the weight
+to zero to disable it. The signed weight must be finite and nonpositive.
+
+All other rewards keep their existing defaults. Terminal distance and enabled
+terminal velocity costs apply on an early-success step as well as at a clean
+deadline. The optional terminal success bonus also applies on that step when
+enabled; it remains **off by default**, as in the original task. Existing
+`env.use_terminal_success_bonus=True env.rwd_scale_terminal_success=5.0`
+overrides continue to work. Failure distance costs remain unchanged. Both PPO
+and SAC keep gamma 1.0; the explicit time cost supplies the speed incentive.
+
+Train with the same options as the original task, changing only the task ID:
+
+```bash
+./isaaclab.sh -p source/scripts/rsl_rl/train.py --task=Borinot-goto-minTime --num_envs=10000 --headless env.control_mode=wrench
+```
+
+To hide time from the actor, append `env.remove_time_from_actor_obs=True`.
+This removes **both** normalized remaining time and remaining seconds. It keeps
+every other actor input in the same order, including controller memory. The
+critic still receives both clocks. The default keeps the original observation
+layout. Hiding time reduces the actor input by two, so a visible-time checkpoint
+cannot be loaded unchanged into a hidden-time actor. Use the same setting during
+training and playback.
+
+The registered PPO, SAC-CE, and SAC-MSE recipes use separate experiment folders:
+`borinot_goto_min_time` and `borinot_goto_min_time_sac`. Controllers, goal sampling,
+success thresholds, disturbance schedules, and stage-pure curriculum rules are
+inherited. Early successes count toward curriculum promotion. Monitor
+`Episode/success_count` alongside `Episode/completed_count`,
+`Goal/success_duration_s` (mean duration of successful completed episodes),
+`Goal/early_success_count`, and `Episode_Reward/time`. Existing
+`Goal/deadline_*` metrics still describe only episodes that reach the deadline.
+
+The public player accepts both minimum-time IDs. It preserves episode resets on
+early success even for a fixed live goal, instead of switching to the original
+task's continuous hold mode:
+
+```bash
+./isaaclab.sh -p source/scripts/rsl_rl/play_borinot_goto.py --task=Borinot-goto-minTime --checkpoint=/absolute/path/checkpoint.pt --random-goals env.control_mode=wrench
+```
+
+Pass the same controller, observation, architecture, and agent overrides used in
+training. The MuJoCo wrapper forwards the same task ID to this player too.
+
+The following sections describe the original deadline task unless stated otherwise.
+
 **Arm-aware INDI modes:** `env.control_mode=model_wrench_indi` and `env.control_mode=model_wrench_yawless_indi` retain the corresponding explicit-arm model and add a causal, physics-rate torque-residual correction. Both support PPO and SAC. See the shared [hybrid method, sensing, timing and configuration guide](../borinot/MODEL_WRENCH_INDI_CONTROL.md). Collective thrust remains model-based; the first post-reset tick is nominal.
 
 This is a separate task beside `borinot_cmd_vel`. We ask Borinot to put its base

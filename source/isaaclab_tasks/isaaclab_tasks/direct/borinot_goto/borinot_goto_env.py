@@ -40,7 +40,7 @@ class BorinotGoToEnv(BorinotCmdVelEnv):
         self._episode_terms = {name: torch.zeros(self.num_envs, device=self.device) for name in (
             "terminal_distance", "progress", "terminal_linear_vel", "terminal_ang_vel", "terminal_success",
             "action_rate", "energy", "base_collision", "leave_area", "self_collision", "tilt",
-            "thrust_limits", "torque_limits", "action_limits")}
+            "thrust_limits", "torque_limits", "action_limits", "time")}
         self._goal_markers = None
 
     def _resample_commands(self, env_ids):
@@ -63,15 +63,16 @@ class BorinotGoToEnv(BorinotCmdVelEnv):
         failed, _ = super()._get_dones()  # completed-substep safety events and power
         self._goal_failed.copy_(failed)
         self._goal_deadline_reached.copy_(self._episode_steps >= self._goal_deadline_steps)
-        self._goal_finished.copy_(failed | self._goal_deadline_reached)
         distance = (self._goal_position_w - self.robot.data.root_pos_w).norm(dim=-1)
         reached, slow, still = goal_success_parts(
             self.cfg, distance, self.robot.data.root_lin_vel_w, self.robot.data.root_ang_vel_w)
-        self._goal_success.copy_(reached & slow & still & self._goal_deadline_reached & ~failed)
+        self._goal_success.copy_(reached & slow & still & ~failed
+                                 & (self._goal_deadline_reached | self.cfg.reset_at_success))
+        self._goal_finished.copy_(failed | self._goal_deadline_reached | self._goal_success)
         first = reached & (self._first_arrival_s < 0)
         self._first_arrival_s[first] = self._episode_steps[first] * self.step_dt
         self._minimum_goal_distance.copy_(torch.minimum(self._minimum_goal_distance, distance))
-        # Deadline is a genuine terminal state, NOT an artificial timeout.
+        # Deadline and early settled success are genuine terminals, NOT artificial timeouts.
         return self._goal_finished.clone(), torch.zeros_like(self._goal_finished)
 
     def _get_rewards(self):
@@ -81,14 +82,14 @@ class BorinotGoToEnv(BorinotCmdVelEnv):
         delta = self._actuator_commands - self._previous_actuator_commands
         action_rate = delta[:, :6].square().mean(-1) + delta[:, 6:].square().mean(-1)
         power = self._power_sum_w / max(1, self._power_samples)
-        clean_deadline = self._goal_deadline_reached & ~self._goal_failed
+        clean_terminal = (self._goal_deadline_reached | (self._goal_success & self.cfg.reset_at_success)) & ~self._goal_failed
         terms = {
             "terminal_distance": self.cfg.rwd_scale_terminal_distance * terminal_distance * self._goal_finished,
             "progress": self.cfg.rwd_scale_progress * self._goal_progress_factor * (self._previous_goal_distance - distance),
-            "terminal_linear_vel": (self.cfg.rwd_scale_terminal_linear_vel * clean_deadline
+            "terminal_linear_vel": (self.cfg.rwd_scale_terminal_linear_vel * clean_terminal
                                     * self.robot.data.root_lin_vel_w.square().sum(-1)
                                     if self.cfg.use_terminal_linear_vel_penalty else torch.zeros_like(distance)),
-            "terminal_ang_vel": (self.cfg.rwd_scale_terminal_ang_vel * clean_deadline
+            "terminal_ang_vel": (self.cfg.rwd_scale_terminal_ang_vel * clean_terminal
                                  * self.robot.data.root_ang_vel_w.square().sum(-1)
                                  if self.cfg.use_terminal_ang_vel_penalty else torch.zeros_like(distance)),
             "terminal_success": (self.cfg.rwd_scale_terminal_success * self._goal_success
@@ -99,6 +100,7 @@ class BorinotGoToEnv(BorinotCmdVelEnv):
             "leave_area": self.cfg.rwd_scale_leave_area * self._events["leave_area"],
             "self_collision": self.cfg.rwd_scale_self_collision * self._self_contact_bodies.sum(-1) * self.step_dt,
             "tilt": self.cfg.rwd_scale_tilt * self._events["tilt"],
+            "time": torch.full_like(distance, self.cfg.per_step_penalty_weight),
             **clipped_limit_rewards(self._action_limit_costs, self.cfg),
         }
         for name, value in terms.items():
@@ -123,9 +125,17 @@ class BorinotGoToEnv(BorinotCmdVelEnv):
         self._commands[:, 3] = remaining_s / (self._goal_deadline_steps * self.step_dt)
         # Reuse all measured state and controller-memory fields, in the same order.
         observation = torch.cat((super()._get_observations()["policy"], remaining_s[:, None]), dim=-1)
+        policy = observation
+        if self.cfg.remove_time_from_actor_obs:
+            # Normalized time follows v, omega, [acc], q, dq, action, [gravity], R,
+            # [height], goal XYZ. Controller memory follows it; seconds is last.
+            time_index = (22 + self.cfg.action_space + int(self.cfg.include_base_height)
+                          + 3 * int(self.cfg.projected_gravity_in_obs)
+                          + 3 * self.cfg.obs_include_base_lin_acc_steps * self.cfg.obs_include_base_lin_acc)
+            policy = torch.cat((observation[:, :time_index], observation[:, time_index + 1:-1]), dim=-1)
         if self.cfg.goal_debug_vis:
             self._draw_goal_markers()
-        return {"policy": observation, "critic": observation}
+        return {"policy": policy, "critic": observation}
 
     def _update_curriculum(self, env_ids):
         completed = env_ids[self._goal_finished[env_ids] & (self._episode_steps[env_ids] > 0)]
@@ -176,6 +186,10 @@ class BorinotGoToEnv(BorinotCmdVelEnv):
             logs["Goal/deadline_ang_speed_rad_s"] = data.root_ang_vel_w[ids].norm(dim=-1).mean()
         if (arrivals >= 0).any():
             logs["Goal/first_arrival_s_when_reached"] = arrivals[arrivals >= 0].mean()
+        successes = self._goal_success[completed]
+        if successes.any():
+            logs["Goal/success_duration_s"] = duration[successes].mean()
+        logs["Goal/early_success_count"] = (successes & ~goal_info["deadline_reached"][completed]).sum()
         logs.update({f"Episode_Reward/{name}": value[completed].mean() for name, value in self._episode_terms.items()})
         self.extras["log"] = logs
 

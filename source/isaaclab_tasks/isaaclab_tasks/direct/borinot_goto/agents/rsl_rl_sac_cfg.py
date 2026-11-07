@@ -18,3 +18,15 @@ class BorinotGoToSACMSERunnerCfg(BorinotCmdVelSACMSERunnerCfg):
     experiment_name = "borinot_goto_sac"
     run_name = "Borinot go-to SAC MSE"
     algorithm = BorinotCmdVelSACMSERunnerCfg().algorithm.replace(gamma=1.0)
+
+
+@configclass
+class BorinotGoToMinTimeSACRunnerCfg(BorinotGoToSACRunnerCfg):
+    experiment_name = "borinot_goto_min_time_sac"
+    run_name = "Borinot minimum-time go-to SAC CE"
+
+
+@configclass
+class BorinotGoToMinTimeSACMSERunnerCfg(BorinotGoToSACMSERunnerCfg):
+    experiment_name = "borinot_goto_min_time_sac"
+    run_name = "Borinot minimum-time go-to SAC MSE"

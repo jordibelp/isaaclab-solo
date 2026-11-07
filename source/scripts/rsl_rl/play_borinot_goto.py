@@ -10,7 +10,8 @@ from pathlib import Path
 from isaaclab.app import AppLauncher
 
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument("--task", default="Borinot-goto", choices=("Borinot-goto", "Borinot-GoTo-Direct-v0"))
+parser.add_argument("--task", default="Borinot-goto", choices=(
+    "Borinot-goto", "Borinot-GoTo-Direct-v0", "Borinot-goto-minTime", "Borinot-GoTo-MinTime-Direct-v0"))
 parser.add_argument("--agent", default="rsl_rl_cfg_entry_point")
 parser.add_argument("--checkpoint", required=True)
 parser.add_argument("--num_envs", type=int, default=1)
@@ -135,7 +136,7 @@ def main(env_cfg, agent_cfg):
                                 show_ui=args.ui and not args.random_goals and play_env.sim.has_gui(), relative=relative)
         initial_goal = (play_env._goal_position_w[0] - play_env.scene.env_origins[0]).tolist()
         push_limit_n = stage_force_limit(env_cfg, play_env.goal_curriculum.level)
-        mode = "random" if args.random_goals else ("episodes" if args.reset_at_deadline else "chain")
+        mode = "random" if args.random_goals else ("episodes" if play_env.reset_at_deadline else "chain")
         print(f"[INFO] Borinot go-to: {mode} mode, {env_cfg.control_mode}, {env_cfg.physics_hz}/{env_cfg.policy_hz} Hz, "
               f"actuator_delay={env_cfg.actuator_delay} s, actuator_delay_range={env_cfg.actuator_delay_range}, "
               f"training reference stage {play_env.goal_curriculum.level} (not a live-goal limit; "

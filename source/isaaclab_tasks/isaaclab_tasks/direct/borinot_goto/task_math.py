@@ -14,7 +14,7 @@ def stage_settings(cfg, level):
 
 
 def goal_success_parts(cfg, distance, lin_vel_w, ang_vel_w):
-    """Success conditions at a clean deadline: inside the goal ball, slow, and not rotating."""
+    """Spatial and velocity success conditions; the task chooses when to evaluate them."""
     return (distance <= cfg.goal_success_tolerance_m,
             lin_vel_w.norm(dim=-1) < cfg.goal_success_lin_vel_tolerance_m_s,
             ang_vel_w.norm(dim=-1) < cfg.goal_success_ang_vel_tolerance_rad_s)
@@ -101,9 +101,12 @@ def validate_goal_config(cfg):
             or any(a < b for a, b in zip(factors, factors[1:]))):
         raise ValueError("progress_reward_factors must decrease from 1.0 to 0.0.")
     for name in ("curriculum", "skip_curriculum", "progress_reward_curriculum", "use_terminal_linear_vel_penalty",
-                 "use_terminal_ang_vel_penalty", "use_terminal_success_bonus", "goal_debug_vis"):
+                 "use_terminal_ang_vel_penalty", "use_terminal_success_bonus", "goal_debug_vis",
+                 "reset_at_success", "remove_time_from_actor_obs"):
         if not isinstance(getattr(cfg, name), bool):
             raise ValueError(f"{name} must be a boolean.")
+    if not math.isfinite(cfg.per_step_penalty_weight) or cfg.per_step_penalty_weight > 0:
+        raise ValueError("per_step_penalty_weight must be finite and nonpositive; its sign is the reward sign.")
     start = cfg.start_forces_randn_curriculum_idx
     if not isinstance(start, int) or isinstance(start, bool) or start < 0:
         raise ValueError("start_forces_randn_curriculum_idx must be a nonnegative integer level.")

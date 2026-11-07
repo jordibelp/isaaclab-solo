@@ -19,10 +19,13 @@ class BorinotGoToEnvCfg(BorinotCmdVelEnvCfg):
     # Omitted CLI references use only the configured phase time ranges.
     goal_reference_speed_m_s = (0.0,)
     goal_reference_accel_m_s2 = (0.0,)
-    # Success, evaluated only at a clean deadline: all three must hold.
+    # Success at a clean deadline, or first settled arrival when reset_at_success is enabled.
     goal_success_tolerance_m = 0.05  # 3D base-link distance <= this
     goal_success_lin_vel_tolerance_m_s = 0.1  # |base linear velocity| < this
     goal_success_ang_vel_tolerance_rad_s = 0.2  # |base angular velocity|, all three axes, < this
+    reset_at_success = False  # otherwise success is evaluated only at the deadline
+    per_step_penalty_weight = -0.0  # signed reward per policy step, including the terminal step; no dt
+    remove_time_from_actor_obs = False  # remove both clocks from policy inputs; critic keeps both
     goal_curriculum_start_level = 0
     curriculum_success_threshold = 0.8  # >=, not reward-weight-dependent
     curriculum_window_episodes = 2048
@@ -35,11 +38,11 @@ class BorinotGoToEnvCfg(BorinotCmdVelEnvCfg):
     rwd_scale_progress = 1.0  # scale * (previous_distance - distance), no extra dt
     failure_distance_floor_m = 10.0  # early safety failure pays at least -100, rather than escaping the deadline cost
     use_terminal_linear_vel_penalty = True
-    rwd_scale_terminal_linear_vel = -1.0  # one-off per (m/s)^2, only at a clean deadline
+    rwd_scale_terminal_linear_vel = -1.0  # one-off per (m/s)^2 at a clean terminal
     use_terminal_ang_vel_penalty = True
-    rwd_scale_terminal_ang_vel = -1.0  # one-off per (rad/s)^2, only at a clean deadline
+    rwd_scale_terminal_ang_vel = -1.0  # one-off per (rad/s)^2 at a clean terminal
     use_terminal_success_bonus = False
-    rwd_scale_terminal_success = 10.0  # one-off, at a successful deadline (inside and at rest)
+    rwd_scale_terminal_success = 10.0  # one-off, on successful termination (inside and at rest)
     rwd_scale_action_rate = 0.0
     rwd_scale_energy = 0.0
     rwd_scale_base_collision = 0.0
@@ -63,6 +66,8 @@ class BorinotGoToEnvCfg(BorinotCmdVelEnvCfg):
         # then append remaining seconds after controller memory (+1 observation).
         self.observation_space += 1
         self.state_space = self.observation_space
+        if self.remove_time_from_actor_obs:
+            self.observation_space -= 2
         self.is_finite_horizon = True
         # A generic horizon must not cut short a sampled deadline. Derive the
         # metadata horizon from all sampling stages after Hydra overrides.
@@ -73,3 +78,11 @@ class BorinotGoToEnvCfg(BorinotCmdVelEnvCfg):
             longest = max(longest, bounds[1], distance / speed if speed > 0 else 0.0,
                           2 * math.sqrt(distance / accel) if accel > 0 else 0.0)
         self.episode_length_s = math.ceil(longest * self.policy_hz) / self.policy_hz
+
+
+@configclass
+class BorinotGoToMinTimeEnvCfg(BorinotGoToEnvCfg):
+    """Same go-to task, with an explicit cost of time and first settled-arrival termination."""
+
+    reset_at_success = True
+    per_step_penalty_weight = -0.015
