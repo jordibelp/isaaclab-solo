@@ -124,7 +124,7 @@ Order:
 
 1. Base linear velocity in body axes: 3, m/s.
 2. Base angular velocity in body axes: 3, rad/s.
-3. Optional body-frame base CoM linear acceleration: 3, m/s².
+3. Optional body-frame base CoM linear acceleration history: 3 values per physics sample, m/s².
 4. Two leg joint positions: 2, rad, in `joint_names` order.
 5. Two leg joint velocities: 2, rad/s.
 6. Previous executed policy action: action count below.
@@ -140,9 +140,22 @@ The full rotation matrix stays, including yaw. Projected gravity alone would
 not encode yaw, so these two representations are not interchangeable in general.
 
 Acceleration is off by default. Enable `env.obs_include_base_lin_acc=True` to
-add it. This is simulated **kinematic acceleration**, not an accelerometer's
-specific force or a noisy IMU model. Its reset observation is zero. Changing this
-flag changes policy size and requires a compatible checkpoint.
+add it. `env.obs_include_base_lin_acc_steps` is a positive integer, default 2.
+The history contains the most recent completed **physics-rate** samples, oldest
+to newest, with XYZ together for each sample. Two samples add six inputs. Each
+sample uses the body's axes at its measurement time. There is no averaging or
+filtering. At the default 200 Hz physics / 100 Hz policy rates, these are the two
+5 ms substep samples from the preceding 10 ms policy interval. Longer histories
+also retain samples from earlier policy intervals.
+
+This is simulated **kinematic acceleration**, not an accelerometer's specific
+force or a noisy IMU model. Physical resets clear only the selected environments'
+history, with zeros for samples not yet collected. Observation reads and go-to
+subgoal changes do not advance or clear it. Disabled acceleration adds no inputs
+and performs no acceleration sampling. Changing the enabled flag or history
+length changes policy size and requires a compatible checkpoint. For an older
+checkpoint trained with the single acceleration sample, explicitly set
+`env.obs_include_base_lin_acc_steps=1`.
 
 | `env.control_mode` | Actions | Observations | Agents |
 | --- | --- | --- | --- |
@@ -153,7 +166,8 @@ flag changes policy size and requires a compatible checkpoint.
 | `wrench` | World acceleration + heading + body rates + 2 joint targets = 9 | 39 | PPO, SAC CE, SAC MSE |
 | `cbrt` / `cbrt_indi` | Body rates + collective + 2 joint targets = 6 | 36 | PPO, SAC CE, SAC MSE |
 
-Optional acceleration adds 3 observations in every mode. PI adds six actual
+Optional acceleration adds `3 * obs_include_base_lin_acc_steps` observations in
+every mode (six with the default history length). PI adds six actual
 rotor thrust states and three rate integrals. INDI adds its six thrust states and
 two joint integrals. Wrench and both CBRT variants add six realized rotor thrusts.
 Rotor states are normalized by nominal hover thrust. As in goalkeeper, not all

@@ -114,7 +114,7 @@ class BorinotSymmetry:
         add("velocity", 3)
         add("omega", 3)
         if not self.legacy and self.cfg.obs_include_base_lin_acc:
-            add("acceleration", 3)
+            add("acceleration", 3 * getattr(self.cfg, "obs_include_base_lin_acc_steps", 1))
         add("joint_position", 2)
         add("joint_velocity", 2)
         if self.legacy and self.cfg.include_force_info_in_obs:

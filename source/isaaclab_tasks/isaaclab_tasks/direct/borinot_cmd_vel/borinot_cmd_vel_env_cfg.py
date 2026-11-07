@@ -48,6 +48,7 @@ class BorinotCmdVelEnvCfg(BorinotGoalkeeperEnvCfg):
     base_collision_force_threshold_n = 1.0  # Solo base contact threshold
     self_collision_force_threshold_n = 0.6  # Solo undesired-contact threshold
     obs_include_base_lin_acc = False  # body-frame kinematic CoM acceleration; NOT specific force
+    obs_include_base_lin_acc_steps = 2  # physics-rate XYZ samples, oldest to newest; zero-padded after reset
     include_base_height = True  # absolute base-link world Z, metres; not relative to the reset height
     projected_gravity_in_obs = False  # redundant with the full rotation matrix; True restores legacy gravity inputs
 
@@ -90,12 +91,15 @@ class BorinotCmdVelEnvCfg(BorinotGoalkeeperEnvCfg):
         for name in ("include_base_height", "projected_gravity_in_obs"):
             if not isinstance(getattr(self, name), bool):
                 raise ValueError(f"{name} must be a boolean.")
+        if type(self.obs_include_base_lin_acc_steps) is not int or self.obs_include_base_lin_acc_steps < 1:
+            raise ValueError("obs_include_base_lin_acc_steps must be a positive integer.")
         # Both networks: v_b, omega_b, optional acceleration, q, dq, last action,
         # optional gravity_b, row-major R_world_body, optional world height, command.
         controller_state = 6 if self.control_mode in ("wrench", "model_wrench", "model_wrench_yawless", "cbrt", "cbrt_indi") else (
             8 if self.control_mode == "indi" else (
                 9 if self.control_mode == "PI_rotors_PD_joint_pos_control" else 0))
-        self.observation_space = (23 + self.action_space + controller_state + 3 * self.obs_include_base_lin_acc
+        self.observation_space = (23 + self.action_space + controller_state
+                                  + 3 * self.obs_include_base_lin_acc_steps * self.obs_include_base_lin_acc
                                   + int(self.include_base_height) + 3 * int(self.projected_gravity_in_obs))
         self.state_space = self.observation_space
         self.robot.init_state.pos = tuple(self.robot_home)

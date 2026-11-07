@@ -582,3 +582,14 @@ def test_goal_task_is_not_mistaken_for_velocity_symmetry_layout():
     from test_symmetry import symmetry
     with pytest.raises(ValueError, match="Go-to"):
         symmetry.BorinotSymmetry(config())
+
+
+def test_go_to_inherits_history_length_and_preserves_extra_deadline_scalar():
+    cfg = config(obs_include_base_lin_acc=True, obs_include_base_lin_acc_steps=2)
+    assert cfg.observation_space == cfg.state_space == 39
+    env = fake_env(cfg)
+    env._base_lin_acc_history = torch.arange(12, dtype=torch.float64).reshape(2, 2, 3)
+    obs = env._get_observations()
+    assert obs["policy"].shape == (2, 39)
+    assert torch.equal(obs["policy"][:, 6:12], env._base_lin_acc_history.flatten(1))
+    torch.testing.assert_close(obs["policy"][:, -1], torch.tensor([1., 4.], dtype=torch.float64))

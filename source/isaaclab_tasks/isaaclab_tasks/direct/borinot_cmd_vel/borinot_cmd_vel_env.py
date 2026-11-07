@@ -54,6 +54,9 @@ class BorinotCmdVelEnv(DirectRLEnv):
         super().__init__(cfg, render_mode, **kwargs)
         self.joint_ids, _ = self.robot.find_joints(list(cfg.joint_names), preserve_order=True)
         self.base_id = self.robot.find_bodies("base")[0][0]
+        self._base_lin_acc_history = (torch.zeros(self.num_envs, cfg.obs_include_base_lin_acc_steps, 3,
+                                                device=self.device) if cfg.obs_include_base_lin_acc else None)
+        self._base_lin_acc_samples = 0
         self._base_contact_column = self.contact_body_names.index("base")
         if any(sensor.contact_physx_view.filter_count != len(self.contact_body_names) - 1
                for sensor in self._body_contact_sensors):
@@ -221,9 +224,19 @@ class BorinotCmdVelEnv(DirectRLEnv):
         self.actions.copy_(actions)
         self._power_sum_w.zero_()
         self._power_samples = self._physics_samples = 0
+        self._base_lin_acc_samples = 0
 
     def _sample_physics_events(self):
         """Latch completed-substep events until this policy interval is scored."""
+        if self.cfg.obs_include_base_lin_acc and self._base_lin_acc_samples < self._physics_samples:
+            # Called before the next substep and once after the final substep.
+            # Store each measurement in its acquisition-time body frame, not the
+            # newest attitude's axes. Observation reads never advance history.
+            acceleration_b = quat_apply_inverse(self.robot.data.root_quat_w,
+                                                self.robot.data.body_lin_acc_w[:, self.base_id])
+            self._base_lin_acc_history[:, :-1] = self._base_lin_acc_history[:, 1:].clone()
+            self._base_lin_acc_history[:, -1] = acceleration_b
+            self._base_lin_acc_samples = self._physics_samples
         for column, sensor in enumerate(self._body_contact_sensors):
             data = sensor.data
             own_forces = data.force_matrix_w[:, 0]  # [env, other robot body, world XYZ]
@@ -305,8 +318,7 @@ class BorinotCmdVelEnv(DirectRLEnv):
         data, q = self.robot.data, self.robot.data.root_quat_w
         parts = [data.root_lin_vel_b, data.root_ang_vel_b]
         if self.cfg.obs_include_base_lin_acc:
-            acceleration_b = quat_apply_inverse(q, data.body_lin_acc_w[:, self.base_id])
-            parts.append(acceleration_b * (self._episode_steps > 0)[:, None])
+            parts.append(self._base_lin_acc_history.flatten(1))
         parts += [data.joint_pos[:, self.joint_ids], data.joint_vel[:, self.joint_ids], self.actions]
         if self.cfg.projected_gravity_in_obs:
             parts.append(quat_apply_inverse(q, self._gravity))
@@ -415,6 +427,8 @@ class BorinotCmdVelEnv(DirectRLEnv):
                                              joint_ids=self.joint_ids, env_ids=env_ids)
         self.robot.set_joint_velocity_target(joint_zero, joint_ids=self.joint_ids, env_ids=env_ids)
         self.robot.set_joint_effort_target(joint_zero, joint_ids=self.joint_ids, env_ids=env_ids)
+        if self.cfg.obs_include_base_lin_acc:
+            self._base_lin_acc_history[env_ids] = 0
         for buffer in (self.actions, self._action_limit_costs, self._rate_integral, self._episode_steps, self._episode_xy_integral,
                        self._episode_velocity_error_integral, self._episode_energy_j, self._base_push_steps_left, self._base_push_force_z_w,
                        self._base_push_points_b, self._power_sum_w):

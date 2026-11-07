@@ -47,7 +47,8 @@ Choose any of the seven existing PPO control modes:
 The action meanings and PPO/SAC mappings are unchanged. The existing sine/cosine
 angle flags, arm hold, actuator delay, motor lag, inertial model, and observation
 options remain available. An added sine/cosine component adds one action and one
-previous-action observation. Optional acceleration adds three observations.
+previous-action observation. Optional acceleration adds three observations per
+physics sample: six with the default `env.obs_include_base_lin_acc_steps=2`.
 Changing these settings can make checkpoints incompatible.
 
 SAC MSE:
@@ -74,8 +75,14 @@ Actor and critic receive the **same** vector, in this order:
 1. Base-body-frame linear velocity, 3 values, m/s. As in command tracking, this
    is the base rigid body's CoM velocity, not the whole robot's CoM velocity.
 2. Base-body-frame angular velocity, 3 values, rad/s.
-3. Optional body-frame kinematic acceleration, 3 values, m/s². Set
-   `env.obs_include_base_lin_acc=True`. This is not accelerometer specific force.
+3. Optional body-frame kinematic acceleration history, m/s². Set
+   `env.obs_include_base_lin_acc=True` (default False). The most recent
+   `env.obs_include_base_lin_acc_steps` completed physics samples are flattened
+   oldest to newest, XYZ per sample. The default length 2 adds six values.
+   Each sample keeps its acquisition-time body axes; no averaging or filtering.
+   Physical resets clear the selected histories and missing samples are zero.
+   Live goal/deadline changes preserve the history. This is not accelerometer
+   specific force. Use length 1 for older single-sample acceleration checkpoints.
 4. Thigh and calf positions, then velocities, 2 + 2 values, rad and rad/s.
 5. Previous policy action, with the selected controller's action dimension.
 6. Optional projected gravity, 3 values. Off by default:

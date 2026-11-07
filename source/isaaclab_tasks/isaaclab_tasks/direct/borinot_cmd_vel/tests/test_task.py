@@ -303,6 +303,7 @@ def test_reset_switches_do_not_merge_distinct_events_or_timeouts(base_reset, til
 
 def contact_env(n=5):
     cfg = SimpleNamespace(self_collision_force_threshold_n=.6, base_collision_force_threshold_n=1.,
+        obs_include_base_lin_acc=False,
         flight_height_range_m=(.15, 20.), flight_xy_limit_m=25., robot_tilt_threshold_degs=70.,
         reset_robot_on_tilt_threshold=True, reset_robot_on_robot_crash=True, self_collision_triggers_reset=False,
         control_mode="thrust_and_torque_control", sac_action_mapping=False, remove_thrust_clipping=True, hold_arm=False,
