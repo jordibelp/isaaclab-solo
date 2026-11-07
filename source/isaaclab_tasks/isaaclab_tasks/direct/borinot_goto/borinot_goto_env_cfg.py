@@ -59,6 +59,9 @@ class BorinotGoToEnvCfg(BorinotCmdVelEnvCfg):
     start_forces_randn_curriculum_idx = 5
     curriculum_start_level = 0  # unused parent force level; use goal_curriculum_start_level
 
+    base_push_interval_range_s=(0.7,1.3)
+    base_push_duration_range_s=(0.25,0.7)
+
     def configure_control(self):
         super().configure_control()
         validate_goal_config(self)
