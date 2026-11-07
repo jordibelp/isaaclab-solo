@@ -167,6 +167,8 @@ def get_checkpoint_path(
 
     If :attr:`run_dir` and :attr:`checkpoint` are regex expressions then the most recent (highest alphabetical order)
     run and checkpoint are selected. To disable this behavior, set the flag :attr:`sort_alpha` to False.
+    Checkpoint selectors also match names without an optional ``MMDD_<wandb_run_id>_`` prefix.
+    Sorting ignores this prefix, so legacy selectors and iteration ordering work with both formats.
 
     Args:
         log_path: The log directory path to find models in.
@@ -207,12 +209,17 @@ def get_checkpoint_path(
         raise ValueError(f"No runs present in the directory: '{log_path}' match: '{run_dir}'.")
 
     # list all model checkpoints in the directory
-    model_checkpoints = [f for f in os.listdir(run_path) if re.match(checkpoint, f)]
+    def unprefixed_name(filename: str) -> str:
+        return re.sub(r"^\d{4}_[A-Za-z0-9]{7,8}_", "", filename)
+
+    model_checkpoints = [
+        f for f in os.listdir(run_path) if re.match(checkpoint, f) or re.match(checkpoint, unprefixed_name(f))
+    ]
     # check if any checkpoints are present
     if len(model_checkpoints) == 0:
         raise ValueError(f"No checkpoints in the directory: '{run_path}' match '{checkpoint}'.")
     # sort alphabetically while ensuring that *_10 comes after *_9
-    model_checkpoints.sort(key=lambda m: f"{m:0>15}")
+    model_checkpoints.sort(key=lambda m: f"{unprefixed_name(m):0>15}")
     # get latest matched checkpoint file
     checkpoint_file = model_checkpoints[-1]
 

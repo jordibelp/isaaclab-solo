@@ -11,6 +11,9 @@ Adds:
 - round-wise observation permutations for plasticity-loss experiments
 - paper-style plasticity mitigation (LayerNorm, regenerative L2, shrink+perturb)
 - run naming compatible with the current skrl conventions
+
+W&B checkpoints use ``MMDD_<run_id>_<original_name>.pt`` across all tasks and runners.
+MMDD is the run's start date; runs without W&B keep their original checkpoint names.
 """
 
 import argparse
@@ -703,6 +706,8 @@ def _infer_input_checkpoint_name(checkpoint_path: str | None) -> str | None:
     parent_run_id = run_dir_name.rsplit("_", 1)[-1].strip()
     if not checkpoint_stem:
         return None
+    if re.match(r"^\d{4}_[A-Za-z0-9]{7,8}_", checkpoint_stem):
+        return checkpoint_stem
     if re.fullmatch(r"[A-Za-z0-9]{7,8}", parent_run_id):
         return f"{parent_run_id}_{checkpoint_stem}"
     return checkpoint_stem
@@ -793,7 +798,27 @@ def _curriculum_checkpoint_stage(curriculum_state: dict) -> tuple[tuple[int | No
     return (global_idx, two_feet_phase), filename
 
 
-_PERIODIC_CHECKPOINT_PATTERN = re.compile(r"model_(\d+)\.pt")
+_PERIODIC_CHECKPOINT_PATTERN = re.compile(r"(?:\d{4}_[A-Za-z0-9]{7,8}_)?model_(\d+)\.pt")
+
+
+def _checkpoint_path(runner, path: str | Path) -> str:
+    """Return the actual save path, adding this run's prefix exactly once."""
+    directory, name = os.path.split(path)
+    prefix = getattr(runner, "_checkpoint_prefix", "")
+    if prefix and not name.startswith(f"{prefix}_"):
+        name = f"{prefix}_{name}"
+    return os.path.join(directory, name)
+
+
+def _patch_runner_save_with_checkpoint_names(runner, prefix: str) -> None:
+    """Name every checkpoint before serialization, upload and retention."""
+    runner._checkpoint_prefix = prefix
+    original_save = runner.save
+
+    def _save_with_names(path: str, infos: dict | None = None) -> None:
+        original_save(_checkpoint_path(runner, path), infos=infos)
+
+    runner.save = _save_with_names
 
 
 def _save_best_model_checkpoints(
@@ -825,10 +850,10 @@ def _save_best_model_checkpoints(
                 "curriculum_base_push_force_xy_abs": curriculum_state["base_push_force_xy_abs"],
             }
         )
-        curriculum_model_path = os.path.join(log_dir, curriculum_model_filename)
+        curriculum_model_path = _checkpoint_path(runner, os.path.join(log_dir, curriculum_model_filename))
         runner.save(curriculum_model_path, infos=best_infos)
     if save_generic_best or curriculum_model_path is None:
-        runner.save(os.path.join(log_dir, "best_model.pt"), infos=best_infos)
+        runner.save(_checkpoint_path(runner, os.path.join(log_dir, "best_model.pt")), infos=best_infos)
     return curriculum_model_path
 
 
@@ -836,8 +861,8 @@ def _patch_runner_save_with_checkpoint_retention(runner, keep_last: int) -> None
     """Prune superseded periodic checkpoints on every save rather than only at shutdown.
 
     Runs are routinely killed before ``max_iterations``, so retention has to happen while
-    training progresses. Only ``model_<iteration>.pt`` files are pruned; the per-curriculum-stage
-    ``best_model*.pt`` checkpoints this script writes are never touched.
+    training progresses. Only ``model_<iteration>.pt`` files (with or without a run prefix) are
+    pruned; the per-curriculum-stage ``best_model*.pt`` checkpoints are never touched.
     """
 
     original_save = runner.save
@@ -921,7 +946,9 @@ def _install_sac_best_model_hook(runner, log_dir: str, resume_path: str | None, 
             runner, log_dir, curriculum_state, stage_filename, mean_reward, iteration, resume_path,
             save_generic_best=False,
         )
-        destination = "best_model.pt" if curriculum_model_path is None else os.path.basename(curriculum_model_path)
+        destination = os.path.basename(
+            curriculum_model_path or _checkpoint_path(runner, os.path.join(log_dir, "best_model.pt"))
+        )
         print(
             f"[INFO]: Saved new best model to {destination} "
             f"(iteration={iteration}, Train/mean_reward={mean_reward:.4f})",
@@ -2300,7 +2327,9 @@ class PeriodicEvalVideoLauncher:
     def _launch(self, locs: dict) -> None:
         iteration = int(locs.get("it", getattr(self.runner, "current_learning_iteration", 0)))
         total_time_s = int(getattr(self.runner, "tot_time", 0.0))
-        checkpoint_path = self.checkpoint_dir / f"periodic_eval_it{iteration:06d}_t{total_time_s:06d}s.pt"
+        checkpoint_path = Path(
+            _checkpoint_path(self.runner, self.checkpoint_dir / f"periodic_eval_it{iteration:06d}_t{total_time_s:06d}s.pt")
+        )
         video_path = self.video_dir / f"periodic_eval_it{iteration:06d}_t{total_time_s:06d}s.mp4"
         child_log_path = self.child_log_dir / f"periodic_eval_it{iteration:06d}_t{total_time_s:06d}s.log"
 
@@ -2832,7 +2861,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     log_root_path = os.path.abspath(log_root_path)
     print(f"[INFO] Logging experiment in directory: {log_root_path}")
 
-    base_run_name = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    run_start_time = datetime.now()
+    base_run_name = run_start_time.strftime("%Y-%m-%d_%H-%M-%S")
     print(f"Run timestamp: {base_run_name}")
 
     full_run_name = base_run_name
@@ -2864,6 +2894,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         full_run_name += "_asymmetric-critic"
 
     log_dir_name = full_run_name
+    checkpoint_prefix = ""
     if agent_cfg.logger == "wandb":
         # Let rsl_rl own wandb initialization to avoid config collisions inside its writer.
         # We still pre-generate the run id so the local folder name matches the W&B run id.
@@ -2873,6 +2904,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         if not wandb_project:
             raise ValueError("W&B is enabled but agent_cfg.wandb_project is empty.")
         wandb_run_id = wandb.util.generate_id()
+        checkpoint_prefix = f"{run_start_time:%m%d}_{wandb_run_id}"
         os.environ["WANDB_RUN_ID"] = wandb_run_id
         os.environ["WANDB_RESUME"] = "allow"
         os.environ["BORINOT_WANDB_NAME"] = args_cli.wandb_name or full_run_name
@@ -3271,7 +3303,6 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # RSL-RL 3.x exposes runner.log; the SAC OffPolicyRunner delegates logging
     # to runner.logger and therefore has no equivalent callback.
     original_log = getattr(runner, "log", lambda *args, **kwargs: None)
-    best_model_path = os.path.join(log_dir, "best_model.pt")
     best_mean_reward_by_curriculum_stage: dict[tuple[int | None, int | None], float] = {}
     last_curriculum_stage: tuple[int | None, int | None] | None = None
     mean_reward_history: deque[float] = deque(maxlen=50)
@@ -3378,6 +3409,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         curriculum_model_path = _save_best_model_checkpoints(
             runner, log_dir, curriculum_state, curriculum_model_filename, mean_reward, locs.get("it"), resume_path
         )
+        best_model_path = _checkpoint_path(runner, os.path.join(log_dir, "best_model.pt"))
 
         destination = best_model_path if curriculum_model_path is None else f"{best_model_path} and {curriculum_model_path}"
         print(
@@ -3546,7 +3578,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             flush=True,
         )
 
-    # Patch retention last so it wraps every other runner.save patch.
+    # Retention wraps the state-saving patches; naming is outermost so pruning and uploads
+    # both see the same actual filename, regardless of runner or algorithm.
     if int(args_cli.keep_last_checkpoints) > 0:
         _patch_runner_save_with_checkpoint_retention(runner, int(args_cli.keep_last_checkpoints))
         print(
@@ -3554,6 +3587,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             "periodic checkpoint(s) plus every per-curriculum-stage best_model*.pt, pruning on each save.",
             flush=True,
         )
+
+    _patch_runner_save_with_checkpoint_names(runner, checkpoint_prefix)
+    if checkpoint_prefix:
+        print(f"[INFO]: Checkpoint filenames: {checkpoint_prefix}_<name>.pt", flush=True)
 
     num_learning_iterations = int(agent_cfg.max_iterations)
     if args_cli.plasticity_loss_exp and should_resume:
