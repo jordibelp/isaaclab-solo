@@ -6,11 +6,11 @@ Date: 2026-10-14. Task ID: `Borinot-Goalkeeper-Direct-v0`.
 
 ## Start here
 
-**Shared physical-model defaults:** six 5 g motor point masses and the reference
-inference leg mass/CoM/inertia are now enabled for all Borinot tasks. These are
-spawned-layer overrides; the source USD is unchanged. For switches, payload
-precedence, nominal mass and older-checkpoint opt-outs, see
-[shared inertial properties](../borinot/INERTIAL_PROPERTIES.md).
+**Shared physical-model defaults:** `borinotFlat_6b3e09ce.usd` uses Jan's short-arm
+inertial model. The inclusive base gets no extra six 5 g motor points. Names,
+meshes and colliders are preserved; the original USD is unchanged. See
+[shared inertial properties](../borinot/INERTIAL_PROPERTIES.md) for masses,
+payload precedence and older-checkpoint settings.
 
 **New controller:** `env.control_mode=indi` selects a nine-action acceleration/rate/heading/joint-target policy with physics-rate INDI and joint PID. It works with PPO and both SAC critics. See the shared [step-by-step INDI guide](INDI_CONTROL.md) for equations, design choices, training/playback commands and limits.
 
@@ -113,12 +113,14 @@ flowchart RL
 The robot comes from:
 
 ```text
-/home/jordibelp/IsaacLab/source/isaaclab_assets/data/Robots/Borinot/borinotFlat.usd
+/home/jordibelp/IsaacLab/source/isaaclab_assets/data/Robots/Borinot/borinotFlat_6b3e09ce.usd
 ```
 
 ### Paddle and mass
 
-The original USD has a 115 g distal link. We model it as a 15 g shaft plus a separate 100 g paddle. This is a prototype interpretation of the existing tip ballast, not a measured separation of the physical parts.
+The default model uses Jan's complete 127 g short lower link, including its nut,
+plus a separate 100 g paddle. The legacy 15 g shaft approximation is available
+only with `env.inertial_properties.use_inference_leg_inertias=False`.
 The paddle is a round ping-pong-style racket: a **160 mm diameter** head, **12 mm thick**, plus a **60 × 26 mm** handle of the same thickness. Both parts are physical collision shapes on one rigid body named `paddle`. A ball hitting either part counts as a paddle hit. The short handle clears the upper arm at neutral. It extends toward the wrist along paddle-local +Y, overlapping the head by up to 10 mm so the parts join. This is a prototype shape, not a measured commercial racket.
 
 A fixed joint connects it to the distal link. The **head center** keeps the existing 50 mm standoff from the old tip center along the arm-plane normal, toward the incoming ball. With `racket_parallel_to_arm_plane=True`, the local mount rotates the paddle's +X normal onto the distal link's +Z axis. The root yaw then maps this normal onto world +X. Resizing does not move this center, its normal, or the fixed shot target. The original USD is unchanged.

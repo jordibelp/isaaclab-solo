@@ -75,7 +75,7 @@ def test_mass_properties_match_authored_stage(goto_env):
     from borinot_sim2sim.usd_scene import _gf_quat, quat_to_matrix
 
     robot, stage = goto_env.robot, goto_env.sim.stage
-    assert goto_env.robot_mass_kg == pytest.approx(2.940538, abs=1e-5)  # no racket, inference legs, motors
+    assert goto_env.robot_mass_kg == pytest.approx(2.993, abs=1e-5)  # short arm, inclusive base, no racket
     inertias = robot.root_physx_view.get_inertias()[0].reshape(-1, 3, 3).double().numpy()
     coms = robot.root_physx_view.get_coms()[0, :, :3].double().numpy()
     for index, name in enumerate(robot.body_names):

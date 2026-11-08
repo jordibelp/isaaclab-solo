@@ -80,6 +80,9 @@ the October 23 `1023_aunmwlq7_best_model_curriculum_idx_2.pt` loads with
 inputs. Our loader check also used
 `env.inertial_properties.include_motor_masses=False` and
 `env.inertial_properties.use_inference_leg_inertias=False` for the older plant.
+Since the default asset is now `borinotFlat_6b3e09ce.usd`, reproducing that
+older plant also requires `env.robot.spawn.usd_path` pointing to the unchanged
+`borinotFlat.usd`. See the shared [inertial-model guide](../source/isaaclab_tasks/isaaclab_tasks/direct/borinot/INERTIAL_PROPERTIES.md).
 That short flight was finite but reset four times in five simulated seconds.
 It is a compatibility check, not a successful tracking result.
 

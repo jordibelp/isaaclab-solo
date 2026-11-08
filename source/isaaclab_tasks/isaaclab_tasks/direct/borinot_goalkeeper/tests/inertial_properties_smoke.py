@@ -16,6 +16,7 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--urdf', type=Path, required=True)
 parser.add_argument('--output', type=Path, required=True)
 parser.add_argument('--tasks', default='all', help='all, or one registered task ID')
+parser.add_argument('--control-mode', default='thrust_and_torque_control')
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 app = AppLauncher(args).app
@@ -31,7 +32,7 @@ from isaaclab_tasks.utils.parse_cfg import parse_env_cfg
 root = ET.parse(args.urdf).getroot()
 report = {'cases': [], 'urdf_sha256': hashlib.sha256(args.urdf.read_bytes()).hexdigest()}
 tasks = ['Borinot-Direct-v0', 'Borinot-Goalkeeper-Direct-v0',
-         'Borinot-Goalkeeper-Simple-Direct-v0', 'Borinot-cmd-vel'] if args.tasks == 'all' else [args.tasks]
+         'Borinot-Goalkeeper-Simple-Direct-v0', 'Borinot-cmd-vel', 'Borinot-goto'] if args.tasks == 'all' else [args.tasks]
 
 
 def urdf_properties(name):
@@ -58,13 +59,13 @@ def add_about_origin(mass, com, inertia):
 
 try:
     for task in tasks:
-        cases = [('default', True, True, False), ('legacy', False, False, False)]
+        cases = [('default', False, True, False), ('legacy-leg', False, False, False)]
         if task == 'Borinot-cmd-vel':
-            cases += [('motor-only', True, False, False), ('leg-only', False, True, False),
-                      ('randomized', True, True, True), ('racket-and-old-payload', True, True, False)]
+            cases += [('randomized', False, True, True), ('racket-and-old-payload', False, True, False)]
         for label, motors, leg, randomized in cases:
             cfg = parse_env_cfg(task, device=args.device, num_envs=4)
             cfg.seed = 42
+            if hasattr(cfg, 'control_mode'): cfg.control_mode = args.control_mode
             if hasattr(cfg, 'include_events_randomization'): cfg.include_events_randomization = randomized
             if hasattr(cfg, 'curriculum'): cfg.curriculum = False
             if hasattr(cfg, 'reset_rpy_noise_degs'): cfg.reset_rpy_noise_degs = (0., 0., 0.)
@@ -126,6 +127,12 @@ try:
                     else: check(name+'_com', torch.allclose(coms[:,index,:3].double(),com.expand(4,-1),atol=1e-7,rtol=0))
                     case['properties'][name] = {'mass':masses[:,index].tolist(),'com':coms[:,index,:3].tolist(),'inertia':actualI.tolist()}
                 check('no_extra_bodies_or_dofs',env.robot.num_bodies==3+int('paddle' in env.robot.body_names) and env.robot.num_joints==2)
+                if hasattr(env, '_wrench') and hasattr(env._wrench, 'model'):
+                    check('controller_nominal_model_mass', abs(env._wrench.model.total_mass-nominal_total)<1e-6)
+                    for body in env._wrench.model.bodies:
+                        if body['name'] in expected:
+                            mass, com, I = expected[body['name']]
+                            check(body['name']+'_controller_inertia',torch.allclose(body['inertia'].cpu().double(),I,atol=1e-8,rtol=2e-5))
                 hover = cfg.hover_thrust_per_rotor if task == 'Borinot-Direct-v0' else env._hover_per_rotor
                 if motors or leg or task != 'Borinot-Direct-v0': check('nominal_hover',abs(hover-nominal_total*9.81/6)<1e-6)
                 snapshots = env.get_code_snapshot_files()

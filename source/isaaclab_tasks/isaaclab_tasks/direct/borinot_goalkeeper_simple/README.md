@@ -6,10 +6,10 @@ Date: 2026-10-18. Task ID: `Borinot-Goalkeeper-Simple-Direct-v0`.
 
 ## Start here
 
-**Shared physical-model defaults:** motor point masses and inference leg
-inertial properties are enabled here too. Read
-[shared inertial properties](../borinot/INERTIAL_PROPERTIES.md) for the independent
-switches, payload precedence and older-checkpoint opt-outs.
+**Shared physical-model defaults:** the versioned `borinotFlat_6b3e09ce.usd`
+uses Jan's short-arm inertias with no added motor point masses. Read
+[shared inertial properties](../borinot/INERTIAL_PROPERTIES.md) for calibration,
+payload precedence and older-checkpoint settings.
 
 **Direct motor dynamics (2026-11-02):** both direct rotor modes share the
 original task's updated motor model: lag rotor angular speed with the existing

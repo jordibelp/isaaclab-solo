@@ -119,7 +119,7 @@ class BorinotEnv(DirectRLEnv):
         self._dt_control = self._dt_physics * self.cfg.decimation
 
         self._rotor_pos_b = torch.tensor(self.cfg.rotor_pos_b, dtype=torch.float32, device=self.device)  # (6,3)
-        if cfg.inertial_properties.include_motor_masses:
+        if cfg.inertial_properties.include_motor_masses or cfg.inertial_properties.use_inference_leg_inertias:
             # Wrench torques are about the physical CoM, not the link origin.
             base_com = self.robot.root_physx_view.get_coms()[0, self._base_body_id[0], :3].to(self.device)
             self._rotor_pos_b -= base_com

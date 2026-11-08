@@ -222,14 +222,15 @@ legacy PI retains thrust lag. Older direct-control policies still load, but
 need their original revision for an exact replay of their training dynamics.
 
 The plant keeps the two-joint leg. There is no ball or goal. The racket is
-**off by default**. All four Borinot tasks now default to shared motor point-mass
-and inference leg-inertia overrides. See [shared inertial properties](../borinot/INERTIAL_PROPERTIES.md).
-The source robot USD is unchanged. Nominal no-racket mass is now **2.940538 kg**.
+**off by default**. Borinot tasks now use the versioned `borinotFlat_6b3e09ce.usd`
+with Jan's short-arm inertias and no extra motor point masses. See
+[shared inertial properties](../borinot/INERTIAL_PROPERTIES.md).
+The original USD is unchanged. Nominal no-racket mass is **2.993 kg**.
 
 ### Optional racket and calf-tip payload
 
 **Precedence:** inference leg inertias are enabled by default. They use the
-reference 115 g calf, with its load already included, and replace the old
+reference 127 g short lower link, with its load already included, and replace the old
 shaft/point-payload description below. The tip-payload setting is ignored in
 that mode, so it cannot double-count a 100 g load. To use the legacy point model,
 set `env.inertial_properties.use_inference_leg_inertias=False`.
@@ -249,13 +250,11 @@ Use `env.ee_includes_puntual_mass=0.15` for 150 g. The two options are independe
 you can include both a racket and a tip payload. Negative or non-finite payload
 masses are rejected.
 
-In legacy leg mode, the bare shaft uses the existing 15 g, 160 mm rod approximation. The source USD
-has a 115 g distal-link mass. We replace that mass, rather than leaving its
-assumed 100 g ballast in place and adding another payload. With no racket or
-selected tip payload, the legacy calf is 15 g and the nominal total robot mass
-is about 2.810538 kg **with motor masses also disabled**. A 100 g point payload makes the calf 115 g and the total
-robot about 2.910538 kg under those legacy switches; enabling motor masses adds 30 g. These shaft/ballast assumptions are inherited prototype
-values, not a new measurement of the real robot.
+In legacy leg mode, the bare shaft uses the existing 15 g, 160 mm rod approximation.
+This replaces the asset's distal-link properties rather than adding a second
+payload. With the new inclusive base and no racket, a 15 g shaft gives a nominal
+robot mass of **2.881 kg**; a 100 g point payload gives **2.981 kg**. These are
+prototype shaft/payload approximations, not Jan's measured short-link model.
 
 The point is at `(0.0, -0.136, -0.00495)` m in `flying_arm_2__link2` coordinates,
 the distal-most point of the current calf mesh. This is **not** the racket's
@@ -278,7 +277,7 @@ different payload changes the dynamics. The original `aunmwlq7` checkpoint was
 trained with the racket. To reproduce that setup, explicitly add:
 
 ```bash
-env.inertial_properties.include_motor_masses=False env.inertial_properties.use_inference_leg_inertias=False env.arm_holds_racket=True env.ee_includes_puntual_mass=0.0
+env.robot.spawn.usd_path=/home/jordibelp/IsaacLab/source/isaaclab_assets/data/Robots/Borinot/borinotFlat.usd env.inertial_properties.include_motor_masses=False env.inertial_properties.use_inference_leg_inertias=False env.arm_holds_racket=True env.ee_includes_puntual_mass=0.0
 ```
 
 ## Randomization and vertical disturbances

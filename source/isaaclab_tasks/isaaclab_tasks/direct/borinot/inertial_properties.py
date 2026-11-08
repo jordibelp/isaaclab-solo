@@ -61,6 +61,11 @@ def apply_inertial_properties(stage, robot_path, cfg):
     from isaaclab.utils.math import matrix_from_quat, quat_from_matrix
 
     validate_inertial_properties(cfg)
+    base = stage.GetPrimAtPath(f"{robot_path}/base")
+    if cfg.include_motor_masses and base.GetCustomDataByKey("borinotIncludesRotorMass"):
+        raise ValueError("This base already includes all motor and rotor masses. "
+                         "Set inertial_properties.include_motor_masses=False; "
+                         "the six legacy 5 g points would double-count them.")
 
     def write(name, mass, com, inertia):
         moments, axes = torch.linalg.eigh(torch.as_tensor(inertia, dtype=torch.float64))

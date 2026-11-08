@@ -1,110 +1,98 @@
 # Shared Borinot inertial properties
 
-All four Borinot tasks now support the same spawn-time mass overrides:
-`Borinot-Direct-v0`, `Borinot-cmd-vel`, `Borinot-Goalkeeper-Direct-v0`, and
-`Borinot-Goalkeeper-Simple-Direct-v0`.
+## Default asset: Jan's short arm, revision 6b3e09ce
 
-We only author overrides on the spawned robot, before cloning and physics startup.
-We never edit `borinotFlat.usd`. Body names, joints, collision shapes, observation
-sizes, action mappings, and joint limits stay unchanged.
+All Borinot training tasks now select:
 
-## Two independent switches, both enabled by default
+`source/isaaclab_assets/data/Robots/Borinot/borinotFlat_6b3e09ce.usd`
+
+This is an independent copy of `borinotFlat.usd`. The original stays unchanged.
+The copy replaces only each body's mass, centre of mass (CoM), and full inertia
+with `borinot_description` commit `6b3e09ce998f61824045d6ba4c149ba5dc1b06c4`,
+`arm:=short`. It retains every part name, joint, mesh, transform, material,
+collider and collision approximation. Provenance is stored in USD layer metadata.
+
+The base mass is **2.71746155 kg**, including all motors and propellers. The upper
+link is **0.14853845 kg**. The short lower link is **0.127 kg**, including its
+104 g nut. Nominal robot mass is **2.993 kg without a racket**, or **3.093 kg with
+the separate 100 g goalkeeper racket**, before startup randomization.
+
+The geometry is the short link, not the new long Solo leg. This change does not
+add that long variant or rotor-spin acceleration/gyroscopic dynamics. It matches
+Jan's inertial model, not newly measured hardware dynamics: the base tensor is
+derived from earlier identification and adjusted mass accounting. Existing task
+joint stops, drive settings, armature, gains, action mappings and friction
+randomization remain unchanged; they are not replaced by URDF actuator limits.
+
+## Startup overrides and double-counting prevention
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `env.inertial_properties.include_motor_masses` | `True` | Merge six ideal motor point masses into the base |
-| `env.inertial_properties.use_inference_leg_inertias` | `True` | Replace both leg links' mass, CoM and full inertia with the inference description |
-| `env.inertial_properties.motor_mass_kg` | `0.005` | Mass of each motor point, in kg |
+| `env.inertial_properties.include_motor_masses` | `False` | Historical point-mass option, only for the old USD |
+| `env.inertial_properties.use_inference_leg_inertias` | `True` | Apply the portable short-arm calibration after legacy shaft/payload construction |
 
-The portable numeric reference is in `inertial_properties_cfg.py`. It was
-transcribed from `borinot_description/urdf/borinot_flying_arm_2.urdf`, description
-revision `76708fb`. Training does not need that external package installed.
-CoM means center of mass. Inertia tensors use kg m².
+Training does not load an external description repository. Portable leg values
+are stored in `inertial_properties_cfg.py` and are archived with the source
+snapshot. The default values agree with the new USD. They retain all tensor
+entries, including the lower link's nonzero YZ term.
 
-## Motor points
+A base marker records that the new USD already includes the rotor masses.
+Enabling the old six 5 g point masses on this asset raises a clear error instead
+of adding a second 30 g. The legacy option remains available for explicit old
+asset playback. It does not include finite-size rotor spin inertia.
 
-The six points use the reference URDF's base-link positions, in metres:
+The default complete leg replacement supersedes `shaft_mass_kg` and
+`ee_includes_puntual_mass`. An old `ee_includes_puntual_mass=0.1` flag therefore
+does not add another 100 g to the 127 g lower link. The optional goalkeeper racket
+stays a separate body. Set `use_inference_leg_inertias=False` to deliberately use
+the legacy shaft/point-payload approximation instead.
 
-```python
-((0.0, -0.185, 0.05), (0.0, 0.185, 0.05),
- (0.1602146997, 0.0925, 0.05), (-0.1602146997, -0.0925, 0.05),
- (0.1602146997, -0.0925, 0.05), (-0.1602146997, 0.0925, 0.05))
-```
+Base mass/CoM and joint-friction randomization keep their existing settings.
+Hover calibration and model-based controllers use the updated nominal properties;
+randomized clones remain separate from that nominal model.
 
-You can override these through `env.inertial_properties.motor_mass_positions_b`.
-The original base mass is increased by 30 g. We recompute its CoM and full inertia
-with the parallel-axis theorem. There are no extra rigid bodies, colliders or DOFs.
-The rotor thrust locations and spin signs are not changed.
+## Training and playback
 
-These are **ideal point masses**, as requested. They do not include the separate
-rotor links' intrinsic inertia tensors in the URDF. Thus this matches their mass
-and position contribution, not the complete finite-size rotor assembly inertia.
-The base's own pre-existing USD inertia is retained before adding the point terms.
+No new flag is required. Existing commands using `source/scripts/rsl_rl/train.py`
+select the new asset through their task configuration. Cmd-vel and GoTo inherit
+the shared goalkeeper asset; goalkeeper Simple and the original Borinot task
+select the same versioned copy.
 
-## Inference leg properties and payload precedence
-
-The upper link uses mass **0.14853845 kg** and local CoM
-**(0.00001377, -0.078707, -0.01935853) m**. Its full tensor includes the nonzero
-YZ term **-0.00004671 kg m²**.
-
-The calf uses mass **0.115 kg** and local CoM **(0, -0.1149, -0.021) m**. Its
-link-axis tensor is diagonal: **(0.00017554, 0.00001972, 0.00017938) kg m²**.
-All six numbers for each full tensor, including off-diagonal terms, are kept in
-the config. They are converted into principal moments and axes for USD/PhysX.
-
-The reference 115 g calf **already includes its load**. When the inference leg
-switch is on, it replaces the entire old shaft/payload model. Therefore
-`env.ee_includes_puntual_mass` and `env.shaft_mass_kg` do not change the final calf
-properties in this mode. In particular, an old `ee_includes_puntual_mass=0.1`
-command does **not** add a second 100 g. A goalkeeper racket is still a separate
-100 g body; it is not removed or merged by these switches.
-
-For custom link properties, edit or override `leg_masses_kg`,
-`leg_com_positions_l`, and `leg_inertias_l_kg_m2` inside `env.inertial_properties`.
-The order is upper link, then calf. Positions and full own-CoM tensors use each
-link's local axes. Positive masses, finite symmetric tensors, and physical
-principal moments are validated before simulator construction.
-
-With both switches on, nominal robot mass is **2.940538 kg without a racket**, or
-**3.040538 kg with the default 100 g racket**. Hover calibration uses the new
-nominal mass. Small final digits depend on PhysX float precision.
-
-## Randomization and old checkpoints
-
-Startup randomization still runs after these overrides. Base mass/inertia scaling
-acts on the **combined base**, including motor points. Its CoM offsets are relative
-to the new combined CoM. The leg properties are not randomized by those base events.
-For an exact nominal comparison in a goalkeeper or cmd-vel task, add
-`env.include_events_randomization=False`; disabling the overrides does not itself
-disable existing randomization.
-
-To recover previous task behavior for an older checkpoint, add both overrides:
+For example, from the IsaacLab repository after normal environment activation:
 
 ```bash
-env.inertial_properties.include_motor_masses=False env.inertial_properties.use_inference_leg_inertias=False
+./isaaclab.sh -p source/scripts/rsl_rl/train.py --task=Borinot-goto --num_envs=10000 --headless env.control_mode=model_wrench_indi
 ```
 
-Then the cmd-vel task uses its previous 15 g shaft plus selected ideal tip load,
-goalkeeper tasks retain their previous shaft-and-racket model, and the original
-Borinot task retains its authored leg properties and old thrust calibration.
-Use the checkpoint's other original settings as well; equal tensor sizes do not
-make changed physical models equivalent.
+MuJoCo players reuse the same task configuration and inertial overrides, so they
+also select the new asset by default.
 
-For example, cmd-vel's old 100 g ideal tip model, without motor masses:
+## Older checkpoints
 
-```bash
-env.inertial_properties.include_motor_masses=False env.inertial_properties.use_inference_leg_inertias=False env.arm_holds_racket=False env.ee_includes_puntual_mass=0.1
-```
+Equal observation/action sizes do not make the old and new dynamics equivalent.
+To reproduce an older model, restore its **saved configuration and original USD
+path**, not only the two flags. Existing logs/checkpoints are not rewritten.
+
+For cmd-vel, GoTo and both goalkeeper tasks the asset field is
+`env.robot.spawn.usd_path`; for the original `Borinot-Direct-v0` it is
+`env.usd_path`. Point it to the unchanged `borinotFlat.usd`.
+
+- Before the October 28 inference-calibration update, use the old USD, set both
+  inertial switches False, and restore the original shaft/payload/racket flags.
+- For the October 28--November 8 115 g inference model, use the old USD and the
+  saved old inertial config: six 5 g points enabled and the old 115 g leg values.
+  Merely selecting the old USD while retaining the new 127 g leg override does
+  not restore that old model.
+
+No push, cluster sync, deployment or hardware change is implied by this local
+asset/configuration update.
 
 ## Verification
 
-`borinot_goalkeeper/tests/test_inertial_properties.py` checks first moments,
-independent kinetic energy, zero mass, invalid masses, and the affected axes.
-`borinot_goalkeeper/tests/inertial_properties_smoke.py` reads the original inference
-URDF independently and checks actual cloned PhysX masses, CoMs and full tensors.
-It covers all four tasks, both opt-outs, individual switches, randomization,
-racket/payload precedence, resets, unchanged body/DOF counts, hover calibration,
-and inclusion of both implementation/config files in source snapshots.
-
-Both helper files are archived with future training runs. Existing checkpoints,
-training logs, and online W&B records are not rewritten by this change.
+`borinot_goalkeeper/tests/test_calibrated_usd.py` checks the frozen URDF's full
+inertial tensors, default configuration, stale-flag rejection, and preservation
+of all non-inertial USD attributes and relationships.
+`inertial_properties_smoke.py --urdf <short-urdf> --output <receipt.json>` checks
+actual PhysX masses, CoMs, full tensors, controllers, clones, resets, optional
+racket and legacy-payload precedence, including randomized clones. The CPU
+point-merge tests continue to validate the explicit old-asset option.
