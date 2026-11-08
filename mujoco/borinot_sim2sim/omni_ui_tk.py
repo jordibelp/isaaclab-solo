@@ -1,6 +1,6 @@
 """The small ``omni.ui`` subset used by the Borinot play panels, drawn with Tkinter.
 
-Windows, stacks, labels, buttons, check boxes, float fields/sliders and their value models.
+Windows, stacks, collapsible/rebuildable frames, labels, buttons, check boxes and float models.
 Callbacks run in the main thread when the backend pumps Tk (every rendered frame), so the
 play scripts keep their original "UI queues intent, the loop applies it" behaviour.
 """
@@ -40,9 +40,11 @@ def _tk_root():
 def pump():
     if _root is not None:
         try:
-            for label in _pending_labels:
-                label.widget.configure(text=label._text)
+            labels = tuple(_pending_labels)
             _pending_labels.clear()
+            for label in labels:
+                if label.widget.winfo_exists():  # a Frame rebuild may have removed the old label
+                    label.widget.configure(text=label._text)
             _root.update()
         except tk.TclError:
             pass
@@ -194,6 +196,51 @@ class VStack(_Container):
 
 class HStack(_Container):
     horizontal = True
+
+
+class Frame(_Container):
+    """A container whose build callback can replace its contents, e.g. waypoint rows."""
+
+    def __init__(self, build_fn=None, **kwargs):
+        super().__init__(**kwargs)
+        self._build_fn = build_fn
+        if build_fn is not None:
+            self.rebuild()
+
+    def rebuild(self):
+        for child in self.inner.winfo_children():
+            child.destroy()
+        if self._build_fn is not None:
+            with self:
+                self._build_fn()
+
+
+class CollapsableFrame(_Container):
+    """Clickable header with a persistent body; hiding it does not discard edited values."""
+
+    def __init__(self, title="", collapsed=False, **kwargs):
+        super().__init__(**kwargs)
+        outer, self._title = self.inner, title
+        self._header = tk.Button(outer, anchor="w", command=self._toggle)
+        self._header.pack(side=tk.TOP, fill=tk.X)
+        self.inner = tk.Frame(outer)
+        self.collapsed = collapsed
+
+    @property
+    def collapsed(self):
+        return self._collapsed
+
+    @collapsed.setter
+    def collapsed(self, value):
+        self._collapsed = bool(value)
+        self._header.configure(text=f"{'>' if self._collapsed else 'v'} {self._title}")
+        if self._collapsed:
+            self.inner.pack_forget()
+        else:
+            self.inner.pack(side=tk.TOP, fill=tk.X)
+
+    def _toggle(self):
+        self.collapsed = not self.collapsed
 
 
 class ScrollingFrame(_Widget):

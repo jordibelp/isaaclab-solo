@@ -41,8 +41,13 @@ This is your original command with only the player path changed:
 
 You get the MuJoCo viewer and a separate native control window. The control window
 keeps the existing XYZ goal, world/relative frame, manual/automatic deadline, pause,
-reset and camera controls. Press Enter or leave an exact-value field to apply an edit.
+reset and camera controls. Press Enter or leave an exact-value field to update the
+draft, then click **Go to goal** to send all coordinates and the deadline together.
 Typed values can exceed the slider range. The slider does not round or clamp them.
+The collapsed **Command sequence (optional)** section also works in MuJoCo.
+Add waypoints from the draft, edit each row's flight time (`0` = Auto) and extra
+wait, then click **Start sequence**. Waits start after each flight deadline.
+Pause freezes waits. Stop keeps the active target and cancels later waypoints.
 
 Use `--deadline_s=2.0` for a fixed two-second goal budget. Without it, the original
 player chooses an automatic deadline from the current training schedule. It flies

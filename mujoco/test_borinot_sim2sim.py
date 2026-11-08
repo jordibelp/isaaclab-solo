@@ -292,6 +292,101 @@ def test_slider_does_not_rewrite_exact_field(value):
         ui.shutdown()
 
 
+@pytest.mark.skipif(not os.environ.get("DISPLAY"), reason="Tk controls need an X display")
+def test_collapsible_frame_preserves_inputs_and_rebuilds_rows():
+    from borinot_sim2sim import omni_ui_tk as ui
+
+    try:
+        window = ui.Window("Sequence widget test", width=400, height=300)
+        builds = []
+
+        def build_row():
+            builds.append(ui.Label(f"Row {len(builds) + 1}"))
+
+        with window.frame:
+            with ui.CollapsableFrame("Optional sequence", collapsed=True) as section:
+                field = ui.FloatField(ui.SimpleFloatModel(2.0))
+                rows = ui.Frame(build_fn=build_row)
+        ui.pump()
+        assert section.collapsed and not section.inner.winfo_ismapped()
+        section._header.invoke()
+        ui.pump()
+        assert not section.collapsed and section.inner.winfo_ismapped()
+        field.widget.delete(0, "end")
+        field.widget.insert(0, "2.75")
+        field.widget.event_generate("<FocusOut>")
+        section.collapsed = True
+        section.collapsed = False
+        ui.pump()
+        assert field.model.as_float == 2.75
+        old_label = builds[0]
+        old_label.text = "Queued update before rebuild"
+        rows.rebuild()  # callback is outside the original container context
+        assert not old_label.widget.winfo_exists()
+        builds[1].text = "Fresh row"
+        ui.pump()
+        assert builds[1].widget.cget("text") == "Fresh row"
+        assert len(rows.inner.winfo_children()) == 1 and not ui._parents
+    finally:
+        ui.shutdown()
+
+
+@pytest.mark.skipif(not os.environ.get("DISPLAY"), reason="Tk controls need an X display")
+def test_live_goto_panel_keeps_drafts_and_builds_editable_sequence_rows(goto_env):
+    from borinot_sim2sim import omni_ui_tk as ui
+    from isaaclab_tasks.direct.borinot_goto.playback import BorinotGoToPlayEnv
+    from isaaclab_tasks.direct.borinot_goto.playback_ui import GoalControls
+
+    def button(widget, text):
+        for child in widget.winfo_children():
+            if child.winfo_class() == "Button" and child.cget("text") == text:
+                return child
+            found = button(child, text)
+            if found is not None:
+                return found
+        return None
+
+    goto_env.close()  # the adapter owns one simulation context at a time
+    env = BorinotGoToPlayEnv(goto_env.cfg, goal=(0., 0., 1.5))
+    panel = None
+    try:
+        env.reset()
+        panel = GoalControls(env, (0., 0., 1.5), None, [(-6., 6.)] * 4, show_ui=True)
+        ui.pump()
+        target = env._goal_position_w.clone()
+        panel._models[0].set_value(3.)
+        ui.pump()
+        assert not panel.go_requested and torch.equal(target, env._goal_position_w)
+        panel.sequence_editor._header.invoke()
+        button(panel.window.body, "Add waypoint from draft").invoke()
+        panel._models[0].set_value(-3.)
+        button(panel.window.body, "Add waypoint from draft").invoke()
+        ui.pump()
+        assert len(panel._sequence_models) == 10
+        panel._sequence_models[4].set_value(2.)
+        panel.remove_waypoint(1)
+        assert len(panel._sequence_models) == 5 and panel.waypoints[0]["values"][4] == 2.
+        button(panel.window.body, "Add waypoint from draft").invoke()
+        button(panel.window.body, "Start sequence").invoke()
+        wrapper = SimpleNamespace(get_observations=env._get_observations)
+        observation, reset = panel.apply_requests(wrapper, env._get_observations(), 0.)
+        assert not reset and panel.sequence_phase == "flying"
+        assert env.play_goal.tolist() == [3., 0., 1.5]
+        assert torch.isfinite(observation["policy"]).all()
+        button(panel.window.body, "Stop sequence").invoke()
+        assert panel._sequence is None and env.play_goal.tolist() == [3., 0., 1.5]
+        button(panel.window.body, "Go to goal").invoke()
+        panel._models[0].set_value(4.)  # later edits do not change the queued Go
+        panel.apply_requests(wrapper, observation, 0.)
+        assert env.play_goal.tolist() == [-3., 0., 1.5]
+        panel.update(0.)
+        ui.pump()
+    finally:
+        if panel is not None:
+            panel.close()
+        env.close()
+
+
 @pytest.mark.parametrize("kind", ["cmd_vel", "goto", "goalkeeper", "goalkeeper_simple"])
 @pytest.mark.parametrize("armature", [None, {
     "flying_arm_2__j_bl_link1": 0.0007, "flying_arm_2__j_link1_link2": 0.0012,
