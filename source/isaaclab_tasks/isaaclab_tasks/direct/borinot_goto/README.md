@@ -111,7 +111,7 @@ Choose an existing or hybrid model-wrench control mode:
 | `thrust_and_torque_control` | 8 | 33 |
 | `thrust_and_PD_joint_pos_control` | 8 | 33 |
 | `PI_rotors_PD_joint_pos_control` | 6 | 40 |
-| `indi` | 9 | 42 |
+| `dsam_indi` | 9 | 42 |
 | `wrench` | 9 | 40 |
 | `model_wrench` / `model_wrench_indi` | 9 | 40 |
 | `model_wrench_yawless` / `model_wrench_yawless_indi` | 8 | 39 |

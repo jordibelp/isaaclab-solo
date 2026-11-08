@@ -60,7 +60,7 @@ can all appear in the residual. It cannot cancel an impact before observing it.
   observation for the policy is independent of this controller input.
 - As in the nominal model-wrench plant, rotor spin inertia is not identified or
   simulated (`G2=0`). Static thrust-lever-arm and aerodynamic-drag torque remain.
-  Changing `env.indi.rotor_spin_inertia_kg_m2` affects standalone `indi`, not these
+  Changing `env.indi.rotor_spin_inertia_kg_m2` affects standalone `dsam_indi`, not these
   modes. A calibrated nonzero spin model needs matching plant and allocation work;
   it is not silently claimed here.
 

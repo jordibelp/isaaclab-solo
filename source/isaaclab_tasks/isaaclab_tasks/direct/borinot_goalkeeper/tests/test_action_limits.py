@@ -83,15 +83,15 @@ def test_disabled_thrust_cap_keeps_lower_bound_and_nominal_torque_soft_limit():
     torch.testing.assert_close(result[:, 1], torch.ones(2))
 
 
-@pytest.mark.parametrize('mode', ['thrust_and_PD_joint_pos_control', 'PI_rotors_PD_joint_pos_control', 'indi'])
+@pytest.mark.parametrize('mode', ['thrust_and_PD_joint_pos_control', 'PI_rotors_PD_joint_pos_control', 'dsam_indi'])
 @pytest.mark.parametrize('sac', [False, True])
 def test_reference_modes_do_not_mistake_reference_units_for_torques(mode, sac):
     cfg = config()
     cfg.control_mode, cfg.sac_action_mapping = mode, sac
-    raw = torch.full((2, 9 if mode == 'indi' else 6 if mode.startswith('PI') else 8), 20.)
+    raw = torch.full((2, 9 if mode == 'dsam_indi' else 6 if mode.startswith('PI') else 8), 20.)
     result = raw_action_limit_costs(raw, cfg, 5.)
     assert not result[:, 1].any()
-    if mode == 'indi':
+    if mode == 'dsam_indi':
         assert not result[:, :2].any()
         torch.testing.assert_close(result[:, 2], torch.full((2,), 9*19.**2 if sac else 0.))
     elif not sac:
@@ -100,7 +100,7 @@ def test_reference_modes_do_not_mistake_reference_units_for_torques(mode, sac):
 
 
 @pytest.mark.parametrize('mode,sac,size', [('thrust_and_torque_control', False, 8),
-    ('thrust_and_PD_joint_pos_control', False, 8), ('PI_rotors_PD_joint_pos_control', False, 6), ('indi', True, 9)])
+    ('thrust_and_PD_joint_pos_control', False, 8), ('PI_rotors_PD_joint_pos_control', False, 6), ('dsam_indi', True, 9)])
 def test_held_arm_ignores_unused_policy_joint_outputs(mode, sac, size):
     cfg = config()
     cfg.hold_arm, cfg.control_mode, cfg.sac_action_mapping = True, mode, sac

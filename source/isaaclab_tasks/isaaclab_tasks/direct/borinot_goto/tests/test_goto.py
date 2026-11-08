@@ -456,13 +456,13 @@ def test_dense_telescoping_means_no_intrinsic_rush_for_same_terminal_state():
     assert (early[:-1]-early[1:]).sum() == (late[:-1]-late[1:]).sum() == 2
 
 
-@pytest.mark.parametrize("mode", ["indi", "wrench", "cbrt", "cbrt_indi", "thrust_and_PD_joint_pos_control"])
+@pytest.mark.parametrize("mode", ["dsam_indi", "wrench", "cbrt", "cbrt_indi", "thrust_and_PD_joint_pos_control"])
 def test_existing_sincos_action_expansion_also_expands_goal_observations(mode):
     flags = {"predict_thigh_joint_pos_as_sincos":True, "predict_calf_joint_pos_as_sincos":True}
-    if mode in ("indi", "wrench"):
+    if mode in ("dsam_indi", "wrench"):
         flags["predict_yaw_as_sincos"] = True
     base, expanded = config(mode), config(mode, **flags)
-    added = 3 if mode in ("indi", "wrench") else 2
+    added = 3 if mode in ("dsam_indi", "wrench") else 2
     assert expanded.action_space == base.action_space + added
     assert expanded.observation_space == base.observation_space + added
     env = fake_env(expanded)

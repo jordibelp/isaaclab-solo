@@ -130,7 +130,7 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         self._desired_actuation = (
             DesiredActuationMetrics(cfg, self._hover_per_rotor, self.num_envs, self.device)
             if cfg.control_mode == "thrust_and_torque_control" and not cfg.hold_arm else None)
-        if cfg.control_mode == "indi":
+        if cfg.control_mode == "dsam_indi":
             self._init_indi()
         elif cfg.control_mode in ("wrench", "model_wrench", "model_wrench_indi", "model_wrench_yawless", "model_wrench_yawless_indi"):
             self._init_wrench()
@@ -365,7 +365,7 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         self._shot_steps += self._ball_active
         self._outcome.zero_()
         self._previous_actuator_commands.copy_(self._actuator_commands)
-        if self.cfg.control_mode in ("indi", "wrench", "model_wrench", "model_wrench_indi", "model_wrench_yawless", "model_wrench_yawless_indi", "cbrt", "cbrt_indi"):
+        if self.cfg.control_mode in ("dsam_indi", "wrench", "model_wrench", "model_wrench_indi", "model_wrench_yawless", "model_wrench_yawless_indi", "cbrt", "cbrt_indi"):
             if self.cfg.sac_action_mapping:
                 actions = clamp_scalar_actions(actions, self.cfg, 1.0)
         elif not self.cfg.sac_action_mapping and not self.cfg.remove_thrust_clipping:
@@ -395,7 +395,7 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         self._physics_samples += 1
         # The command reaching the controllers now; self.actions stays the newest policy output.
         actions = self._actuator_delay(self.actions)
-        if self.cfg.control_mode in ("indi", "wrench", "model_wrench", "model_wrench_indi", "model_wrench_yawless", "model_wrench_yawless_indi", "cbrt", "cbrt_indi"):
+        if self.cfg.control_mode in ("dsam_indi", "wrench", "model_wrench", "model_wrench_indi", "model_wrench_yawless", "model_wrench_yawless_indi", "cbrt", "cbrt_indi"):
             if self.cfg.control_mode in ("wrench", "model_wrench", "model_wrench_indi", "model_wrench_yawless", "model_wrench_yawless_indi"):
                 commands, joint_effort = self._step_wrench(actions)
                 controller = self._wrench
@@ -438,7 +438,7 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         cap = self._hover_per_rotor * self.cfg.thrust_to_weight
         commands.clamp_(min=0.0, max=None if self.cfg.remove_thrust_clipping else cap)
         self._actuator_commands[:, :6] = commands / cap
-        if self.cfg.control_mode in ("indi", "wrench", "model_wrench", "model_wrench_indi", "model_wrench_yawless", "model_wrench_yawless_indi", "cbrt", "cbrt_indi"):
+        if self.cfg.control_mode in ("dsam_indi", "wrench", "model_wrench", "model_wrench_indi", "model_wrench_yawless", "model_wrench_yawless_indi", "cbrt", "cbrt_indi"):
             # These controllers have already advanced their own speed-lag state once.
             self._rotor_thrust.copy_(self.cfg.kf * controller.rotor_speed.square())
         elif self.cfg.motor_time_constant_s == 0:
@@ -454,7 +454,7 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
             # Preserve the legacy PI mode's thrust-lag dynamics.
             self._rotor_thrust.add_(self._motor_alpha * (commands - self._rotor_thrust))
         wrench = self._rotor_thrust @ self._allocation.T
-        if self.cfg.control_mode == "indi":
+        if self.cfg.control_mode == "dsam_indi":
             wrench[:, 1:] += self._indi.transient_torque
         # Forces act at the fixed rotor positions, about each environment's actual CoM.
         wrench[:, 1] -= self._base_com_offset[:, 1] * wrench[:, 0]
@@ -464,7 +464,7 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         self.robot.permanent_wrench_composer.set_forces_and_torques(
             forces=force, torques=wrench[:, None, 1:4], body_ids=[self.base_id], is_global=False,
         )
-        if self.cfg.control_mode in ("indi", "wrench", "model_wrench", "model_wrench_indi", "model_wrench_yawless", "model_wrench_yawless_indi", "cbrt", "cbrt_indi"):
+        if self.cfg.control_mode in ("dsam_indi", "wrench", "model_wrench", "model_wrench_indi", "model_wrench_yawless", "model_wrench_yawless_indi", "cbrt", "cbrt_indi"):
             # Implicit gains are zero: software PID (INDI) / PD (wrench/CBRT) runs at physics rate.
             self.robot.set_joint_effort_target(joint_effort, joint_ids=self.joint_ids)
         elif self.cfg.control_mode == "thrust_and_torque_control" and not self.cfg.hold_arm:
@@ -489,7 +489,7 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         # PD is implicit in PhysX. computed_torque is its unsaturated PD demand
         # estimate from this completed substep, including the final substep.
         # Direct torques and explicit INDI PID are already scored elsewhere.
-        use_pd = self.cfg.control_mode not in ("indi", "wrench", "model_wrench", "model_wrench_indi", "model_wrench_yawless", "model_wrench_yawless_indi", "cbrt", "cbrt_indi") and (
+        use_pd = self.cfg.control_mode not in ("dsam_indi", "wrench", "model_wrench", "model_wrench_indi", "model_wrench_yawless", "model_wrench_yawless_indi", "cbrt", "cbrt_indi") and (
             self.cfg.control_mode != "thrust_and_torque_control" or self.cfg.hold_arm)
         if use_pd and self.cfg.rwd_scale_torque_limits:
             limit = self.cfg.effort_lim_sim
@@ -714,7 +714,7 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         if self.cfg.control_mode == "PI_rotors_PD_joint_pos_control":
             # Direct modes already command each rotor in the action; PI hides thrusts and its integral state.
             tail += [self._rotor_thrust / self._hover_per_rotor, self._rate_integral]
-        elif self.cfg.control_mode == "indi":
+        elif self.cfg.control_mode == "dsam_indi":
             tail += [self._indi.observation()]
         elif self.cfg.control_mode in ("wrench", "model_wrench", "model_wrench_indi", "model_wrench_yawless", "model_wrench_yawless_indi"):
             tail += [self._wrench.observation()]
@@ -877,7 +877,7 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
             value[env_ids] = 0
         self._actuator_delay.reset(env_ids)  # after _update_curriculum logged the finished episodes' delays
         self._rotor_thrust[env_ids] = self._hover_per_rotor
-        if self.cfg.control_mode == "indi":
+        if self.cfg.control_mode == "dsam_indi":
             self._indi.reset(env_ids)
         elif self.cfg.control_mode in ("wrench", "model_wrench", "model_wrench_indi", "model_wrench_yawless", "model_wrench_yawless_indi"):
             self._wrench.reset(env_ids)

@@ -84,7 +84,7 @@ def expected(actions, cfg, hover, legacy):
                     torque += ((request-command)/torque_scale)**2
             elif not cfg.sac_action_mapping and not cfg.remove_thrust_clipping and not cfg.hold_arm:
                 refs = sum(max(abs(value)-cfg.action_clamp, 0.)**2 for value in row[-2:])
-        elif cfg.control_mode == 'indi':
+        elif cfg.control_mode == 'dsam_indi':
             reference = row[:-2] if cfg.hold_arm else row
             refs = sum(max(abs(value)-1., 0.)**2 for value in reference) if cfg.sac_action_mapping else 0.
         elif not cfg.remove_thrust_clipping:
@@ -109,7 +109,7 @@ def measured_step(env, cfg, hover, legacy):
         env.robot.set_joint_effort_target = record_effort
     original_apply = env._apply_action
     cap = hover*cfg.thrust_to_weight if not legacy else None
-    if not legacy and cfg.control_mode == 'indi':
+    if not legacy and cfg.control_mode == 'dsam_indi':
         ctrl = env._indi
         original_indi = ctrl.step
 
@@ -251,7 +251,7 @@ try:
     weights = (-1., -.25, -.5)
     for i, name in enumerate(('thrust_limits', 'torque_limits', 'action_limits')):
         check(f'{name}_delivered_on_actual_transition', torch.allclose(terms[prefix+name], weights[i]*wanted[:, i], atol=2e-4, rtol=2e-6))
-    if not legacy and cfg.control_mode == 'indi':
+    if not legacy and cfg.control_mode == 'dsam_indi':
         check('indi_physical_thrust_excess_is_penalized', wanted[:, 0].max() > 0)
         check('indi_physical_joint_excess_is_penalized', wanted[:, 1].max() > 0)
         if cfg.sac_action_mapping:

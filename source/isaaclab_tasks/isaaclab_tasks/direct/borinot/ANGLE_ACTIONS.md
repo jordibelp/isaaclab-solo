@@ -23,7 +23,7 @@ The original goalkeeper, simple goalkeeper, and command-velocity task share this
 | `thrust_and_torque_control` | No | No | 8 | 8 |
 | `thrust_and_PD_joint_pos_control` | No | Yes | 8 | 10 |
 | `PI_rotors_PD_joint_pos_control` | No: it predicts a yaw **rate** | Yes | 6 | 8 |
-| `indi` | Yes | Yes | 9 | 12 |
+| `dsam_indi` | Yes | Yes | 9 | 12 |
 | `wrench` | Yes | Yes | 9 | 12 |
 | `cbrt` / `cbrt_indi` | No: they predict a yaw **rate** | Yes | 6 | 8 |
 

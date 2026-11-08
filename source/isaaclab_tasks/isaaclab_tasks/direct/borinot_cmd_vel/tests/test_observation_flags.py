@@ -19,7 +19,7 @@ from test_symmetry import symmetry
 
 FOLDER = Path(__file__).resolve().parents[1]
 MODES = ("thrust_and_torque_control", "thrust_and_PD_joint_pos_control",
-         "PI_rotors_PD_joint_pos_control", "indi", "wrench", "cbrt", "cbrt_indi")
+         "PI_rotors_PD_joint_pos_control", "dsam_indi", "wrench", "cbrt", "cbrt_indi")
 
 
 def config(mode=MODES[0], **overrides):
@@ -67,7 +67,7 @@ def observation_env(cfg):
         joint_pos=torch.tensor([[.1, -.2], [.3, -.4]], dtype=q.dtype),
         joint_vel=torch.tensor([[.5, -.6], [.7, -.8]], dtype=q.dtype),
         body_lin_acc_w=torch.arange(6, dtype=q.dtype).reshape(2, 1, 3))
-    controller_size = 8 if cfg.control_mode == "indi" else 6
+    controller_size = 8 if cfg.control_mode == "dsam_indi" else 6
     controller = SimpleNamespace(observation=lambda: torch.full((2, controller_size), .7, dtype=q.dtype))
     acceleration_history = torch.zeros(2, cfg.obs_include_base_lin_acc_steps, 3, dtype=q.dtype)
     acceleration_history[:, -1] = inverse(q, data.body_lin_acc_w[:, 0]) * torch.tensor([[0.], [1.]])
@@ -94,7 +94,7 @@ def test_feature_values_dimensions_and_symmetry(mode, height, gravity, accelerat
     result = method("_get_observations", quat_apply_inverse=inverse, matrix_from_quat=matrix)(env)
     obs = result["policy"]
     transform = symmetry.BorinotSymmetry(cfg)
-    extra = {MODES[2]: 9, "indi": 8, "wrench": 6, "cbrt": 6, "cbrt_indi": 6}.get(mode, 0)
+    extra = {MODES[2]: 9, "dsam_indi": 8, "wrench": 6, "cbrt": 6, "cbrt_indi": 6}.get(mode, 0)
     expected_size = 23 + cfg.action_space + extra + int(height) + 3*int(gravity) + 3*steps*int(acceleration)
     assert obs.shape == (2, expected_size)
     assert cfg.observation_space == cfg.state_space == transform.observation_size == expected_size

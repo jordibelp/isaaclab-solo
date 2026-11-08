@@ -78,7 +78,7 @@ evaluator restores weights and normalizers, **not** the saved environment YAML.
 ## A. Playback with a fixed 20 ms command delay
 
 ```bash
-./isaaclab.sh -p source/scripts/rsl_rl/play_borinot_goalkeeper.py --checkpoint /absolute/path/indi_model.pt env.control_mode=indi env.actuator_delay=0.02
+./isaaclab.sh -p source/scripts/rsl_rl/play_borinot_goalkeeper.py --checkpoint /absolute/path/indi_model.pt env.control_mode=dsam_indi env.actuator_delay=0.02
 ```
 
 For direct control, use its own checkpoint and
@@ -89,7 +89,7 @@ For direct control, use its own checkpoint and
 ## B. Evaluate a checkpoint over N complete robot episodes
 
 ```bash
-./isaaclab.sh -p source/scripts/rsl_rl/eval_borinot_goalkeeper.py --checkpoint /absolute/path/indi_model.pt --num_episodes 512 --num_envs 256 --seed 7 --actuator_delays 0.0 0.01 0.02 0.04 --label indi-no-delay-training --out_dir /absolute/path/borinot-delay-results env.control_mode=indi env.shot_level=3
+./isaaclab.sh -p source/scripts/rsl_rl/eval_borinot_goalkeeper.py --checkpoint /absolute/path/indi_model.pt --num_episodes 512 --num_envs 256 --seed 7 --actuator_delays 0.0 0.01 0.02 0.04 --label indi-no-delay-training --out_dir /absolute/path/borinot-delay-results env.control_mode=dsam_indi env.shot_level=3
 ```
 
 The evaluator is headless by default. It does not train or upload to W&B.
@@ -163,7 +163,7 @@ env.actuator_delay=0.0 'env.actuator_delay_range=[0.0,0.04]'
 For example, from the activated local environment:
 
 ```bash
-./isaaclab.sh -p source/scripts/rsl_rl/train.py --task Borinot-Goalkeeper-Direct-v0 --headless env.control_mode=indi env.actuator_delay=0.0 'env.actuator_delay_range=[0.0,0.04]'
+./isaaclab.sh -p source/scripts/rsl_rl/train.py --task Borinot-Goalkeeper-Direct-v0 --headless env.control_mode=dsam_indi env.actuator_delay=0.0 'env.actuator_delay_range=[0.0,0.04]'
 ```
 
 That draws 0, 5, ..., 40 ms at 200 Hz. Use the same range for the direct-control

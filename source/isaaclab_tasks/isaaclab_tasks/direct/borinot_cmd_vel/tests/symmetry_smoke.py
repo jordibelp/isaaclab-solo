@@ -9,7 +9,7 @@ from isaaclab.app import AppLauncher
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--task", default="Borinot-cmd-vel")
-parser.add_argument("--mode", default="indi")
+parser.add_argument("--mode", default="dsam_indi")
 parser.add_argument("--sac", action="store_true")
 parser.add_argument("--pairs", action="store_true")
 parser.add_argument("--output", type=Path, required=True)

@@ -232,7 +232,7 @@ def test_indi_receives_delayed_references(steps):
     run_shifted(delayed_pair(indi_env, steps), policy_actions, steps)
 
 
-@pytest.mark.parametrize("make", [indi_env, lambda: action_env(MODES[2])], ids=["indi", "pi"])
+@pytest.mark.parametrize("make", [indi_env, lambda: action_env(MODES[2])], ids=["dsam_indi", "pi"])
 def test_inner_loops_react_to_measurements_without_the_command_delay(make):
     (delayed, delayed_calls), (reference, reference_calls) = delayed_pair(make, 6)
     apply = method("borinot_goalkeeper_env.py", "_apply_action")

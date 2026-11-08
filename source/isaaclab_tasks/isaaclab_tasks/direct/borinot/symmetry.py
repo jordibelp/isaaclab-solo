@@ -54,9 +54,9 @@ class BorinotSymmetry:
         self.home_yaw = math.atan2(2*(w*z+x*y), 1-2*(y*y+z*z))
         self.action_slices = {}
         self._action_layout()
-        if (self.mode in ("indi", "wrench", "model_wrench", "model_wrench_indi") and cfg.sac_action_mapping
+        if (self.mode in ("dsam_indi", "wrench", "model_wrench", "model_wrench_indi") and cfg.sac_action_mapping
                 and not cfg.predict_yaw_as_sincos):
-            controller = cfg.indi if self.mode == "indi" else cfg.wrench
+            controller = cfg.indi if self.mode == "dsam_indi" else cfg.wrench
             turns = controller.heading_range_degs / 180.
             if turns < 1 or not math.isclose(turns, round(turns), abs_tol=1e-8):
                 raise ValueError("World-heading augmentation needs a whole number of full-circle SAC heading ranges "
@@ -83,9 +83,9 @@ class BorinotSymmetry:
         elif self.mode in ("model_wrench_yawless", "model_wrench_yawless_indi"):
             add("acceleration", 3)
             add("rates", 3)
-        elif self.mode in ("indi", "wrench", "model_wrench", "model_wrench_indi"):
+        elif self.mode in ("dsam_indi", "wrench", "model_wrench", "model_wrench_indi"):
             add("acceleration", 3)
-            if self.mode == "indi":
+            if self.mode == "dsam_indi":
                 add("rates", 3)
             add("yaw", 2 if self.cfg.predict_yaw_as_sincos else 1)
             if self.mode in ("wrench", "model_wrench", "model_wrench_indi"):
@@ -133,9 +133,9 @@ class BorinotSymmetry:
             if self.mode == "PI_rotors_PD_joint_pos_control":
                 add("rotors", 6)
                 add("rate_integral", 3)
-            elif self.mode in ("indi", "wrench", "model_wrench", "model_wrench_indi", "model_wrench_yawless", "model_wrench_yawless_indi", "cbrt", "cbrt_indi"):
+            elif self.mode in ("dsam_indi", "wrench", "model_wrench", "model_wrench_indi", "model_wrench_yawless", "model_wrench_yawless_indi", "cbrt", "cbrt_indi"):
                 add("rotors", 6)
-                if self.mode == "indi":
+                if self.mode == "dsam_indi":
                     add("joint_integral", 2)
         self.observation_size = offset
 
@@ -160,7 +160,7 @@ class BorinotSymmetry:
                 else:
                     scale, centre, half_range = 1., 0., math.pi
                     if self.cfg.sac_action_mapping:
-                        controller = self.cfg.indi if self.mode == "indi" else self.cfg.wrench
+                        controller = self.cfg.indi if self.mode == "dsam_indi" else self.cfg.wrench
                         scale = half_range = math.radians(controller.heading_range_degs)
                     elif self.mode in ("wrench", "model_wrench", "model_wrench_indi"):
                         centre = self.home_yaw

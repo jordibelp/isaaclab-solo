@@ -49,7 +49,7 @@ their original order. Run it after the file is available on the cluster:
 ./reuse_isaaclab_gpu_job.sh --jobid 4659 -- bash -e -o pipefail scripts/cluster_chains/borinot_min_time_agility.sh
 ```
 
-The order is `thrust_and_torque_control`, `wrench`, `indi`, `model_wrench`,
+The order is `thrust_and_torque_control`, `wrench`, `dsam_indi`, `model_wrench`,
 `model_wrench_indi`, `model_wrench_yawless_indi`, `cbrt`, `cbrt_indi`, then
 `model_wrench_yawless`. All supplied arguments are preserved, including the two
 `env.use_terminal_success_bonus` settings. Their last value is `True`.

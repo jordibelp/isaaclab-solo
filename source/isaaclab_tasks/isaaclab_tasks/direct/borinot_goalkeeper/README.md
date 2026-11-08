@@ -12,7 +12,7 @@ meshes and colliders are preserved; the original USD is unchanged. See
 [shared inertial properties](../borinot/INERTIAL_PROPERTIES.md) for masses,
 payload precedence and older-checkpoint settings.
 
-**New controller:** `env.control_mode=indi` selects a nine-action acceleration/rate/heading/joint-target policy with physics-rate INDI and joint PID. It works with PPO and both SAC critics. See the shared [step-by-step INDI guide](INDI_CONTROL.md) for equations, design choices, training/playback commands and limits.
+**New controller:** `env.control_mode=dsam_indi` selects a nine-action acceleration/rate/heading/joint-target policy with physics-rate INDI and joint PID. It works with PPO and both SAC critics. See the shared [step-by-step INDI guide](INDI_CONTROL.md) for equations, design choices, training/playback commands and limits.
 
 This is a separate task. It does not change the existing Borinot locomotion task or the source USD.
 We start with privileged simulator information. Both the actor and critic receive true robot state, ball position and velocity, and the sampled ball mass and restitution. There is no camera or state estimator yet. By default the actor does not see the predicted plane crossing or the shot phase; the critic always does (see the observation contract below).

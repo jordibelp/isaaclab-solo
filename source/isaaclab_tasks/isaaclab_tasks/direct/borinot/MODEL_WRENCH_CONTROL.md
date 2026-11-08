@@ -72,7 +72,7 @@ effort limit and motor lag remain `env.kp`, `env.kd`, `env.effort_lim_sim`, and
 
 `env.model_wrench_use_prev_alpha=False` is the default and preserves the original
 zero-virtual-alpha direction reference. It is read only by `model_wrench` and
-`model_wrench_yawless` and their `_indi` variants; it has no effect on measured `wrench`, standalone `indi`, CBRT, or
+`model_wrench_yawless` and their `_indi` variants; it has no effect on measured `wrench`, standalone `dsam_indi`, CBRT, or
 direct control modes.
 
 The scalar simulator armature is included only as two diagonal generalized

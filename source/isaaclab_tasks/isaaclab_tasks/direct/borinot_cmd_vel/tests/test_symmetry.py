@@ -29,11 +29,11 @@ spec = importlib.util.spec_from_file_location("borinot_tracking_test", FOLDER / 
 tracking = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(tracking)
 MODES = ("thrust_and_torque_control", "thrust_and_PD_joint_pos_control", "PI_rotors_PD_joint_pos_control",
-         "indi", "wrench", "model_wrench", "cbrt", "cbrt_indi")
+         "dsam_indi", "wrench", "model_wrench", "cbrt", "cbrt_indi")
 BITS = tuple(itertools.product((False, True), repeat=3))
 
 
-def cfg(mode="indi", bits=(False, False, False), sac=False, acceleration=False):
+def cfg(mode="dsam_indi", bits=(False, False, False), sac=False, acceleration=False):
     result = config()
     result.control_mode, result.sac_action_mapping = mode, sac
     result.predict_yaw_as_sincos, result.predict_thigh_joint_pos_as_sincos, result.predict_calf_joint_pos_as_sincos = bits
@@ -100,7 +100,7 @@ def test_world_rotation_changes_only_world_frame_and_heading_references(home_yaw
         assert torch.equal(result[:, sl], obs[:, sl])
 
 
-@pytest.mark.parametrize("mode", ["indi", "wrench", "model_wrench"])
+@pytest.mark.parametrize("mode", ["dsam_indi", "wrench", "model_wrench"])
 @pytest.mark.parametrize("sac", [False, True])
 @pytest.mark.parametrize("pair", [False, True])
 def test_world_acceleration_and_decoded_yaw_rotate_together(mode, sac, pair):
@@ -124,7 +124,7 @@ def test_world_acceleration_and_decoded_yaw_rotate_together(mode, sac, pair):
             result = a[:, slot.start]
             if sac:
                 result = result*math.pi
-        if mode=="indi" or sac:
+        if mode=="dsam_indi" or sac:
             result = result+transform.home_yaw
         return result
     delta = angle(output)-angle(actions)
@@ -137,7 +137,7 @@ def test_world_acceleration_and_decoded_yaw_rotate_together(mode, sac, pair):
 
 @pytest.mark.parametrize("pair", [False, True])
 def test_sac_heading_bounds_and_limited_heading_rejection(pair):
-    task = cfg("indi", (pair, False, False), True)
+    task = cfg("dsam_indi", (pair, False, False), True)
     transform = symmetry.BorinotSymmetry(task)
     actions = torch.rand(1000, task.action_space)*2-1
     actions[:2, transform.action_slices["yaw"]] = torch.tensor([[-1.], [1.]])
@@ -173,7 +173,7 @@ def test_real_tracking_reward_matches_world_rotation():
 
 
 def test_tensordict_alignment_action_only_observation_only_and_rotor_history():
-    task = cfg("indi", (True, True, True), acceleration=True)
+    task = cfg("dsam_indi", (True, True, True), acceleration=True)
     transform = symmetry.BorinotSymmetry(task)
     env = SimpleNamespace(cfg=task)
     obs, _ = observations(transform)

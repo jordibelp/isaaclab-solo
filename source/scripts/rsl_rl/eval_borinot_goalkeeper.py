@@ -8,7 +8,7 @@ episodes, so short failed episodes are not over-represented. --actuator_delays s
 policy-command delays in one launch; every delay restarts from the same seed. Results:
 <out_dir>/<label>_<time>.json and one <out_dir>/summary.csv row per delay.
 
-./isaaclab.sh -p source/scripts/rsl_rl/eval_borinot_goalkeeper.py --checkpoint <model.pt> --num_episodes 512 --seed 0 --actuator_delays 0 0.01 0.02 0.04 env.control_mode=indi
+./isaaclab.sh -p source/scripts/rsl_rl/eval_borinot_goalkeeper.py --checkpoint <model.pt> --num_episodes 512 --seed 0 --actuator_delays 0 0.01 0.02 0.04 env.control_mode=dsam_indi
 """
 
 import argparse

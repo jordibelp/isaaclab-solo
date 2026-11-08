@@ -12,10 +12,10 @@ def angle_action_slots(cfg):
     """Canonical scalar indices replaced by pairs, in policy-output order."""
     mode = cfg.control_mode
     slots = []
-    if mode in ("indi", "wrench", "model_wrench", "model_wrench_indi") and getattr(cfg, "predict_yaw_as_sincos", False):
-        slots.append(6 if mode == "indi" else 3)
+    if mode in ("dsam_indi", "wrench", "model_wrench", "model_wrench_indi") and getattr(cfg, "predict_yaw_as_sincos", False):
+        slots.append(6 if mode == "dsam_indi" else 3)
     if mode != "thrust_and_torque_control":
-        start = 7 if mode in ("indi", "wrench", "model_wrench", "model_wrench_indi") else (
+        start = 7 if mode in ("dsam_indi", "wrench", "model_wrench", "model_wrench_indi") else (
             6 if mode in ("thrust_and_PD_joint_pos_control", "model_wrench_yawless", "model_wrench_yawless_indi") else 4)
         for index, joint in enumerate(("thigh", "calf")):
             if getattr(cfg, f"predict_{joint}_joint_pos_as_sincos", False):
@@ -24,7 +24,7 @@ def angle_action_slots(cfg):
 
 
 def angle_action_size(cfg):
-    base = 9 if cfg.control_mode in ("indi", "wrench", "model_wrench", "model_wrench_indi") else (
+    base = 9 if cfg.control_mode in ("dsam_indi", "wrench", "model_wrench", "model_wrench_indi") else (
         8 if cfg.control_mode.startswith("thrust_and_") or cfg.control_mode in ("model_wrench_yawless", "model_wrench_yawless_indi") else 6)
     return base + len(angle_action_slots(cfg))
 

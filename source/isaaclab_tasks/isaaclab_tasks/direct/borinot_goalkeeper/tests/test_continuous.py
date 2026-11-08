@@ -139,7 +139,7 @@ def test_waiting_observations_hide_parked_ball_and_expose_schedule(env):
     assert torch.isfinite(obs['policy']).all() and torch.isfinite(obs['critic']).all()
 
 
-@pytest.mark.parametrize('mode', (*control.MODES, 'indi'))
+@pytest.mark.parametrize('mode', (*control.MODES, 'dsam_indi'))
 def test_rotor_omega_is_default_off_and_updates_only_critic_size(mode):
     from test_indi import indi
 
@@ -156,10 +156,10 @@ def test_rotor_omega_is_default_off_and_updates_only_critic_size(mode):
             original[0], original[1], original[2] + 6 * enabled)
 
 
-@pytest.mark.parametrize('mode', (*control.MODES, 'indi'))
+@pytest.mark.parametrize('mode', (*control.MODES, 'dsam_indi'))
 def test_optional_rotor_omega_appends_current_speeds_without_changing_actor(env, mode):
     env.cfg.control_mode = mode
-    env.actions = torch.full((env.num_envs, 9 if mode == 'indi' else 6 if mode == control.MODES[2] else 8), .25)
+    env.actions = torch.full((env.num_envs, 9 if mode == 'dsam_indi' else 6 if mode == control.MODES[2] else 8), .25)
     env._indi = SimpleNamespace(observation=lambda: torch.zeros(env.num_envs, 8))
     # Deliberately unrelated commands and realized rotor speeds; preserve motor order.
     omega = torch.tensor([0., 50., 400., 800., 1200., 1600.]).expand(env.num_envs, -1)

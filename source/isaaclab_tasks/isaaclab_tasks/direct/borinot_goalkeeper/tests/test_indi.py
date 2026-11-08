@@ -22,7 +22,7 @@ SPEC.loader.exec_module(indi)
 
 def fixture(dtype=torch.float64, n=4, hz=300, ip=0.0):
     cfg = config()
-    cfg.control_mode, cfg.physics_hz, cfg.policy_hz = "indi", hz, hz/2
+    cfg.control_mode, cfg.physics_hz, cfg.policy_hz = "dsam_indi", hz, hz/2
     cfg.indi = indi.IndiControllerCfg(rotor_spin_inertia_kg_m2=ip)
     method("borinot_goalkeeper_env_cfg.py", "configure_control")(cfg)
     pos = torch.tensor(cfg.rotor_pos_b, dtype=dtype)
@@ -40,7 +40,7 @@ def home_quat(controller):
 @pytest.mark.parametrize("hz", [200, 300, 400])
 def test_config_resolves_new_mode_without_changing_default_timing(sac, hz):
     cfg = config()
-    cfg.control_mode, cfg.indi, cfg.sac_action_mapping = "indi", indi.IndiControllerCfg(), sac
+    cfg.control_mode, cfg.indi, cfg.sac_action_mapping = "dsam_indi", indi.IndiControllerCfg(), sac
     cfg.physics_hz, cfg.policy_hz = hz, hz/2
     method("borinot_goalkeeper_env_cfg.py", "configure_control")(cfg)
     assert (cfg.action_space, cfg.observation_space, cfg.state_space) == (9, 53, 65)

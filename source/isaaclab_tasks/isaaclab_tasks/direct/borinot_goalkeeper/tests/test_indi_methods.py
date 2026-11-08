@@ -115,7 +115,7 @@ def test_controller_step_routes_selected_method(selected):
 def test_invalid_method_is_rejected_by_both_config_resolvers(filename):
     cfg = config()
     assert cfg.indi_tilt_method == "geom"
-    cfg.control_mode, cfg.indi = "indi", indi.IndiControllerCfg()
+    cfg.control_mode, cfg.indi = "dsam_indi", indi.IndiControllerCfg()
     cfg.indi_tilt_method = "typo"
     with pytest.raises(ValueError, match="indi_tilt_method"):
         method(filename, "configure_control")(cfg)

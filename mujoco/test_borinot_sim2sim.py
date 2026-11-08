@@ -245,7 +245,7 @@ def test_invalid_substeps(substeps):
 @pytest.mark.parametrize("kind", ["cmd_vel", "goto", "goalkeeper", "goalkeeper_simple"])
 @pytest.mark.parametrize("mode", [
     "thrust_and_torque_control", "thrust_and_PD_joint_pos_control", "PI_rotors_PD_joint_pos_control",
-    "indi", "wrench", "model_wrench", "model_wrench_indi", "model_wrench_yawless",
+    "dsam_indi", "wrench", "model_wrench", "model_wrench_indi", "model_wrench_yawless",
     "model_wrench_yawless_indi", "cbrt", "cbrt_indi",
 ])
 def test_task_controller_rollout(kind, mode):

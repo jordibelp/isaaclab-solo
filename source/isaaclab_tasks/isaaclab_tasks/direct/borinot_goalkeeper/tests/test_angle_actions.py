@@ -14,7 +14,7 @@ from test_cbrt import fixture as cbrt_fixture
 from test_sac import algorithm_class, sac_env
 
 MODES = ("thrust_and_torque_control", "thrust_and_PD_joint_pos_control",
-         "PI_rotors_PD_joint_pos_control", "indi", "wrench", "cbrt", "cbrt_indi")
+         "PI_rotors_PD_joint_pos_control", "dsam_indi", "wrench", "cbrt", "cbrt_indi")
 BITS = tuple(itertools.product((False, True), repeat=3))
 
 
@@ -27,7 +27,7 @@ def pair_slots(mode, bits):
     if mode == MODES[0]:
         return []
     yaw_slot, joint = {MODES[1]: (None, 6), MODES[2]: (None, 4),
-                      "indi": (6, 7), "wrench": (3, 7), "cbrt": (None, 4), "cbrt_indi": (None, 4)}[mode]
+                      "dsam_indi": (6, 7), "wrench": (3, 7), "cbrt": (None, 4), "cbrt_indi": (None, 4)}[mode]
     return ([yaw_slot] if yaw and yaw_slot is not None else []) + ([joint] if thigh else []) + ([joint+1] if calf else [])
 
 
@@ -105,32 +105,32 @@ def test_actual_implicit_pd_targets_mix_scalar_and_pair_units(mode, bits, sac):
     assert not calls["effort"].any() and not calls["velocity"].any()
 
 
-@pytest.mark.parametrize("mode", ["indi", "wrench", "cbrt", "cbrt_indi"])
+@pytest.mark.parametrize("mode", ["dsam_indi", "wrench", "cbrt", "cbrt_indi"])
 @pytest.mark.parametrize("bits", BITS)
 @pytest.mark.parametrize("sac", [False, True])
 def test_actual_controllers_match_equivalent_scalar_reference(mode, bits, sac):
-    ctrl = indi_fixture() if mode=="indi" else (wrench_fixture() if mode=="wrench" else cbrt_fixture(mode))
+    ctrl = indi_fixture() if mode=="dsam_indi" else (wrench_fixture() if mode=="wrench" else cbrt_fixture(mode))
     ctrl.task.sac_action_mapping = sac
     baseline = copy.deepcopy(ctrl)
     set_flags(ctrl.task, bits)
-    count = 9 if mode in ("indi", "wrench") else 6
+    count = 9 if mode in ("dsam_indi", "wrench") else 6
     physical = torch.zeros(4, count, dtype=torch.float64)
     physical[:, -2:] = torch.tensor([.42, -.65])
-    if mode in ("indi", "wrench"):
-        physical[:, 6 if mode=="indi" else 3] = .9
+    if mode in ("dsam_indi", "wrench"):
+        physical[:, 6 if mode=="dsam_indi" else 3] = .9
     elif not sac:
         physical[:, 3] = ctrl.hover_total
     raw = encode(physical, pair_slots(mode, bits), radius=.3 if sac else 5.)
     scalar = physical.clone()
     if sac:
-        if bits[0] and mode in ("indi", "wrench"):
-            scalar[:, 6 if mode=="indi" else 3] /= math.radians(ctrl.cfg.heading_range_degs)
+        if bits[0] and mode in ("dsam_indi", "wrench"):
+            scalar[:, 6 if mode=="dsam_indi" else 3] /= math.radians(ctrl.cfg.heading_range_degs)
         for index, enabled in enumerate(bits[1:]):
             if enabled:
                 scalar[:, -2+index] /= ctrl.joint_scale[index]
     rates = torch.zeros(4, 3, dtype=torch.float64)
     position, velocity = torch.full((4, 2), .1, dtype=torch.float64), torch.full((4, 2), -.2, dtype=torch.float64)
-    if mode=="indi":
+    if mode=="dsam_indi":
         args = (home_quat(ctrl), rates, position, velocity)
     elif mode=="wrench":
         args = (physical.new_tensor(ctrl.task.robot_home_quat).expand(4, -1), rates, position, velocity, rates, rates)
@@ -143,7 +143,7 @@ def test_actual_controllers_match_equivalent_scalar_reference(mode, bits, sac):
         torch.testing.assert_close(ctrl.requested_joint_effort, baseline.requested_joint_effort, atol=1e-12, rtol=0)
 
 
-@pytest.mark.parametrize("mode", [MODES[1], "indi", "wrench", "cbrt", "cbrt_indi"])
+@pytest.mark.parametrize("mode", [MODES[1], "dsam_indi", "wrench", "cbrt", "cbrt_indi"])
 @pytest.mark.parametrize("bits", BITS)
 def test_sac_bounds_expand_only_pairs_and_preserve_scalar_joint_bounds(mode, bits):
     env, _ = sac_env()
@@ -169,16 +169,16 @@ def test_sac_bounds_expand_only_pairs_and_preserve_scalar_joint_bounds(mode, bit
 @pytest.mark.parametrize("mode", MODES)
 def test_action_limit_costs_ignore_pair_radius_and_all_held_joint_channels(mode, hold):
     cfg = config()
-    cfg.control_mode, cfg.hold_arm, cfg.sac_action_mapping = mode, hold, mode in ("indi", "wrench", "cbrt", "cbrt_indi")
+    cfg.control_mode, cfg.hold_arm, cfg.sac_action_mapping = mode, hold, mode in ("dsam_indi", "wrench", "cbrt", "cbrt_indi")
     cfg.remove_thrust_clipping = False
     cfg.action_clamp = 1.0
     cfg.rwd_scale_action_limits = -1.
     set_flags(cfg, (True, True, True))
-    base = 9 if mode in ("indi", "wrench") else (8 if mode.startswith("thrust_and_") else 6)
+    base = 9 if mode in ("dsam_indi", "wrench") else (8 if mode.startswith("thrust_and_") else 6)
     canonical = torch.zeros(2, base)
     raw = encode(canonical, pair_slots(mode, (True, True, True)), radius=100.)
     assert not raw_action_limit_costs(raw, cfg, 5.)[:, 2].any()
     # A genuine clipped scalar reference still costs (3-1)^2, even with expanded pairs.
-    if mode in ("indi", "wrench", "cbrt", "cbrt_indi", MODES[2]):
+    if mode in ("dsam_indi", "wrench", "cbrt", "cbrt_indi", MODES[2]):
         raw[:, 0] = 3.
         torch.testing.assert_close(raw_action_limit_costs(raw, cfg, 5.)[:, 2], torch.full((2,), 4.))

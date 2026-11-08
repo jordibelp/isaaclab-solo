@@ -73,7 +73,7 @@ def main(cfg, agent_cfg):
               and all(s.contact_physx_view.filter_count == body_count - 1 for s in env._body_contact_sensors))
         check("physics_policy_clock", abs(env.physics_dt-1/cfg.physics_hz) < 1e-10
               and abs(env.step_dt-1/cfg.policy_hz) < 1e-10)
-        use_pd = cfg.control_mode not in ("thrust_and_torque_control", "indi") or cfg.hold_arm
+        use_pd = cfg.control_mode not in ("thrust_and_torque_control", "dsam_indi") or cfg.hold_arm
         check("live_gains", torch.allclose(view.get_dof_stiffnesses()[:, env.joint_ids], torch.full((8, 2), cfg.kp if use_pd else 0.))
               and torch.allclose(view.get_dof_dampings()[:, env.joint_ids], torch.full((8, 2), cfg.kd if use_pd else 0.)))
         check("live_effort_limits", torch.allclose(view.get_dof_max_forces()[:, env.joint_ids], torch.full((8, 2), cfg.effort_lim_sim)))
@@ -114,7 +114,7 @@ def main(cfg, agent_cfg):
         # Freeze rotor lag for this composition-only comparison; restore it below.
         alpha = env._motor_alpha
         env._motor_alpha = 0.
-        if cfg.control_mode == "indi":
+        if cfg.control_mode == "dsam_indi":
             # INDI has its own physics-rate state. Capture the shared-control
             # baseline in the same call instead of advancing that state twice.
             saved_add = composer.add_forces_and_torques
@@ -125,7 +125,7 @@ def main(cfg, agent_cfg):
                 return saved_add(**kwargs)
             composer.add_forces_and_torques = capture_add
         env._apply_action()
-        if cfg.control_mode == "indi":
+        if cfg.control_mode == "dsam_indi":
             composer.add_forces_and_torques = saved_add
             baseline_f, baseline_t = captured["f"], captured["t"]
         env._motor_alpha = alpha

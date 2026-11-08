@@ -99,7 +99,7 @@ class BorinotCmdVelEnv(DirectRLEnv):
         self._actuator_commands[:, :6] = 1.0 / cfg.thrust_to_weight
         self._previous_actuator_commands = self._actuator_commands.clone()
         self._motor_alpha = 1.0 if cfg.motor_time_constant_s == 0 else 1 - math.exp(-self.physics_dt / cfg.motor_time_constant_s)
-        if cfg.control_mode == "indi":
+        if cfg.control_mode == "dsam_indi":
             self._init_indi()
         elif cfg.control_mode in ("wrench", "model_wrench", "model_wrench_indi", "model_wrench_yawless", "model_wrench_yawless_indi"):
             self._init_wrench()
@@ -212,7 +212,7 @@ class BorinotCmdVelEnv(DirectRLEnv):
         self._command_steps_left.sub_(1)
         self._update_pushes()
         self._previous_actuator_commands.copy_(self._actuator_commands)
-        if self.cfg.control_mode in ("indi", "wrench", "model_wrench", "model_wrench_indi", "model_wrench_yawless", "model_wrench_yawless_indi", "cbrt", "cbrt_indi"):
+        if self.cfg.control_mode in ("dsam_indi", "wrench", "model_wrench", "model_wrench_indi", "model_wrench_yawless", "model_wrench_yawless_indi", "cbrt", "cbrt_indi"):
             if self.cfg.sac_action_mapping:
                 actions = clamp_scalar_actions(actions, self.cfg, 1.0)
         elif not self.cfg.sac_action_mapping and not self.cfg.remove_thrust_clipping:
@@ -329,7 +329,7 @@ class BorinotCmdVelEnv(DirectRLEnv):
         parts.append(self._commands)
         if self.cfg.control_mode == "PI_rotors_PD_joint_pos_control":
             parts += [self._rotor_thrust / self._hover_per_rotor, self._rate_integral]
-        elif self.cfg.control_mode == "indi":
+        elif self.cfg.control_mode == "dsam_indi":
             parts.append(self._indi.observation())
         elif self.cfg.control_mode in ("wrench", "model_wrench", "model_wrench_indi", "model_wrench_yawless", "model_wrench_yawless_indi"):
             parts.append(self._wrench.observation())
@@ -446,7 +446,7 @@ class BorinotCmdVelEnv(DirectRLEnv):
             n, self.cfg.base_push_interval_range_s, self.step_dt, self.device)
         for buffer in (self._actuator_commands, self._previous_actuator_commands):
             buffer[env_ids, :6], buffer[env_ids, 6:] = 1.0 / self.cfg.thrust_to_weight, 0.0
-        if self.cfg.control_mode == "indi":
+        if self.cfg.control_mode == "dsam_indi":
             self._indi.reset(env_ids)
         elif self.cfg.control_mode in ("wrench", "model_wrench", "model_wrench_indi", "model_wrench_yawless", "model_wrench_yawless_indi"):
             self._wrench.reset(env_ids)

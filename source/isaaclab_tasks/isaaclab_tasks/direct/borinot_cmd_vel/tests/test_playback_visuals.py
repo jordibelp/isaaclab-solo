@@ -67,7 +67,7 @@ def test_signal_sources_and_full_body_vs_heading_frames(sac):
         assert torch.equal(getattr(env, key), value), key
 
 
-@pytest.mark.parametrize("mode", ["wrench", "indi", "thrust_and_torque_control"])
+@pytest.mark.parametrize("mode", ["wrench", "dsam_indi", "thrust_and_torque_control"])
 def test_no_invented_policy_rate_for_other_modes(mode):
     env, _ = fixture_env(mode=mode)
     assert scope["overlay_vectors"](env, ["policy_rate"]) == {}

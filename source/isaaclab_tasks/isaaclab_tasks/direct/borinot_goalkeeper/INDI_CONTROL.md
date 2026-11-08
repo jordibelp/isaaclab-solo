@@ -1,10 +1,14 @@
-# Borinot: physics-rate INDI and joint PID
+# Borinot: physics-rate DSAM-INDI and joint PID
 
-Updated: 2026-10-24. Applies to both goalkeeper tasks and the shared command-velocity controller.
+Updated: 2026-11-08. Applies to both goalkeeper tasks, command velocity, and GoTo (including minimum time).
+
+The mode was renamed from `indi` to `dsam_indi`. Only the selector changed;
+the controller behavior and `env.indi.*` settings are unchanged. Use the new
+selector in training and playback commands, including with existing checkpoints.
 
 ## 1. What is implemented
 
-Set `env.control_mode=indi` to train or play a policy with **nine outputs**:
+Set `env.control_mode=dsam_indi` to train or play a policy with **nine outputs**:
 
 1. Three desired linear accelerations in world axes.
 2. Three desired body rates, used as feedforward.
@@ -58,7 +62,7 @@ export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt SSL_CERT_DIR=/etc/ssl/ce
 This local command uses the paper-style clocks and a modest environment count:
 
 ```bash
-./isaaclab.sh -p source/scripts/rsl_rl/train.py --task Borinot-Goalkeeper-Simple-Direct-v0 --num_envs 128 --headless --logger tensorboard env.control_mode=indi env.physics_hz=300 env.policy_hz=150 '--kit_args=--/UJITSO/geometry=false --/UJITSO/textures=false --/UJITSO/materials=false'
+./isaaclab.sh -p source/scripts/rsl_rl/train.py --task Borinot-Goalkeeper-Simple-Direct-v0 --num_envs 128 --headless --logger tensorboard env.control_mode=dsam_indi env.physics_hz=300 env.policy_hz=150 '--kit_args=--/UJITSO/geometry=false --/UJITSO/textures=false --/UJITSO/materials=false'
 ```
 
 Replace the task with `Borinot-Goalkeeper-Direct-v0` for the original reward.
@@ -77,7 +81,7 @@ These commands do not submit a Slurm job.
 Use the same INDI switches with either SAC entry point. This is a small local smoke-sized example:
 
 ```bash
-./isaaclab.sh -p source/scripts/rsl_rl/train.py --task Borinot-Goalkeeper-Simple-Direct-v0 --agent rsl_rl_sac_cfg_entry_point --num_envs 32 --headless --logger tensorboard env.control_mode=indi env.physics_hz=300 env.policy_hz=150 agent.algorithm.replay_buffer_size=4096 agent.algorithm.num_mini_batches=2 agent.algorithm.mini_batch_size=32 agent.local_redundancy.batch_size=8 '--kit_args=--/UJITSO/geometry=false --/UJITSO/textures=false --/UJITSO/materials=false'
+./isaaclab.sh -p source/scripts/rsl_rl/train.py --task Borinot-Goalkeeper-Simple-Direct-v0 --agent rsl_rl_sac_cfg_entry_point --num_envs 32 --headless --logger tensorboard env.control_mode=dsam_indi env.physics_hz=300 env.policy_hz=150 agent.algorithm.replay_buffer_size=4096 agent.algorithm.num_mini_batches=2 agent.algorithm.mini_batch_size=32 agent.local_redundancy.batch_size=8 '--kit_args=--/UJITSO/geometry=false --/UJITSO/textures=false --/UJITSO/materials=false'
 ```
 
 Use `--agent rsl_rl_sac_mse_cfg_entry_point` for MSE critics.
@@ -89,7 +93,7 @@ The existing PI mode remains unsupported by these SAC agents.
 ### Playback
 
 ```bash
-./isaaclab.sh -p source/scripts/rsl_rl/play_borinot_goalkeeper.py --task Borinot-Goalkeeper-Simple-Direct-v0 --checkpoint /absolute/path/to/model.pt env.control_mode=indi env.physics_hz=300 env.policy_hz=150
+./isaaclab.sh -p source/scripts/rsl_rl/play_borinot_goalkeeper.py --task Borinot-Goalkeeper-Simple-Direct-v0 --checkpoint /absolute/path/to/model.pt env.control_mode=dsam_indi env.physics_hz=300 env.policy_hz=150
 ```
 
 For SAC, also pass the same `--agent` used for training.
@@ -613,7 +617,7 @@ python -m pytest -q --confcutdir=source/isaaclab_tasks/isaaclab_tasks/direct/bor
 The live smoke accepts either task and real Hydra overrides:
 
 ```bash
-./isaaclab.sh -p source/isaaclab_tasks/isaaclab_tasks/direct/borinot_goalkeeper/tests/indi_smoke.py --headless --task Borinot-Goalkeeper-Simple-Direct-v0 --output /absolute/scratch/path/indi-smoke.json env.control_mode=indi env.physics_hz=300 env.policy_hz=150 '--kit_args=--/UJITSO/geometry=false --/UJITSO/textures=false --/UJITSO/materials=false'
+./isaaclab.sh -p source/isaaclab_tasks/isaaclab_tasks/direct/borinot_goalkeeper/tests/indi_smoke.py --headless --task Borinot-Goalkeeper-Simple-Direct-v0 --output /absolute/scratch/path/indi-smoke.json env.control_mode=dsam_indi env.physics_hz=300 env.policy_hz=150 '--kit_args=--/UJITSO/geometry=false --/UJITSO/textures=false --/UJITSO/materials=false'
 ```
 
 The standalone performance check does not start Isaac Sim:

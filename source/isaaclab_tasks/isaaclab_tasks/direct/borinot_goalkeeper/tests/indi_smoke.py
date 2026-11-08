@@ -41,7 +41,7 @@ def main(cfg, agent_cfg):
 
     try:
         obs, _ = env.reset()
-        check("hydra_nine_actions", cfg.control_mode == "indi" and env.action_space.shape[-1] == cfg.action_space == 9)
+        check("hydra_nine_actions", cfg.control_mode == "dsam_indi" and env.action_space.shape[-1] == cfg.action_space == 9)
         check("hydra_nested_controller_cfg", cfg.indi.filter_cutoff_hz == env._indi.cfg.filter_cutoff_hz)
         check("hydra_tilt_method", cfg.indi_tilt_method in ("geom", "method_1", "method_2")
               and env._indi.task.indi_tilt_method == cfg.indi_tilt_method)

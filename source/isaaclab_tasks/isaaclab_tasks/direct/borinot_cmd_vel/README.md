@@ -164,7 +164,7 @@ checkpoint trained with the single acceleration sample, explicitly set
 | `thrust_and_torque_control` (default) | 6 rotor thrusts + 2 joint torques = 8 | 32 | PPO, SAC CE, SAC MSE |
 | `thrust_and_PD_joint_pos_control` | 6 rotor thrusts + 2 joint targets = 8 | 32 | PPO, SAC CE, SAC MSE |
 | `PI_rotors_PD_joint_pos_control` | Collective + body rates + 2 joint targets = 6 | 39 | PPO |
-| `indi` | World acceleration + body rates + heading + 2 joint targets = 9 | 41 | PPO, SAC CE, SAC MSE |
+| `dsam_indi` | World acceleration + body rates + heading + 2 joint targets = 9 | 41 | PPO, SAC CE, SAC MSE |
 | `wrench` | World acceleration + heading + body rates + 2 joint targets = 9 | 39 | PPO, SAC CE, SAC MSE |
 | `model_wrench` / `model_wrench_indi` | Same nine-action wrench layout; explicit arm model, optional INDI correction | 39 | PPO, SAC CE, SAC MSE |
 | `model_wrench_yawless` / `model_wrench_yawless_indi` | World acceleration + body rates + 2 joint targets = 8; no heading target | 38 | PPO, SAC CE, SAC MSE |

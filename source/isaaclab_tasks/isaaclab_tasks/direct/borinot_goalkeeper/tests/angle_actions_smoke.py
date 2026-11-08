@@ -28,7 +28,7 @@ from isaaclab_tasks.direct.borinot_goalkeeper.agents.rsl_rl_sac_cfg import Borin
 @hydra_task_config(args.task, "rsl_rl_cfg_entry_point")
 def main(base_cfg, agent_cfg):
     modes = ("thrust_and_torque_control", "thrust_and_PD_joint_pos_control",
-             "PI_rotors_PD_joint_pos_control", "indi", "wrench", "cbrt", "cbrt_indi")
+             "PI_rotors_PD_joint_pos_control", "dsam_indi", "wrench", "cbrt", "cbrt_indi")
     legacy = not hasattr(base_cfg, "control_mode")
     # Isaac Sim teardown/recreation can stall. Use one registered env per process.
     cases = [("legacy", False)] if legacy else [(args.mode, args.sac)]
@@ -67,8 +67,8 @@ def main(base_cfg, agent_cfg):
             if legacy or mode != modes[0]:
                 radius = .3 if legacy else 50.
                 actions[:, joint_start:joint_start+4] = radius*torch.stack((targets.cos(), targets.sin()), -1).flatten()
-            if mode in ("indi", "wrench"):
-                start = 6 if mode=="indi" else 3
+            if mode in ("dsam_indi", "wrench"):
+                start = 6 if mode=="dsam_indi" else 3
                 actions[:, start:start+2] = 50.*actions.new_tensor([.6]).cos().repeat(2)
                 actions[:, start+1] = 50.*actions.new_tensor(.6).sin()
             if mode.startswith("cbrt") and not sac:
@@ -81,18 +81,18 @@ def main(base_cfg, agent_cfg):
                 return setter(value, **kwargs)
 
             env.robot.set_joint_position_target = position_trace
-            controller = getattr(env, "_"+mode, None) if mode in ("indi", "wrench") else (
+            controller = (env._indi if mode == "dsam_indi" else env._wrench) if mode in ("dsam_indi", "wrench") else (
                 getattr(env, "_cbrt", None) if mode.startswith("cbrt") else None)
             if controller is not None:
                 original = controller.step
 
                 def control_trace(*values):
                     # Inputs are tensors owned by the simulator; capture before stepping.
-                    position, velocity = (values[3], values[4]) if mode in ("indi", "wrench") else (values[2], values[3])
+                    position, velocity = (values[3], values[4]) if mode in ("dsam_indi", "wrench") else (values[2], values[3])
                     position, velocity = position.clone(), velocity.clone()
                     result = original(*values)
                     desired = cfg.kp*(targets-position)-cfg.kd*velocity
-                    if mode=="indi":
+                    if mode=="dsam_indi":
                         desired += controller.cfg.joint_ki*controller.joint_integral
                     captured["pd_matches"] = torch.allclose(controller.requested_joint_effort, desired, atol=2e-5, rtol=1e-5)
                     return result
