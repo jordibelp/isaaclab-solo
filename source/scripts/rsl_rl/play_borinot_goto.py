@@ -153,7 +153,7 @@ def main(env_cfg, agent_cfg):
         with torch.inference_mode():
             while completed < total_steps and simulation_app.is_running():
                 start = time.perf_counter()
-                observation, did_reset = controls.apply_requests(env, observation)
+                observation, did_reset = controls.apply_requests(env, observation, completed * play_env.step_dt)
                 if did_reset:
                     model.reset(every_env)
                 controls.update(completed * play_env.step_dt)
@@ -190,8 +190,10 @@ def main(env_cfg, agent_cfg):
             "progress_reward_factor": factor, "push_force_limit_n": push_limit_n,
             "initial_goal_m": initial_goal, "deadline_s": args.deadline_s,
             "initial_goal_input_m": goal, "initial_goal_frame": args.goal_frame,
-            "final_goal_input_m": None if args.random_goals else controls.goal,
-            "final_goal_frame": "relative" if controls.relative else "world",
+            "final_goal_input_m": None if args.random_goals else play_env.play_goal.tolist(),
+            "final_goal_frame": "relative" if play_env.play_goal_relative else "world",
+            "draft_goal_input_m": controls.goal, "draft_goal_frame": "relative" if controls.relative else "world",
+            "sequence_phase": controls.sequence_phase, "sequence_message": controls.sequence_message,
             "final_state_robot0": flight_state(play_env, completed * play_env.step_dt),
             "totals": play_env.play_totals, "hold_worst_distance_m": play_env.play_hold_worst_distance_m,
             "robot0_results": play_env.play_results[-20:], "robot0_result_count": len(play_env.play_results),

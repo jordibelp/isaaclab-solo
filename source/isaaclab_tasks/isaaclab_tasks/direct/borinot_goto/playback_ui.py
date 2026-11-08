@@ -103,6 +103,13 @@ class GoalControls:
         self.auto_deadline = deadline_s is None
         self.deadline_s = 2.0 if deadline_s is None else float(deadline_s)
         self.go_requested = self.reset_requested = self.paused = False
+        self._pending_goal = None
+        self.waypoints = []
+        self._sequence = self._pending_sequence = None
+        self.sequence_index = 0
+        self.sequence_phase = "idle"
+        self.sequence_message = "Not started."
+        self._sequence_models, self._sequence_subscriptions = [], []
         self.manual_resets = 0
         self.message = ""
         self.window = self._preview = self._preview_key = None
@@ -145,8 +152,8 @@ class GoalControls:
                         self._models.append(model)
                         self._subscriptions.append(model.subscribe_value_changed_fn(
                             lambda m, i=index: self.set_component(i, m.get_value_as_float())))
-                ui.Label("Edits apply immediately, including while paused. Reset uses these inputs.\n"
-                         "Moving the deadline switches Auto off; typed values are not limited to slider ranges.",
+                ui.Label("Edits are a draft. Only Go sends XYZ and deadline together.\n"
+                         "Moving the deadline switches Auto off; Reset keeps the active goal.",
                          height=40, word_wrap=True)
                 self.preview_label = ui.Label("", height=75, word_wrap=True)
                 with ui.HStack(height=32):
@@ -155,6 +162,7 @@ class GoalControls:
                 with ui.HStack(height=32):
                     ui.Button("Reset robot", clicked_fn=self.request_reset)
                     self.pause_button = ui.Button("Pause", clicked_fn=self.toggle_pause)
+                self._build_sequence_editor(ui)
                 ui.Label("CAMERA", height=22)
                 with ui.HStack(height=30):
                     for mode in CAMERAS:
@@ -171,6 +179,129 @@ class GoalControls:
                          "\nFlight bounds and crash resets remain enabled.", height=75, word_wrap=True)
         self.window.deferred_dock_in("Stage", ui.DockPolicy.CURRENT_WINDOW_IS_ACTIVE)
 
+    def _build_sequence_editor(self, ui):
+        with ui.CollapsableFrame("Command sequence (optional)", collapsed=True, height=0) as self.sequence_editor:
+            with ui.VStack(spacing=6, height=0):
+                ui.Label("Add the draft as a waypoint, then edit the next XYZ and add again.\n"
+                         "Rows stay editable. Nothing is sent until Start sequence.", height=42, word_wrap=True)
+                ui.Button("Add waypoint from draft", height=28, clicked_fn=self.add_waypoint)
+                self._sequence_frame = ui.Frame(height=0, build_fn=self._build_sequence_rows)
+                with ui.HStack(height=30):
+                    ui.Button("Start sequence", clicked_fn=self.request_sequence_start)
+                    ui.Button("Stop sequence", clicked_fn=self.stop_sequence)
+                self.sequence_label = ui.Label("Not started.", height=48, word_wrap=True)
+                ui.Label("Flight [s]: 0 = Auto. Wait [s]: hold the target AFTER the flight deadline.\n"
+                         "Pause freezes waits. Stop keeps the active target; it is not a brake.\n"
+                         "Go, Fly home and Reset cancel the sequence. Safety resets stop it; misses do not.\n"
+                         "Requires continuous live-goal mode (no reset-at-deadline / minTime).",
+                         height=80, word_wrap=True)
+
+    def _build_sequence_rows(self):
+        import omni.ui as ui
+
+        self._sequence_models.clear()
+        self._sequence_subscriptions.clear()
+        with ui.VStack(spacing=4, height=0):
+            with ui.HStack(height=22, spacing=4):
+                ui.Label("# / frame", width=72)
+                for label in ("X [m]", "Y [m]", "Z [m]", "Flight [s]", "Wait [s]"):
+                    ui.Label(label, width=76)
+            for index, row in enumerate(self.waypoints):
+                with ui.HStack(height=28, spacing=4):
+                    ui.Label(f"{index + 1} / {'REL' if row['relative'] else 'WORLD'}", width=72)
+                    for component, value in enumerate(row["values"]):
+                        model = ui.SimpleFloatModel(value)
+                        ui.FloatField(model, width=76)
+                        self._sequence_models.append(model)
+                        self._sequence_subscriptions.append(model.subscribe_value_changed_fn(
+                            lambda m, r=row, c=component: r["values"].__setitem__(c, m.get_value_as_float())))
+                    ui.Button("X", width=24, tooltip="Remove waypoint",
+                              clicked_fn=lambda i=index: self.remove_waypoint(i))
+
+    def add_waypoint(self):
+        self.waypoints.append({"values": [*self.goal, self.requested_deadline() or 0.0, 0.0],
+                               "relative": self.relative})
+        if self.window:
+            self._sequence_frame.rebuild()
+
+    def remove_waypoint(self, index):
+        self.waypoints.pop(index)
+        if self.window:
+            self._sequence_frame.rebuild()
+
+    def request_sequence_start(self):
+        """Validate and snapshot the entire draft; later row edits affect only the next run."""
+        if self.env.reset_at_deadline or self.env.play_goal is None:
+            self.sequence_message = "Sequence not started: use continuous live-goal mode."
+            return
+        try:
+            if not self.waypoints:
+                raise ValueError("add at least one waypoint.")
+            sequence = []
+            for index, row in enumerate(self.waypoints):
+                x, y, z, seconds, wait = row["values"]
+                if not all(math.isfinite(v) and v >= 0 for v in (seconds, wait)):
+                    raise ValueError(f"row {index + 1}: flight and wait must be finite and nonnegative.")
+                deadline = seconds or None
+                self.env._validated_goal((x, y, z), deadline, row["relative"])
+                sequence.append(((x, y, z), deadline, row["relative"], wait))
+        except ValueError as error:
+            self.sequence_message = f"Sequence not started: {error}"
+            return
+        self.stop_sequence()
+        self.go_requested, self._pending_goal = False, None
+        self._pending_sequence = tuple(sequence)
+        self.sequence_message = "Start queued."
+
+    def stop_sequence(self):
+        self._sequence = self._pending_sequence = None
+        self.sequence_phase = "stopped"
+        self.sequence_message = "Stopped. Active target unchanged."
+
+    def _send_sequence_waypoint(self, env):
+        goal, deadline, relative, _ = self._sequence[self.sequence_index]
+        try:
+            self.env.set_play_goal(goal, deadline, relative=relative)
+        except ValueError as error:
+            self.stop_sequence()
+            self.sequence_message = f"Stopped at row {self.sequence_index + 1}: {error}"
+            return None
+        self._sequence_baseline = self.env.play_totals.copy()
+        self.sequence_phase = "flying"
+        self.sequence_message = f"Waypoint {self.sequence_index + 1}/{len(self._sequence)}: flying."
+        return env.get_observations()
+
+    def _advance_sequence(self, env, observation, time_s):
+        if self._pending_sequence is not None:
+            self._sequence, self._pending_sequence = self._pending_sequence, None
+            self.sequence_index = 0
+            updated = self._send_sequence_waypoint(env)
+            return observation if updated is None else updated
+        if self._sequence is None or self.paused:
+            return observation
+        delta = {key: value - self._sequence_baseline[key] for key, value in self.env.play_totals.items()}
+        if delta["goal_failures"] or delta["hold_failures"]:
+            self.stop_sequence()
+            self.sequence_message = "Stopped: safety reset. Active target unchanged."
+            return observation
+        if self.sequence_phase == "flying":
+            if delta["goals"] < self.env.num_envs:
+                return observation
+            self.sequence_phase = "waiting"
+            self._wait_until_s = time_s + self._sequence[self.sequence_index][3]
+        remaining = max(0.0, self._wait_until_s - time_s)
+        self.sequence_message = f"Waypoint {self.sequence_index + 1}/{len(self._sequence)}: waiting {remaining:.2f} s."
+        if remaining > 1e-9:
+            return observation
+        self.sequence_index += 1
+        if self.sequence_index == len(self._sequence):
+            self._sequence = None
+            self.sequence_phase = "completed"
+            self.sequence_message = "Sequence complete. Holding the last target."
+            return observation
+        updated = self._send_sequence_waypoint(env)
+        return observation if updated is None else updated
+
     def set_component(self, index, value):
         if not math.isfinite(value):
             return
@@ -181,13 +312,13 @@ class GoalControls:
             if self.auto_deadline and self.window:
                 self._auto_model.set_value(False)
             self.auto_deadline = False
-        self.request_go()
 
     def set_auto_deadline(self, enabled):
         self.auto_deadline = bool(enabled)
-        self.request_go()
 
     def request_go(self):
+        self.stop_sequence()
+        self._pending_goal = (tuple(self.goal), self.requested_deadline(), self.relative)
         self.go_requested = True
 
     def set_relative(self, relative):
@@ -219,6 +350,7 @@ class GoalControls:
         self.request_go()
 
     def request_reset(self):
+        self.stop_sequence()
         self.reset_requested = True
 
     def toggle_pause(self):
@@ -232,21 +364,29 @@ class GoalControls:
     def requested_deadline(self):
         return None if self.auto_deadline else self.deadline_s
 
-    def apply_requests(self, env, observation):
-        """Apply the latest inputs once before inference, also when Reset wins over Go."""
-        if not (self.go_requested or self.reset_requested):
-            return observation, False
-        reset = self.reset_requested
+    def apply_requests(self, env, observation, time_s=0.0):
+        """Apply explicit intent before inference. Draft edits never change the active command."""
+        if self.reset_requested:
+            self.go_requested = self.reset_requested = False
+            self._pending_goal = None
+            self.stop_sequence()
+            observation, _ = env.reset()
+            self.manual_resets += 1
+            self.message = ""
+            return observation, True
+        if not self.go_requested:
+            return self._advance_sequence(env, observation, time_s), False
         self.go_requested = self.reset_requested = False
+        goal, deadline, relative = self._pending_goal
+        self._pending_goal = None
         try:
-            self.env.set_play_goal(self.goal, self.requested_deadline(), relative=self.relative)
+            self.env.set_play_goal(goal, deadline, relative=relative)
         except ValueError as error:
             self.message = f"Goal not sent: {error}"
             return observation, False
         self.message = ""
-        if reset or self.env.reset_at_deadline:
+        if self.env.reset_at_deadline:
             observation, _ = env.reset()
-            self.manual_resets += int(reset)
             return observation, True
         return env.get_observations(), False
 
@@ -339,6 +479,8 @@ class GoalControls:
               f"angular speed < {cfg.goal_success_ang_vel_tolerance_rad_s:g} rad/s.")
         self.status_label.text = (f"{'PAUSED' if self.paused else 'PLAYING'} - {time_s:.1f} s - camera {self.camera}"
                                   f" - manual resets {self.manual_resets}" + (f"\n{self.message}" if self.message else ""))
+        if hasattr(self, "sequence_label"):
+            self.sequence_label.text = self.sequence_message
 
     def close(self):
         if self._preview is not None:
@@ -347,3 +489,4 @@ class GoalControls:
             self.window.destroy()
             self.window = None
         self._subscriptions.clear()
+        self._sequence_subscriptions.clear()

@@ -352,23 +352,28 @@ def controls(env, goal, relative=False):
 
 
 @pytest.mark.parametrize("index,value", [(0, 7.5), (1, -7.5), (2, 4.0), (3, 12.345)])
-def test_slider_edits_queue_a_goal_before_the_next_policy_step(index, value):
+def test_slider_edits_only_change_the_draft_until_go(index, value):
     env = play_env()
     panel = controls(env, GOAL)
+    before = env._goal_position_w.clone(), env._episode_steps.clone()
     panel.set_component(index, value)
-    assert panel.go_requested
+    assert not panel.go_requested
+    assert panel.apply_requests(None, "unchanged") == ("unchanged", False)
+    assert torch.equal(env._goal_position_w, before[0]) and torch.equal(env._episode_steps, before[1])
     if index == 3:
         assert not panel.auto_deadline and panel.requested_deadline() == value
 
 
 @pytest.mark.parametrize("episodes", [False, True])
-def test_reset_applies_latest_fields_once_even_while_paused(episodes):
+def test_reset_keeps_active_goal_and_does_not_send_draft_even_while_paused(episodes):
     from types import SimpleNamespace
     env = play_env(reset_at_deadline=episodes)
     panel = controls(env, GOAL)
     panel.paused = True
     panel.set_component(0, 8.0)
     panel.set_component(3, 12.345)
+    panel.request_go()  # Reset wins even if Go was also queued.
+    active_goal = env._goal_position_w.clone()
     panel.request_reset()
     resets = []
 
@@ -381,11 +386,10 @@ def test_reset_applies_latest_fields_once_even_while_paused(episodes):
     observation, did_reset = panel.apply_requests(wrapper, None)
     assert did_reset and len(resets) == 1 and panel.manual_resets == 1
     assert not panel.go_requested and not panel.reset_requested and panel.paused
-    assert env._goal_deadline_steps.tolist() == [1235, 1235]
+    assert env.play_deadline_s is None
     assert not env._episode_steps.any()
-    torch.testing.assert_close(env._goal_position_w - env.scene.env_origins,
-                               torch.tensor([[8., -.5, 2.]] * 2, dtype=torch.float64))
-    assert observation["policy"][:, -1].tolist() == pytest.approx([12.35, 12.35])
+    torch.testing.assert_close(env._goal_position_w, active_goal)
+    assert panel.goal[0] == 8.0 and panel.deadline_s == 12.345  # draft is not discarded
     assert panel.apply_requests(wrapper, observation) == (observation, False)
 
 
@@ -401,16 +405,220 @@ def test_manual_deadline_survives_holds_outside_training_range_and_generic_horiz
     assert env._segment_hold.all() and env._goal_deadline_steps.tolist() == [1235, 1235]
 
 
-def test_auto_checkbox_changes_queue_a_goal_and_curriculum_metadata_is_only_a_bounded_reference():
+def test_auto_checkbox_only_edits_draft_and_curriculum_metadata_is_only_a_bounded_reference():
     env = play_env()
     panel = controls(env, GOAL)
     panel.set_auto_deadline(False)
-    assert panel.go_requested and panel.requested_deadline() == 2.0
+    assert not panel.go_requested and panel.requested_deadline() == 2.0
     scope = load_definitions(FOLDER / "playback.py", {
         "BorinotGoToEnv": environment_class(), "max_curriculum_level": task_math.max_curriculum_level})
     level = scope["checkpoint_goal_level"]
     assert level({"best_model_curriculum_idx": 12}, 0, set(), max_level=9) == 9
     assert level({"best_model_curriculum_idx": 12}, 4, {"env.goal_curriculum_start_level"}, max_level=9) == 4
+
+
+def wrapper_for(env):
+    from types import SimpleNamespace
+
+    def reset():
+        env._reset_idx(None)
+        return env._get_observations(), {}
+
+    return SimpleNamespace(reset=reset, get_observations=env._get_observations)
+
+
+def finish_segment(env, success=True):
+    env.robot.data.root_pos_w.copy_(env._goal_position_w)
+    env.robot.data.root_lin_vel_w[:] = 0.0 if success else 2.0
+    env._episode_steps.copy_(env._goal_deadline_steps)
+    env._get_dones()
+    env._get_rewards()
+
+
+def sequence_panel(env=None):
+    env = env or play_env()
+    panel = controls(env, (3., 0., 1.5))
+    panel.add_waypoint()
+    panel.waypoints[0]["values"][4] = 2.0
+    panel.set_component(0, -3.)
+    panel.add_waypoint()
+    return panel, env, wrapper_for(env)
+
+
+def test_go_snapshots_all_fields_and_later_edits_do_not_leak_into_the_sent_command():
+    env = play_env()
+    panel = controls(env, GOAL)
+    panel.set_component(0, 3.)
+    panel.set_component(1, 2.)
+    panel.set_component(2, 1.5)
+    panel.set_component(3, 1.75)
+    panel.request_go()
+    panel.set_component(0, -3.)
+    panel.set_auto_deadline(True)
+    panel.set_relative(True)
+    observation, reset = panel.apply_requests(wrapper_for(env), None)
+    assert not reset and env.play_deadline_s == 1.75 and not env.play_goal_relative
+    torch.testing.assert_close(env._goal_position_w - env.scene.env_origins,
+                               torch.tensor([[3., 2., 1.5]] * 2, dtype=torch.float64))
+    assert observation["policy"][:, -1].tolist() == [1.75, 1.75]
+
+
+def test_sequence_snapshots_rows_and_waits_two_sim_seconds_after_all_waypoint_deadlines():
+    panel, env, wrapper = sequence_panel()
+    original = env._goal_position_w.clone()
+    assert not panel.go_requested and torch.equal(original, env._goal_position_w)
+    panel.request_sequence_start()
+    panel.waypoints[0]["values"][0] = 7.0  # editing the list cannot change the queued snapshot
+    panel.remove_waypoint(1)
+    observation, reset = panel.apply_requests(wrapper, None, 10.)
+    assert not reset and panel.sequence_phase == "flying"
+    assert env.play_goal.tolist() == [3., 0., 1.5]
+    assert observation["policy"][:, -1].min() > 0
+    panel.apply_requests(wrapper, observation, 11.)  # time alone cannot complete a flight
+    assert panel.sequence_phase == "flying"
+    finish_segment(env)
+    panel.apply_requests(wrapper, observation, 12.)
+    assert panel.sequence_phase == "waiting"
+    panel.paused = True
+    panel.apply_requests(wrapper, observation, 12.)  # official player freezes simulated time while paused
+    panel.paused = False
+    panel.apply_requests(wrapper, observation, 13.99)
+    assert env.play_goal.tolist() == [3., 0., 1.5]
+    observation, _ = panel.apply_requests(wrapper, observation, 14.)
+    assert panel.sequence_index == 1 and panel.sequence_phase == "flying"
+    assert env.play_goal.tolist() == [-3., 0., 1.5]
+    assert not env._episode_steps.any() and not env._segment_hold.any()
+    finish_segment(env)
+    panel.apply_requests(wrapper, observation, 18.)
+    assert panel.sequence_phase == "completed" and panel._sequence is None
+    assert env.play_goal.tolist() == [-3., 0., 1.5] and env._segment_hold.all()
+
+
+@pytest.mark.parametrize("bad_component,bad_value", [(0, math.nan), (2, 50.), (3, -1.), (4, -1.), (4, math.inf)])
+def test_invalid_sequence_is_rejected_in_full_before_any_goal_is_sent(bad_component, bad_value):
+    panel, env, wrapper = sequence_panel()
+    panel.waypoints[1]["values"][bad_component] = bad_value
+    before = env._goal_position_w.clone(), env._episode_steps.clone()
+    panel.request_sequence_start()
+    panel.apply_requests(wrapper, None, 0.)
+    assert panel._sequence is None and panel._pending_sequence is None
+    assert "not started" in panel.sequence_message
+    assert torch.equal(before[0], env._goal_position_w) and torch.equal(before[1], env._episode_steps)
+
+
+@pytest.mark.parametrize("failure", ["goal safety", "hold safety"])
+def test_sequence_stops_on_safety_reset_without_advancing(failure):
+    panel, env, wrapper = sequence_panel()
+    panel.request_sequence_start()
+    observation, _ = panel.apply_requests(wrapper, None, 0.)
+    if failure == "hold safety":
+        finish_segment(env)
+        panel.apply_requests(wrapper, observation, 5.)
+        assert panel.sequence_phase == "waiting"
+        env.safety_failures[0] = True
+        finish_segment(env)
+    else:
+        env.safety_failures[0] = failure == "goal safety"
+        finish_segment(env, success=False)
+    panel.apply_requests(wrapper, observation, 6.)
+    assert panel.sequence_phase == "stopped" and env.play_goal.tolist() == [3., 0., 1.5]
+    assert "safety" in panel.sequence_message
+
+
+def test_a_training_score_miss_does_not_block_the_timed_sequence():
+    panel, env, wrapper = sequence_panel()
+    panel.request_sequence_start()
+    panel.apply_requests(wrapper, None, 0.)
+    finish_segment(env, success=False)
+    assert env.play_totals["goal_successes"] == 0
+    panel.apply_requests(wrapper, None, 5.)
+    assert panel.sequence_phase == "waiting"
+    panel.apply_requests(wrapper, None, 7.)
+    assert panel.sequence_phase == "flying" and env.play_goal.tolist() == [-3., 0., 1.5]
+
+
+@pytest.mark.parametrize("running", [False, True])
+@pytest.mark.parametrize("action", ["stop", "go", "home", "reset"])
+def test_explicit_actions_cancel_queued_or_running_sequence(action, running):
+    panel, env, wrapper = sequence_panel()
+    panel.request_sequence_start()
+    observation = None
+    if running:
+        observation, _ = panel.apply_requests(wrapper, None, 0.)
+    target = env._goal_position_w.clone()
+    {"stop": panel.stop_sequence, "go": panel.request_go,
+     "home": panel.fly_home, "reset": panel.request_reset}[action]()
+    assert panel._sequence is None and panel._pending_sequence is None
+    panel.apply_requests(wrapper, observation, 10.)
+    if action in ("stop", "reset"):
+        assert torch.equal(env._goal_position_w, target)
+    elif action == "go":
+        assert env.play_goal.tolist() == [-3., 0., 1.5]
+    else:
+        assert env.play_goal.tolist() == list(env.cfg.robot_home)
+
+
+def test_relative_waypoints_resolve_when_each_row_starts_not_when_the_list_is_built():
+    env = play_env()
+    panel = controls(env, (1., 0., 0.), relative=True)
+    panel.add_waypoint()
+    panel.add_waypoint()
+    start = env.robot.data.root_pos_w.clone()
+    panel.request_sequence_start()
+    wrapper = wrapper_for(env)
+    panel.apply_requests(wrapper, None, 0.)
+    finish_segment(env)
+    observation, _ = panel.apply_requests(wrapper, None, 5.)
+    torch.testing.assert_close(env._goal_position_w, start + start.new_tensor([2., 0., 0.]))
+    assert env.play_goal_relative and observation["policy"][:, -1].min() > 0
+
+
+def test_sequence_waits_for_the_last_clone_and_rejects_a_later_invalid_relative_target():
+    panel, env, wrapper = sequence_panel()
+    panel.request_sequence_start()
+    panel.apply_requests(wrapper, None, 0.)
+    env.robot.data.root_pos_w.copy_(env._goal_position_w)
+    env.robot.data.root_lin_vel_w[:] = 0.
+    env._episode_steps[0] = env._goal_deadline_steps[0]
+    env._get_dones()
+    env._get_rewards()
+    panel.apply_requests(wrapper, None, 5.)
+    assert panel.sequence_phase == "flying"  # one clone has not finished
+    env._episode_steps[0] = 0  # clone 0 is now in a hold, not another goal
+    env._episode_steps[1] = env._goal_deadline_steps[1]
+    env._get_dones()
+    env._get_rewards()
+    panel.apply_requests(wrapper, None, 6.)
+    assert panel.sequence_phase == "waiting" and panel._wait_until_s == 8.
+
+    # Relative rows cannot be bounds-checked against their future start positions.
+    panel.stop_sequence()
+    panel.waypoints.clear()
+    panel.goal = [1., 0., 0.]
+    panel.set_relative(True)
+    panel.add_waypoint()
+    panel.add_waypoint()
+    env.robot.data.root_pos_w[:, 0] = env.scene.env_origins[:, 0] + env.cfg.flight_xy_limit_m - 1.5
+    panel.request_sequence_start()
+    panel.apply_requests(wrapper, None, 10.)
+    finish_segment(env)
+    active = env._goal_position_w.clone()
+    observation = env._get_observations()
+    returned, _ = panel.apply_requests(wrapper, observation, 12.)
+    assert returned is observation and panel.sequence_phase == "stopped"
+    assert "row 2" in panel.sequence_message
+    assert torch.equal(active, env._goal_position_w)
+
+
+def test_sequences_reject_empty_lists_and_reset_at_deadline_modes():
+    env = play_env()
+    panel = controls(env, GOAL)
+    panel.request_sequence_start()
+    assert "at least one" in panel.sequence_message
+    panel.add_waypoint()
+    env.reset_at_deadline = True
+    panel.request_sequence_start()
+    assert panel._pending_sequence is None and "continuous" in panel.sequence_message
 
 
 def test_ui_mode_switch_preserves_input_without_sending_and_relative_preview_tracks_only_the_next_go():

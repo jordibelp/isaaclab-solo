@@ -429,7 +429,7 @@ The default goal is the robot home, so the robot first hovers in place.
 Select **Relative to base position** in the panel to enter displacements
 instead. The switch keeps the same numbers and does not send a goal.
 Relative XYZ uses world-aligned axes, not axes rotated with the robot yaw.
-Each edit or **Go to goal** adds the displacement to each robot's current base position.
+Only **Go to goal** adds the displacement to each robot's current base position.
 For example, `(1, 0, 0)` flies one metre along world X at the current height.
 Press Go again with unchanged inputs to repeat that displacement from the new
 position. Once sent, the target stays fixed, including across safety resets;
@@ -450,13 +450,14 @@ How a goal works in the player:
   `--deadline_s` or the deadline slider sets a fixed time instead. Moving the
   slider switches Auto off. Any positive finite manual time is accepted, rounded
   up to policy ticks. It need not match a training range or the metadata horizon.
-- **Edits and Go to goal.** XYZ/time edits apply before the next policy action,
-  including while paused. **Go to goal** resends the current inputs.
+- **Edits and Go to goal.** XYZ, time, Auto and frame edits change only the draft.
+  **Go to goal** snapshots all inputs together and sends them before the next
+  policy action, including while paused. Later edits do not change that command.
   The green sphere shows the active goal; yellow previews the next target.
   **Fly home** sends the robot home.
-- **Reset robot.** Reset sends the latest inputs and starts one new rollout from
-  home, even if Go is also queued. Relative inputs snapshot the target before
-  the teleport, just as Go does in `--reset-at-deadline` mode.
+- **Reset robot.** Reset starts a new rollout from home with the active goal.
+  It never sends draft fields, even if Go is also queued. An active relative
+  target stays fixed; Reset does not add the displacement again.
 - **Chain mode (default).** A new goal starts from the current state. The
   robot is not teleported. The goal clock restarts, so the policy sees the new
   body-frame offset, a full `t_norm` and the new remaining seconds.
@@ -476,6 +477,38 @@ How a goal works in the player:
   to home and repeats the goal. A new goal also starts a new episode from home.
 - **`--random-goals`.** Training goal and deadline sampling at the checkpoint
   stage, with a reset at every deadline. No goal window.
+
+### Optional command sequence
+
+Open **Command sequence (optional)** in the same panel. It is collapsed by
+default. No new launch flags are needed.
+
+1. Enter `(3, 0, 1.5)` in the main fields. Click **Add waypoint from draft**.
+2. Set the first row's **Wait [s]** to `2`.
+3. Enter `(-3, 0, 1.5)` in the main fields and add another waypoint.
+4. Click **Start sequence**.
+
+Each row has editable X/Y/Z, **Flight [s]** and **Wait [s]** fields, plus a
+remove button. Flight `0` means Auto; a positive value sets that waypoint's
+deadline. The WORLD/REL label records the main frame checkbox when you add
+the row. Relative displacements resolve from each robot's position when
+that row starts, along world axes.
+
+The player flies the first waypoint. At its flight deadline, it holds
+the same target for two extra simulated seconds, then sends the second
+waypoint. The wait does not start at first arrival. With multiple robots,
+all flight deadlines must finish before the wait starts. A training-score
+miss does not stop the sequence; the result still appears in the goal log.
+A safety reset stops the sequence.
+
+Pause freezes sequence waits. Start snapshots the whole list; editing or
+removing rows during a run affects only the next run. **Stop sequence**
+cancels future waypoints but keeps the current target. It is not a brake.
+**Go to goal**, **Fly home** and **Reset robot** also cancel the sequence.
+After the last row's wait, the robot keeps the last target. Holds use the
+existing policy and are not a promise of perfectly stationary hover.
+Sequences require the default continuous live-goal mode, not
+`--reset-at-deadline`, `--random-goals` or the minTime task.
 
 Each finished goal prints one line, for example `[GOAL] ... SUCCESS. Final
 distance 0.004 m, speed 0.05 m/s, angular speed 0.08 rad/s ...`. The run ends with one
