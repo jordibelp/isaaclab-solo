@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 
 pytest.importorskip("pxr.Usd")
-from pxr import Gf, Usd, UsdPhysics
+from pxr import Gf, Sdf, Usd, UsdPhysics
 
 REPO = Path(__file__).resolve().parents[6]
 ASSETS = REPO / "source/isaaclab_assets/data/Robots/Borinot"
@@ -54,7 +54,10 @@ def test_new_asset_matches_short_urdf_mass_com_and_full_tensor(name):
 def test_copy_preserves_every_non_inertial_attribute_and_prim():
     assert NEW.is_file()
     before, after = Usd.Stage.Open(str(OLD)), Usd.Stage.Open(str(NEW))
-    assert [str(p.GetPath()) for p in before.TraverseAll()] == [str(p.GetPath()) for p in after.TraverseAll()]
+    # The only extra subtree is the requested visual-only tip-weight marker.
+    marker = Sdf.Path('/Borinot/flying_arm_2__link2/tip_mass_visual')
+    assert [str(p.GetPath()) for p in before.TraverseAll()] == [
+        str(p.GetPath()) for p in after.TraverseAll() if not p.GetPath().HasPrefix(marker)]
     allowed = {'physics:mass', 'physics:centerOfMass', 'physics:diagonalInertia', 'physics:principalAxes'}
     for a in before.TraverseAll():
         b = after.GetPrimAtPath(a.GetPath())

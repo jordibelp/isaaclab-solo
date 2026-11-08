@@ -9,8 +9,13 @@ All Borinot training tasks now select:
 This is an independent copy of `borinotFlat.usd`. The original stays unchanged.
 The copy replaces only each body's mass, centre of mass (CoM), and full inertia
 with `borinot_description` commit `6b3e09ce998f61824045d6ba4c149ba5dc1b06c4`,
-`arm:=short`. It retains every part name, joint, mesh, transform, material,
+`arm:=short`. It retains every existing part name, joint, mesh, transform, material,
 collider and collision approximation. Provenance is stored in USD layer metadata.
+
+A 30 mm orange sphere named `tip_mass_visual` marks the weight at the short-arm
+end-effector position, `(0, -0.130, 0)` m in the second link's axes. It follows
+that link and is visual only: no collider, rigid body or added mass. The existing
+127 g lower-link calibration already includes the weight.
 
 The base mass is **2.71746155 kg**, including all motors and propellers. The upper
 link is **0.14853845 kg**. The short lower link is **0.127 kg**, including its
