@@ -12,11 +12,17 @@ Usage:
 Examples:
   ./reuse_isaaclab_gpu_job.sh --jobid 12345 -- ./isaaclab.sh -p source/scripts/rsl_rl/train.py --task solo12-v0 --num_envs 4096 --headless
   ./reuse_isaaclab_gpu_job.sh --jobid 12345 -- bash -lc './isaaclab.sh -p source/scripts/rsl_rl/train.py --task solo12-v0 --symmetry-mode augmentation --num_envs 10000 --headless'
+  ./reuse_isaaclab_gpu_job.sh --jobid 12345 -- bash -e -o pipefail run_chain.sh
 
 Notes:
   - This does NOT request a new GPU from Slurm.
   - It reuses the GPU already allocated to the running job JOBID.
   - It activates the IsaacLab conda env and applies the same relevant exports as train_isaac.sbs.
+  - For sequential commands, put them in a script and pass it to bash as above.
+    Bare newlines, semicolons, or && after the helper do not put later commands in the job step.
+  - This does not wait for another training process already running in the job.
+    All commands share the allocation's remaining time limit.
+  - See scripts/cluster_chains/README.md for the copy/paste workflow and an example chain.
 EOF
 }
 
