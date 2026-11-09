@@ -1,6 +1,8 @@
 # Solo12 IsaacLab → MuJoCo sim-to-sim
 
-This folder runs the `solo12-two-feet` 48-observation RSL-RL policy in MuJoCo without importing Isaac Sim. It preserves the inference contract used by `play_direct_0325.py`:
+This folder runs Solo12 RSL-RL PPO and SAC policies in MuJoCo without importing Isaac Sim.
+The player supports `solo12-two-feet` and four-feet `solo12-v0`, including clean simple-MLP
+IMU observations. It preserves the inference contract used by `play_direct_0325.py`:
 
 - 200 Hz physics and 50 Hz policy (`dt=0.005`, decimation 4)
 - joint order `FL, FR, RL, RR` with hip/thigh/calf per leg (`cfg.joint_names`)
@@ -17,6 +19,8 @@ This folder runs the `solo12-two-feet` 48-observation RSL-RL policy in MuJoCo wi
 `solo12-two-feet` are `kp=15, kd=0.5`. The checkpoint's training run (`q3a68133`, verified on W&B)
 actually used `kp=9, kd=0.2`. The MuJoCo script defaults to `--kp 15 --kd 0.5` to reproduce the
 Isaac play command byte-for-byte; pass `--kp 9 --kd 0.2` to play at training gains.
+For `--task=solo12-v0`, the default gains are `kp=9, kd=0.2` instead. Explicit gain flags
+and `env.kp` / `env.kd` overrides still take precedence.
 
 Measured on `0717_q3a68133_model_15008` (steady-state ‖Δv_xy‖ mean over the 8-command sequence):
 
@@ -25,6 +29,60 @@ Measured on `0717_q3a68133_model_15008` (steady-state ‖Δv_xy‖ mean over the
 | Isaac play, kp15/kd0.5 | 0.149 m/s | 0 |
 | MuJoCo, kp15/kd0.5 | 0.175 m/s | 1 |
 | MuJoCo, kp9/kd0.2 (training) | 0.139 m/s | 0 |
+
+## IMU checkpoints (four feet or two feet)
+
+Pass the observation settings used during training. Tensor size alone cannot tell us
+which signals a checkpoint expects. For `1109_qsc4btfx_best_model_curriculum_idx_2_4feet_IMU_SAC.pt`,
+the actor has 57 inputs in this order:
+
+| Signal | Values | Units |
+|---|---:|---|
+| Base-frame gyro | 3 | rad/s |
+| Base-frame projected gravity | 3 | unit vector |
+| Four base-frame IMU linear-acceleration samples, oldest first | 12 | m/s² |
+| Velocity command | 3 | m/s, m/s, rad/s |
+| Joint positions minus the safe-pose offset | 12 | rad |
+| Joint velocities | 12 | rad/s |
+| Previous policy action | 12 | policy units |
+
+There is no base linear velocity in this actor. Each acceleration sample advances after
+one 5 ms physics step, not after an observation read. Reset zeros the whole history and
+rebases velocity differences so a teleport does not create an acceleration spike.
+
+The clean IMU uses the link orientation for gyro and projected gravity. Acceleration is
+gravity-free, so a stationary sensor reads zero and a freely falling sensor reads gravity
+in base axes. We estimate world COM and angular accelerations from endpoint velocity
+differences. We then apply the rigid-body tangential and centripetal terms at the IMU.
+Its mounting point is 1 cm ahead of the base origin, or 2 cm ahead of the nominal COM.
+This is a finite-step estimate, not a claim of identical PhysX/MuJoCo contact acceleration.
+Clipping matches the training defaults: ±900 degrees/s for gyro and ±32767/2048 m/s²
+for processed acceleration. `env.base_imu_clip`, `env.base_imu_gyro_clip` and
+`env.base_imu_ekf_acc_clip` can override those settings.
+
+This path matches **clean evaluation**, not the training noise/bias model or a measured
+hardware EKF. It supports `imu_ekf_processed_inputs=True`, not raw specific force or a
+history-encoder/TCN checkpoint. The legacy 48-input path is unchanged. Incorrect input
+settings fail with an observation-contract error before the rollout starts.
+
+After activating `env_isaaclab`, run this from the IsaacLab repository for a live viewer:
+
+```bash
+./isaaclab.sh -p mujoco/play_direct_mujoco.py --task=solo12-v0 --checkpoint=/home/jordibelp/IsaacLab-dirty/logs/skrl/checkpoints/1109_qsc4btfx_best_model_curriculum_idx_2_4feet_IMU_SAC.pt --duration_s=2000 --cmd_init 0.5 0.0 0.0 env.base_obs_from_imu=True env.remove_root_lin_vel_b_from_actor_obs=True env.include_lin_acc_steps_in_imu_obs=4 env.kp=9.0 env.kd=0.2 env.effort_limit_sim=2.25 'env.joint_physical_limit_hip=[-65.0,65.0]' 'env.joint_physical_limit_calf=[-179.0,179.0]' env.use_asymmetric_thigh_limits=True 'env.joint_physical_limit_front_thigh=[-135.0,65.0]' 'env.joint_physical_limit_rear_thigh=[-65.0,135.0]'
+```
+
+The actor loader restores network sizes, normalization and SAC action bounds directly
+from the checkpoint. Do not pass Isaac-only agent flags or soft-limit flags to change
+those saved bounds. Physical joint stops and the effort cap still need the matching
+runtime overrides above. The model uses flat ground; it does not restore training
+curricula, delays, randomization or rough terrain from a checkpoint filename.
+
+For a local headless check, add `--headless --track-cmds='0.5 0 0;0 0.3 0;0 0 0.5;0 0 0' --no-wandb`.
+Each command runs for 5 seconds; `--duration_s` only controls live mode. Evaluation
+output includes every tracking sample plus the resolved observation contract in
+`run_config.json`. The supplied checkpoint completed that 20-second check with
+1,000 policy steps and zero base-contact resets on 2026-11-09. This short check does
+not establish hardware transfer or broad robustness.
 
 ## Model matching
 

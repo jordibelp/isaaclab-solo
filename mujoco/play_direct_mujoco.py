@@ -40,6 +40,9 @@ JOINT_NAMES = (
     "RR_hip_joint", "RR_thigh_joint", "RR_calf_joint",
 )
 SAFE_Q = np.array((0.0, 0.4, -0.8, 0.0, 0.4, -0.8, 0.0, -0.4, 0.8, 0.0, -0.4, 0.8))
+IMU_OFFSET_B = np.array((0.01, 0.0, 0.0))  # base-link origin, not COM
+IMU_GYRO_CLIP = math.radians(900.0)
+IMU_EKF_ACC_CLIP = 32767.0 / 2048.0
 
 
 def parse_commands(value: str) -> list[tuple[float, float, float]]:
@@ -70,14 +73,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", type=Path,
                         help="Output root (default logs/mujoco/cmd_tracking); model/timestamp are appended.")
     parser.add_argument("--realtime", action="store_true", help="Pace the interactive viewer at wall-clock speed.")
-    parser.add_argument("--task", default="solo12-two-feet")
+    parser.add_argument("--task", choices=("solo12-two-feet", "solo12-v0"), default="solo12-two-feet")
     parser.add_argument("--num_envs", type=int, default=1)
     parser.add_argument("--kp", type=float, default=None,
-                        help=f"PD stiffness (default: env.kp override, else {DEFAULT_KP:g} = Isaac play with "
-                             f"--disable_training_gain_sync; training used {TRAINING_KP:g}).")
+                        help=f"PD stiffness (default: env.kp override, else {DEFAULT_KP:g} for two feet, 9 for solo12-v0).")
     parser.add_argument("--kd", type=float, default=None,
-                        help=f"PD damping (default: env.kd override, else {DEFAULT_KD:g} = Isaac play with "
-                             f"--disable_training_gain_sync; training used {TRAINING_KD:g}).")
+                        help=f"PD damping (default: env.kd override, else {DEFAULT_KD:g} for two feet, 0.2 for solo12-v0).")
     parser.add_argument("--bringup_clip_rad", "--bringup-clip-rad", type=float, default=0.0,
                         help="Clip q_des - q before position PD [rad]; 0 disables clipping.")
     parser.add_argument("--camera", choices=("free", "side", "front"), default="side",
@@ -105,10 +106,15 @@ _ENV_JOINT_LIMIT_KEYS = {
     for name in ("hip", "thigh", "calf", "front_thigh", "rear_thigh", "front_calf", "rear_calf")
 }
 _ENV_ASYMMETRIC_LIMIT_KEYS = {"env.use_asymmetric_thigh_limits", "env.use_asymmetric_calf_limits"}
+_ENV_OBSERVATION_BOOL_KEYS = {
+    "env.base_obs_from_imu", "env.remove_root_lin_vel_b_from_actor_obs",
+    "env.remove_root_lin_vel_b_from_obs", "env.base_imu_clip", "env.imu_ekf_processed_inputs",
+}
+_ENV_IMU_CLIP_KEYS = {"env.base_imu_gyro_clip", "env.base_imu_ekf_acc_clip"}
 
 
 def consume_env_overrides(unknown: list[str]) -> tuple[dict, list[str]]:
-    """Pull gains, command ranges, and physical joint limits out of the Isaac CLI tail."""
+    """Pull supported actuator, observation and command settings out of the Isaac CLI tail."""
     import ast
 
     overrides: dict = {}
@@ -124,10 +130,25 @@ def consume_env_overrides(unknown: list[str]) -> tuple[dict, list[str]]:
                 raise ValueError(f"{key} requires finite [lower, upper] degrees with lower < upper.") from exc
             overrides[key.removeprefix("env.")] = (low, high)
             continue
-        if key in _ENV_ASYMMETRIC_LIMIT_KEYS:
+        if key in _ENV_ASYMMETRIC_LIMIT_KEYS | _ENV_OBSERVATION_BOOL_KEYS:
             if raw.lower() not in ("true", "false"):
                 raise ValueError(f"{key} requires True or False.")
             overrides[key.removeprefix("env.")] = raw.lower() == "true"
+            continue
+        if key == "env.include_lin_acc_steps_in_imu_obs":
+            try:
+                steps = int(raw)
+                if steps < 0:
+                    raise ValueError
+            except ValueError as exc:
+                raise ValueError(f"{key} requires a non-negative integer.") from exc
+            overrides[key.removeprefix("env.")] = steps
+            continue
+        if key in _ENV_IMU_CLIP_KEYS:
+            value = float(raw)
+            if not math.isfinite(value) or value <= 0.0:
+                raise ValueError(f"{key} requires a finite positive value.")
+            overrides[key.removeprefix("env.")] = value
             continue
         try:
             if key in ("env.kp", "env.kd", "env.effort_limit_sim"):
@@ -218,6 +239,20 @@ class Solo12Mujoco:
         # Keep legacy XML limits unless explicitly overridden. SAC's saved action
         # scaling already encodes the training soft limits; do not rescale the actor.
         overrides = env_overrides or {}
+        self.base_obs_from_imu = overrides.get("base_obs_from_imu", False)
+        self.include_root_lin_vel = not (
+            overrides.get("remove_root_lin_vel_b_from_actor_obs", False)
+            or overrides.get("remove_root_lin_vel_b_from_obs", False)
+        )
+        self.imu_acc_steps = overrides.get("include_lin_acc_steps_in_imu_obs", 0)
+        if self.imu_acc_steps and not self.base_obs_from_imu:
+            raise ValueError("env.include_lin_acc_steps_in_imu_obs requires env.base_obs_from_imu=True.")
+        if self.base_obs_from_imu and not overrides.get("imu_ekf_processed_inputs", True):
+            raise ValueError("IMU playback requires env.imu_ekf_processed_inputs=True (gravity-free acceleration).")
+        self.base_imu_clip = overrides.get("base_imu_clip", True)
+        self.base_imu_gyro_clip = overrides.get("base_imu_gyro_clip", IMU_GYRO_CLIP)
+        self.base_imu_ekf_acc_clip = overrides.get("base_imu_ekf_acc_clip", IMU_EKF_ACC_CLIP)
+        self._imu_lin_acc_history = np.zeros((self.imu_acc_steps, 3))
         self.effort_limit = float(overrides.get("effort_limit_sim", EFFORT_LIMIT))
         if not math.isfinite(self.effort_limit) or self.effort_limit <= 0.0:
             raise ValueError("env.effort_limit_sim must be finite and positive.")
@@ -260,6 +295,40 @@ class Solo12Mujoco:
         self.action.fill(0.0)
         self._base_contact_latched = False
         mujoco.mj_forward(self.model, self.data)
+        self._imu_lin_acc_history.fill(0.0)
+        _, angular, linear = self._base_imu_kinematics()
+        self._previous_imu_com_velocity = linear.copy()
+        self._previous_imu_ang_velocity = angular.copy()
+
+    def _base_imu_kinematics(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Endpoint rotation and world COM velocities without changing MuJoCo's dynamics caches.
+
+        Free-joint translation velocity is world-aligned at the link origin; angular
+        velocity is link-aligned. mj_step's derived body caches still describe the
+        pre-integration state, so read the integrated qpos/qvel for IMU sampling.
+        """
+        rotation = quat_rotation(self.data.qpos[3:7])
+        angular = rotation @ self.data.qvel[3:6]
+        linear = self.data.qvel[:3] + np.cross(angular, rotation @ self.model.body_ipos[self.base_id])
+        return rotation, angular, linear
+
+    def _record_base_imu_sample(self) -> None:
+        """Record clean gravity-free IMU acceleration after each 5 ms physics step."""
+        if not self.base_obs_from_imu or not self.imu_acc_steps:
+            return
+        rotation, angular, linear = self._base_imu_kinematics()
+        com_acceleration = (linear - self._previous_imu_com_velocity) / PHYSICS_DT
+        angular_acceleration = (angular - self._previous_imu_ang_velocity) / PHYSICS_DT
+        lever = rotation @ (IMU_OFFSET_B - self.model.body_ipos[self.base_id])
+        acceleration = com_acceleration + np.cross(angular_acceleration, lever)
+        acceleration += np.cross(angular, np.cross(angular, lever))
+        acceleration_b = rotation.T @ acceleration
+        if self.base_imu_clip:
+            acceleration_b = acceleration_b.clip(-self.base_imu_ekf_acc_clip, self.base_imu_ekf_acc_clip)
+        self._imu_lin_acc_history[:-1] = self._imu_lin_acc_history[1:]
+        self._imu_lin_acc_history[-1] = acceleration_b
+        self._previous_imu_com_velocity = linear.copy()
+        self._previous_imu_ang_velocity = angular.copy()
 
     def _base_velocity_world(self) -> tuple[np.ndarray, np.ndarray]:
         """World-frame (angular, linear-at-COM) base velocity, matching PhysX root com velocities."""
@@ -277,7 +346,18 @@ class Solo12Mujoco:
         gravity_b = rotation_wb.T @ np.array((0.0, 0.0, -1.0))
         q = self.data.qpos[self.joint_qpos]
         qd = self.data.qvel[self.joint_dof]
-        return np.concatenate((lin_vel_b, ang_vel_b, gravity_b, command, q - SAFE_Q, qd, self.action))
+        if self.base_obs_from_imu:
+            rotation_wb, angular, linear = self._base_imu_kinematics()
+            lin_vel_b = rotation_wb.T @ linear
+            ang_vel_b = rotation_wb.T @ angular
+            if self.base_imu_clip:
+                ang_vel_b = ang_vel_b.clip(-self.base_imu_gyro_clip, self.base_imu_gyro_clip)
+        terms = [lin_vel_b] if self.include_root_lin_vel else []
+        terms.extend((ang_vel_b, gravity_b))
+        if self.base_obs_from_imu:
+            terms.append(self._imu_lin_acc_history.reshape(-1))
+        terms.extend((command, q - SAFE_Q, qd, self.action))
+        return np.concatenate(terms)
 
     def tracked_velocity(self) -> tuple[float, float, float]:
         """Planar velocity in the gravity-aligned heading frame plus world yaw rate (env reward frame)."""
@@ -305,6 +385,7 @@ class Solo12Mujoco:
                     requested_target - q, -self.bringup_clip_rad, self.bringup_clip_rad
                 )
             mujoco.mj_step(self.model, self.data)
+            self._record_base_imu_sample()
             self._base_contact_latched |= self._base_hit_ground_now()
 
     def _base_hit_ground_now(self) -> bool:
@@ -653,6 +734,19 @@ def run_tracking(args, sim: Solo12Mujoco, policy: Policy, checkpoint: Path, mode
         "decimation": DECIMATION,
         "policy_dt": POLICY_DT,
         "action_scale": ACTION_SCALE,
+        "observation_contract": {
+            "input_dim": int(policy.obs_mean.numel()),
+            "base_obs_from_imu": sim.base_obs_from_imu,
+            "include_root_lin_vel": sim.include_root_lin_vel,
+            "include_lin_acc_steps_in_imu_obs": sim.imu_acc_steps,
+            "imu_offset_pos_b_m": IMU_OFFSET_B.tolist(),
+            "imu_acceleration": "gravity-free; world COM/angular velocity differences at physics_dt + rigid lever arm",
+            "base_imu_clip": sim.base_imu_clip,
+            "base_imu_gyro_clip_radps": sim.base_imu_gyro_clip,
+            "base_imu_ekf_acc_clip_mps2": sim.base_imu_ekf_acc_clip,
+            "acceleration_history_order": "oldest first, XYZ per sample; zeroed on reset",
+            "noise_enabled": False,
+        },
         "kp": sim.kp,
         "kd": sim.kd,
         "effort_limit_nm": sim.effort_limit,
@@ -738,8 +832,8 @@ def main() -> None:
     args, unknown = build_parser().parse_known_args()
     if not math.isfinite(args.bringup_clip_rad) or args.bringup_clip_rad < 0.0:
         raise SystemExit("--bringup_clip_rad must be finite and non-negative (0 disables clipping)")
-    if args.task != "solo12-two-feet" or args.num_envs != 1:
-        raise ValueError("MuJoCo sim-to-sim currently supports --task=solo12-two-feet --num_envs=1 only")
+    if args.task not in ("solo12-v0", "solo12-two-feet") or args.num_envs != 1:
+        raise ValueError("MuJoCo sim-to-sim supports --task=solo12-v0 or solo12-two-feet with --num_envs=1 only")
     env_overrides, ignored = consume_env_overrides(unknown)
     if env_overrides:
         print("[INFO] Applying overrides:", " ".join(f"{k}={v}" for k, v in env_overrides.items()), flush=True)
@@ -748,8 +842,9 @@ def main() -> None:
     if args.track_cmds is None and args.headless:
         raise SystemExit("Live slider mode needs the viewer; pass --track-cmds for headless runs.")
 
-    kp = args.kp if args.kp is not None else env_overrides.get("kp", DEFAULT_KP)
-    kd = args.kd if args.kd is not None else env_overrides.get("kd", DEFAULT_KD)
+    default_kp, default_kd = (9.0, 0.2) if args.task == "solo12-v0" else (DEFAULT_KP, DEFAULT_KD)
+    kp = args.kp if args.kp is not None else env_overrides.get("kp", default_kp)
+    kd = args.kd if args.kd is not None else env_overrides.get("kd", default_kd)
     for name, cli_value in (("kp", args.kp), ("kd", args.kd)):
         env_value = env_overrides.get(name)
         if cli_value is not None and env_value is not None:
@@ -771,6 +866,17 @@ def main() -> None:
     model_path = Path(__file__).with_name("solo12.xml").resolve()
     sim = Solo12Mujoco(model_path, kp=kp, kd=kd, spawn_z=args.spawn_z, env_overrides=env_overrides,
                      bringup_clip_rad=args.bringup_clip_rad)
+    observation_size = sim.observation(tuple(args.cmd_init)).size
+    if observation_size != policy.obs_mean.numel():
+        raise ValueError(
+            f"Observation contract mismatch: checkpoint expects {policy.obs_mean.numel()} inputs, "
+            f"but playback supplies {observation_size}. Set env.base_obs_from_imu, "
+            "env.remove_root_lin_vel_b_from_actor_obs and env.include_lin_acc_steps_in_imu_obs "
+            "to match training; input size alone cannot identify their meanings."
+        )
+    print(f"[INFO] Observation inputs={observation_size}; IMU={sim.base_obs_from_imu}; "
+          f"base linear velocity={sim.include_root_lin_vel}; acceleration samples={sim.imu_acc_steps} "
+          f"at {1 / PHYSICS_DT:g} Hz, oldest first; clean signals (no training noise).", flush=True)
     print(f"[INFO] MuJoCo {mujoco.__version__}; model mass={sim.model.body_mass.sum():.6f} kg")
     print(f"[INFO] Bring-up position-error clipping: {sim.bringup_clip_rad:g} rad (0 = disabled); "
           f"effort limit={sim.effort_limit:g} Nm.", flush=True)
