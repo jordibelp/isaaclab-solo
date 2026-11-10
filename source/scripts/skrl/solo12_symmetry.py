@@ -654,7 +654,14 @@ def compute_symmetric_observations_actions(
     history_sample_dim = _get_base_imu_history_sample_dim(env)
     use_front_back_symmetry = _uses_front_back_symmetry(env)
     lin_acc_steps = _policy_obs_imu_lin_acc_steps(env)
-    if obs is not None:
+    extended_teacher = policy_model in {"base_imu_teacher", "base_imu_student_rl"} and (
+        bool(_find_cfg_value(env, "teacher_include_base_force"))
+        or _find_cfg_value(env, "teacher_foot_force_obs") not in (None, "none")
+        or int(_find_cfg_value(env, "include_lin_acc_steps_in_imu_obs") or 0) > 0
+    )
+    if obs is not None and extended_teacher:
+        obs_aug = _augment_extended_base_imu_obs(obs, env, policy_model, history_sample_dim, use_front_back_symmetry)
+    elif obs is not None:
         obs_policy, was_tensordict = _extract_policy_obs_tensor(obs, obs_type)
         obs_policy_aug = _augment_obs_tensor(
             obs_policy, policy_model, history_sample_dim, use_front_back_symmetry, lin_acc_steps
@@ -689,3 +696,55 @@ def compute_symmetric_observations_actions(
         actions_aug = torch.cat(transforms, dim=0)
 
     return obs_aug, actions_aug
+
+
+def _augment_extended_base_imu_obs(obs, env, policy_model, history_sample_dim, use_front_back_symmetry):
+    """Mirror clean acceleration/force channels as polar vectors and permute calf forces by leg."""
+    legacy_dim = 45 + (4 if _find_cfg_value(env, "include_foot_height_obs") else 0)
+    acc_dim = 3 * int(_find_cfg_value(env, "include_lin_acc_steps_in_imu_obs") or 0)
+    force_dim = 3 if _find_cfg_value(env, "teacher_include_base_force") else 0
+    foot_kind = _find_cfg_value(env, "teacher_foot_force_obs") or "none"
+    foot_dim = {"none": 0, "norm": 4, "vector": 12}[foot_kind]
+    teacher_dim = legacy_dim + acc_dim + force_dim + foot_dim + 3
+
+    def mirror(value, front_back):
+        legacy = torch.cat((value[:, :legacy_dim], value[:, -3:]), dim=-1)
+        transform = transform_base_imu_teacher_obs_reflect_y if front_back else transform_base_imu_teacher_obs_reflect_x
+        legacy = transform(legacy)
+        sign = _VECTOR_REFLECT_Y if front_back else _VECTOR_REFLECT_X
+        offset = legacy_dim
+        terms = [legacy[:, :legacy_dim]]
+        vector_dim = acc_dim + force_dim
+        if vector_dim:
+            vectors = value[:, offset:offset + vector_dim].reshape(value.shape[0], -1, 3)
+            terms.append((vectors * sign.to(value.device)).flatten(1))
+            offset += vector_dim
+        if foot_dim:
+            permutation = _FRONT_BACK_FOOT_PERM if front_back else _LEFT_RIGHT_FOOT_PERM
+            feet = value[:, offset:offset + foot_dim].reshape(value.shape[0], 4, -1)
+            feet = feet[:, permutation.to(value.device)]
+            if foot_kind == "vector":
+                feet = feet * sign.to(value.device)
+            terms.append(feet.flatten(1))
+        return torch.cat((*terms, legacy[:, -3:]), dim=-1)
+
+    def augment(value, *, critic=False):
+        if policy_model == "base_imu_student_rl" and not critic:
+            return _augment_obs_tensor(value, policy_model, history_sample_dim, use_front_back_symmetry)
+        if value.shape[-1] != teacher_dim:
+            raise ValueError(f"Extended IMU privileged observation width {value.shape[-1]} != {teacher_dim}.")
+        reflected = mirror(value, False)
+        variants = [value, reflected]
+        if use_front_back_symmetry:
+            variants.extend((mirror(value, True), mirror(reflected, True)))
+        return torch.cat(variants, dim=0)
+
+    if isinstance(obs, torch.Tensor):
+        return augment(obs)
+    data = {}
+    for key in obs.keys(include_nested=False):
+        if key == "rnd_state":
+            data[key] = torch.cat([obs[key]] * (4 if use_front_back_symmetry else 2), dim=0)
+        else:
+            data[key] = augment(obs[key], critic=key == "critic")
+    return TensorDict(data, batch_size=[data["policy"].shape[0]], device=data["policy"].device)

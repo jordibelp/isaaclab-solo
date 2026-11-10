@@ -18,13 +18,17 @@ teacher latent. Optionally it also supervises the action mean.
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import os
 import sys
+import shlex
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+_REPRODUCIBLE_COMMAND = shlex.join(["./isaaclab.sh", "-p", "source/scripts/rsl_rl/train_solo12_base_imu_dagger.py", *sys.argv[1:]])
 
 _UPSTREAM_RSL_SCRIPT_DIR = Path(__file__).resolve().parents[3] / "scripts" / "reinforcement_learning" / "rsl_rl"
 if str(_UPSTREAM_RSL_SCRIPT_DIR) not in sys.path:
@@ -124,6 +128,12 @@ from isaaclab_tasks.direct.solo12.agents.base_imu_actor_critic import (
     BaseImuTcnEncoder,
     Solo12BaseImuTeacherActorCritic,
 )
+from solo12_imu_pipeline import adapter_metadata, configure_teacher_for_dagger, save_training_contract
+
+_SKRL_SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "skrl"
+if str(_SKRL_SCRIPTS_DIR) not in sys.path:
+    sys.path.append(str(_SKRL_SCRIPTS_DIR))
+from helpers import _wandb_snapshot
 
 
 class ReplayBuffer:
@@ -381,6 +391,7 @@ def _sync_base_imu_policy_cfg_from_env_cfg(env_cfg, agent_cfg) -> None:
     env_to_policy_fields = {
         "teacher_encoder_obs_dim": "teacher_encoder_obs_dim",
         "teacher_latent_dim": "teacher_latent_dim",
+        "teacher_latent_activation": "teacher_latent_activation",
         "teacher_encoder_hidden_dims": "teacher_encoder_hidden_dims",
         "teacher_critic_obs_dim": "teacher_critic_obs_dim",
         "base_imu_history_length": "history_len",
@@ -409,9 +420,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if args_cli.device is not None:
         env_cfg.sim.device = args_cli.device
         agent_cfg.device = args_cli.device
-    _sync_base_imu_policy_cfg_from_env_cfg(env_cfg, agent_cfg)
-
     teacher_checkpoint = _resolve_teacher_checkpoint()
+    configure_teacher_for_dagger(env_cfg, agent_cfg.policy, teacher_checkpoint)
+    _sync_base_imu_policy_cfg_from_env_cfg(env_cfg, agent_cfg)
+    checkpoint_metadata = adapter_metadata(
+        env_cfg, agent_cfg.policy, teacher_checkpoint,
+        supervise_action=bool(args_cli.supervise_action), action_loss_coef=float(args_cli.action_loss_coef),
+    )
     num_iterations = args_cli.dagger_iterations or args_cli.max_iterations or 1000
     num_steps_per_iter = args_cli.num_steps_per_iter or int(getattr(agent_cfg, "num_steps_per_env", 24))
 
@@ -427,12 +442,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env_cfg.log_dir = log_dir
     dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
     dump_yaml(os.path.join(log_dir, "params", "agent.yaml"), agent_cfg)
+    save_training_contract(log_dir, env_cfg, agent_cfg.policy)
     with open(os.path.join(log_dir, "params", "dagger_args.json"), "w", encoding="utf-8") as f:
         json.dump(vars(args_cli), f, indent=2, sort_keys=True, default=str)
     wandb_run = _maybe_init_wandb(
         log_dir,
         run_suffix,
         {
+            "command": _REPRODUCIBLE_COMMAND,
+            "task": args_cli.task,
             "teacher_checkpoint": teacher_checkpoint,
             "dagger_iterations": int(num_iterations),
             "num_steps_per_iter": int(num_steps_per_iter),
@@ -469,6 +487,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     vec_env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
     device = torch.device(vec_env.unwrapped.device)
     raw_env = vec_env.unwrapped
+    if wandb_run is not None:
+        _wandb_snapshot(
+            log_dir, env_cfg, agent_cfg, args_cli, inspect.getsourcefile(type(env_cfg)),
+            inspect.getsourcefile(type(raw_env)),
+            extra_files=[__file__, str(Path(__file__).with_name("solo12_imu_pipeline.py")),
+                         inspect.getsourcefile(Solo12BaseImuTeacherActorCritic), inspect.getsourcefile(type(agent_cfg))],
+        )
     teacher_obs_dim = int(raw_env.cfg.teacher_critic_obs_dim)
     history_dim = int(raw_env.cfg.base_imu_history_flat_dim)
     command_dim = 3
@@ -603,7 +628,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 optimizer_state_dict=optimizer.state_dict(),
                 iteration=iteration,
                 best_loss=best_loss,
-                teacher_checkpoint=teacher_checkpoint,
+                **checkpoint_metadata,
                 dims={
                     "teacher_obs_dim": teacher_obs_dim,
                     "history_len": int(raw_env.cfg.base_imu_history_length),
@@ -627,7 +652,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 optimizer_state_dict=optimizer.state_dict(),
                 iteration=iteration,
                 best_loss=best_loss,
-                teacher_checkpoint=teacher_checkpoint,
+                **checkpoint_metadata,
                 dims={
                     "teacher_obs_dim": teacher_obs_dim,
                     "history_len": int(raw_env.cfg.base_imu_history_length),

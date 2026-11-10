@@ -68,3 +68,6 @@ _register("solo12-IMU-student-rl", "Solo12BaseImuStudentRlEnvCfg", "Solo12BaseIm
 _register("solo12-IMU-student-dagger", "Solo12BaseImuStudentDaggerEnvCfg", "Solo12BaseImuTeacherPPORunnerCfg")
 _register("Isaac-Solo12-BaseIMU-Teacher-Direct-v0", "Solo12BaseImuTeacherEnvCfg", "Solo12BaseImuTeacherPPORunnerCfg")
 _register("Isaac-Solo12-BaseIMU-StudentRL-Direct-v0", "Solo12BaseImuStudentRlEnvCfg", "Solo12BaseImuStudentRlPPORunnerCfg")
+_register("solo12-two-feet-IMU-teacher", "Solo12TwoFeetImuTeacherEnvCfg", "Solo12TwoFeetImuTeacherPPORunnerCfg")
+_register("solo12-two-feet-IMU-student-dagger", "Solo12TwoFeetImuStudentDaggerEnvCfg", "Solo12TwoFeetImuTeacherPPORunnerCfg")
+_register("solo12-two-feet-IMU-student-rl", "Solo12TwoFeetImuStudentRlEnvCfg", "Solo12TwoFeetImuStudentRlPPORunnerCfg")

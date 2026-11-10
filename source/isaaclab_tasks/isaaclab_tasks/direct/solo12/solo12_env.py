@@ -330,6 +330,11 @@ class Solo12Env(DirectRLEnv):
         self._twofeet_airborne_start = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         # The IMU bias states are simulated when a student history or the simple_mlp observation uses the IMU.
         self._base_imu_enabled = self.cfg.imu_raw_inputs or self.cfg.base_obs_from_imu
+        teacher_acc_steps = (
+            self.cfg.include_lin_acc_steps_in_imu_obs if self.cfg.policy_model.startswith("base_imu_") else 0
+        )
+        self._base_imu_enabled |= teacher_acc_steps > 0
+        self._teacher_lin_acc_history = torch.zeros(self.num_envs, teacher_acc_steps, 3, device=self.device)
         self._base_imu_history_len = self.cfg.base_imu_history_length if self.cfg.imu_raw_inputs else 0
         self._base_imu_history_sample_dim = self.cfg.base_imu_history_sample_dim
         self._base_imu_history = torch.zeros(
@@ -1474,7 +1479,10 @@ class Solo12Env(DirectRLEnv):
             return
 
         self._update_base_imu_bias_random_walk()
-        if self.cfg.include_lin_acc_steps_in_imu_obs > 0:
+        if self._teacher_lin_acc_history.shape[1] > 0:
+            self._teacher_lin_acc_history = torch.roll(self._teacher_lin_acc_history, shifts=-1, dims=1)
+            self._teacher_lin_acc_history[:, -1] = self._get_base_origin_lin_acc_b()
+        if self.cfg.base_obs_from_imu and self.cfg.include_lin_acc_steps_in_imu_obs > 0:
             observed_acc = self._read_base_imu_sample(corrupt=True)[:, 3:6]
             clean_acc = self._read_base_imu_sample(corrupt=False)[:, 3:6]
             self._imu_lin_acc_history = torch.roll(self._imu_lin_acc_history, shifts=-1, dims=1)
@@ -1496,6 +1504,20 @@ class Solo12Env(DirectRLEnv):
         if self.cfg.base_imu_history_action_is_last_executed:
             return self._applied_actions
         return self._actions
+
+    def _get_base_origin_lin_acc_b(self) -> torch.Tensor:
+        """Gravity-free acceleration at the base link origin, in its acquisition-time axes (m/s²)."""
+        body_id = self._base_wrench_body_ids[0]
+        data = self._robot.data
+        quat_w = data.body_link_quat_w[:, body_id]
+        com_to_origin_w = math_utils.quat_apply(quat_w, -data.body_com_pos_b[:, body_id])
+        omega_w = data.body_com_ang_vel_w[:, body_id]
+        acc_w = (
+            data.body_com_lin_acc_w[:, body_id]
+            + torch.linalg.cross(data.body_com_ang_acc_w[:, body_id], com_to_origin_w, dim=-1)
+            + torch.linalg.cross(omega_w, torch.linalg.cross(omega_w, com_to_origin_w, dim=-1), dim=-1)
+        )
+        return math_utils.quat_apply_inverse(quat_w, acc_w)
 
     def _read_base_imu_sample(self, corrupt: bool = True) -> torch.Tensor:
         base_body_id = self._base_wrench_body_ids[0]
@@ -1643,8 +1665,9 @@ class Solo12Env(DirectRLEnv):
     def _get_observations(self) -> dict:
         if self.cfg.policy_model == "base_imu_teacher":
             teacher_obs = self._get_teacher_critic_obs(corrupt=True)
+            critic_obs = teacher_obs if self.cfg.noisy_critic_obs else self._get_teacher_critic_obs(corrupt=False)
             self._previous_actions = self._actions.clone()
-            return self._with_optional_rnd_state({"policy": teacher_obs, "critic": teacher_obs})
+            return self._with_optional_rnd_state({"policy": teacher_obs, "critic": critic_obs})
         if self.cfg.policy_model == "base_imu_student_rl":
             policy_obs = torch.cat((self._base_imu_history.reshape(self.num_envs, -1), self._commands), dim=-1)
             critic_obs = self._get_teacher_critic_obs(corrupt=False)
@@ -1821,6 +1844,19 @@ class Solo12Env(DirectRLEnv):
                 self._get_joint_state_obs(corrupt=corrupt),
             ]
         )
+        if self.cfg.include_lin_acc_steps_in_imu_obs > 0:
+            terms.append(self._teacher_lin_acc_history.flatten(1))
+        if self.cfg.teacher_include_base_force:
+            # The held disturbance used for the completed policy interval; zero outside a push.
+            terms.append(self._base_push_forces_b.sum(dim=1))
+        if self.cfg.teacher_foot_force_obs != "none":
+            forces_w = self._contact_sensor.data.net_forces_w[:, self._feet_body_ids]
+            if self.cfg.teacher_foot_force_obs == "norm":
+                terms.append(torch.linalg.vector_norm(forces_w, dim=-1))
+            else:
+                quat_w = self._robot.data.root_quat_w[:, None].expand(-1, len(self._feet_body_ids), -1)
+                forces_b = math_utils.quat_apply_inverse(quat_w.reshape(-1, 4), forces_w.reshape(-1, 3))
+                terms.append(forces_b.reshape(self.num_envs, -1))
         return torch.cat(tuple(terms), dim=-1)
 
     def _get_teacher_critic_obs(self, corrupt: bool) -> torch.Tensor:
@@ -1983,6 +2019,7 @@ class Solo12Env(DirectRLEnv):
         self._applied_actions[env_ids] = 0.0
         if self._base_imu_enabled:
             self._base_imu_history[env_ids] = 0.0
+            self._teacher_lin_acc_history[env_ids] = 0.0
             self._imu_lin_acc_history[env_ids] = 0.0
             self._sample_base_imu_bias(env_ids)
 

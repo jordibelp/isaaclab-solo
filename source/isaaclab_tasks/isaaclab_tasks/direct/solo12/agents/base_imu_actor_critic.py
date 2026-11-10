@@ -167,6 +167,7 @@ class Solo12BaseImuTeacherActorCritic(nn.Module, _GaussianActorMixin):
         teacher_latent_dim: int = 32,
         teacher_encoder_hidden_dims: tuple[int] | list[int] = (256, 128, 64),
         teacher_encoder_activation: str = "elu",
+        teacher_latent_activation: str = "identity",
         command_dim: int = 3,
         **kwargs: dict[str, Any],
     ) -> None:
@@ -181,6 +182,9 @@ class Solo12BaseImuTeacherActorCritic(nn.Module, _GaussianActorMixin):
         self.obs_groups = obs_groups
         self.teacher_encoder_obs_dim = int(teacher_encoder_obs_dim)
         self.teacher_latent_dim = int(teacher_latent_dim)
+        if teacher_latent_activation not in {"identity", "tanh"}:
+            raise ValueError("teacher_latent_activation must be 'identity' or 'tanh'.")
+        self.teacher_latent_activation = teacher_latent_activation
         self.command_dim = int(command_dim)
 
         num_actor_obs = self._obs_dim(obs, obs_groups["policy"])
@@ -220,7 +224,8 @@ class Solo12BaseImuTeacherActorCritic(nn.Module, _GaussianActorMixin):
 
     def encode_teacher(self, obs: torch.Tensor) -> torch.Tensor:
         teacher_input = obs[:, : self.teacher_encoder_obs_dim]
-        return self.teacher_encoder(teacher_input)
+        latent = self.teacher_encoder(teacher_input)
+        return torch.tanh(latent) if self.teacher_latent_activation == "tanh" else latent
 
     def _actor_input(self, obs: torch.Tensor) -> torch.Tensor:
         z = self.encode_teacher(obs)

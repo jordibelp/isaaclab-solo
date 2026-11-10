@@ -432,6 +432,8 @@ def _is_solo12_race_task_name(task_name: str | None) -> bool:
 _SOLO12_DIRECT_SYMMETRY_TASKS = {
     "solo12-v0",
     "solo12-two-feet",
+    "solo12-two-feet-IMU-teacher",
+    "solo12-two-feet-IMU-student-rl",
     "solo12-backflip",
     "Isaac-Solo12-Laas-Direct-v0",
     "solo12-IMU-based-teacher",
@@ -454,6 +456,7 @@ def _sync_base_imu_policy_cfg_from_env_cfg(env_cfg, agent_cfg) -> None:
     env_to_policy_fields = {
         "teacher_encoder_obs_dim": "teacher_encoder_obs_dim",
         "teacher_latent_dim": "teacher_latent_dim",
+        "teacher_latent_activation": "teacher_latent_activation",
         "teacher_encoder_hidden_dims": "teacher_encoder_hidden_dims",
         "teacher_critic_obs_dim": "teacher_critic_obs_dim",
         "base_imu_history_length": "history_len",
@@ -1603,9 +1606,15 @@ def _infer_mlp_input_output_dims(
 
 
 def _configure_student_policy_from_dagger_adapter(env_cfg, policy_cfg, adapter_checkpoint_path: str) -> None:
-    """Make a race TCN policy architecture match a saved DAgger adapter and teacher."""
+    """Match a base-IMU or race TCN policy to its saved DAgger adapter and teacher."""
 
     checkpoint = torch.load(adapter_checkpoint_path, map_location="cpu", weights_only=False)
+    if str(getattr(env_cfg, "policy_model", "")).startswith("base_imu_"):
+        from solo12_imu_pipeline import configure_base_imu_student
+
+        teacher_path = _resolve_existing_model_path(checkpoint["teacher_checkpoint"])
+        configure_base_imu_student(env_cfg, policy_cfg, checkpoint, teacher_path)
+        return
     layout = checkpoint.get("layout")
     dims = checkpoint.get("dims")
     if not isinstance(layout, dict) or not isinstance(dims, dict):
@@ -1793,7 +1802,7 @@ def _copy_normalizer_state(target_state, target_prefix: str, source_state, sourc
 def _copy_dagger_actor_normalizer_state(target_state, adapter_checkpoint, teacher_state, policy) -> list[str]:
     history_state = adapter_checkpoint.get("history_normalizer_state_dict")
     if not isinstance(history_state, dict):
-        return []
+        history_state = {}
 
     target_prefix = "actor_obs_normalizer"
     teacher_prefix = "actor_obs_normalizer"
@@ -1808,14 +1817,20 @@ def _copy_dagger_actor_normalizer_state(target_state, adapter_checkpoint, teache
         target_value = target_state[target_key].clone()
         history_value = history_state.get(suffix)
         teacher_value = teacher_state.get(f"{teacher_prefix}.{suffix}")
-        if not isinstance(history_value, torch.Tensor) or not isinstance(teacher_value, torch.Tensor):
-            continue
-        if history_value.shape[-1] != history_dim or teacher_value.shape[-1] < command_dim:
-            continue
-        target_value[:, :history_dim] = history_value.to(device=target_value.device)
-        target_value[:, history_dim : history_dim + command_dim] = teacher_value[:, -command_dim:].to(
-            device=target_value.device
-        )
+        # EmpiricalNormalization divides by std + eps. A fresh std=1 is NOT identity.
+        identity_std = 1.0 - policy.actor_obs_normalizer.eps
+        identity_value = {"_mean": 0.0, "_var": identity_std**2, "_std": identity_std}[suffix]
+        target_value.fill_(identity_value)
+        if isinstance(history_value, torch.Tensor):
+            if history_value.shape[-1] != history_dim:
+                continue
+            target_value[:, :history_dim] = history_value.to(device=target_value.device)
+        if isinstance(teacher_value, torch.Tensor):
+            if teacher_value.shape[-1] < command_dim:
+                continue
+            target_value[:, history_dim : history_dim + command_dim] = teacher_value[:, -command_dim:].to(
+                device=target_value.device
+            )
         target_state[target_key] = target_value
         copied.append(target_key)
 
@@ -1885,7 +1900,10 @@ def _copy_race_dagger_normalizer_state(
 def _initialize_student_from_dagger_adapter(runner, adapter_checkpoint_path: str) -> None:
     policy = runner.alg.policy
     if hasattr(policy, "actor_history_encoder"):
-        encoder_prefixes = ("actor_history_encoder", "critic_history_encoder")
+        encoder_prefixes = tuple(
+            name for name in ("actor_history_encoder", "critic_history_encoder")
+            if isinstance(getattr(policy, name, None), torch.nn.Module)
+        )
         current_sample_dim = int(getattr(policy, "history_sample_dim"))
         race_tcn_policy = False
         asymmetric_actor_critic = False
@@ -2028,15 +2046,14 @@ def _initialize_student_from_dagger_adapter(runner, adapter_checkpoint_path: str
             target_state, "critic_obs_normalizer", teacher_state, "critic_obs_normalizer"
         )
 
-    if race_tcn_policy:
-        for prefix, copied in (
-            ("actor_obs_normalizer.", copied_actor_norm),
-            ("critic_obs_normalizer.", copied_critic_norm),
-        ):
-            expected = {key for key in target_state if key.startswith(prefix)}
-            missing = sorted(expected.difference(copied))
-            if missing:
-                transfer_errors.append(f"normalizer transfer did not initialize: {', '.join(missing)}")
+    for prefix, copied in (
+        ("actor_obs_normalizer.", copied_actor_norm),
+        ("critic_obs_normalizer.", copied_critic_norm),
+    ):
+        expected = {key for key in target_state if key.startswith(prefix)}
+        missing = sorted(expected.difference(copied))
+        if missing:
+            transfer_errors.append(f"normalizer transfer did not initialize: {', '.join(missing)}")
 
     required_transfer_groups = [
         (
@@ -3160,6 +3177,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
     dump_yaml(os.path.join(log_dir, "params", "agent.yaml"), agent_cfg)
+    from solo12_imu_pipeline import save_training_contract
+
+    save_training_contract(log_dir, env_cfg, getattr(agent_cfg, "policy", None))
     dump_yaml(
         os.path.join(log_dir, "params", "seeding.yaml"),
         {
@@ -3219,6 +3239,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         *[inspect.getsourcefile(base) for base in type(agent_cfg).__mro__
                           if base.__module__.startswith("isaaclab_tasks.")],
                         *[inspect.getsourcefile(base) for base in type(runner.alg).__mro__ if base is not object],
+                        inspect.getsourcefile(type(runner.alg.policy)) if hasattr(runner.alg, "policy") else None,
+                        _THIS_DIR / "solo12_imu_pipeline.py" if str(getattr(env_cfg, "policy_model", "")).startswith("base_imu_") else None,
                         symmetry_py,
                         __file__,
                         _THIS_DIR / "continual_backprop.py",

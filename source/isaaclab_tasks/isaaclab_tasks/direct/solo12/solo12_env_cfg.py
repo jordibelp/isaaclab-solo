@@ -398,6 +398,7 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     base_obs_from_imu = False
     # With base_obs_from_imu: number of physics-rate IMU gravity-free linear acceleration samples observed
     # after the gravity (the current and previous physics steps, oldest first, 3 values each). 0 leaves them out.
+    # In encoded base_imu modes this instead selects clean base-origin acceleration for the teacher/critic.
     include_lin_acc_steps_in_imu_obs = 0
     # Selects the policy/observation layout. Supported values:
     # - "simple_mlp": legacy flat observation.
@@ -414,7 +415,12 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     use_rotMat_on_imu_encoder = False
     include_foot_height_obs = False
     teacher_latent_dim = 32
+    teacher_latent_activation = "identity"  # Legacy teachers remain unbounded; new teachers can match the TCN's tanh.
     teacher_encoder_hidden_dims = [256, 128, 64]
+    # Extra clean simulator signals for the encoded teacher and the student's privileged critic.
+    # These are never included in the student actor's history.
+    teacher_include_base_force = False
+    teacher_foot_force_obs = "none"  # "none", "norm" (4 scalars), or "vector" (4 base-frame vectors).
     feed_history_encoding_to_critic = False
 
     # Round-wise input-permutation experiment (arXiv:2405.19153). These values
@@ -630,7 +636,8 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     # Observation noise. noisy_actor_obs applies the sensor noise models to the actor observation: the
     # uniform (mocap) ranges below, or the base-IMU noise/bias model, also for the base-IMU student history.
     # noisy_critic_obs=True gives the critic the actor's observation (same noise); False gives it its own
-    # noise-free "critic" observation group, like the privileged critic of arXiv:2512.01996 (simple_mlp only).
+    # noise-free "critic" observation group. Encoded teachers also support a separate clean critic;
+    # encoded student critics and DAgger labels are always clean.
     noisy_actor_obs = True
     noisy_critic_obs = True
     base_lin_vel_noise = (-0.1, 0.1)
@@ -852,12 +859,12 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     def refresh_observation_dimensions(self):
         """Recompute observation dimensions after Hydra overrides."""
         self.refresh_base_imu_dimensions()
-        simple_mlp_only = (
-            self.remove_root_lin_vel_b_from_actor_obs or self.base_obs_from_imu or not self.noisy_critic_obs
-        )
+        encoded_imu = self.policy_model in {"base_imu_teacher", "base_imu_student_rl", "base_imu_student_dagger"}
+        simple_mlp_only = self.remove_root_lin_vel_b_from_actor_obs or self.base_obs_from_imu
+        simple_mlp_only |= not self.noisy_critic_obs and not encoded_imu
         if simple_mlp_only and self.policy_model != "simple_mlp":
             raise ValueError(
-                "remove_root_lin_vel_b_from_actor_obs, base_obs_from_imu and noisy_critic_obs=False only apply "
+                "remove_root_lin_vel_b_from_actor_obs and base_obs_from_imu only apply "
                 "to policy_model='simple_mlp'."
             )
         if self.base_obs_from_imu and (not self.imu_ekf_processed_inputs or self.use_rotMat_on_imu_encoder):
@@ -865,10 +872,13 @@ class Solo12EnvCfg(DirectRLEnvCfg):
                 "base_obs_from_imu uses the /odri/imu signals: keep imu_ekf_processed_inputs=True and "
                 "use_rotMat_on_imu_encoder=False."
             )
-        if self.include_lin_acc_steps_in_imu_obs < 0 or (
-            self.include_lin_acc_steps_in_imu_obs > 0 and not self.base_obs_from_imu
-        ):
-            raise ValueError("include_lin_acc_steps_in_imu_obs must be >= 0, and > 0 requires base_obs_from_imu=True.")
+        if self.include_lin_acc_steps_in_imu_obs > 0 and not (self.base_obs_from_imu or encoded_imu):
+            raise ValueError(
+                "include_lin_acc_steps_in_imu_obs must be an integer >= 0; > 0 requires "
+                "base_obs_from_imu=True or an encoded base_imu policy."
+            )
+        if (self.teacher_include_base_force or self.teacher_foot_force_obs != "none") and not encoded_imu:
+            raise ValueError("Privileged teacher force observations require an encoded base_imu policy.")
         legacy_obs_dim = BASE_OBSERVATION_SPACE - (0 if self.actor_obs_has_lin_vel() else ROOT_LIN_VEL_OBS_DIM)
         legacy_obs_dim += IMU_LIN_ACC_OBS_DIM * self.include_lin_acc_steps_in_imu_obs
 
@@ -882,6 +892,12 @@ class Solo12EnvCfg(DirectRLEnvCfg):
 
     def refresh_base_imu_dimensions(self):
         """Recompute student observation dimensions after Hydra overrides."""
+        if type(self.include_lin_acc_steps_in_imu_obs) is not int or self.include_lin_acc_steps_in_imu_obs < 0:
+            raise ValueError("include_lin_acc_steps_in_imu_obs must be an integer >= 0.")
+        if self.teacher_foot_force_obs not in {"none", "norm", "vector"}:
+            raise ValueError("teacher_foot_force_obs must be 'none', 'norm', or 'vector'.")
+        if self.teacher_latent_activation not in {"identity", "tanh"}:
+            raise ValueError("teacher_latent_activation must be 'identity' or 'tanh'.")
         for name in (
             "imu_noise_scale",
             "imu_acc_noise_scale",
@@ -895,6 +911,9 @@ class Solo12EnvCfg(DirectRLEnvCfg):
         teacher_encoder_dim = 3 + 3 + 3 + 24 + len(JOINT_NAMES)
         if self.include_foot_height_obs:
             teacher_encoder_dim += 4
+        teacher_encoder_dim += 3 * self.include_lin_acc_steps_in_imu_obs
+        teacher_encoder_dim += 3 if self.teacher_include_base_force else 0
+        teacher_encoder_dim += {"none": 0, "norm": 4, "vector": 12}[self.teacher_foot_force_obs]
         self.teacher_encoder_obs_dim = teacher_encoder_dim
         self.teacher_critic_obs_dim = teacher_encoder_dim + COMMAND_OBS_DIM
 
@@ -1027,3 +1046,36 @@ class Solo12TwoFeetEnvCfg(Solo12EnvCfg):
 
     # shorter bc we are using shorter episodes
     base_push_interval_range_s = (2.0, 5.0)
+
+
+@configclass
+class Solo12TwoFeetImuTeacherEnvCfg(Solo12TwoFeetEnvCfg):
+    """Existing two-feet curriculum with a clean privileged encoder teacher."""
+
+    policy_model = "base_imu_teacher"
+    noisy_actor_obs = False
+    noisy_critic_obs = False
+    include_lin_acc_steps_in_imu_obs = 4
+    teacher_include_base_force = True
+    teacher_foot_force_obs = "norm"
+    teacher_latent_activation = "tanh"
+    # Issued commands are available on the robot; simulated delay-line outputs are not.
+    action_obs_is_last_executed = False
+    base_imu_history_action_is_last_executed = False
+
+
+@configclass
+class Solo12TwoFeetImuStudentDaggerEnvCfg(Solo12TwoFeetImuTeacherEnvCfg):
+    """Noisy student histories and clean labels on the same two-feet task."""
+
+    policy_model = "base_imu_student_dagger"
+    imu_raw_inputs = True
+    noisy_actor_obs = True
+
+
+@configclass
+class Solo12TwoFeetImuStudentRlEnvCfg(Solo12TwoFeetImuStudentDaggerEnvCfg):
+    """History-only actor and clean privileged critic for PPO fine-tuning."""
+
+    policy_model = "base_imu_student_rl"
+    feed_history_encoding_to_critic = False

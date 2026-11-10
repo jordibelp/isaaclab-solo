@@ -85,7 +85,7 @@ def test_actor_observation_size_and_critic_groups(overrides, actor_obs_dim, crit
 
 @pytest.mark.parametrize(
     "option, value",
-    [("base_obs_from_imu", True), ("remove_root_lin_vel_b_from_actor_obs", True), ("noisy_critic_obs", False)],
+    [("base_obs_from_imu", True), ("remove_root_lin_vel_b_from_actor_obs", True)],
 )
 def test_new_observation_options_require_the_simple_mlp_layout(option, value):
     cfg = Solo12BaseImuStudentRlEnvCfg()
@@ -294,6 +294,7 @@ def test_each_physics_step_appends_observed_and_clean_accelerations_oldest_first
     env.cfg = cfg
     env._base_imu_enabled = True
     env._base_imu_history_len = 0
+    env._teacher_lin_acc_history = torch.zeros(1, 0, 3)
     env._imu_lin_acc_history = torch.zeros(1, 3, 2, 3)
     env._update_base_imu_bias_random_walk = lambda: None
 

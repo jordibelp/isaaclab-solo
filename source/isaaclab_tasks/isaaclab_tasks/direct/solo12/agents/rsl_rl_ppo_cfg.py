@@ -53,6 +53,7 @@ class RslRlPpoSolo12BaseImuTeacherCfg(RslRlPpoActorCriticCfg):
     class_name: str = "Solo12BaseImuTeacherActorCritic"
     teacher_encoder_obs_dim: int = _SOLO12_BASE_IMU_TEACHER_CFG.teacher_encoder_obs_dim
     teacher_latent_dim: int = _SOLO12_BASE_IMU_TEACHER_CFG.teacher_latent_dim
+    teacher_latent_activation: str = _SOLO12_BASE_IMU_TEACHER_CFG.teacher_latent_activation
     teacher_encoder_hidden_dims: list[int] = _SOLO12_BASE_IMU_TEACHER_CFG.teacher_encoder_hidden_dims
     command_dim: int = 3
 
@@ -160,4 +161,19 @@ class Solo12BaseImuStudentRlPPORunnerCfg(Solo12PPORunnerCfg):
         actor_hidden_dims=[256, 128, 64],
         critic_hidden_dims=[256, 128, 64],
         activation="elu",
+    )
+
+
+@configclass
+class Solo12TwoFeetImuTeacherPPORunnerCfg(Solo12BaseImuTeacherPPORunnerCfg):
+    experiment_name = "solo12_two_feet_imu_teacher"
+    run_name = "two-feet-clean-teacher"
+
+
+@configclass
+class Solo12TwoFeetImuStudentRlPPORunnerCfg(Solo12BaseImuStudentRlPPORunnerCfg):
+    experiment_name = "solo12_two_feet_imu_student_rl"
+    run_name = "two-feet-imu-student-ppo"
+    algorithm = Solo12PpoAlgorithmCfg(
+        **{**Solo12BaseImuStudentRlPPORunnerCfg().algorithm.to_dict(), "learning_rate": 2.0e-4}
     )

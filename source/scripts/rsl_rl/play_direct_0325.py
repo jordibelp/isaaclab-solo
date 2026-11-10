@@ -1466,6 +1466,7 @@ def _sync_base_imu_policy_cfg_from_env_cfg(env_cfg, agent_cfg) -> None:
     env_to_policy_fields = {
         "teacher_encoder_obs_dim": "teacher_encoder_obs_dim",
         "teacher_latent_dim": "teacher_latent_dim",
+        "teacher_latent_activation": "teacher_latent_activation",
         "teacher_encoder_hidden_dims": "teacher_encoder_hidden_dims",
         "teacher_critic_obs_dim": "teacher_critic_obs_dim",
         "base_imu_history_length": "history_len",
