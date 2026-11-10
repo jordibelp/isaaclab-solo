@@ -5,6 +5,18 @@ import math
 import torch
 
 
+def goal_facing_quat(start_position_w, goal_position_w):
+    """Flat base-to-world wxyz quaternion: base +X faces the goal's world-XY projection.
+
+    atan2(0, 0) gives yaw zero (world +X) for vertical or coincident goals.
+    """
+    offset_w = goal_position_w - start_position_w
+    half_yaw = 0.5 * torch.atan2(offset_w[:, 1], offset_w[:, 0])
+    quat = start_position_w.new_zeros((len(start_position_w), 4))
+    quat[:, 0], quat[:, 3] = torch.cos(half_yaw), torch.sin(half_yaw)
+    return quat
+
+
 def stage_settings(cfg, level):
     """Increase geometry first; only then fade the dense reward."""
     difficulty = min(level, len(cfg.goal_half_extents_m) - 1)

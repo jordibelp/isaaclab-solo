@@ -110,6 +110,19 @@ class BorinotGoToPlayEnv(BorinotGoToEnv):
             buffer[env_ids] = False
         self._segment_hold[env_ids] = hold
 
+    def _sample_reset_goals(self, start_position_w, env_ids):
+        if self.play_goal is None:
+            return super()._sample_reset_goals(start_position_w, env_ids)
+        # Face the owned live goal, not a training goal that _start_segment
+        # would replace. First relative targets resolve from the new reset pose.
+        if self._play_goal_targets is not None:
+            goals = self._play_goal_targets[env_ids] + self.scene.env_origins[env_ids]
+        elif self.play_goal_relative:
+            goals = start_position_w + self.play_goal
+        else:
+            goals = self.scene.env_origins[env_ids] + self.play_goal
+        return goals, self._play_deadline_steps((goals - start_position_w).norm(dim=-1), hold=False)
+
     def _reset_idx(self, env_ids):
         if env_ids is None:
             env_ids = self.robot._ALL_INDICES

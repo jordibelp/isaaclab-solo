@@ -38,6 +38,11 @@ def play_env(goal=GOAL, deadline_s=None, reset_at_deadline=False, goal_relative=
         self.reset_calls.append(env_ids.tolist())
         data = self.robot.data
         data.root_pos_w[env_ids] = data.root_pos_w.new_tensor(self.cfg.robot_home) + self.scene.env_origins[env_ids]
+        if self.cfg.init_base_attitude_points_to_goal:
+            root = data.root_pos_w.new_zeros((len(env_ids), 13))
+            root[:, :3] = data.root_pos_w[env_ids]
+            self._sample_reset_attitude(root, env_ids)
+            data.root_quat_w[env_ids] = root[:, 3:7]
         data.root_lin_vel_w[env_ids] = 0.0
         self._episode_steps[env_ids] = 0
 
@@ -74,6 +79,33 @@ def test_live_goal_replaces_sampled_goal_at_every_reset_and_restarts_the_goal_cl
         torch.testing.assert_close(buffer, distance.expand(2).to(buffer.dtype))
     assert env._first_arrival_s.tolist() == [-1.0, -1.0]
     assert env.reset_at_deadline is False and env.play_difficulty == 5
+
+
+@pytest.mark.parametrize("relative", [False, True])
+def test_goal_facing_reset_uses_the_live_goal_but_new_inflight_goals_do_not_teleport(relative):
+    env = play_env(goal=(1., -.5, 2.), goal_relative=relative,
+                   init_base_attitude_points_to_goal=True, reset_rpy_noise_degs=(40., 50., 170.))
+
+    def check_facing():
+        from test_goto import matrix
+        rotation = matrix(env.robot.data.root_quat_w)
+        delta = env._goal_position_w - env.robot.data.root_pos_w
+        delta[:, 2] = 0
+        torch.testing.assert_close(rotation[:, :, 0], delta / delta.norm(dim=-1, keepdim=True))
+        torch.testing.assert_close(rotation[:, :, 2], torch.tensor([[0., 0., 1.]], dtype=delta.dtype).repeat(2, 1))
+
+    check_facing()
+    q = env.robot.data.root_quat_w.clone()
+    position = env.robot.data.root_pos_w.clone()
+    env.set_play_goal((-2., .8, 1.), 2.0, relative=relative)
+    assert torch.equal(env.robot.data.root_quat_w, q) and torch.equal(env.robot.data.root_pos_w, position)
+    target = env._goal_position_w.clone()
+    env._reset_idx(torch.tensor([1]))
+    assert torch.equal(env._goal_position_w, target)
+    assert torch.equal(env.robot.data.root_quat_w[0], q[0])
+    # The untouched clone keeps its in-flight attitude; only clone 1 reorients.
+    expected = task_math.goal_facing_quat(env.robot.data.root_pos_w[1:], target[1:])
+    torch.testing.assert_close(env.robot.data.root_quat_w[1:], expected)
 
 
 @pytest.mark.parametrize("distance", [0.0, 0.5, 2.0, 2.25, 3.0, 6.0, 7.8, 8.544])

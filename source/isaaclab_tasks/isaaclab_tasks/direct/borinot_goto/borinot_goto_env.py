@@ -11,7 +11,7 @@ from isaaclab_tasks.direct.borinot.action_limits import clipped_limit_rewards
 from isaaclab_tasks.direct.borinot_cmd_vel.borinot_cmd_vel_env import BorinotCmdVelEnv
 
 from .borinot_goto_env_cfg import BorinotGoToEnvCfg
-from .task_math import SuccessCurriculum, goal_success_parts, sample_goals, stage_force_limit, stage_settings
+from .task_math import SuccessCurriculum, goal_facing_quat, goal_success_parts, sample_goals, stage_force_limit, stage_settings
 
 
 class BorinotGoToEnv(BorinotCmdVelEnv):
@@ -193,12 +193,28 @@ class BorinotGoToEnv(BorinotCmdVelEnv):
         logs.update({f"Episode_Reward/{name}": value[completed].mean() for name, value in self._episode_terms.items()})
         self.extras["log"] = logs
 
+    def _sample_reset_goals(self, start_position_w, env_ids):
+        difficulty, _ = stage_settings(self.cfg, self.goal_curriculum.level)
+        return sample_goals(start_position_w, self.cfg, difficulty, self.step_dt)
+
+    def _sample_reset_attitude(self, root, env_ids):
+        if not self.cfg.init_base_attitude_points_to_goal:
+            return super()._sample_reset_attitude(root, env_ids)
+        # The parent has sampled the actual reset position, but has not written
+        # it or reset controller histories yet. Choose the episode goal now.
+        goals, steps = self._sample_reset_goals(root[:, :3], env_ids)
+        self._goal_position_w[env_ids], self._goal_deadline_steps[env_ids] = goals, steps
+        root[:, 3:7] = goal_facing_quat(root[:, :3], goals)
+
     def _reset_idx(self, env_ids):
         if env_ids is None:
             env_ids = self.robot._ALL_INDICES
         super()._reset_idx(env_ids)  # logs old outcome, resets the SAME shared plant/control state
         difficulty, factor = stage_settings(self.cfg, self.goal_curriculum.level)
-        goals, steps = sample_goals(self.robot.data.root_pos_w[env_ids], self.cfg, difficulty, self.step_dt)
+        if self.cfg.init_base_attitude_points_to_goal:
+            goals, steps = self._goal_position_w[env_ids], self._goal_deadline_steps[env_ids]
+        else:
+            goals, steps = sample_goals(self.robot.data.root_pos_w[env_ids], self.cfg, difficulty, self.step_dt)
         self._goal_position_w[env_ids] = goals
         self._goal_deadline_steps[env_ids] = steps
         self._goal_episode_level[env_ids] = self._episode_stage[env_ids] = self.goal_curriculum.level

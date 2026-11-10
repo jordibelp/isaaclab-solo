@@ -183,6 +183,30 @@ acceleration or heading. Height tells the policy where the ground boundary is.
 The default attitude is upright with independent ±5° reset offsets on each axis;
 the default base height is 1.5 m. All state inputs report the actual reset pose.
 
+### Optional goal-facing start
+
+Add `env.init_base_attitude_points_to_goal=True` to a GoTo or GoTo-minTime
+training/play command. The default is `False`, which keeps the existing reset
+distribution and random-number sequence.
+
+When enabled, each physical reset first samples the base position and goal.
+The base starts flat, with its +X axis pointing toward the goal in world XY.
+This replaces `robot_home_quat` and skips **all** `reset_rpy_noise_degs`, including
+roll and pitch, so the base is exactly flat. The yaw is computed directly with
+`atan2(goal_y - base_y, goal_x - base_x)`; this is the same rotation as using
+the horizontal goal unit vector, world +Z, and their cross product as columns.
+A goal directly above/below the base, or at the same position, uses yaw zero.
+The current robot's joint axes are along base -Y, so its leg moves in the
+base X-Z plane. This start aligns that sweep plane with the goal direction;
+it does not change the initial joint angles or point the foot horizontally.
+
+Full, partial and automatic episode resets use the new goal. The public
+player faces its active live goal on a physical reset. Sending a new goal
+during flight does not rotate or teleport the robot. This option does not add
+a heading reward or hold yaw during the episode. It changes the start
+distribution; whether the policy learns the intended leg-assisted tilt still
+needs a training comparison.
+
 ## Deadline and reward
 
 Let `d` be the Euclidean 3D distance in metres between the base-link origin and

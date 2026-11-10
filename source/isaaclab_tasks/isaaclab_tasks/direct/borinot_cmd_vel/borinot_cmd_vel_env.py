@@ -402,6 +402,16 @@ class BorinotCmdVelEnv(DirectRLEnv):
             IndiController, WrenchController, ModelWrenchController, ModelWrenchYawlessController, ModelWrenchIndiController, ModelWrenchYawlessIndiController, nominal_model_description, CbrtController, tracking_metrics, raw_action_limit_costs, decode_angle_actions, ActuatorDelay,
             apply_inertial_properties, BorinotInertialPropertiesCfg)]
 
+    def _sample_reset_attitude(self, root, env_ids):
+        """Set the reset attitude before writing the root and resetting controllers."""
+        root[:, 3:7] = torch.tensor(self.cfg.robot_home_quat, device=self.device)
+        if any(self.cfg.reset_rpy_noise_degs):
+            half_ranges = torch.deg2rad(torch.tensor(self.cfg.reset_rpy_noise_degs, device=self.device))
+            rpy = (2 * torch.rand(len(env_ids), 3, device=self.device) - 1) * half_ranges
+            delta = quat_from_euler_xyz(*rpy.unbind(-1))
+            # Right multiplication: small local offsets about the nominal home attitude.
+            root[:, 3:7] = quat_mul(root[:, 3:7], delta)
+
     def _reset_idx(self, env_ids):
         if env_ids is None:
             env_ids = self.robot._ALL_INDICES
@@ -412,13 +422,7 @@ class BorinotCmdVelEnv(DirectRLEnv):
         root[:, :3] = torch.tensor(self.cfg.robot_home, device=self.device) + self.scene.env_origins[env_ids]
         root[:, :2] += torch.empty(n, 2, device=self.device).uniform_(-self.cfg.reset_xy_noise_m, self.cfg.reset_xy_noise_m)
         root[:, 2] += torch.empty(n, device=self.device).uniform_(-self.cfg.reset_z_noise_m, self.cfg.reset_z_noise_m)
-        root[:, 3:7] = torch.tensor(self.cfg.robot_home_quat, device=self.device)
-        if any(self.cfg.reset_rpy_noise_degs):
-            half_ranges = torch.deg2rad(torch.tensor(self.cfg.reset_rpy_noise_degs, device=self.device))
-            rpy = (2 * torch.rand(n, 3, device=self.device) - 1) * half_ranges
-            delta = quat_from_euler_xyz(*rpy.unbind(-1))
-            # Right multiplication: small local offsets about the nominal home attitude.
-            root[:, 3:7] = quat_mul(root[:, 3:7], delta)
+        self._sample_reset_attitude(root, env_ids)
         root[:, 7:] = 0.0
         self.robot.write_root_state_to_sim(root, env_ids)
         self.robot.write_joint_state_to_sim(self.robot.data.default_joint_pos[env_ids],

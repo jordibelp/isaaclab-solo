@@ -12,6 +12,8 @@ class BorinotGoToEnvCfg(BorinotCmdVelEnvCfg):
     """Same flight plant, reset distribution and controllers; a different command and objective."""
     is_finite_horizon = True  # the deadline is part of the task, never a value bootstrap
     goal_conditioned = True
+    # Flat base +X toward the sampled goal in world XY; skip all reset RPY noise.
+    init_base_attitude_points_to_goal = False
     goal_half_extents_m = ((0.25, 0.25, 0.10), (0.5, 0.5, 0.20), (1.0, 1.0, 0.35),
                            (2.0, 2.0, 0.60), (3.0, 3.0, 0.80), (6.0, 6.0, 1.0))
     goal_deadline_range_s = ((2.5, 3.5), (2.0, 3.0), (1.5, 2.5), (1.0, 2.0), (0.7, 1.8), (1.0, 2.5))
