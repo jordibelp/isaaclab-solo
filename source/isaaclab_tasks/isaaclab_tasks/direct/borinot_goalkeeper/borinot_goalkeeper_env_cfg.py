@@ -36,7 +36,7 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     cbrt = CbrtControllerCfg()  # control_mode=cbrt or cbrt_indi; shared CBRT_CONTROL.md
     model_wrench_indi = ModelWrenchIndiCfg()  # hybrid residual filter; nominal gains stay in wrench
     wrench = WrenchControllerCfg()  # shared gains: wrench / model_wrench; see ../borinot/*WRENCH_CONTROL.md
-    indi = IndiControllerCfg()  # used only by control_mode="dsam_indi"; see INDI_CONTROL.md
+    indi = IndiControllerCfg()  # DSAM settings; spin inertia/nonlinear iterations also serve model-wrench INDI
     # geom = method 3; alternatives: method_1, method_2. Definitions:
     # /home/jordibelp/Desktop/emmaDocs/2026-10-23-tau-log-exp-comparison.ipynb
     indi_tilt_method = "geom"  # used only by control_mode="dsam_indi"; inherited by Borinot-cmd-vel

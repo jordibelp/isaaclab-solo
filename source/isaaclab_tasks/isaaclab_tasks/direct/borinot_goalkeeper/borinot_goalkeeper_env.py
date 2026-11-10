@@ -454,8 +454,8 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
             # Preserve the legacy PI mode's thrust-lag dynamics.
             self._rotor_thrust.add_(self._motor_alpha * (commands - self._rotor_thrust))
         wrench = self._rotor_thrust @ self._allocation.T
-        if self.cfg.control_mode == "dsam_indi":
-            wrench[:, 1:] += self._indi.transient_torque
+        if self.cfg.control_mode in ("dsam_indi", "model_wrench_indi", "model_wrench_yawless_indi"):
+            wrench[:, 1:] += controller.transient_torque
         # Forces act at the fixed rotor positions, about each environment's actual CoM.
         wrench[:, 1] -= self._base_com_offset[:, 1] * wrench[:, 0]
         wrench[:, 2] += self._base_com_offset[:, 0] * wrench[:, 0]

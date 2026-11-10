@@ -47,7 +47,8 @@ can all appear in the residual. It cannot cancel an impact before observing it.
 - `env.model_wrench_indi.filter_cutoff_hz=12.0`: shared residual-filter cutoff.
   It must be positive and below half `env.physics_hz`.
 - Gains, SAC reference scales, tilt method and allocation settings stay in
-  `env.wrench`. `env.indi` does **not** configure these hybrid modes.
+  `env.wrench`. Only the shared spin inertia and nonlinear iteration budget
+  below come from `env.indi`; its DSAM gains and filters do not apply here.
 - `env.model_wrench_use_prev_alpha=False` retains the original zero-virtual-alpha
   direction choice. `True` uses the previous requested angular acceleration,
   as in the nominal model-wrench family.
@@ -58,14 +59,23 @@ can all appear in the residual. It cannot cancel an impact before observing it.
   `body_com_lin_vel_w[:, base_id]`, not link-origin velocity, hidden acceleration,
   policy acceleration or predicted acceleration. Enabling an acceleration
   observation for the policy is independent of this controller input.
-- As in the nominal model-wrench plant, rotor spin inertia is not identified or
-  simulated (`G2=0`). Static thrust-lever-arm and aerodynamic-drag torque remain.
-  Changing `env.indi.rotor_spin_inertia_kg_m2` affects standalone `dsam_indi`, not these
-  modes. A calibrated nonzero spin model needs matching plant and allocation work;
-  it is not silently claimed here.
+- `env.indi.rotor_spin_inertia_kg_m2=0.0` sets the spin-axis inertia per rotor,
+  in kg·m², for `dsam_indi`, `model_wrench_indi` and `model_wrench_yawless_indi`.
+  Zero keeps the previous behavior exactly. A finite positive value enables
+  spin-acceleration reaction torque in bounded allocation, reconstructed
+  applied torque and simulated physics. The sign follows `env.rotor_spin`,
+  as in DSAM. Static thrust-lever-arm and aerodynamic-drag torque remain.
+  This does not add rotor gyroscopic coupling. No calibrated inertia is supplied.
+- `env.indi.nonlinear_iterations=6` sets the shared bounded speed-inversion
+  budget when spin inertia is nonzero. The solve includes commanded-speed
+  differences, followed by one motor-lag update. Feedback and physics instead
+  use the realized post-lag speed difference over the completed interval.
+  Plain `model_wrench` / `model_wrench_yawless` still omit rotor spin inertia.
 
 Physical resets clear only selected observer histories and zero the filter.
-The first command is exactly nominal, with no stale acceleration difference.
+Command-speed history resets to hover and transient torque resets to zero.
+The first torque request is exactly nominal, with no stale acceleration difference.
+Nonzero inertia can change its rotor allocation.
 GoTo goal-clock updates that do not reset the robot keep the observer history.
 
 ## Use
@@ -82,12 +92,13 @@ From the normal IsaacLab environment, for example:
 For playback, use the same mode and angle-encoding overrides as training with
 `play_borinot_cmd_vel.py`, `play_borinot_goto.py`, or
 `play_borinot_goalkeeper.py`. Do not interchange the nine- and eight-action layouts.
+Also restore the training value of `env.indi.rotor_spin_inertia_kg_m2`.
 
 ## Diagnostics and sources
 
 The controller exposes `nominal_wrench`, corrected `requested_wrench`,
 `disturbance_b`, `raw_disturbance_w`, `measured_acceleration_b`,
-`applied_wrench`, and `allocation_residual`. These are numeric buffers, not new
+`applied_wrench`, `transient_torque`, and `allocation_residual`. These are numeric buffers, not new
 automatic W&B histories. `measured_acceleration_b` uses the **previous** body
 frame; `disturbance_b` uses the **current** one. Requested wrench residuals use
 the pre-lag bounded allocation. `applied_wrench` is post-lag. Nominal predicted
@@ -95,8 +106,8 @@ base/joint accelerations and diagnostic arm reactions remain **nominal**, not
 predictions of the corrected, saturated or lagged response.
 
 - `controllers/borinot_model_wrench_indi.py`: observer and both hybrid classes.
-- `controllers/borinot_model_wrench{,_yawless}.py`: unchanged nominal laws plus
-  one no-op torque hook for the hybrid subclasses.
+- `controllers/borinot_model_wrench{,_yawless}.py`: nominal laws and hooks for
+  hybrid torque correction and rotor allocation.
 - `borinot_goalkeeper/tests/test_model_wrench_indi.py`: full-dynamics forward
   oracle, rotating frames, SciPy filter, action pairs, causality and reset checks.
 - `borinot_goalkeeper/tests/model_wrench_indi_smoke.py`: actual registered

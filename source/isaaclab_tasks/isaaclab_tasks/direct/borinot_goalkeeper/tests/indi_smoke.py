@@ -51,9 +51,7 @@ def main(cfg, agent_cfg):
         check("shared_source_is_snapshotted", inspect.getsourcefile(IndiController) in env.get_code_snapshot_files())
         check("physics_policy_timing", abs(env.physics_dt-1/cfg.physics_hz) < 1e-10
               and abs(env.step_dt-1/cfg.policy_hz) < 1e-10)
-        simple = 'Simple' in args.task
-        velocity = args.task in ("Borinot-cmd-vel", "Borinot-Cmd-Vel-Direct-v0")
-        actor_size, critic_size = (43, 43) if velocity else (53, 63 if simple else 65)
+        actor_size, critic_size = cfg.observation_space, cfg.state_space
         check("actor_critic_dimensions", obs['policy'].shape == (args.num_envs, actor_size)
               and obs['critic'].shape == (args.num_envs, critic_size))
         view = env.robot.root_physx_view

@@ -441,6 +441,12 @@ We do not pretend that `km` is rotor inertia: it is an aerodynamic drag-torque c
 ### Optional: nonzero `Ip`
 
 Set `env.indi.rotor_spin_inertia_kg_m2` to a measured value when available.
+The same field also configures `model_wrench_indi` and `model_wrench_yawless_indi`:
+their allocation, post-lag torque reconstruction and simulated plant use it
+together. See [Model-wrench INDI](../borinot/MODEL_WRENCH_INDI_CONTROL.md).
+Their gains, filters and linear allocation settings remain under `env.wrench`
+and `env.model_wrench_indi`, not the DSAM settings here. Only spin inertia and
+`env.indi.nonlinear_iterations` are shared. Zero remains the default.
 The solver then uses bounded, damped Gauss–Newton in normalized rotor-speed coordinates.
 Each of six default iterations solves a **batched 4×4 linear system**, even though there are six rotor outputs.
 It uses only the free rotor directions at a bound and tries several bounded step lengths.

@@ -62,6 +62,20 @@ def main(cfg, agent_cfg):
         actions = torch.cat(parts+[scalar[:, start:]], -1)
         original = ctrl.step
         raw_peaks = []
+        transient_peaks = []
+        last_transient = torch.zeros_like(ctrl.transient_torque)
+        original_wrench = env.robot.permanent_wrench_composer.set_forces_and_torques
+
+        def traced_wrench(**kwargs):
+            expected = env._rotor_thrust @ env._allocation.T
+            expected[:, 1:] += last_transient
+            expected[:, 1] -= env._base_com_offset[:, 1]*expected[:, 0]
+            expected[:, 2] += env._base_com_offset[:, 0]*expected[:, 0]
+            check("plant_includes_spin_acceleration", torch.allclose(
+                kwargs["torques"][:, 0], expected[:, 1:], atol=2e-5, rtol=2e-5))
+            return original_wrench(**kwargs)
+
+        env.robot.permanent_wrench_composer.set_forces_and_torques = traced_wrench
 
         def traced(action, quat, rates, q, dq, velocity_w):
             rotation = rotation_from_quat(quat)
@@ -82,10 +96,18 @@ def main(cfg, agent_cfg):
             check("collective_not_corrected", torch.equal(ctrl.requested_wrench[:, :1], ctrl.nominal_wrench[:, :1]))
             check("one_speed_update", torch.allclose(ctrl.rotor_speed,
                   speed+ctrl.motor_alpha*((commands/cfg.kf).sqrt()-speed), atol=1e-5, rtol=1e-6))
+            last_transient.zero_()
+            last_transient[:, 2] = (((ctrl.rotor_speed-speed)/ctrl.dt)
+                *torch.tensor(cfg.rotor_spin, device=env.device)*cfg.indi.rotor_spin_inertia_kg_m2).sum(-1)
+            check("spin_acceleration_torque", torch.allclose(ctrl.transient_torque, last_transient,
+                  atol=2e-5, rtol=2e-5))
+            applied = matvec(ctrl.allocator.allocation, cfg.kf*ctrl.rotor_speed.square())
+            applied[:, 1:] += last_transient
             check("applied_rotor_wrench", torch.allclose(ctrl.applied_wrench,
-                  matvec(ctrl.allocator.allocation, cfg.kf*ctrl.rotor_speed.square())))
+                  applied, atol=2e-5, rtol=2e-5))
             check("finite_correction", torch.isfinite(ctrl.disturbance_b).all())
             raw_peaks.append(float(ctrl.raw_disturbance_w.abs().max()))
+            transient_peaks.append(float(last_transient.abs().max()))
             return commands, effort
 
         ctrl.step = traced
@@ -98,6 +120,8 @@ def main(cfg, agent_cfg):
         env._reset_idx(torch.tensor([0], device=env.device))
         check("partial_reset_isolation", torch.equal(ctrl.residual_filter.z1[1:], preserved))
         check("no_stale_residual", not ctrl.measurement_ready[0] and not ctrl.disturbance_b[0].any())
+        check("reset_spin_history", not ctrl.transient_torque[0].any()
+              and torch.equal(ctrl.command_speed[0], ctrl.rotor_speed[0]))
         env._step_wrench(actions)
         check("fresh_reset_tick", not ctrl.raw_disturbance_w[0].any() and not ctrl.disturbance_b[0].any())
         env.episode_length_buf.fill_(env.max_episode_length)
@@ -107,6 +131,9 @@ def main(cfg, agent_cfg):
         env.step(actions)
         check("automatic_reset", not ctrl.measurement_ready.any() and not ctrl.disturbance_b.any())
         report["max_raw_residual_nm"] = max(raw_peaks)
+        report["max_spin_acceleration_torque_nm"] = max(transient_peaks)
+        if cfg.indi.rotor_spin_inertia_kg_m2:
+            check("nonzero_inertia_exercised", max(transient_peaks) > 1e-5)
         report["status"] = "passed"
     finally:
         args.output.parent.mkdir(parents=True, exist_ok=True)

@@ -180,6 +180,13 @@ class ModelWrenchController(WrenchController):
         """Nominal law is unchanged; hybrid subclasses add residual feedback here."""
         return torque
 
+    def _allocate_rotors(self):
+        self.requested_rotor_thrust.copy_(matvec(self.allocator.inverse, self.requested_wrench))
+        commands = self.allocator.thrust(self.requested_wrench)
+        self.allocation_residual.copy_(matvec(self.allocator.allocation, commands)-self.requested_wrench)
+        self.rotor_speed.add_(self.motor_alpha*((commands/self.task.kf).sqrt()-self.rotor_speed))
+        return commands
+
     def step(self, actions, quaternion, rates, joint_pos, joint_vel):
         if self.task.sac_action_mapping:
             u = decode_angle_actions(clamp_scalar_actions(actions, self.task, 1.0), self.task)
@@ -231,9 +238,6 @@ class ModelWrenchController(WrenchController):
         self.external_force_w.copy_(matvec(rotation, self.mass[:, None]*(actual_a-gravity_b)-axis*thrust[:, None]))
         self.external_moment_b.copy_(matvec(self.inertia, self.alpha_desired)
             + torch.linalg.cross(rates, matvec(self.inertia, rates))-torque)
-        self.requested_rotor_thrust.copy_(matvec(self.allocator.inverse, self.requested_wrench))
-        commands = self.allocator.thrust(self.requested_wrench)
-        self.allocation_residual.copy_(matvec(self.allocator.allocation, commands)-self.requested_wrench)
-        self.rotor_speed.add_(self.motor_alpha*((commands/self.task.kf).sqrt()-self.rotor_speed))
+        commands = self._allocate_rotors()
         self.ready.fill_(True)
         return commands, effort

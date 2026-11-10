@@ -27,7 +27,7 @@ class IndiControllerCfg:
     allocation_weights: tuple = (1.0, 10.0, 10.0, 1.0)  # squared, capacity-normalized wrench error
     allocation_iterations: int = 96
     nonlinear_iterations: int = 6
-    rotor_spin_inertia_kg_m2: float = 0.0  # NOT identified: default omits G2 in controller AND physics
+    rotor_spin_inertia_kg_m2: float = 0.0  # shared by dsam_indi and model-wrench INDI; 0 omits G2
     inertia_scale: float = 1.0  # fixed nominal base inertia; arm reactions remain disturbances
     joint_ki: float = 0.5  # N*m/(rad*s); kp/kd use the task's existing fields
     joint_integral_limit: float = 0.3  # rad*s, with conditional anti-windup
@@ -221,6 +221,37 @@ def box_qp(hessian, linear, initial, lipschitz, iterations):
     return x
 
 
+def invert_rotor_speed(x, previous, a, b, target, iterations):
+    """Bounded speed inversion of thrust/drag plus spin-acceleration torque.
+
+    Inputs use normalized speeds and weighted wrenches. Matrices may be shared
+    or batched per environment. Solve only 4x4 systems, without host checks.
+    """
+    def mv(matrix, vector):
+        return (matrix @ vector.unsqueeze(-1)).squeeze(-1)
+
+    for _ in range(iterations):
+        value = mv(a, x.square()) + mv(b, x-previous)
+        jacobian = 2*a * x[:, None, :] + b
+        residual = value - target
+        gradient = mv(jacobian.mT, residual)
+        free = ((x > 1e-6) & (x < 1-1e-6)) | ((x <= 1e-6) & (gradient < 0)) | ((x >= 1-1e-6) & (gradient > 0))
+        jacobian = jacobian * free[:, None, :]
+        normal = jacobian @ jacobian.mT + 1e-6*torch.eye(4, device=x.device, dtype=x.dtype)
+        solution, _ = torch.linalg.solve_ex(normal, residual.unsqueeze(-1))
+        delta = -(jacobian.mT @ solution).squeeze(-1)
+        candidate = (x + delta).clamp(0, 1)
+        best, cost = x, residual.square().sum(-1)
+        for step in (1.0, 0.5, 0.25, 0.125):
+            trial = x + step*(candidate-x)
+            residual = mv(a, trial.square()) + mv(b, trial-previous) - target
+            trial_cost = residual.square().sum(-1)
+            best = torch.where((trial_cost < cost)[:, None], trial, best)
+            cost = torch.minimum(cost, trial_cost)
+        x = best
+    return x
+
+
 class RotorAllocator:
     """Six bounded rotors; normalized wrench least squares, not inverse-then-clip."""
 
@@ -247,32 +278,9 @@ class RotorAllocator:
         speed = (self.thrust(wrench) / self.kf).sqrt()
         if self.cfg.rotor_spin_inertia_kg_m2 == 0:
             return speed
-        # Eq. (16) generalized from four equations/four rotors to four equations/six rotors.
-        # Bounded, damped Gauss-Newton in normalized speed. Solve only 4x4 systems,
-        # using solve_ex to avoid a CUDA->CPU error-check synchronization each iteration.
         x, previous = speed / self.speed_max, previous_command / self.speed_max
         target = wrench / self.scale * self.weight
-        for _ in range(self.cfg.nonlinear_iterations):
-            value = x.square() @ self.a.T + (x - previous) @ self.b.T
-            jacobian = 2*self.a[None] * x[:, None, :] + self.b[None]
-            residual = value - target
-            gradient = (jacobian.mT @ residual.unsqueeze(-1)).squeeze(-1)
-            free = ((x > 1e-6) & (x < 1 - 1e-6)) | ((x <= 1e-6) & (gradient < 0)) | ((x >= 1-1e-6) & (gradient > 0))
-            jacobian = jacobian * free[:, None, :]
-            normal = jacobian @ jacobian.mT + 1e-6*torch.eye(4, device=x.device, dtype=x.dtype)
-            solution, _ = torch.linalg.solve_ex(normal, residual.unsqueeze(-1))
-            delta = -(jacobian.mT @ solution).squeeze(-1)
-            candidate = (x + delta).clamp(0, 1)
-            # Keep only improving steps; infeasible wrench requests remain explicitly residuals.
-            best, cost = x, (value - target).square().sum(-1)
-            for step in (1.0, 0.5, 0.25, 0.125):
-                trial = x + step * (candidate - x)
-                residual = trial.square() @ self.a.T + (trial - previous) @ self.b.T - target
-                trial_cost = residual.square().sum(-1)
-                best = torch.where((trial_cost < cost)[:, None], trial, best)
-                cost = torch.minimum(cost, trial_cost)
-            x = best
-        return x * self.speed_max
+        return invert_rotor_speed(x, previous, self.a, self.b, target, self.cfg.nonlinear_iterations) * self.speed_max
 
 
 class IndiController:

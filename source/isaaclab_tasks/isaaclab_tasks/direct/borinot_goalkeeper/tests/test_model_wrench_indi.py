@@ -14,12 +14,13 @@ from test_model_wrench_yawless import controller as yawless_controller
 from test_wrench import wrench
 
 
-def hybrid(n=8, yawless=False, sac=False, dtype=torch.float64):
+def hybrid(n=8, yawless=False, sac=False, dtype=torch.float64, ip=0.0):
     module = importlib.import_module(wrench.__package__ + ".borinot_model_wrench_indi")
     old = (yawless_controller if yawless else nominal_controller)(n=n, sac=sac, dtype=dtype)
     cfg = old.task
     cfg.control_mode += "_indi"
     cfg.model_wrench_indi = module.ModelWrenchIndiCfg()
+    cfg.indi.rotor_spin_inertia_kg_m2 = ip
     method("borinot_goalkeeper_env_cfg.py", "configure_control")(cfg)
     cls = module.ModelWrenchYawlessIndiController if yawless else module.ModelWrenchIndiController
     return cls(cfg, old.allocator.allocation, old.model, old.hover), old
@@ -43,18 +44,23 @@ def test_first_tick_is_exact_nominal_and_interface_is_unchanged(yawless, sac):
     assert ctrl.task.observation_space == old.task.observation_space
 
 
+@pytest.mark.parametrize("ip", [0.0, 2e-5])
 @pytest.mark.parametrize("yawless", [False, True])
 @pytest.mark.parametrize("dtype,tol", [(torch.float64, 2e-12), (torch.float32, 3e-5)])
-def test_independent_forward_model_residual_sign_and_realized_torque(yawless, dtype, tol):
-    ctrl, _ = hybrid(yawless=yawless, dtype=dtype)
+def test_independent_forward_model_residual_sign_and_realized_torque(yawless, dtype, tol, ip):
+    ctrl, _ = hybrid(yawless=yawless, dtype=dtype, ip=ip)
     torch.manual_seed(5)
     q, dq, rates = torch.randn(8, 2, dtype=dtype)*.2, torch.randn(8, 2, dtype=dtype)*.1, torch.randn(8, 3, dtype=dtype)*.1
     quat = torch.tensor(Rotation.random(8, random_state=9).as_quat(scalar_first=True), dtype=dtype)
     rotation = wrench.rotation_from_quat(quat)
     velocity = torch.randn(8, 3, dtype=dtype)
     actions = torch.randn(8, ctrl.task.action_space, dtype=dtype)*.03
+    previous_speed = ctrl.rotor_speed.clone()
     _, effort = ctrl.step(actions, quat, rates, q, dq, velocity)
     realized = wrench.matvec(ctrl.allocator.allocation, ctrl.task.kf*ctrl.rotor_speed.square())
+    realized[:, 3] += ((ctrl.rotor_speed-previous_speed)/ctrl.dt
+                      * torch.tensor(ctrl.task.rotor_spin, dtype=dtype) * ip).sum(-1)
+    torch.testing.assert_close(ctrl.applied_wrench, realized, atol=tol, rtol=tol)
     disturbance = torch.tensor([[.03, -.04, .02]], dtype=dtype).repeat(8, 1)
     rhs = torch.cat((torch.zeros(8, 2, dtype=dtype), realized[:, :1], realized[:, 1:]+disturbance, effort), -1)
     # Full eight-row forward solve, independent of the controller's reduced row.
@@ -68,6 +74,78 @@ def test_independent_forward_model_residual_sign_and_realized_torque(yawless, dt
     torch.testing.assert_close(ctrl.disturbance_b, b[0]*disturbance, atol=tol, rtol=tol)
     torch.testing.assert_close(ctrl.requested_wrench[:, 1:], ctrl.nominal_wrench[:, 1:]-ctrl.disturbance_b, atol=tol, rtol=tol)
     torch.testing.assert_close(ctrl.requested_wrench[:, :1], ctrl.nominal_wrench[:, :1], atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("yawless", [False, True])
+@pytest.mark.parametrize("field,value", [
+    ("rotor_spin_inertia_kg_m2", -1e-5), ("rotor_spin_inertia_kg_m2", float("nan")),
+    ("rotor_spin_inertia_kg_m2", float("inf")), ("nonlinear_iterations", 0),
+    ("nonlinear_iterations", True), ("nonlinear_iterations", 1.5),
+])
+def test_shared_inertia_config_is_validated_for_hybrids(yawless, field, value):
+    ctrl, _ = hybrid(yawless=yawless)
+    setattr(ctrl.task.indi, field, value)
+    with pytest.raises(ValueError, match=field):
+        method("borinot_goalkeeper_env_cfg.py", "configure_control")(ctrl.task)
+
+
+@pytest.mark.parametrize("yawless", [False, True])
+@pytest.mark.parametrize("dtype,tol", [(torch.float64, 2e-8), (torch.float32, 2e-5)])
+@pytest.mark.parametrize("lag", [1.0, 0.12])
+def test_nonzero_inertia_allocation_lag_and_reset(yawless, dtype, tol, lag):
+    ctrl, _ = hybrid(yawless=yawless, dtype=dtype, ip=2e-5)
+    ctrl.motor_alpha = lag
+    torch.manual_seed(123)
+    previous = ctrl.rotor_speed.clone()
+    feasible_speed = previous*(.95+.1*torch.rand_like(previous))
+    g2 = torch.zeros(4, 6, dtype=dtype)
+    g2[3] = torch.tensor(ctrl.task.rotor_spin, dtype=dtype)*2e-5
+    target = (wrench.matvec(ctrl.allocator.allocation, ctrl.task.kf*feasible_speed.square())
+              + ((feasible_speed-previous)/ctrl.dt) @ g2.T)
+    ctrl.requested_wrench.copy_(target)
+    commands = ctrl._allocate_rotors()
+    independent = (wrench.matvec(ctrl.allocator.allocation, commands)
+                   + ((ctrl.command_speed-previous)/ctrl.dt) @ g2.T)
+    torch.testing.assert_close(independent, target, atol=tol, rtol=tol)
+    torch.testing.assert_close(ctrl.allocation_residual, independent-target, atol=tol, rtol=tol)
+    torch.testing.assert_close(ctrl.rotor_speed, previous+lag*((commands/ctrl.task.kf).sqrt()-previous),
+                               atol=tol, rtol=tol)
+    expected_transient = ((ctrl.rotor_speed-previous)/ctrl.dt) @ g2[1:].T
+    torch.testing.assert_close(ctrl.transient_torque, expected_transient, atol=tol, rtol=tol)
+    assert ctrl.transient_torque[:, 2].abs().max() > 1e-4
+    assert (commands >= 0).all() and (commands <= ctrl.allocator.cap).all()
+    keep = ctrl.command_speed[1:].clone(), ctrl.transient_torque[1:].clone()
+    ctrl.reset(torch.tensor([0]))
+    assert not ctrl.transient_torque[0].any()
+    torch.testing.assert_close(ctrl.command_speed[0], ctrl.rotor_speed[0], atol=0, rtol=0)
+    torch.testing.assert_close(ctrl.command_speed[1:], keep[0], atol=0, rtol=0)
+    torch.testing.assert_close(ctrl.transient_torque[1:], keep[1], atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("mode", ["dsam_indi", "model_wrench_indi", "model_wrench_yawless_indi"])
+def test_actual_action_method_applies_inertia_torque_to_plant(mode):
+    from types import SimpleNamespace
+    from test_control import action_env
+
+    env, calls = action_env("thrust_and_torque_control")
+    env.cfg.control_mode = mode
+    # Use a nonzero fixture torque so dropping/doubling it cannot pass by roundoff.
+    controller = SimpleNamespace(rotor_speed=torch.full((3, 6), 500., dtype=torch.float64),
+        transient_torque=torch.tensor([[0., 0., .17]], dtype=torch.float64).repeat(3, 1))
+    env.cfg.rwd_scale_thrust_limits = env.cfg.rwd_scale_torque_limits = 0.
+    commands = env.cfg.kf*controller.rotor_speed.square()
+    effort = torch.zeros(3, 2, dtype=torch.float64)
+    if mode == "dsam_indi":
+        env._indi = controller
+        env.robot.data.root_quat_w = torch.tensor([[1., 0., 0., 0.]]).repeat(3, 1)
+        env.robot.data.joint_pos = env.robot.data.joint_vel = effort
+        controller.step = lambda *args: (commands, effort)
+    else:
+        env._wrench = controller
+        env._step_wrench = lambda _: (commands, effort)
+    method("borinot_goalkeeper_env.py", "_apply_action")(env)
+    expected = commands @ env._allocation[1:].T + controller.transient_torque
+    torch.testing.assert_close(calls["wrench"]["torques"][:, 0], expected, atol=0, rtol=0)
 
 
 @pytest.mark.parametrize("yawless", [False, True])

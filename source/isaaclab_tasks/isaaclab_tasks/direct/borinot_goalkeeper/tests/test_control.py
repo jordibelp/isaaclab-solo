@@ -50,6 +50,7 @@ def config():
                 pass
     values["sim"] = SimpleNamespace(dt=1/240, render_interval=4)
     values["km_over_kf"] = values["km"] / values["kf"]
+    values["indi"] = importlib.import_module(controllers.__name__ + ".borinot_indi").IndiControllerCfg()
     values["robot"] = SimpleNamespace(spawn=SimpleNamespace(articulation_props=SimpleNamespace(enabled_self_collisions=False)), actuators={"arm": SimpleNamespace(
         stiffness=35.0, damping=0.6, effort_limit_sim=2.7, velocity_limit_sim=15.0,
         friction=0.0, armature=0.00036207, effort_limit=None, velocity_limit=None)})

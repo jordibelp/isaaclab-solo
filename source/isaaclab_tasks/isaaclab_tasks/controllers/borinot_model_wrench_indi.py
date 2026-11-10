@@ -14,7 +14,7 @@ import math
 
 import torch
 
-from .borinot_indi import Butterworth, rotation_from_quat
+from .borinot_indi import Butterworth, invert_rotor_speed, rotation_from_quat
 from .borinot_model_wrench import ModelWrenchController
 from .borinot_model_wrench_yawless import ModelWrenchYawlessController
 from .borinot_wrench import matvec
@@ -27,6 +27,12 @@ class ModelWrenchIndiCfg:
     def validate(self, task):
         if not math.isfinite(self.filter_cutoff_hz) or not 0 < self.filter_cutoff_hz < task.physics_hz / 2:
             raise ValueError("model_wrench_indi.filter_cutoff_hz must be positive and below physics Nyquist.")
+        inertia = task.indi.rotor_spin_inertia_kg_m2
+        if not math.isfinite(inertia) or inertia < 0:
+            raise ValueError("indi.rotor_spin_inertia_kg_m2 must be finite and non-negative.")
+        iterations = task.indi.nonlinear_iterations
+        if isinstance(iterations, bool) or not isinstance(iterations, int) or iterations < 1:
+            raise ValueError("indi.nonlinear_iterations must be a positive integer.")
 
 
 class _ModelWrenchIndi:
@@ -48,14 +54,22 @@ class _ModelWrenchIndi:
         self.disturbance_b = allocation.new_zeros((n, 3))
         self.measured_acceleration_b = allocation.new_zeros((n, 6))
         self.residual_filter = Butterworth(self.raw_disturbance_w, task.model_wrench_indi.filter_cutoff_hz, self.dt)
+        self.command_speed = self.rotor_speed.clone()
+        self.transient_torque = allocation.new_zeros((n, 3))
+        self.g2 = allocation.new_zeros((4, 6))
+        self.g2[3] = allocation.new_tensor(task.rotor_spin) * task.indi.rotor_spin_inertia_kg_m2
+        self.speed_max = math.sqrt(self.allocator.cap / task.kf)
+        self.speed_effectiveness = (self.g2 * (self.speed_max/self.dt)
+                                   / self.allocator.scale[..., None] * self.allocator.weight[:, None])
 
     def reset(self, ids):
         super().reset(ids)
+        self.command_speed[ids] = self.rotor_speed[ids]
         self.measurement_ready[ids] = False
         for buffer in (self.previous_rotation, self.previous_velocity_w, self.previous_omega_w,
                        self.previous_effective_row, self.previous_effective_bias, self.previous_joint_effort,
                        self.applied_wrench, self.nominal_wrench, self.raw_disturbance_w,
-                       self.disturbance_b, self.measured_acceleration_b):
+                       self.disturbance_b, self.measured_acceleration_b, self.transient_torque):
             buffer[ids] = 0
         self.residual_filter.reset(ids, self.raw_disturbance_w[ids])
 
@@ -66,6 +80,24 @@ class _ModelWrenchIndi:
         self.previous_effective_row.copy_(effective[:, 3:])
         self.previous_effective_bias.copy_(effective_bias[:, 3:])
         return torque-self.disturbance_b
+
+    def _allocate_rotors(self):
+        if self.task.indi.rotor_spin_inertia_kg_m2 == 0:
+            return super()._allocate_rotors()
+        self.requested_rotor_thrust.copy_(matvec(self.allocator.inverse, self.requested_wrench))
+        initial = (self.allocator.thrust(self.requested_wrench)/self.task.kf).sqrt()/self.speed_max
+        command = self.speed_max * invert_rotor_speed(
+            initial, self.command_speed/self.speed_max, self.allocator.a, self.speed_effectiveness,
+            self.requested_wrench/self.allocator.scale*self.allocator.weight, self.task.indi.nonlinear_iterations)
+        commands = self.task.kf*command.square()
+        predicted = (matvec(self.allocator.allocation, commands)
+                     + ((command-self.command_speed)/self.dt) @ self.g2.T)
+        self.allocation_residual.copy_(predicted-self.requested_wrench)
+        self.command_speed.copy_(command)
+        next_speed = self.rotor_speed + self.motor_alpha*(command-self.rotor_speed)
+        self.transient_torque.copy_(((next_speed-self.rotor_speed)/self.dt) @ self.g2[1:].T)
+        self.rotor_speed.copy_(next_speed)
+        return commands
 
     def step(self, actions, quaternion, rates, joint_pos, joint_vel, velocity_w):
         rotation = rotation_from_quat(quaternion)
@@ -86,9 +118,9 @@ class _ModelWrenchIndi:
         self.previous_velocity_w.copy_(velocity_w)
         self.previous_omega_w.copy_(omega_w)
         self.previous_joint_effort.copy_(effort)
-        # This model-wrench plant has G2=0: no unidentified rotor spin inertia.
         # Reconstruct rotor-only torque, never the arm reaction or command wrench.
         self.applied_wrench.copy_(matvec(self.allocator.allocation, self.task.kf*self.rotor_speed.square()))
+        self.applied_wrench[:, 1:] += self.transient_torque
         self.measurement_ready.fill_(True)
         return commands, effort
 
