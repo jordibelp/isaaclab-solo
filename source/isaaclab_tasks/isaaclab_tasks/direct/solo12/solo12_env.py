@@ -272,9 +272,14 @@ class Solo12Env(DirectRLEnv):
         self._q_offset_action_and_obs = self._build_q_offset_action_and_obs()
         self._base_push_interval_step_range = self._seconds_range_to_steps(self.cfg.base_push_interval_range_s)
         self._base_push_duration_step_range = self._seconds_range_to_steps(self.cfg.base_push_duration_range_s)
+        self._base_push_initial_delay_step_range = (
+            self._base_push_interval_step_range
+            if self.cfg.base_push_initial_delay_range_s is None
+            else self._seconds_range_to_steps(self.cfg.base_push_initial_delay_range_s)
+        )
         self._base_push_steps_left = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self._base_push_steps_until_next = self._sample_int_steps(
-            self._base_push_interval_step_range, self.num_envs
+            self._base_push_initial_delay_step_range, self.num_envs
         )
         self._base_push_forces_b = torch.zeros(
             self.num_envs, len(self._base_wrench_body_ids), 3, device=self.device
@@ -1333,7 +1338,7 @@ class Solo12Env(DirectRLEnv):
     def _reset_base_pushes(self, env_ids: torch.Tensor):
         self._base_push_steps_left[env_ids] = 0
         self._base_push_steps_until_next[env_ids] = self._sample_int_steps(
-            self._base_push_interval_step_range, len(env_ids)
+            self._base_push_initial_delay_step_range, len(env_ids)
         )
         self._base_push_forces_b[env_ids] = 0.0
         self._base_push_application_points_b[env_ids] = 0.0

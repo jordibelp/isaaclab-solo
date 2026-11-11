@@ -547,7 +547,11 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     twofeet_airborne_reset_ang_vel_range = (-0.1, 0.1)  # rad/s, per world axis
     # Delays the joint-position target by physics steps.
     actuation_delay_range = (0, 3)
+    # Push-free wait after a push ends, not a start-to-start interval.
     base_push_interval_range_s = (10.0, 15.0)
+    # First-push delay after each reset. None uses the interval above (legacy timing).
+    # Zero starts the push on the first policy step; ranges are rounded to policy ticks.
+    base_push_initial_delay_range_s: tuple[float, float] | None = None
     base_push_duration_range_s = (0.5, 2.0)
     base_push_force_xy_range = (-4.5, 4.5)
     base_push_force_z_range = (-10.0, 10.0)
@@ -799,6 +803,15 @@ class Solo12EnvCfg(DirectRLEnvCfg):
                 term.mode = "curriculum_startup"
 
     def refresh_runtime_dependent_config(self):
+        delay = self.base_push_initial_delay_range_s
+        if delay is not None and (
+            not isinstance(delay, (tuple, list))
+            or len(delay) != 2
+            or any(not isinstance(value, (int, float)) or not math.isfinite(value) for value in delay)
+            or delay[0] < 0.0
+            or delay[1] < delay[0]
+        ):
+            raise ValueError("base_push_initial_delay_range_s must be None or a finite, ordered, non-negative pair.")
         self._apply_initial_position_reset_profile()
         self.refresh_observation_dimensions()
         self._apply_runtime_overrides_to_nested_cfg()
@@ -1060,6 +1073,8 @@ class Solo12TwoFeetEnvCfg(Solo12EnvCfg):
 
     # shorter bc we are using shorter episodes
     base_push_interval_range_s = (2.0, 5.0)
+    # Include early disturbances without shortening the push-free gaps later in the episode.
+    base_push_initial_delay_range_s = (0.0, 5.0)
 
 
 @configclass

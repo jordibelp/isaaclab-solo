@@ -53,6 +53,32 @@ W&B exposes `Curriculum/two_feet_phase`, `Curriculum/global_idx`,
 `Curriculum/advance_reward_ratio`, `Episode_Reward_ratio/*`, the active reward scales, terrain/delay settings,
 push magnitude, and `Curriculum/events_randomization_active`.
 
+## First-push timing
+
+Two-feet tasks, including the IMU teacher, DAgger and PPO student, now sample their first-push delay
+uniformly from `base_push_initial_delay_range_s=(0.0, 5.0)` after every reset. Each environment gets
+its own sample. About 20% of resets schedule a push within the first second and 40% within two seconds.
+These are scheduling probabilities, not measured push counts: an early termination can cancel a push.
+Curriculum phases with zero force still apply no force.
+
+The first delay is separate from `base_push_interval_range_s=(2.0, 5.0)`. In Solo12 this interval is a
+**push-free wait after the previous push ends**. The next interval is sampled when a push starts, but
+its countdown pauses while that push is active. A 2 s push and a 2 s interval therefore give roughly
+4 s between starts, not back-to-back pushes. Times are rounded to policy ticks; the existing scheduler
+can start a push one tick earlier than the nominal time.
+
+Use `env.base_push_initial_delay_range_s=[0.0,0.0]` for a push on the first policy step. Use
+`env.base_push_initial_delay_range_s=null` to restore the old full-interval delay after reset. This also
+preserves the old random-number draws. For example, compare old and new timing with all other
+training settings fixed, then evaluate identical forces at 0.1, 0.5, 1, 2 and 5 s after reset.
+
+Plain Solo12 and backflip retain `None` by default, but accept the same override. This option does not
+change force magnitudes, push durations, application points or the force curriculum. A partial reset
+clears and resamples only the selected environments; no active force carries into their new episodes.
+
+This is not a global change to every task's scheduler. Borinot cmd-vel/GoTo use **start-to-start**
+intervals, and GoTo already randomizes its first delay. Those tasks are unchanged.
+
 ## Posed starts (`twofeet_airborne_reset_prob`)
 
 This is the two-feet version of `backflip_airborne_reset_prob`. A fraction of the resets starts the robot
