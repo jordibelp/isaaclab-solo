@@ -94,7 +94,8 @@ not establish hardware transfer or broad robustness.
 
 These paths use the actual production networks. We restore network widths and
 normalizers from tensors. Teacher playback includes the privileged MLP encoder.
-DAgger playback uses the saved TCN and frozen teacher actor. Student PPO playback
+DAgger playback uses the saved TCN and its fine-tuned student actor head when present;
+older or frozen-head adapters use the original teacher actor. Student PPO playback
 uses its trained TCN and actor. Critics load for strict checkpoint checks but do not
 run during inference. No Isaac Sim application starts; the encoded loaders need the
 usual RSL-RL dependencies already installed in `env_isaaclab`.

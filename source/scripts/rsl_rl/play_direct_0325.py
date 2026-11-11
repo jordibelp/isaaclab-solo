@@ -1084,6 +1084,12 @@ def _build_base_imu_dagger_adapter_policy(
         teacher_obs_dim=teacher_obs_dim,
         device=device,
     )
+    from solo12_imu_pipeline import adapter_student_actor_state
+
+    student_actor_state = adapter_student_actor_state(adapter_checkpoint)
+    if student_actor_state is not None:
+        teacher.actor.load_state_dict(student_actor_state, strict=True)
+        print("[INFO] Using the DAgger-fine-tuned student actor head for playback.", flush=True)
     latent_dim = int(teacher.teacher_latent_dim)
     adapter = BaseImuTcnEncoder(
         history_len=int(raw_env.cfg.base_imu_history_length),

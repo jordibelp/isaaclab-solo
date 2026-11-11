@@ -111,6 +111,9 @@ class EncodedPolicy(torch.nn.Module):
             _, teacher_cfg = saved_contract(teacher_path, teacher_payload)
             state = teacher_payload["model_state_dict"]
             self.network = self._teacher(models, pipeline, state, activation=policy_cfg.get("activation", teacher_cfg.get("activation", activation)))
+            student_actor_state = pipeline.adapter_student_actor_state(payload)
+            if student_actor_state is not None:
+                self.network.actor.load_state_dict(student_actor_state, strict=True)
             tcn_state = payload["adapter_state_dict"]
             self.history_encoder = self._tcn(models, tcn_state, payload.get("layout", {}))
             dims = payload["dims"]

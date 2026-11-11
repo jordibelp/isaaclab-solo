@@ -1,7 +1,11 @@
 """CPU checks for real base-IMU networks and the public DAgger-to-PPO loader."""
 
 import ast
+import argparse
+import copy
 import importlib.util
+import math
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -103,7 +107,7 @@ def chain(tmp_path, request):
     dims = {"history_len": 9, "history_sample_dim": 45, "teacher_obs_dim": 67, "latent_dim": 7}
     checkpoint = {
         **pipeline.adapter_metadata(cfg, SimpleNamespace(activation="elu"), str(teacher_path),
-                                    supervise_action=True, action_loss_coef=0.25),
+                                    action_loss_coef=0.25),
         "adapter_state_dict": adapter.state_dict(), "history_normalizer_state_dict": normalizer.state_dict(),
         "dims": dims,
     }
@@ -201,6 +205,177 @@ def test_action_loss_updates_only_the_history_encoder(chain):
     action.square().mean().backward()
     assert all(p.grad is None for p in c.teacher.parameters())
     assert c.adapter.conv_stack[0].conv.weight.grad.abs().sum() > 0
+
+
+def dagger_cli(monkeypatch, *args):
+    path = Path(__file__).with_name("train_solo12_base_imu_dagger.py")
+    nodes = ast.parse(path.read_text()).body
+    start = next(i for i, node in enumerate(nodes) if isinstance(node, ast.Assign)
+                 and any(isinstance(t, ast.Name) and t.id == "parser" for t in node.targets))
+    stop = next(i for i, node in enumerate(nodes) if isinstance(node, ast.Assign)
+                and any(isinstance(t, ast.Attribute) and t.attr == "argv" for t in node.targets))
+    monkeypatch.setattr(sys, "argv", [str(path), *args])
+    ns = {"argparse": argparse, "math": math,
+          "cli_args": SimpleNamespace(add_rsl_rl_args=lambda parser: None),
+          "AppLauncher": SimpleNamespace(add_app_launcher_args=lambda parser: None)}
+    exec(compile(ast.Module(body=nodes[start:stop], type_ignores=[]), str(path), "exec"), ns)
+    assert not ns["hydra_args"]
+    return ns["args_cli"]
+
+
+@pytest.mark.parametrize("args,finetune,supervise", [
+    ([], False, True), (["--action-loss-coef", "0"], False, False),
+    (["--finetune-student-actor"], True, True),
+    (["--supervise-action", "--action-loss-coef", "0"], False, False),
+])
+def test_action_coefficient_controls_supervision_without_a_separate_flag(monkeypatch, args, finetune, supervise):
+    parsed = dagger_cli(monkeypatch, *args)
+    assert parsed.finetune_student_actor is finetune
+    assert parsed.supervise_action is supervise
+
+
+@pytest.mark.parametrize("args", [
+    ["--finetune-student-actor", "--action-loss-coef", "0"],
+    ["--action-loss-coef", "-0.1"], ["--action-loss-coef", "nan"], ["--action-loss-coef", "inf"],
+])
+def test_invalid_action_objective_fails_before_simulator_launch(monkeypatch, args):
+    with pytest.raises(SystemExit) as exc:
+        dagger_cli(monkeypatch, *args)
+    assert exc.value.code == 2
+
+
+@pytest.mark.parametrize("finetune,coefficient", [(False, 0.), (False, 0.25), (True, 0.25)])
+def test_real_supervised_loop_updates_only_selected_networks(chain, finetune, coefficient):
+    c = chain
+    c.teacher.requires_grad_(False)
+    student_actor = copy.deepcopy(c.teacher.actor).requires_grad_(True) if finetune else None
+    parameters = list(c.adapter.parameters()) + (list(student_actor.parameters()) if finetune else [])
+    teacher_before = {k: v.clone() for k, v in c.teacher.state_dict().items()}
+    adapter_before = {k: v.clone() for k, v in c.adapter.state_dict().items()}
+    actor_before = {k: v.clone() for k, v in student_actor.state_dict().items()} if finetune else None
+    batch = (c.history, torch.randn(6, 7), torch.randn(6, 3), torch.randn(6, 12))
+    path = Path(__file__).with_name("train_solo12_base_imu_dagger.py")
+    main = next(n for n in ast.parse(path.read_text()).body if isinstance(n, ast.FunctionDef) and n.name == "main")
+    loop = next(n for n in ast.walk(main) if isinstance(n, ast.For)
+                and ast.unparse(n.iter) == "range(int(updates))")
+    ns = {"torch": torch, "nn": torch.nn, "teacher": c.teacher, "adapter": c.adapter,
+          "student_actor": student_actor, "history_normalizer": None, "device": torch.device("cpu"),
+          "optimizer": torch.optim.AdamW(parameters, lr=0.01, weight_decay=0.),
+          "trainable_parameters": parameters, "updates": 1, "mini_batch_size": 6,
+          "buffer": SimpleNamespace(sample=lambda *_: batch),
+          "args_cli": SimpleNamespace(action_loss_coef=coefficient, supervise_action=coefficient != 0., max_grad_norm=1.),
+          "loss_sum": 0., "latent_loss_sum": 0., "action_loss_sum": 0.}
+    exec(compile(ast.Module(body=[loop], type_ignores=[]), str(path), "exec"), ns)
+    assert all(torch.equal(v, c.teacher.state_dict()[k]) for k, v in teacher_before.items())
+    assert all(p.grad is None for p in c.teacher.parameters())
+    assert any(not torch.equal(v, c.adapter.state_dict()[k]) for k, v in adapter_before.items())
+    assert (ns["action_loss_sum"] > 0.) is (coefficient != 0.)
+    if finetune:
+        assert any(not torch.equal(v, student_actor.state_dict()[k]) for k, v in actor_before.items())
+
+
+def test_public_handoff_uses_modified_actor_but_original_privileged_critic(chain):
+    c = chain
+    actor = copy.deepcopy(c.teacher.actor)
+    with torch.no_grad():
+        for p in actor.parameters():
+            p.add_(0.12)
+    c.checkpoint["student_actor_state_dict"] = actor.state_dict()
+    c.checkpoint["objective"]["finetune_student_actor"] = True
+    path = c.tmp_path / "finetuned.pt"
+    torch.save(c.checkpoint, path)
+    cfg = SimpleNamespace()
+    pipeline.configure_base_imu_student(c.cfg, cfg, c.checkpoint, str(c.teacher_path))
+    obs = TensorDict({"policy": torch.cat((c.history, c.obs["policy"][:, -3:]), -1),
+                      "critic": c.obs["critic"]}, batch_size=[6])
+    student = models.Solo12BaseImuStudentActorCritic(obs, {"policy": ["policy"], "critic": ["critic"]}, 12, **vars(cfg))
+    train_definitions()["_initialize_student_from_dagger_adapter"](SimpleNamespace(alg=SimpleNamespace(policy=student)), str(path))
+    student.eval()
+    command = c.teacher.actor_obs_normalizer(c.obs["policy"])[:, -3:]
+    expected = actor(torch.cat((c.adapter(c.normalizer(c.history)), command), -1))
+    torch.testing.assert_close(student.act_inference(obs), expected, rtol=0, atol=0)
+    torch.testing.assert_close(student.evaluate(obs), c.teacher.evaluate(c.obs), rtol=0, atol=0)
+    for k, v in c.teacher.critic.state_dict().items():
+        torch.testing.assert_close(student.critic.state_dict()[k], v, rtol=0, atol=0)
+    for k, v in actor.state_dict().items():
+        torch.testing.assert_close(student.actor.state_dict()[k], v, rtol=0, atol=0)
+    torch.testing.assert_close(student.log_std, c.teacher.log_std, rtol=0, atol=0)
+
+
+def dagger_definitions(*names):
+    path = Path(__file__).with_name("train_solo12_base_imu_dagger.py")
+    nodes = [n for n in ast.parse(path.read_text()).body if isinstance(n, ast.FunctionDef) and n.name in names]
+    ns = {"torch": torch}
+    future = ast.parse("from __future__ import annotations").body
+    exec(compile(ast.Module(body=future + nodes, type_ignores=[]), str(path), "exec"), ns)
+    return ns
+
+
+def test_collection_uses_modified_student_head_but_keeps_teacher_labels_fixed(chain):
+    c = chain
+    c.teacher.requires_grad_(False)
+    actor = copy.deepcopy(c.teacher.actor)
+    with torch.no_grad():
+        for p in actor.parameters():
+            p.add_(0.1)
+    collect = dagger_definitions("_teacher_targets_and_student_action")["_teacher_targets_and_student_action"]
+    args = dict(teacher=c.teacher, adapter=c.adapter, history_normalizer=c.normalizer,
+                teacher_obs_raw=c.obs["policy"], history_raw=c.history, stochastic_actions=False)
+    original = collect(**args)
+    modified = collect(**args, student_actor=actor)
+    for index in (0, 1, 2):
+        torch.testing.assert_close(original[index], modified[index], rtol=0, atol=0)
+    assert not torch.equal(original[3], modified[3])
+    expected = actor(torch.cat((c.adapter(c.normalizer(c.history)), modified[1]), -1))
+    torch.testing.assert_close(modified[3], expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("checkpoint", [
+    {"objective": {"finetune_student_actor": True}},
+    {"objective": {"finetune_student_actor": False}, "student_actor_state_dict": {}},
+    {"student_actor_state_dict": 123},
+])
+def test_inconsistent_saved_actor_is_never_silently_ignored(checkpoint):
+    with pytest.raises(ValueError, match="student_actor_state_dict"):
+        pipeline.adapter_student_actor_state(checkpoint)
+
+
+@pytest.mark.parametrize("finetune,coefficient", [(False, 0.), (False, 0.25), (True, 0.25)])
+def test_saved_objective_records_supervision_and_head_training_separately(chain, finetune, coefficient):
+    metadata = pipeline.adapter_metadata(chain.cfg, SimpleNamespace(), str(chain.teacher_path),
+                                         action_loss_coef=coefficient, finetune_student_actor=finetune)
+    assert metadata["objective"] == {"supervise_action": coefficient != 0.,
+                                     "action_loss_coef": coefficient, "finetune_student_actor": finetune}
+
+
+def test_isaac_adapter_player_uses_saved_modified_head(chain):
+    c = chain
+    actor = copy.deepcopy(c.teacher.actor)
+    with torch.no_grad():
+        for p in actor.parameters():
+            p.add_(0.12)
+    c.checkpoint["student_actor_state_dict"] = actor.state_dict()
+    c.checkpoint["objective"]["finetune_student_actor"] = True
+    path = Path(__file__).with_name("play_direct_0325.py")
+    nodes = [n for n in ast.parse(path.read_text()).body
+             if isinstance(n, (ast.FunctionDef, ast.ClassDef))
+             and n.name in {"BaseImuDaggerAdapterPolicy", "_build_base_imu_dagger_adapter_policy"}]
+    ns = {"torch": torch, "TensorDict": TensorDict, "BaseImuTcnEncoder": models.BaseImuTcnEncoder,
+          "EmpiricalNormalization": EmpiricalNormalization,
+          "_resolve_dagger_teacher_checkpoint": lambda _: str(c.teacher_path),
+          "_load_base_imu_teacher_policy": lambda **_: copy.deepcopy(c.teacher)}
+    exec(compile(ast.Module(body=ast.parse("from __future__ import annotations").body + nodes,
+                            type_ignores=[]), str(path), "exec"), ns)
+    cfg = SimpleNamespace(**vars(c.cfg))
+    cfg.base_imu_history_flat_dim = 405
+    obs = TensorDict({"policy": torch.cat((c.obs["policy"], c.history, c.obs["policy"][:, -3:]), -1)}, batch_size=[6])
+    env = SimpleNamespace(unwrapped=SimpleNamespace(device="cpu", cfg=cfg), num_actions=12,
+                          get_observations=lambda: obs)
+    policy = ns["_build_base_imu_dagger_adapter_policy"](
+        adapter_checkpoint=c.checkpoint, vec_env=env, agent_cfg=SimpleNamespace(policy=None), resume_path="adapter.pt")
+    command = c.teacher.actor_obs_normalizer(c.obs["policy"])[:, -3:]
+    expected = actor(torch.cat((c.adapter(c.normalizer(c.history)), command), -1))
+    torch.testing.assert_close(policy(obs), expected, rtol=0, atol=0)
 
 
 def test_new_teacher_can_match_the_students_bounded_latent_without_changing_old_teacher_outputs(chain):

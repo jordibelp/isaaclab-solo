@@ -7,7 +7,7 @@ We reuse the existing base-IMU PPO and DAgger implementations. Three new task ID
 | Stage | Task | Trainable networks |
 | --- | --- | --- |
 | A. Privileged PPO teacher | `solo12-two-feet-IMU-teacher` | State encoder, actor head, direct-state critic, action noise |
-| B. Supervised DAgger | `solo12-two-feet-IMU-student-dagger` | History TCN only |
+| B. Supervised DAgger | `solo12-two-feet-IMU-student-dagger` | History TCN; optional student actor-head copy |
 | C. Student PPO | `solo12-two-feet-IMU-student-rl` | History TCN, copied actor head, copied privileged critic, action noise |
 
 The original `solo12-two-feet` task and old IMU task defaults remain available. This is a PPO pipeline. Do not select the SAC agent entry point for these encoded tasks.
@@ -109,12 +109,20 @@ SOLO_IMU_TEACHER=/absolute/path/to/the/teacher_run/checkpoint.pt
 ```
 
 ```bash
-./isaaclab.sh -p source/scripts/rsl_rl/train_solo12_base_imu_dagger.py --task solo12-two-feet-IMU-student-dagger --teacher-checkpoint "$SOLO_IMU_TEACHER" --num_envs 9000 --headless --seed 230914 --dagger_iterations 3000 --num_steps_per_iter 24 --dataset_capacity 1500000 --num_mini_batches 8 --train_epochs 4 --learning_rate 0.0003 --supervise-action --action-loss-coef 0.25 --dagger_experiment_name solo12_two_feet_imu_dagger '--kit_args=--/UJITSO/geometry=false --/UJITSO/textures=false --/UJITSO/materials=false'
+./isaaclab.sh -p source/scripts/rsl_rl/train_solo12_base_imu_dagger.py --task solo12-two-feet-IMU-student-dagger --teacher-checkpoint "$SOLO_IMU_TEACHER" --num_envs 9000 --headless --seed 230914 --dagger_iterations 3000 --num_steps_per_iter 24 --dataset_capacity 1500000 --num_mini_batches 8 --train_epochs 4 --learning_rate 0.0003 --finetune-student-actor --action-loss-coef 0.25 --dagger_experiment_name solo12_two_feet_imu_dagger '--kit_args=--/UJITSO/geometry=false --/UJITSO/textures=false --/UJITSO/materials=false'
 ```
 
-The student controls collection with deterministic mean actions, as in the old pipeline. The teacher labels states that the student actually visits. We aggregate the histories in a replay ring. Only the TCN learns. The teacher encoder, actor head, critic, action noise, and teacher normalizers stay frozen.
+The student controls collection with deterministic mean actions. The teacher labels states that the student actually visits. We aggregate the histories in a replay ring. The labeling teacher always stays frozen: its encoder, original actor head, critic, action noise, and normalizers do not learn during DAgger.
 
-The loss is latent mean-squared error plus 0.25 times action mean-squared error. The action loss backpropagates through the frozen actor into the TCN. It does **not** train a separate actor head. Omit `--supervise-action` for latent-only supervision. `--stochastic-actions` optionally adds the frozen teacher's action noise during collection.
+The loss is latent mean-squared error plus `--action-loss-coef` times action mean-squared error. The coefficient defaults to **0.25** and alone controls action supervision. Set it to **0** for latent-only supervision. The old `--supervise-action` flag is accepted with a deprecation notice, but has no effect. In particular, omitting that flag no longer disables the action loss.
+
+| Options | Networks updated by DAgger |
+| --- | --- |
+| `--action-loss-coef 0` | TCN, using latent loss only |
+| Positive coefficient, no fine-tuning flag | TCN, using latent loss plus action loss through the frozen teacher head |
+| `--finetune-student-actor --action-loss-coef 0.25` | TCN and a separate student actor-head copy |
+
+With `--finetune-student-actor`, we initialize the student head from the teacher and use that copy for both collection and supervised predictions. Action loss updates the TCN and student head; latent loss updates only the TCN. Teacher targets still come from the unchanged original teacher. Fine-tuning with a zero action coefficient is rejected because it gives the head no learning signal. Coefficients must be finite and non-negative. `--stochastic-actions` optionally adds the frozen teacher's action noise during collection.
 
 The encoder starts untrained. Early student-controlled rollouts can fail. Keep the easy curriculum start unless a tested adapter is already available. A low latent loss alone is not proof of good control: inspect rollout return, terminations, curriculum progress, action error, and held-out commands. Replay capacity 1.5 million stores about 3.5 GB of float32 histories on CPU, plus labels and commands.
 
@@ -133,6 +141,10 @@ Stage-best adapters are saved after collection and before the next supervised up
 
 Each stage-best file includes the stage indices, selection metric, score, episode count, iteration, and the usual adapter, normalizer, optimizer and teacher metadata. It supports the same playback and PPO initialization commands as `adapter_latest.pt`. The phase in the filename does not set the next run's curriculum start: choose that explicitly. `--adapter-checkpoint` starts fresh per-stage score tracking in the new run. Tasks without a curriculum keep the existing best/latest behavior.
 
+Fine-tuned adapters also save `student_actor_state_dict` and declare the mode in `objective.finetune_student_actor`. Latest, loss-best, and stage-best files all carry the same network set. Isaac and MuJoCo playback use the saved student head when present; older adapters still use the original teacher head. Contradictory head metadata is rejected rather than silently falling back.
+
+To continue a fine-tuned adapter, pass `--adapter-checkpoint` together with `--finetune-student-actor` and a positive action coefficient. This restores the TCN, modified head and history statistics. As before, it starts a fresh optimizer, replay dataset and iteration counter; it is not an exact optimizer-state resume. You can also initialize fine-tuning from an older TCN-only adapter: its student head starts from the teacher.
+
 ### C. Fine-tune the student with PPO
 
 ```bash
@@ -143,7 +155,7 @@ SOLO_IMU_ADAPTER=/absolute/path/to/the/dagger_run/checkpoints/adapter_latest.pt
 ./isaaclab.sh -p source/scripts/rsl_rl/train.py --task solo12-two-feet-IMU-student-rl --init-from-dagger-adapter "$SOLO_IMU_ADAPTER" --num_envs 9000 --headless --seed 230914 --symmetry-mode augmentation --max_iterations 15000 --run_name two-feet-imu-student-ppo '--kit_args=--/UJITSO/geometry=false --/UJITSO/textures=false --/UJITSO/materials=false'
 ```
 
-This initializes the actor TCN from DAgger and copies the teacher actor, direct privileged critic, and action-noise parameter. It composes actor normalization from DAgger history statistics and teacher command statistics. Critic normalization comes from the teacher. Transfer is strict: missing or mismatched tensors fail instead of leaving random parts of the policy.
+This initializes the actor TCN from DAgger. If DAgger fine-tuned a student head, PPO starts from that **modified head**, not the original teacher actor. Older or frozen-head adapters use the original teacher head. The **direct privileged critic and action-noise parameter always start from the original teacher**. Actor normalization combines DAgger history statistics with original teacher command statistics. Critic normalization also comes from the original teacher. Transfer is strict: missing or mismatched tensors fail instead of leaving random parts of the policy.
 
 PPO gets a **fresh optimizer and learning clock**, not the teacher's optimizer. The initial learning rate is 0.0002 with the inherited adaptive schedule. All student policy networks then train. There is no imitation loss in this phase. Do not also pass `--checkpoint` or `--resume` for this initialization. Ordinary PPO checkpoint resume is a different operation.
 
@@ -171,6 +183,8 @@ The learning algorithms already existed. Configuration alone was not sufficient:
 6. Saved the actual policy implementation and contract helper with offline W&B source snapshots.
 
 ## Validation boundary
+
+Actor-fine-tuning follow-up (2026-11-11): 149 focused CPU checks passed, including both latent activations, coefficient-driven supervision, selected-network gradients, modified-head playback and exact PPO handoff. Eleven local integration checks passed with four training environments: a fresh teacher, joint DAgger, continuation, rejection of a discarded saved head, latent-only and frozen-head DAgger, one PPO iteration, and public Isaac/MuJoCo adapter and PPO playback. The live trainer changed the TCN and student head while preserving every original teacher tensor exactly. The saved adapter also passed exact TCN/head transfer, original-teacher critic/noise transfer and five batch-one action comparisons. Live checks used the default bounded latent. This proves integration, not learning performance, large-scale throughput, cluster readiness or hardware transfer.
 
 Original pipeline validation: 30 CPU checks (including the existing race DAgger regressions), 22 task/live-physics checks, and 34 legacy-observation checks passed. One teacher PPO iteration, one action-supervised DAgger iteration, and one student PPO iteration completed with 8 environments. Both PPO stages used symmetry augmentation and offline W&B snapshots. The public headless player loaded teacher, adapter, and final-student checkpoints. Independent physics checks covered acceleration sampling, contact-force values, partial resets, and terminal histories.
 

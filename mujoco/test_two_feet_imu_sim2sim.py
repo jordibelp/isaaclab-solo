@@ -1,6 +1,7 @@
 """Teacher/DAgger/PPO loading and physics-rate signal contracts without Isaac Sim."""
 
 import ast
+import copy
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -115,6 +116,32 @@ def test_missing_teacher_can_be_relocated_explicitly(checkpoints):
         EncodedPolicy(c.adapter_path, "solo12-two-feet-IMU-student-dagger", {})
     policy = EncodedPolicy(c.adapter_path, "solo12-two-feet-IMU-student-dagger", {}, c.teacher_path)
     assert policy.teacher_checkpoint == str(c.teacher_path)
+
+
+def test_dagger_player_uses_the_modified_student_head(checkpoints):
+    c = checkpoints
+    actor = copy.deepcopy(c.teacher.actor)
+    with torch.no_grad():
+        for p in actor.parameters():
+            p.add_(0.15)
+    c.adapter_payload["student_actor_state_dict"] = actor.state_dict()
+    c.adapter_payload["objective"] = {"finetune_student_actor": True}
+    torch.save(c.adapter_payload, c.adapter_path)
+    policy = EncodedPolicy(c.adapter_path, "solo12-two-feet-IMU-student-dagger", {})
+    obs = torch.randn(1, 408)
+    teacher_obs = torch.zeros(1, 67)
+    teacher_obs[:, -3:] = obs[:, -3:]
+    with torch.inference_mode():
+        latent = c.adapter(c.history_normalizer(obs[:, :-3]))
+        command = c.teacher.actor_obs_normalizer(teacher_obs)[:, -3:]
+        expected = actor(torch.cat((latent, command), -1))
+        old = c.teacher.actor(torch.cat((latent, command), -1))
+    assert not torch.equal(expected, old)
+    np.testing.assert_array_equal(policy(obs.numpy()[0]), expected.numpy()[0])
+    c.adapter_payload.pop("student_actor_state_dict")
+    torch.save(c.adapter_payload, c.adapter_path)
+    with pytest.raises(ValueError, match="actor-fine-tuning"):
+        EncodedPolicy(c.adapter_path, "solo12-two-feet-IMU-student-dagger", {})
 
 
 def test_wrong_task_checkpoint_pair_fails(checkpoints):

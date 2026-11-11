@@ -153,7 +153,20 @@ def configure_teacher_for_dagger(env_cfg, policy_cfg, checkpoint_path: str) -> d
     return state
 
 
-def adapter_metadata(env_cfg, policy_cfg, teacher_checkpoint: str, *, supervise_action: bool, action_loss_coef: float) -> dict:
+def adapter_student_actor_state(checkpoint: dict) -> dict | None:
+    """Never silently discard a fine-tuned actor or accept metadata without its weights."""
+    state = checkpoint.get("student_actor_state_dict")
+    if state is not None and not isinstance(state, dict):
+        raise ValueError("DAgger checkpoint has an invalid student_actor_state_dict.")
+    has_actor = state is not None
+    declared = (checkpoint.get("objective") or {}).get("finetune_student_actor", has_actor)
+    if bool(declared) != has_actor:
+        raise ValueError("DAgger checkpoint has inconsistent actor-fine-tuning metadata and student_actor_state_dict.")
+    return state
+
+
+def adapter_metadata(env_cfg, policy_cfg, teacher_checkpoint: str, *, action_loss_coef: float,
+                     finetune_student_actor: bool = False) -> dict:
     return {
         "layout": {
             "kind": "base_imu", "history_len": int(env_cfg.base_imu_history_length),
@@ -164,8 +177,8 @@ def adapter_metadata(env_cfg, policy_cfg, teacher_checkpoint: str, *, supervise_
         "observation_contract": observation_contract(env_cfg),
         "teacher_policy": {name: getattr(policy_cfg, name) for name in POLICY_FIELDS if hasattr(policy_cfg, name)},
         "teacher_checkpoint": str(teacher_checkpoint),
-        "objective": {"supervise_action": supervise_action, "action_loss_coef": action_loss_coef,
-                      "finetune_student_actor": False},
+        "objective": {"supervise_action": action_loss_coef != 0., "action_loss_coef": action_loss_coef,
+                      "finetune_student_actor": finetune_student_actor},
     }
 
 

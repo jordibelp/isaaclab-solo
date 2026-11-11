@@ -10,16 +10,19 @@ The frozen teacher is a ``solo12-IMU-based-teacher`` checkpoint:
 The student env exposes:
     [teacher obs, flattened base-IMU/proprio/action history, command]
 
-This script rolls out the current student encoder through the frozen teacher actor
-head, aggregates visited histories, and trains the student TCN to match the frozen
-teacher latent. Optionally it also supervises the action mean.
+This script rolls out the current student, aggregates visited histories, and trains
+the student TCN to match the frozen teacher latent. A nonzero action-loss coefficient
+also supervises the action mean. The actor head is either frozen or a separately
+fine-tuned copy; the labeling teacher always stays frozen.
 """
 
 from __future__ import annotations
 
 import argparse
+import copy
 import inspect
 import json
+import math
 import os
 import sys
 import shlex
@@ -83,14 +86,18 @@ parser.add_argument(
 )
 parser.add_argument("--learning_rate", type=float, default=3.0e-4, help="AdamW learning rate.")
 parser.add_argument("--weight_decay", type=float, default=0.0, help="AdamW weight decay.")
-parser.add_argument("--max_grad_norm", type=float, default=1.0, help="Student encoder gradient clipping norm.")
+parser.add_argument("--max_grad_norm", type=float, default=1.0, help="Supervised gradient clipping norm.")
 parser.add_argument("--dataset_capacity", type=int, default=262_144, help="Replay ring-buffer capacity.")
 parser.add_argument("--save_interval", type=int, default=50, help="Save latest checkpoint every N iterations.")
 parser.add_argument("--log_interval", type=int, default=1, help="Print every N iterations.")
 parser.add_argument("--no-history-normalization", action="store_true", default=False, help="Disable history normalizer.")
 parser.add_argument("--stochastic-actions", action="store_true", default=False, help="Sample from frozen actor std.")
-parser.add_argument("--supervise-action", action="store_true", default=False, help="Also supervise frozen actor output.")
-parser.add_argument("--action-loss-coef", type=float, default=0.25, help="Weight for optional action MSE.")
+parser.add_argument("--supervise-action", action="store_true", default=False, help=argparse.SUPPRESS)
+parser.add_argument("--action-loss-coef", type=float, default=0.25, help="Action MSE weight; 0 disables action supervision.")
+parser.add_argument(
+    "--finetune-student-actor", "--finetune_student_actor", action="store_true", default=False,
+    help="Also train a student actor-head copy. Requires a positive --action-loss-coef.",
+)
 parser.add_argument("--dagger_experiment_name", type=str, default="solo12_base_imu_dagger", help="Log dir name.")
 parser.add_argument("--run-name", type=str, default=None, help="Optional run name suffix.")
 parser.add_argument("--disable-wandb", action="store_true", default=False, help="Disable custom W&B logging.")
@@ -102,6 +109,14 @@ parser.add_argument("--ray-proc-id", "-rid", type=int, default=None, help=argpar
 cli_args.add_rsl_rl_args(parser)
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
+
+if not math.isfinite(args_cli.action_loss_coef) or args_cli.action_loss_coef < 0.:
+    parser.error("--action-loss-coef must be finite and non-negative.")
+if args_cli.finetune_student_actor and args_cli.action_loss_coef == 0.:
+    parser.error("--finetune-student-actor requires a positive --action-loss-coef to train the actor head.")
+if args_cli.supervise_action:
+    print("[WARN] --supervise-action is deprecated and has no effect; --action-loss-coef controls action supervision.", flush=True)
+args_cli.supervise_action = args_cli.action_loss_coef != 0.
 
 if args_cli.video:
     args_cli.enable_cameras = True
@@ -128,7 +143,10 @@ from isaaclab_tasks.direct.solo12.agents.base_imu_actor_critic import (
     BaseImuTcnEncoder,
     Solo12BaseImuTeacherActorCritic,
 )
-from solo12_imu_pipeline import adapter_latent_tanh, adapter_metadata, configure_teacher_for_dagger, save_training_contract
+from solo12_imu_pipeline import (
+    adapter_latent_tanh, adapter_metadata, adapter_student_actor_state, configure_teacher_for_dagger,
+    save_training_contract,
+)
 from dagger_curriculum_checkpoints import CurriculumBestTracker, curriculum_state
 
 _SKRL_SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "skrl"
@@ -256,13 +274,15 @@ def _teacher_targets_and_student_action(
     teacher_obs_raw: torch.Tensor,
     history_raw: torch.Tensor,
     stochastic_actions: bool,
+    student_actor: nn.Module | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     teacher_obs = teacher.actor_obs_normalizer(teacher_obs_raw)
     target_z = teacher.encode_teacher(teacher_obs)
     command = teacher_obs[:, teacher.teacher_encoder_obs_dim : teacher.teacher_encoder_obs_dim + teacher.command_dim]
     history = history_normalizer(history_raw) if history_normalizer is not None else history_raw
     z_hat = adapter(history)
-    student_mean = teacher.actor(torch.cat((z_hat, command), dim=-1))
+    actor = student_actor if student_actor is not None else teacher.actor
+    student_mean = actor(torch.cat((z_hat, command), dim=-1))
     teacher_action = teacher.actor(torch.cat((target_z, command), dim=-1))
     if stochastic_actions:
         if teacher.noise_std_type == "scalar":
@@ -428,7 +448,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     _sync_base_imu_policy_cfg_from_env_cfg(env_cfg, agent_cfg)
     checkpoint_metadata = adapter_metadata(
         env_cfg, agent_cfg.policy, teacher_checkpoint,
-        supervise_action=bool(args_cli.supervise_action), action_loss_coef=float(args_cli.action_loss_coef),
+        action_loss_coef=float(args_cli.action_loss_coef), finetune_student_actor=bool(args_cli.finetune_student_actor),
     )
     num_iterations = args_cli.dagger_iterations or args_cli.max_iterations or 1000
     num_steps_per_iter = args_cli.num_steps_per_iter or int(getattr(agent_cfg, "num_steps_per_env", 24))
@@ -467,6 +487,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             "stochastic_actions": bool(args_cli.stochastic_actions),
             "supervise_action": bool(args_cli.supervise_action),
             "action_loss_coef": float(args_cli.action_loss_coef),
+            "finetune_student_actor": bool(args_cli.finetune_student_actor),
             "wandb_run_id": wandb_run_id,
             "env": _cfg_to_dict(env_cfg),
             "agent": _cfg_to_dict(agent_cfg),
@@ -528,7 +549,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         history_normalizer = EmpiricalNormalization(history_dim).to(device)
         history_normalizer.train()
 
-    optimizer = torch.optim.AdamW(adapter.parameters(), lr=args_cli.learning_rate, weight_decay=args_cli.weight_decay)
+    student_actor = copy.deepcopy(teacher.actor).requires_grad_(True) if args_cli.finetune_student_actor else None
     if args_cli.adapter_checkpoint is not None:
         ckpt = torch.load(os.path.abspath(os.path.expanduser(args_cli.adapter_checkpoint)), map_location=device, weights_only=False)
         saved_tanh = adapter_latent_tanh(ckpt)
@@ -542,8 +563,18 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 f"checkpoint history_sample_dim={saved_sample_dim}, current={raw_env.cfg.base_imu_history_sample_dim}."
             )
         adapter.load_state_dict(ckpt["adapter_state_dict"], strict=True)
+        actor_state = adapter_student_actor_state(ckpt)
+        if actor_state is not None:
+            if student_actor is None:
+                raise ValueError("This adapter has a fine-tuned actor. Pass --finetune-student-actor to continue it.")
+            student_actor.load_state_dict(actor_state, strict=True)
         if history_normalizer is not None and ckpt.get("history_normalizer_state_dict") is not None:
             history_normalizer.load_state_dict(ckpt["history_normalizer_state_dict"], strict=True)
+
+    trainable_parameters = list(adapter.parameters())
+    if student_actor is not None:
+        trainable_parameters += list(student_actor.parameters())
+    optimizer = torch.optim.AdamW(trainable_parameters, lr=args_cli.learning_rate, weight_decay=args_cli.weight_decay)
 
     buffer = ReplayBuffer(args_cli.dataset_capacity, history_dim, latent_dim, vec_env.num_actions, command_dim)
     obs = vec_env.get_observations()
@@ -554,6 +585,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         _save_checkpoint(
             os.path.join(log_dir, "checkpoints", filename),
             adapter_state_dict=adapter.state_dict(),
+            student_actor_state_dict=student_actor.state_dict() if student_actor is not None else None,
             history_normalizer_state_dict=history_normalizer.state_dict() if history_normalizer is not None else None,
             optimizer_state_dict=optimizer.state_dict(),
             iteration=iteration,
@@ -578,6 +610,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     start_time = time.time()
     print(f"[INFO] Logging Solo12 base-IMU DAgger run in: {log_dir}", flush=True)
     print(f"[INFO] Teacher checkpoint: {teacher_checkpoint}", flush=True)
+    print(f"[INFO] DAgger objective: latent MSE + {args_cli.action_loss_coef:g} * action MSE; "
+          f"trainable: {'TCN and student actor' if student_actor is not None else 'TCN only'}.", flush=True)
     print(
         f"[INFO] Student history: T={raw_env.cfg.base_imu_history_length}, "
         f"D={raw_env.cfg.base_imu_history_sample_dim}, flat={history_dim} -> z[{latent_dim}]",
@@ -588,6 +622,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     for iteration in range(1, int(num_iterations) + 1):
         adapter.eval()
+        if student_actor is not None:
+            student_actor.eval()
         reward_sum = 0.0
         done_sum = 0
         collect_loss_sum = 0.0
@@ -608,6 +644,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 teacher_obs_raw=teacher_obs_raw,
                 history_raw=history_raw,
                 stochastic_actions=bool(args_cli.stochastic_actions),
+                student_actor=student_actor,
             )
             buffer.add(history_raw, target_z, command_norm, teacher_action)
             stage_before = curriculum_state(raw_env)
@@ -630,6 +667,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             print(f"[INFO] Saved {filename}: mean episode return={selection['best_model_value']:.4f}", flush=True)
 
         adapter.train()
+        if student_actor is not None:
+            student_actor.train()
         if args_cli.mini_batch_size is not None:
             mini_batch_size = int(args_cli.mini_batch_size)
             if mini_batch_size <= 0:
@@ -655,13 +694,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             z_hat = adapter(history_input)
             latent_loss = nn.functional.mse_loss(z_hat, z_batch)
             action_loss = torch.zeros((), device=device)
-            if args_cli.supervise_action:
-                action_hat = teacher.actor(torch.cat((z_hat, command_batch), dim=-1))
+            if args_cli.action_loss_coef != 0.:
+                actor = student_actor if student_actor is not None else teacher.actor
+                action_hat = actor(torch.cat((z_hat, command_batch), dim=-1))
                 action_loss = nn.functional.mse_loss(action_hat, action_batch)
             loss = latent_loss + float(args_cli.action_loss_coef) * action_loss
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(adapter.parameters(), float(args_cli.max_grad_norm))
+            torch.nn.utils.clip_grad_norm_(trainable_parameters, float(args_cli.max_grad_norm))
             optimizer.step()
             loss_sum += float(loss.item())
             latent_loss_sum += float(latent_loss.item())
