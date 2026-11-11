@@ -19,6 +19,8 @@ import mujoco
 import numpy as np
 import torch
 
+from solo12_imu_policy import DEFAULT_CONTRACT, TASK_MODELS, EncodedPolicy
+
 
 PHYSICS_DT = 1.0 / 200.0
 DECIMATION = 4
@@ -73,7 +75,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", type=Path,
                         help="Output root (default logs/mujoco/cmd_tracking); model/timestamp are appended.")
     parser.add_argument("--realtime", action="store_true", help="Pace the interactive viewer at wall-clock speed.")
-    parser.add_argument("--task", choices=("solo12-two-feet", "solo12-v0"), default="solo12-two-feet")
+    parser.add_argument("--task", choices=("solo12-two-feet", "solo12-v0", *TASK_MODELS), default="solo12-two-feet")
+    parser.add_argument("--teacher-checkpoint", type=Path,
+                        help="Local frozen teacher for a DAgger adapter whose saved teacher path moved.")
     parser.add_argument("--num_envs", type=int, default=1)
     parser.add_argument("--kp", type=float, default=None,
                         help=f"PD stiffness (default: env.kp override, else {DEFAULT_KP:g} for two feet, 9 for solo12-v0).")
@@ -109,6 +113,8 @@ _ENV_ASYMMETRIC_LIMIT_KEYS = {"env.use_asymmetric_thigh_limits", "env.use_asymme
 _ENV_OBSERVATION_BOOL_KEYS = {
     "env.base_obs_from_imu", "env.remove_root_lin_vel_b_from_actor_obs",
     "env.remove_root_lin_vel_b_from_obs", "env.base_imu_clip", "env.imu_ekf_processed_inputs",
+    "env.include_foot_height_obs", "env.teacher_include_base_force", "env.apply_tanh_to_latent",
+    "env.use_rotMat_on_imu_encoder", "env.action_obs_is_last_executed", "env.base_imu_history_action_is_last_executed",
 }
 _ENV_IMU_CLIP_KEYS = {"env.base_imu_gyro_clip", "env.base_imu_ekf_acc_clip"}
 
@@ -135,7 +141,7 @@ def consume_env_overrides(unknown: list[str]) -> tuple[dict, list[str]]:
                 raise ValueError(f"{key} requires True or False.")
             overrides[key.removeprefix("env.")] = raw.lower() == "true"
             continue
-        if key == "env.include_lin_acc_steps_in_imu_obs":
+        if key in ("env.include_lin_acc_steps_in_imu_obs", "env.base_imu_history_policy_steps"):
             try:
                 steps = int(raw)
                 if steps < 0:
@@ -143,6 +149,12 @@ def consume_env_overrides(unknown: list[str]) -> tuple[dict, list[str]]:
             except ValueError as exc:
                 raise ValueError(f"{key} requires a non-negative integer.") from exc
             overrides[key.removeprefix("env.")] = steps
+            continue
+        if key in ("env.teacher_foot_force_obs", "env.base_imu_tcn_activation"):
+            overrides[key.removeprefix("env.")] = raw.strip("'\"")
+            continue
+        if key == "agent.policy.activation":
+            overrides["policy_activation"] = raw.strip("'\"")
             continue
         if key in _ENV_IMU_CLIP_KEYS:
             value = float(raw)
@@ -199,6 +211,7 @@ class Policy(torch.nn.Module):
             self.layers.append(layer)
         self.register_buffer("obs_mean", state[f"{normalizer_prefix}._mean"].reshape(-1))
         self.register_buffer("obs_std", state[f"{normalizer_prefix}._std"].reshape(-1))
+        self.input_dim = self.obs_mean.numel()
         if self.checkpoint_format == "sac":
             self.register_buffer("action_bias", state["action_bias"].reshape(-1))
             self.register_buffer("action_range", state["action_range"].reshape(-1))
@@ -227,7 +240,8 @@ def quat_rotation(q_wxyz: np.ndarray) -> np.ndarray:
 
 class Solo12Mujoco:
     def __init__(self, model_path: Path, kp: float = DEFAULT_KP, kd: float = DEFAULT_KD,
-                 spawn_z: float = 0.35, env_overrides: dict | None = None, bringup_clip_rad: float = 0.0):
+                 spawn_z: float = 0.35, env_overrides: dict | None = None, bringup_clip_rad: float = 0.0,
+                 policy_model: str = "simple_mlp"):
         if not math.isfinite(bringup_clip_rad) or bringup_clip_rad < 0.0:
             raise ValueError("bringup_clip_rad must be finite and non-negative (0 disables clipping).")
         self.bringup_clip_rad = float(bringup_clip_rad)
@@ -238,14 +252,16 @@ class Solo12Mujoco:
         self.actuator_ids = np.array([mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, n) for n in JOINT_NAMES])
         # Keep legacy XML limits unless explicitly overridden. SAC's saved action
         # scaling already encodes the training soft limits; do not rescale the actor.
-        overrides = env_overrides or {}
+        self.policy_model = policy_model
+        self.encoded_imu = policy_model in TASK_MODELS.values()
+        overrides = {**(DEFAULT_CONTRACT if self.encoded_imu else {}), **(env_overrides or {})}
         self.base_obs_from_imu = overrides.get("base_obs_from_imu", False)
         self.include_root_lin_vel = not (
             overrides.get("remove_root_lin_vel_b_from_actor_obs", False)
             or overrides.get("remove_root_lin_vel_b_from_obs", False)
         )
         self.imu_acc_steps = overrides.get("include_lin_acc_steps_in_imu_obs", 0)
-        if self.imu_acc_steps and not self.base_obs_from_imu:
+        if self.imu_acc_steps and not (self.base_obs_from_imu or self.encoded_imu):
             raise ValueError("env.include_lin_acc_steps_in_imu_obs requires env.base_obs_from_imu=True.")
         if self.base_obs_from_imu and not overrides.get("imu_ekf_processed_inputs", True):
             raise ValueError("IMU playback requires env.imu_ekf_processed_inputs=True (gravity-free acceleration).")
@@ -253,6 +269,14 @@ class Solo12Mujoco:
         self.base_imu_gyro_clip = overrides.get("base_imu_gyro_clip", IMU_GYRO_CLIP)
         self.base_imu_ekf_acc_clip = overrides.get("base_imu_ekf_acc_clip", IMU_EKF_ACC_CLIP)
         self._imu_lin_acc_history = np.zeros((self.imu_acc_steps, 3))
+        self._teacher_lin_acc_history = np.zeros((self.imu_acc_steps if self.encoded_imu else 0, 3))
+        self.history_len = overrides.get("history_len", 13) if policy_model in ("base_imu_student_rl", "base_imu_student_dagger") else 0
+        self._base_imu_history = np.zeros((self.history_len, 45))
+        self.include_foot_height_obs = overrides.get("include_foot_height_obs", False)
+        self.teacher_include_base_force = overrides.get("teacher_include_base_force", False)
+        self.teacher_foot_force_obs = overrides.get("teacher_foot_force_obs", "none")
+        self._base_push_force_b = np.zeros(3)
+        self._calf_forces_w = np.zeros((4, 3))
         self.effort_limit = float(overrides.get("effort_limit_sim", EFFORT_LIMIT))
         if not math.isfinite(self.effort_limit) or self.effort_limit <= 0.0:
             raise ValueError("env.effort_limit_sim must be finite and positive.")
@@ -267,6 +291,9 @@ class Solo12Mujoco:
                 self.model.jnt_range[joint_id] = np.deg2rad(limits)
                 self.model.jnt_limited[joint_id] = True
         self.base_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "base")
+        self.calf_body_ids = np.array([mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, f"{leg}_calf")
+                                       for leg in ("FL", "FR", "RL", "RR")])
+        self._observation_data = mujoco.MjData(self.model) if self.encoded_imu and self.include_foot_height_obs else None
         self.ground_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "ground")
         self.base_geom_ids = {
             geom_id for geom_id in range(self.model.ngeom)
@@ -296,6 +323,10 @@ class Solo12Mujoco:
         self._base_contact_latched = False
         mujoco.mj_forward(self.model, self.data)
         self._imu_lin_acc_history.fill(0.0)
+        self._teacher_lin_acc_history.fill(0.0)
+        self._base_imu_history.fill(0.0)
+        self._base_push_force_b.fill(0.0)
+        self._calf_forces_w.fill(0.0)
         _, angular, linear = self._base_imu_kinematics()
         self._previous_imu_com_velocity = linear.copy()
         self._previous_imu_ang_velocity = angular.copy()
@@ -314,7 +345,7 @@ class Solo12Mujoco:
 
     def _record_base_imu_sample(self) -> None:
         """Record clean gravity-free IMU acceleration after each 5 ms physics step."""
-        if not self.base_obs_from_imu or not self.imu_acc_steps:
+        if not self.encoded_imu and (not self.base_obs_from_imu or not self.imu_acc_steps):
             return
         rotation, angular, linear = self._base_imu_kinematics()
         com_acceleration = (linear - self._previous_imu_com_velocity) / PHYSICS_DT
@@ -323,10 +354,25 @@ class Solo12Mujoco:
         acceleration = com_acceleration + np.cross(angular_acceleration, lever)
         acceleration += np.cross(angular, np.cross(angular, lever))
         acceleration_b = rotation.T @ acceleration
+        if self._teacher_lin_acc_history.size:
+            origin_lever = -rotation @ self.model.body_ipos[self.base_id]
+            origin_acc = com_acceleration + np.cross(angular_acceleration, origin_lever)
+            origin_acc += np.cross(angular, np.cross(angular, origin_lever))
+            self._teacher_lin_acc_history[:-1] = self._teacher_lin_acc_history[1:]
+            self._teacher_lin_acc_history[-1] = rotation.T @ origin_acc
         if self.base_imu_clip:
             acceleration_b = acceleration_b.clip(-self.base_imu_ekf_acc_clip, self.base_imu_ekf_acc_clip)
-        self._imu_lin_acc_history[:-1] = self._imu_lin_acc_history[1:]
-        self._imu_lin_acc_history[-1] = acceleration_b
+        if self.base_obs_from_imu and self.imu_acc_steps:
+            self._imu_lin_acc_history[:-1] = self._imu_lin_acc_history[1:]
+            self._imu_lin_acc_history[-1] = acceleration_b
+        if self.history_len:
+            gyro = rotation.T @ angular
+            if self.base_imu_clip:
+                gyro = gyro.clip(-self.base_imu_gyro_clip, self.base_imu_gyro_clip)
+            sample = np.concatenate((self.data.qpos[self.joint_qpos] - SAFE_Q, self.data.qvel[self.joint_dof],
+                                     gyro, acceleration_b, rotation.T @ np.array((0., 0., -1.)), self.action))
+            self._base_imu_history[:-1] = self._base_imu_history[1:]
+            self._base_imu_history[-1] = sample
         self._previous_imu_com_velocity = linear.copy()
         self._previous_imu_ang_velocity = angular.copy()
 
@@ -337,6 +383,10 @@ class Solo12Mujoco:
         return velocity[:3], velocity[3:]
 
     def observation(self, command: tuple[float, float, float]) -> np.ndarray:
+        if self.history_len:
+            return np.concatenate((self._base_imu_history.reshape(-1), command))
+        if self.policy_model == "base_imu_teacher":
+            return self._teacher_observation(command)
         # IsaacLab contract: root_com_{lin,ang}_vel_b = R_link^T @ world COM velocity;
         # mjOBJ_BODY with flg_local=1 would use the inertial (ximat) frame instead -- do not use it.
         rotation_wb = quat_rotation(self.data.qpos[3:7])
@@ -359,6 +409,40 @@ class Solo12Mujoco:
         terms.extend((command, q - SAFE_Q, qd, self.action))
         return np.concatenate(terms)
 
+    def _teacher_observation(self, command) -> np.ndarray:
+        rotation, angular, linear = self._base_imu_kinematics()
+        terms = [rotation.T @ np.array((0., 0., -1.)), rotation.T @ linear, rotation.T @ angular]
+        if self.include_foot_height_obs:
+            # Query endpoint link positions separately; preserve the completed-step contact/dynamics caches.
+            self._observation_data.qpos[:] = self.data.qpos
+            mujoco.mj_kinematics(self.model, self._observation_data)
+            terms.append(self._observation_data.xpos[self.calf_body_ids, 2].copy())
+        terms.extend((self.action, self.data.qpos[self.joint_qpos] - SAFE_Q, self.data.qvel[self.joint_dof],
+                      self._teacher_lin_acc_history.reshape(-1)))
+        if self.teacher_include_base_force:
+            terms.append(self._base_push_force_b)
+        if self.teacher_foot_force_obs == "norm":
+            terms.append(np.linalg.norm(self._calf_forces_w, axis=-1))
+        elif self.teacher_foot_force_obs == "vector":
+            terms.append((self._calf_forces_w @ rotation).reshape(-1))
+        return np.concatenate((*terms, command))
+
+    def _record_calf_contacts(self) -> None:
+        """Net completed-step contact forces on calf bodies, including non-ground contacts."""
+        self._calf_forces_w.fill(0.)
+        for index, contact in enumerate(self.data.contact):
+            body1, body2 = self.model.geom_bodyid[[contact.geom1, contact.geom2]]
+            if body1 not in self.calf_body_ids and body2 not in self.calf_body_ids:
+                continue
+            wrench = np.zeros(6)
+            mujoco.mj_contactForce(self.model, self.data, index, wrench)
+            force_w = contact.frame.reshape(3, 3).T @ wrench[:3]
+            for foot, body in enumerate(self.calf_body_ids):
+                if body == body1:
+                    self._calf_forces_w[foot] -= force_w
+                if body == body2:
+                    self._calf_forces_w[foot] += force_w
+
     def tracked_velocity(self) -> tuple[float, float, float]:
         """Planar velocity in the gravity-aligned heading frame plus world yaw rate (env reward frame)."""
         rotation_wb = quat_rotation(self.data.qpos[3:7])
@@ -374,6 +458,9 @@ class Solo12Mujoco:
         return float(velocity_xy @ forward), float(velocity_xy @ lateral), float(ang_vel_w[2])
 
     def step(self, action: np.ndarray) -> None:
+        if self.encoded_imu:
+            self._base_push_force_b = quat_rotation(self.data.qpos[3:7]).T @ (
+                self.data.qfrc_applied[:3] + self.data.xfrc_applied[self.base_id, :3])
         self.action = np.asarray(action).copy()
         requested_target = SAFE_Q + ACTION_SCALE * self.action
         self.data.ctrl[self.actuator_ids] = requested_target
@@ -387,6 +474,8 @@ class Solo12Mujoco:
             mujoco.mj_step(self.model, self.data)
             self._record_base_imu_sample()
             self._base_contact_latched |= self._base_hit_ground_now()
+        if self.policy_model == "base_imu_teacher":
+            self._record_calf_contacts()
 
     def _base_hit_ground_now(self) -> bool:
         for contact in self.data.contact:
@@ -721,6 +810,7 @@ def run_tracking(args, sim: Solo12Mujoco, policy: Policy, checkpoint: Path, mode
         "started_at": started_at.isoformat(),
         "timestamp": timestamp,
         "checkpoint": str(checkpoint),
+        "checkpoint_name": checkpoint.name,
         "checkpoint_sha256": checkpoint_sha256(checkpoint),
         "model_xml": str(model_path),
         "visual_meshes_sha256": visual_meshes_sha256(model_path),
@@ -735,7 +825,14 @@ def run_tracking(args, sim: Solo12Mujoco, policy: Policy, checkpoint: Path, mode
         "policy_dt": POLICY_DT,
         "action_scale": ACTION_SCALE,
         "observation_contract": {
-            "input_dim": int(policy.obs_mean.numel()),
+            "input_dim": int(policy.input_dim),
+            "policy_model": sim.policy_model,
+            "saved_contract": getattr(policy, "contract", None),
+            "history_len": sim.history_len,
+            "history_sample_dim": 45 if sim.history_len else 0,
+            "teacher_acceleration": "unclipped gravity-free acceleration at base link origin",
+            "teacher_contact_forces": "net MuJoCo calf-body contacts from final physics substep",
+            "teacher_checkpoint": getattr(policy, "teacher_checkpoint", None),
             "base_obs_from_imu": sim.base_obs_from_imu,
             "include_root_lin_vel": sim.include_root_lin_vel,
             "include_lin_acc_steps_in_imu_obs": sim.imu_acc_steps,
@@ -832,8 +929,8 @@ def main() -> None:
     args, unknown = build_parser().parse_known_args()
     if not math.isfinite(args.bringup_clip_rad) or args.bringup_clip_rad < 0.0:
         raise SystemExit("--bringup_clip_rad must be finite and non-negative (0 disables clipping)")
-    if args.task not in ("solo12-v0", "solo12-two-feet") or args.num_envs != 1:
-        raise ValueError("MuJoCo sim-to-sim supports --task=solo12-v0 or solo12-two-feet with --num_envs=1 only")
+    if args.num_envs != 1:
+        raise ValueError("MuJoCo sim-to-sim supports --num_envs=1 only")
     env_overrides, ignored = consume_env_overrides(unknown)
     if env_overrides:
         print("[INFO] Applying overrides:", " ".join(f"{k}={v}" for k, v in env_overrides.items()), flush=True)
@@ -861,15 +958,20 @@ def main() -> None:
     )
 
     checkpoint = Path(args.checkpoint).expanduser().resolve()
-    policy = Policy(checkpoint)
+    policy = (EncodedPolicy(checkpoint, args.task, env_overrides, args.teacher_checkpoint)
+              if args.task in TASK_MODELS else Policy(checkpoint))
     print(f"[INFO] Loaded {policy.checkpoint_format.upper()} actor for deterministic inference (critic not used).")
+    if isinstance(policy, EncodedPolicy):
+        print(f"[INFO] Policy={policy.policy_model}; apply_tanh_to_latent={policy.contract['apply_tanh_to_latent']}; "
+              "production encoder/normalization restored.", flush=True)
     model_path = Path(__file__).with_name("solo12.xml").resolve()
-    sim = Solo12Mujoco(model_path, kp=kp, kd=kd, spawn_z=args.spawn_z, env_overrides=env_overrides,
-                     bringup_clip_rad=args.bringup_clip_rad)
+    sim = Solo12Mujoco(model_path, kp=kp, kd=kd, spawn_z=args.spawn_z,
+                     env_overrides=getattr(policy, "contract", env_overrides),
+                     bringup_clip_rad=args.bringup_clip_rad, policy_model=TASK_MODELS.get(args.task, "simple_mlp"))
     observation_size = sim.observation(tuple(args.cmd_init)).size
-    if observation_size != policy.obs_mean.numel():
+    if observation_size != policy.input_dim:
         raise ValueError(
-            f"Observation contract mismatch: checkpoint expects {policy.obs_mean.numel()} inputs, "
+            f"Observation contract mismatch: checkpoint expects {policy.input_dim} inputs, "
             f"but playback supplies {observation_size}. Set env.base_obs_from_imu, "
             "env.remove_root_lin_vel_b_from_actor_obs and env.include_lin_acc_steps_in_imu_obs "
             "to match training; input size alone cannot identify their meanings."

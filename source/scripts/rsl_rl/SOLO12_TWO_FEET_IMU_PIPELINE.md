@@ -165,4 +165,4 @@ Latent-switch follow-up: 54 CPU checks and 28 task/live-physics checks passed. B
 
 These small runs check integration and exact initialization. They do not establish learned two-feet performance, better generalization, high-environment-count throughput, or hardware transfer. The encoder's benefit still needs a matched comparison against the direct-IMU policy, with held-out commands, pushes, delays, friction, and IMU noise.
 
-ROS deployment and MuJoCo TCN playback are not part of this change. The existing plain-MLP IMU export/deployment path must not be assumed to support this TCN automatically.
+MuJoCo playback now supports all three task IDs through `mujoco/play_direct_mujoco.py`, including teacher PPO, DAgger adapters with their frozen teacher, and student PPO. See `mujoco/README.md` for commands, checkpoint contracts and simulator limits. ROS deployment is still separate. The existing plain-MLP IMU export/deployment path must not be assumed to support this TCN automatically.

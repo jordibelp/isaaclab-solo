@@ -1,8 +1,8 @@
 # Solo12 IsaacLab → MuJoCo sim-to-sim
 
 This folder runs Solo12 RSL-RL PPO and SAC policies in MuJoCo without importing Isaac Sim.
-The player supports `solo12-two-feet` and four-feet `solo12-v0`, including clean simple-MLP
-IMU observations. It preserves the inference contract used by `play_direct_0325.py`:
+The player supports `solo12-two-feet`, four-feet `solo12-v0`, and the three two-feet IMU
+teacher/student tasks below. It preserves the inference contract used by `play_direct_0325.py`:
 
 - 200 Hz physics and 50 Hz policy (`dt=0.005`, decimation 4)
 - joint order `FL, FR, RL, RR` with hip/thigh/calf per leg (`cfg.joint_names`)
@@ -61,8 +61,8 @@ for processed acceleration. `env.base_imu_clip`, `env.base_imu_gyro_clip` and
 `env.base_imu_ekf_acc_clip` can override those settings.
 
 This path matches **clean evaluation**, not the training noise/bias model or a measured
-hardware EKF. It supports `imu_ekf_processed_inputs=True`, not raw specific force or a
-history-encoder/TCN checkpoint. The legacy 48-input path is unchanged. Incorrect input
+hardware EKF. It supports `imu_ekf_processed_inputs=True`, not raw specific force.
+For encoder/TCN checkpoints, use the task-specific path below. The legacy 48-input path is unchanged. Incorrect input
 settings fail with an observation-contract error before the rollout starts.
 
 After activating `env_isaaclab`, run this from the IsaacLab repository for a live viewer:
@@ -83,6 +83,71 @@ output includes every tracking sample plus the resolved observation contract in
 `run_config.json`. The supplied checkpoint completed that 20-second check with
 1,000 policy steps and zero base-contact resets on 2026-11-09. This short check does
 not establish hardware transfer or broad robustness.
+
+## Two-feet IMU teacher, DAgger and student PPO
+
+| Task | Checkpoint | Inference inputs |
+| --- | --- | --- |
+| `solo12-two-feet-IMU-teacher` | Teacher PPO `.pt` | Clean privileged state, normally 67 values |
+| `solo12-two-feet-IMU-student-dagger` | DAgger `adapter_*.pt` plus its frozen teacher | Physics-rate IMU/joint/action history and commands |
+| `solo12-two-feet-IMU-student-rl` | Student PPO `.pt` | Physics-rate IMU/joint/action history and commands |
+
+These paths use the actual production networks. We restore network widths and
+normalizers from tensors. Teacher playback includes the privileged MLP encoder.
+DAgger playback uses the saved TCN and frozen teacher actor. Student PPO playback
+uses its trained TCN and actor. Critics load for strict checkpoint checks but do not
+run during inference. No Isaac Sim application starts; the encoded loaders need the
+usual RSL-RL dependencies already installed in `env_isaaclab`.
+
+Keep `env.base_obs_from_imu=False` for these tasks, or omit it. That flag belongs to
+the old plain-MLP path. The teacher defaults to four clean base-origin acceleration
+samples, the held base push, and four net calf-contact force norms. The acceleration
+window is not clipped by the IMU limits. Contacts come from MuJoCo's final physics
+substep, including contacts with bodies other than the ground. Optional
+`env.teacher_foot_force_obs=none|norm|vector`, `env.teacher_include_base_force`, and
+`env.include_foot_height_obs` must match the teacher's training contract.
+
+The student normally sees 13 samples of 45 values plus three commands: 588 inputs.
+Each sample contains joint positions/velocities (24), processed gyro/acceleration/
+projected gravity (9), and the current issued action (12). Samples advance at 200 Hz,
+oldest first, with acquisition-time base axes. Reset zeros all histories and rebases
+velocity differences. Reading an observation does not advance history. MuJoCo has
+no simulated command delay here, so issued and executed actions coincide. Privileged
+teacher signals never enter the student actor.
+
+The loader restores `apply_tanh_to_latent` from checkpoint metadata or the run's
+`params/solo12_imu_contract.json`. Saved activation takes precedence over a repeated
+CLI flag. Standalone old PPO copies without that metadata use the two-feet task
+default (`True`); repeat `env.apply_tanh_to_latent=False` if that old run was unbounded.
+Keep the `params` directory for non-default signal contracts and actor activation.
+Without it, repeat the matching observation settings and `agent.policy.activation`.
+For student PPO, repeat a non-default `env.base_imu_tcn_activation` too; PPO's contract
+sidecar does not store this field. DAgger adapters store it in their layout. Both hidden
+activations default to ELU. Conflicting saved
+signal settings, incompatible input dimensions, raw/rotation-matrix IMU layouts, and
+non-200/50-Hz saved clocks fail before rollout.
+
+After activating `env_isaaclab`, teacher playback is:
+
+```bash
+./isaaclab.sh -p mujoco/play_direct_mujoco.py --task=solo12-two-feet-IMU-teacher --checkpoint=/absolute/path/to/teacher.pt --num_envs=1 --duration_s=2000 --cmd_init 0.1 0 0 env.kp=9.0 env.kd=0.2 env.effort_limit_sim=2.25
+```
+
+Student PPO uses the same command with `--task=solo12-two-feet-IMU-student-rl` and its
+PPO checkpoint. DAgger playback is:
+
+```bash
+./isaaclab.sh -p mujoco/play_direct_mujoco.py --task=solo12-two-feet-IMU-student-dagger --checkpoint=/absolute/path/to/adapter_latest.pt --teacher-checkpoint=/absolute/path/to/teacher.pt --num_envs=1 --duration_s=2000 --cmd_init 0.1 0 0 env.kp=9.0 env.kd=0.2 env.effort_limit_sim=2.25
+```
+
+The teacher override is optional when the adapter's saved teacher path still exists.
+For a five-second local check, append `--headless --track-cmds='0.1 0 0' --no-wandb`.
+Keep the physical joint limits and gains from your chosen run. Isaac-only flags such
+as reward/curriculum overrides and explicit network widths are reported as ignored;
+the checkpoint supplies network widths. The player still uses flat ground and clean
+sensor signals, without training noise, curricula, domain randomization or delays.
+Contact-force and finite-difference acceleration values depend on the simulator.
+Matching network arithmetic does not imply matching trajectories or hardware transfer.
 
 ## Model matching
 
