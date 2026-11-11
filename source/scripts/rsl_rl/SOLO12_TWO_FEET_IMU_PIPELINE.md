@@ -120,6 +120,19 @@ The encoder starts untrained. Early student-controlled rollouts can fail. Keep t
 
 The teacher's observation contract and network sizes load from its checkpoint and `params/solo12_imu_contract.json`. Keep that file beside the run. It does not load rewards or curriculum state. Repeat intentional non-default task overrides across stages.
 
+#### DAgger checkpoints
+
+Curriculum-stage best saving is automatic. Your existing command needs no new flag.
+The run's `checkpoints/` directory contains:
+
+- `adapter_best.pt`: the lowest supervised training loss across the run, as before.
+- `adapter_latest.pt`: the latest supervised update, every `--save_interval` iterations and at the end.
+- `adapter_best_curriculum_idx_0_two_feet_phase_1.pt`, and so on: an independent best for each visited curriculum stage. These use the highest mean return over the last 100 eligible completed episodes in that stage, not imitation loss. A later phase can save a best even when its return is lower than an earlier phase's best. These saves do not wait for `--save_interval`.
+
+Stage-best adapters are saved after collection and before the next supervised update. This keeps the adapter weights that collected the scored rollouts. Episodes can span several updates, so the rolling score is training evidence, not a separate fixed-policy evaluation. Episodes that cross a curriculum change or start in a special airborne pose do not count. A stage needs at least one eligible completed episode before it can save a best. If one rollout visits several stages, each stage keeps its own file.
+
+Each stage-best file includes the stage indices, selection metric, score, episode count, iteration, and the usual adapter, normalizer, optimizer and teacher metadata. It supports the same playback and PPO initialization commands as `adapter_latest.pt`. The phase in the filename does not set the next run's curriculum start: choose that explicitly. `--adapter-checkpoint` starts fresh per-stage score tracking in the new run. Tasks without a curriculum keep the existing best/latest behavior.
+
 ### C. Fine-tune the student with PPO
 
 ```bash
@@ -162,6 +175,8 @@ The learning algorithms already existed. Configuration alone was not sufficient:
 Original pipeline validation: 30 CPU checks (including the existing race DAgger regressions), 22 task/live-physics checks, and 34 legacy-observation checks passed. One teacher PPO iteration, one action-supervised DAgger iteration, and one student PPO iteration completed with 8 environments. Both PPO stages used symmetry augmentation and offline W&B snapshots. The public headless player loaded teacher, adapter, and final-student checkpoints. Independent physics checks covered acceleration sampling, contact-force values, partial resets, and terminal histories.
 
 Latent-switch follow-up: 54 CPU checks and 28 task/live-physics checks passed. Both `True` and `False` completed real four-environment teacher → action-supervised DAgger → PPO chains. Unbounded teacher, adapter, and PPO checkpoints passed public headless playback. A standalone copied PPO `.pt` restored `False` for playback and resumed PPO without a sidecar or repeated flag.
+
+Curriculum-checkpoint follow-up: 71 focused CPU checks passed. A four-environment, two-iteration DAgger smoke used short episodes and zero promotion thresholds to visit all five phases. It saved all five stage-best files despite `--save_interval 50`. Their scores matched an independent calculation from recorded rewards and resets. A stage-best adapter passed public headless playback and initialized one PPO iteration. The tracker preserves the training random-number state and input tensors. Separate CUDA/PhysX baseline runs were not bit-exact; this check does not prove deterministic trajectory parity or learned performance.
 
 These small runs check integration and exact initialization. They do not establish learned two-feet performance, better generalization, high-environment-count throughput, or hardware transfer. The encoder's benefit still needs a matched comparison against the direct-IMU policy, with held-out commands, pushes, delays, friction, and IMU noise.
 

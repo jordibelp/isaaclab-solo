@@ -129,6 +129,7 @@ from isaaclab_tasks.direct.solo12.agents.base_imu_actor_critic import (
     Solo12BaseImuTeacherActorCritic,
 )
 from solo12_imu_pipeline import adapter_latent_tanh, adapter_metadata, configure_teacher_for_dagger, save_training_contract
+from dagger_curriculum_checkpoints import CurriculumBestTracker, curriculum_state
 
 _SKRL_SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "skrl"
 if str(_SKRL_SCRIPTS_DIR) not in sys.path:
@@ -366,6 +367,7 @@ def _maybe_init_wandb(log_dir: str, run_name: str, config: dict[str, Any], run_i
             "buffer/*",
             "time/*",
             "env/*",
+            "curriculum/*",
         ):
             wandb.define_metric(metric_name, step_metric="dagger/iteration")
         for filename in ("env.yaml", "agent.yaml", "dagger_args.json"):
@@ -493,6 +495,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             log_dir, env_cfg, agent_cfg, args_cli, inspect.getsourcefile(type(env_cfg)),
             inspect.getsourcefile(type(raw_env)),
             extra_files=[__file__, str(Path(__file__).with_name("solo12_imu_pipeline.py")),
+                         str(Path(__file__).with_name("dagger_curriculum_checkpoints.py")),
                          inspect.getsourcefile(Solo12BaseImuTeacherActorCritic), inspect.getsourcefile(type(agent_cfg))],
         )
     teacher_obs_dim = int(raw_env.cfg.teacher_critic_obs_dim)
@@ -545,6 +548,33 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     buffer = ReplayBuffer(args_cli.dataset_capacity, history_dim, latent_dim, vec_env.num_actions, command_dim)
     obs = vec_env.get_observations()
     best_loss = float("inf")
+    curriculum_bests = CurriculumBestTracker()
+
+    def save_adapter(filename: str, iteration: int, **selection) -> None:
+        _save_checkpoint(
+            os.path.join(log_dir, "checkpoints", filename),
+            adapter_state_dict=adapter.state_dict(),
+            history_normalizer_state_dict=history_normalizer.state_dict() if history_normalizer is not None else None,
+            optimizer_state_dict=optimizer.state_dict(),
+            iteration=iteration,
+            best_loss=best_loss,
+            **selection,
+            **checkpoint_metadata,
+            dims={
+                "teacher_obs_dim": teacher_obs_dim,
+                "history_len": int(raw_env.cfg.base_imu_history_length),
+                "history_sample_dim": int(raw_env.cfg.base_imu_history_sample_dim),
+                "history_flat_dim": history_dim,
+                "latent_dim": latent_dim,
+                "command_dim": command_dim,
+            },
+            imu_layout={
+                "imu_ekf_processed_inputs": bool(raw_env.cfg.imu_ekf_processed_inputs),
+                "use_rotMat_on_imu_encoder": bool(raw_env.cfg.use_rotMat_on_imu_encoder),
+                "base_imu_obs_dim": int(raw_env.cfg.base_imu_obs_dim),
+            },
+        )
+
     start_time = time.time()
     print(f"[INFO] Logging Solo12 base-IMU DAgger run in: {log_dir}", flush=True)
     print(f"[INFO] Teacher checkpoint: {teacher_checkpoint}", flush=True)
@@ -553,6 +583,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         f"D={raw_env.cfg.base_imu_history_sample_dim}, flat={history_dim} -> z[{latent_dim}]",
         flush=True,
     )
+    if curriculum_state(raw_env) is not None:
+        print("[INFO] Curriculum-phase best adapters enabled: last 100 stage-pure episode returns.", flush=True)
 
     for iteration in range(1, int(num_iterations) + 1):
         adapter.eval()
@@ -578,12 +610,24 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 stochastic_actions=bool(args_cli.stochastic_actions),
             )
             buffer.add(history_raw, target_z, command_norm, teacher_action)
+            stage_before = curriculum_state(raw_env)
+            posed_starts = getattr(raw_env, "_twofeet_airborne_start", None)
+            excluded = posed_starts.clone() if posed_starts is not None else None
             obs, rewards, dones, extras = vec_env.step(action)
+            curriculum_bests.update(rewards, dones, stage_before, curriculum_state(raw_env), excluded)
             reward_sum += float(rewards.mean().item())
             done_sum += int(torch.count_nonzero(dones).item())
             _accumulate_env_log(env_log_sums, env_log_counts, extras)
             collect_loss_sum += float(nn.functional.mse_loss(adapter(history_normalizer(history_raw) if history_normalizer is not None else history_raw), target_z).item())
             collected += history_raw.shape[0]
+
+        # Save the collected adapter, not the yet-to-be-evaluated supervised update.
+        # A rollout can promote several times; retain each completed stage's best.
+        for selection in curriculum_bests.pop_improvements():
+            filename = selection.pop("filename")
+            save_adapter(filename, iteration, best_model_iteration=iteration,
+                         checkpoint_timing="before_supervised_update", **selection)
+            print(f"[INFO] Saved {filename}: mean episode return={selection['best_model_value']:.4f}", flush=True)
 
         adapter.train()
         if args_cli.mini_batch_size is not None:
@@ -626,52 +670,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         mean_loss = loss_sum / max(1, int(updates))
         if mean_loss < best_loss:
             best_loss = mean_loss
-            _save_checkpoint(
-                os.path.join(log_dir, "checkpoints", "adapter_best.pt"),
-                adapter_state_dict=adapter.state_dict(),
-                history_normalizer_state_dict=history_normalizer.state_dict() if history_normalizer is not None else None,
-                optimizer_state_dict=optimizer.state_dict(),
-                iteration=iteration,
-                best_loss=best_loss,
-                **checkpoint_metadata,
-                dims={
-                    "teacher_obs_dim": teacher_obs_dim,
-                    "history_len": int(raw_env.cfg.base_imu_history_length),
-                    "history_sample_dim": int(raw_env.cfg.base_imu_history_sample_dim),
-                    "history_flat_dim": history_dim,
-                    "latent_dim": latent_dim,
-                    "command_dim": command_dim,
-                },
-                imu_layout={
-                    "imu_ekf_processed_inputs": bool(raw_env.cfg.imu_ekf_processed_inputs),
-                    "use_rotMat_on_imu_encoder": bool(raw_env.cfg.use_rotMat_on_imu_encoder),
-                    "base_imu_obs_dim": int(raw_env.cfg.base_imu_obs_dim),
-                },
-            )
+            save_adapter("adapter_best.pt", iteration)
 
         if iteration % int(args_cli.save_interval) == 0 or iteration == int(num_iterations):
-            _save_checkpoint(
-                os.path.join(log_dir, "checkpoints", "adapter_latest.pt"),
-                adapter_state_dict=adapter.state_dict(),
-                history_normalizer_state_dict=history_normalizer.state_dict() if history_normalizer is not None else None,
-                optimizer_state_dict=optimizer.state_dict(),
-                iteration=iteration,
-                best_loss=best_loss,
-                **checkpoint_metadata,
-                dims={
-                    "teacher_obs_dim": teacher_obs_dim,
-                    "history_len": int(raw_env.cfg.base_imu_history_length),
-                    "history_sample_dim": int(raw_env.cfg.base_imu_history_sample_dim),
-                    "history_flat_dim": history_dim,
-                    "latent_dim": latent_dim,
-                    "command_dim": command_dim,
-                },
-                imu_layout={
-                    "imu_ekf_processed_inputs": bool(raw_env.cfg.imu_ekf_processed_inputs),
-                    "use_rotMat_on_imu_encoder": bool(raw_env.cfg.use_rotMat_on_imu_encoder),
-                    "base_imu_obs_dim": int(raw_env.cfg.base_imu_obs_dim),
-                },
-            )
+            save_adapter("adapter_latest.pt", iteration)
 
         mean_loss = loss_sum / max(1, int(updates))
         mean_latent_loss = latent_loss_sum / max(1, int(updates))
@@ -704,6 +706,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             "time/elapsed_s": elapsed,
             "time/elapsed_min": elapsed / 60.0,
         }
+        current_stage = curriculum_state(raw_env)
+        if current_stage is not None:
+            metrics.update({f"curriculum/{key}": value for key, value in current_stage.items() if value is not None})
+            stage_key = (current_stage["global_idx"], current_stage["two_feet_phase"])
+            window = curriculum_bests.windows.get(stage_key)
+            if window:
+                metrics["rollout/episode_return"] = sum(window) / len(window)
+                metrics["dagger/curriculum_phase_best_return"] = curriculum_bests.best[stage_key]
         metrics.update(_mean_env_log(env_log_sums, env_log_counts))
         if wandb_run is not None:
             wandb_run.log({key: value for key, value in metrics.items() if value is not None}, step=iteration)
