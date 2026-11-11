@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import math
+from pathlib import Path
 
 import gymnasium as gym
 import numpy as np
@@ -20,6 +21,7 @@ from isaaclab.sensors import ContactSensor
 from isaaclab.sim import schemas as sim_schemas
 from isaaclab.utils.buffers import DelayBuffer
 
+from . import floor_stiffness
 from .solo12_env_cfg import PRIVILEGED_OBS_GROUP, Solo12EnvCfg
 
 
@@ -376,6 +378,13 @@ class Solo12Env(DirectRLEnv):
         self.cfg.terrain.num_envs = self.scene.cfg.num_envs
         self.cfg.terrain.env_spacing = self.scene.cfg.env_spacing
         self._terrain = self.cfg.terrain.class_type(self.cfg.terrain)
+        self._floor_stiffness_randomization = floor_stiffness.randomize_floor_stiffness(self)
+        if self._floor_stiffness_randomization is not None and getattr(self.cfg, "log_dir", None):
+            import json
+
+            receipt = Path(self.cfg.log_dir) / "params" / "floor_stiffness.json"
+            receipt.parent.mkdir(parents=True, exist_ok=True)
+            receipt.write_text(json.dumps(self._floor_stiffness_randomization, indent=2) + "\n")
         self._terrain_height_wp_mesh = self._build_terrain_height_query_mesh()
         self._spawn_flat_terrain_grid_overlay()
 
@@ -385,6 +394,12 @@ class Solo12Env(DirectRLEnv):
 
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
+
+    def get_code_snapshot_files(self):
+        files = [floor_stiffness.__file__]
+        if self._floor_stiffness_randomization is not None and getattr(self.cfg, "log_dir", None):
+            files.append(str(Path(self.cfg.log_dir) / "params" / "floor_stiffness.json"))
+        return files
 
     def _configure_base_collision_filters(self):
         """Apply ``base_filtered_pairs`` symmetrically to the source Solo12 USD prim.
@@ -1128,8 +1143,12 @@ class Solo12Env(DirectRLEnv):
         else:
             columns = self.cfg.tricky_terrain_flat_cols
             column_weights = None
+        rows = tuple(self.cfg.tricky_terrain_spawn_rows)
+        if not should_be_active and self._floor_stiffness_randomization is not None:
+            # Flat rows have identical geometry; use all of them to expose more fixed floor materials.
+            rows = tuple(range(self._terrain.terrain_origins.shape[0]))
         self._sample_terrain_origins_from_tiles(
-            tuple(self.cfg.tricky_terrain_spawn_rows),
+            rows,
             tuple(columns),
             env_ids,
             column_weights=tuple(column_weights) if column_weights is not None else None,

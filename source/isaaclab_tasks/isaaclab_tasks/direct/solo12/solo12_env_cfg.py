@@ -25,6 +25,8 @@ from isaaclab.sim import SimulationCfg
 from isaaclab.terrains import TerrainGeneratorCfg, TerrainImporterCfg
 from isaaclab.utils import configclass
 
+from .floor_stiffness import validate_delta_x_range
+
 
 SOLO12_USD_PATH = Path(__file__).parents[4] / "isaaclab_assets/data/Robots/Solo12/SoloFlat.usd"
 
@@ -618,6 +620,8 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     # terrain damping
     compliant_contact_stiffness: float | None = 0.0  # 3_005.0
     compliant_contact_damping: float | None = 0.0  # 60.0
+    # Reference static indentation with two equally loaded feet. Zero/zero preserves fixed stiffness.
+    delta_x_floor_stiffness_range_mm = [0.0, 0.0]
     enabled_self_collisions = False
     # Link groups whose collisions with the base are explicitly filtered. Removing a group from
     # this list enables those base--link collisions when articulation self-collisions are enabled.
@@ -804,6 +808,12 @@ class Solo12EnvCfg(DirectRLEnvCfg):
             self.terrain.terrain_type = "generator"
             self.terrain.terrain_generator = SOLO12_TRICKY_TERRAINS_CFG.copy()
             self.terrain.use_terrain_origins = True
+        if validate_delta_x_range(self.delta_x_floor_stiffness_range_mm) is not None:
+            if self.terrain.terrain_type != "generator":
+                raise ValueError("delta_x_floor_stiffness_range_mm currently requires generated terrain tiles.")
+            damping = self.compliant_contact_damping
+            if damping is not None and (not math.isfinite(damping) or damping < 0.0):
+                raise ValueError("compliant_contact_damping must be finite and non-negative.")
 
     def apply_events_randomization_setting(self):
         """Disable all configured event randomizations when explicitly requested."""

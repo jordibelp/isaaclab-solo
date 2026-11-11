@@ -17,6 +17,45 @@ from isaaclab_tasks.direct.solo12.solo12_env_cfg import (
 )
 
 
+def test_floor_range_defaults_preserve_fixed_stiffness_and_damping():
+    cfg = Solo12TwoFeetImuTeacherEnvCfg()
+    assert cfg.delta_x_floor_stiffness_range_mm == [0.0, 0.0]
+    cfg.from_dict({"compliant_contact_stiffness": 3000.0, "compliant_contact_damping": 60.0})
+    cfg.refresh_runtime_dependent_config()
+    assert cfg.terrain.physics_material.compliant_contact_stiffness == 3000.0
+    assert cfg.terrain.physics_material.compliant_contact_damping == 60.0
+    cfg.from_dict({"delta_x_floor_stiffness_range_mm": [0.2, 5.0]})
+    cfg.refresh_runtime_dependent_config()
+    assert cfg.delta_x_floor_stiffness_range_mm == [0.2, 5.0]
+    assert cfg.terrain.physics_material.compliant_contact_damping == 60.0
+
+
+@pytest.mark.parametrize("values", [[0.0, 5.0], [-1.0, 5.0], [5.0, .2], [float("nan"), 5.0]])
+def test_invalid_floor_ranges_fail_before_simulation(values):
+    cfg = Solo12TwoFeetImuTeacherEnvCfg()
+    cfg.delta_x_floor_stiffness_range_mm = values
+    with pytest.raises(ValueError, match="delta_x_floor_stiffness_range_mm"):
+        cfg.refresh_runtime_dependent_config()
+
+
+@pytest.mark.parametrize("phase, enabled, expected_rows", [
+    (1, False, (4, 5)), (1, True, tuple(range(10))), (3, False, (4, 5)), (3, True, (4, 5)),
+])
+def test_floor_randomization_widens_only_the_flat_row_pool(phase, enabled, expected_rows):
+    raw = object.__new__(Solo12Env)
+    raw._is_closed = True
+    raw.cfg = Solo12TwoFeetImuTeacherEnvCfg()
+    raw._two_feet_curriculum_phase = phase
+    raw._tricky_terrain_active = False
+    raw._floor_stiffness_randomization = {} if enabled else None
+    raw._terrain = SimpleNamespace(terrain_origins=torch.zeros(10, 12, 3))
+    raw._robot = SimpleNamespace(_ALL_INDICES=torch.arange(4))
+    calls = []
+    raw._sample_terrain_origins_from_tiles = lambda rows, *args, **kwargs: calls.append(rows)
+    raw._refresh_tricky_terrain_origins(force=True)
+    assert calls == [expected_rows]
+
+
 @pytest.mark.parametrize("apply_tanh", [True, False])
 @pytest.mark.parametrize("cls", [Solo12TwoFeetImuTeacherEnvCfg, Solo12TwoFeetImuStudentDaggerEnvCfg, Solo12TwoFeetImuStudentRlEnvCfg])
 def test_one_hydra_field_controls_both_latent_ranges(cls, apply_tanh):
