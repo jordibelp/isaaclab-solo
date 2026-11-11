@@ -1092,6 +1092,7 @@ def _build_base_imu_dagger_adapter_policy(
         latent_dim=latent_dim,
         kernel_size=int(raw_env.cfg.base_imu_tcn_kernel_size),
         activation=str(raw_env.cfg.base_imu_tcn_activation),
+        apply_tanh_to_latent=bool(raw_env.cfg.apply_tanh_to_latent),
     ).to(device)
     adapter.load_state_dict(adapter_checkpoint["adapter_state_dict"], strict=True)
     adapter.eval()
@@ -1475,6 +1476,7 @@ def _sync_base_imu_policy_cfg_from_env_cfg(env_cfg, agent_cfg) -> None:
         "base_imu_tcn_latent_dim": "tcn_latent_dim",
         "base_imu_tcn_kernel_size": "tcn_kernel_size",
         "base_imu_tcn_activation": "tcn_activation",
+        "apply_tanh_to_latent": "apply_tanh_to_latent",
         "feed_history_encoding_to_critic": "feed_history_encoding_to_critic",
     }
     for env_field, policy_field in env_to_policy_fields.items():
@@ -2213,6 +2215,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 "[INFO] Disabled training-time stochasticity for play: " + ", ".join(disabled),
                 flush=True,
             )
+    if str(getattr(env_cfg, "policy_model", "")).startswith("base_imu_"):
+        from solo12_imu_pipeline import restore_latent_activation_from_checkpoint
+
+        restore_latent_activation_from_checkpoint(env_cfg, args_cli.checkpoint)
     _sync_base_imu_policy_cfg_from_env_cfg(env_cfg, agent_cfg)
     route_critic_obs(env_cfg, agent_cfg)
     cli_actuator_gain_overrides = _capture_cli_actuator_gain_overrides(env_cfg, hydra_args)

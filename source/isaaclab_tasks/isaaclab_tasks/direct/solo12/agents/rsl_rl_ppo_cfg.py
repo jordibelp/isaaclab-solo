@@ -69,6 +69,7 @@ class RslRlPpoSolo12BaseImuStudentCfg(RslRlPpoActorCriticCfg):
     tcn_latent_dim: int = _SOLO12_BASE_IMU_STUDENT_CFG.base_imu_tcn_latent_dim
     tcn_kernel_size: int = _SOLO12_BASE_IMU_STUDENT_CFG.base_imu_tcn_kernel_size
     tcn_activation: str = _SOLO12_BASE_IMU_STUDENT_CFG.base_imu_tcn_activation
+    apply_tanh_to_latent: bool = _SOLO12_BASE_IMU_STUDENT_CFG.apply_tanh_to_latent
     feed_history_encoding_to_critic: bool = _SOLO12_BASE_IMU_STUDENT_CFG.feed_history_encoding_to_critic
 
 

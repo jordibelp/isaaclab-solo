@@ -128,7 +128,7 @@ from isaaclab_tasks.direct.solo12.agents.base_imu_actor_critic import (
     BaseImuTcnEncoder,
     Solo12BaseImuTeacherActorCritic,
 )
-from solo12_imu_pipeline import adapter_metadata, configure_teacher_for_dagger, save_training_contract
+from solo12_imu_pipeline import adapter_latent_tanh, adapter_metadata, configure_teacher_for_dagger, save_training_contract
 
 _SKRL_SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "skrl"
 if str(_SKRL_SCRIPTS_DIR) not in sys.path:
@@ -400,6 +400,7 @@ def _sync_base_imu_policy_cfg_from_env_cfg(env_cfg, agent_cfg) -> None:
         "base_imu_tcn_latent_dim": "tcn_latent_dim",
         "base_imu_tcn_kernel_size": "tcn_kernel_size",
         "base_imu_tcn_activation": "tcn_activation",
+        "apply_tanh_to_latent": "apply_tanh_to_latent",
         "feed_history_encoding_to_critic": "feed_history_encoding_to_critic",
     }
     for env_field, policy_field in env_to_policy_fields.items():
@@ -517,6 +518,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         latent_dim=latent_dim,
         kernel_size=int(raw_env.cfg.base_imu_tcn_kernel_size),
         activation=str(raw_env.cfg.base_imu_tcn_activation),
+        apply_tanh_to_latent=bool(raw_env.cfg.apply_tanh_to_latent),
     ).to(device)
     history_normalizer = None
     if not args_cli.no_history_normalization:
@@ -526,6 +528,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     optimizer = torch.optim.AdamW(adapter.parameters(), lr=args_cli.learning_rate, weight_decay=args_cli.weight_decay)
     if args_cli.adapter_checkpoint is not None:
         ckpt = torch.load(os.path.abspath(os.path.expanduser(args_cli.adapter_checkpoint)), map_location=device, weights_only=False)
+        saved_tanh = adapter_latent_tanh(ckpt)
+        if saved_tanh != raw_env.cfg.apply_tanh_to_latent:
+            raise ValueError("Adapter apply_tanh_to_latent does not match the teacher/student contract.")
         saved_dims = ckpt.get("dims", {})
         saved_sample_dim = saved_dims.get("history_sample_dim") if isinstance(saved_dims, dict) else None
         if saved_sample_dim is not None and int(saved_sample_dim) != int(raw_env.cfg.base_imu_history_sample_dim):

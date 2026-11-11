@@ -54,10 +54,12 @@ class BaseImuTcnEncoder(nn.Module):
         latent_dim: int,
         kernel_size: int,
         activation: str = "elu",
+        apply_tanh_to_latent: bool = True,
     ) -> None:
         super().__init__()
         self.history_len = int(history_len)
         self.sample_dim = int(sample_dim)
+        self.apply_tanh_to_latent = apply_tanh_to_latent
 
         self.conv_stack = nn.Sequential(
             CausalConv1d(sample_dim, channels, kernel_size=kernel_size, dilation=1, stride=1),
@@ -75,7 +77,7 @@ class BaseImuTcnEncoder(nn.Module):
         self.to_latent = nn.Sequential(
             nn.Flatten(start_dim=1),
             nn.Linear(conv_output_dim, latent_dim),
-            nn.Tanh(),
+            nn.Tanh() if apply_tanh_to_latent else nn.Identity(),
         )
 
     @staticmethod
@@ -209,6 +211,7 @@ class Solo12BaseImuTeacherActorCritic(nn.Module, _GaussianActorMixin):
         self.actor = MLP(self.teacher_latent_dim + self.command_dim, num_actions, actor_hidden_dims, activation)
         self.critic = MLP(num_critic_obs, 1, critic_hidden_dims, activation)
         print(f"Teacher encoder: {self.teacher_encoder}")
+        print(f"Teacher latent activation: {self.teacher_latent_activation}")
         print(f"Actor MLP: {self.actor}")
         print(f"Critic MLP: {self.critic}")
 
@@ -275,6 +278,7 @@ class Solo12BaseImuStudentActorCritic(nn.Module, _GaussianActorMixin):
         tcn_latent_dim: int = 32,
         tcn_kernel_size: int = 5,
         tcn_activation: str = "elu",
+        apply_tanh_to_latent: bool = True,
         feed_history_encoding_to_critic: bool = False,
         **kwargs: dict[str, Any],
     ) -> None:
@@ -318,6 +322,7 @@ class Solo12BaseImuStudentActorCritic(nn.Module, _GaussianActorMixin):
             "latent_dim": self.tcn_latent_dim,
             "kernel_size": tcn_kernel_size,
             "activation": tcn_activation,
+            "apply_tanh_to_latent": apply_tanh_to_latent,
         }
         self.actor_history_encoder = BaseImuTcnEncoder(**encoder_kwargs)
         self.critic_history_encoder = BaseImuTcnEncoder(**encoder_kwargs) if self.feed_history_encoding_to_critic else None

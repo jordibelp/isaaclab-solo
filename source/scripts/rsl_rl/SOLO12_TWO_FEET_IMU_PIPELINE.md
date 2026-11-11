@@ -31,7 +31,27 @@ The teacher encoder receives 64 inputs by default, in this exact order:
 
 Commands add three more inputs. They are **outside the teacher encoder**. The actor sees the 32-value latent and three commands. The critic sees all 67 clean inputs directly. It has no encoder or TCN.
 
-The teacher's encoder, actor head, and critic each use hidden widths 256, 128, 64 by default. The new teacher bounds its final latent with `tanh`, matching the student's output range. Old teachers keep their original unbounded latent by default.
+The teacher's encoder, actor head, and critic each use hidden widths 256, 128, 64 by default.
+
+### Optional latent bounding
+
+For the three two-feet IMU tasks, one Hydra setting controls **both** the teacher encoder output and the student TCN output:
+
+```text
+env.apply_tanh_to_latent=True
+```
+
+This is the default. Each latent coordinate is bounded between -1 and 1. To leave both outputs unbounded, append this override to the teacher-training command:
+
+```text
+env.apply_tanh_to_latent=False
+```
+
+With `False`, the final teacher encoder layer and the final TCN projection are linear. The hidden-layer ELU activations, actor action outputs, and direct privileged critic do not change. This is a design choice, not a requirement of TCNs.
+
+The teacher's saved contract carries this setting into DAgger. The adapter then carries it into student PPO. Resume and playback also restore it when the saved metadata is available. You do not need to repeat the flag during handoff. The saved setting takes precedence: changing it after training would change the learned policy even though all tensor shapes still match. New PPO checkpoints embed the flag inside the `.pt` file, so copying that file alone preserves it. Older PPO checkpoints fall back to their `params` metadata, or to the explicit flag when that metadata is absent.
+
+The older base-IMU task defaults remain unchanged: legacy teachers use the separate `teacher_latent_activation` setting, and legacy student TCNs default to `tanh`. For the new two-feet tasks, `teacher_latent_activation` is derived from `apply_tanh_to_latent`; use the boolean switch, not the derived field.
 
 Both teacher observation-noise switches default to false. Domain randomization and task disturbances are separate: clean observations do not mean clean physics. DAgger labels and the student PPO critic are always clean even when the student actor is noisy.
 
@@ -50,7 +70,7 @@ Each history sample has 45 values: joint position and velocity (24), gyro (3), g
 
 The history contains 13 samples at 200 Hz. It includes both endpoints and spans 60 ms. Policy inference runs at 50 Hz. Samples are oldest first. Histories are zero-padded after reset and advance once per completed physics step, never on observation reads. Each sample uses the base axes at acquisition time.
 
-The TCN uses 64 channels, kernel size 5, ELU activations, dilations 1/1/2/4, and a 32-value `tanh` output. The actor gets 585 history values plus three current commands: **588 inputs**. It never receives simulator linear velocity, applied force, contact force, or the teacher's acceleration window. The clean acceleration window is privileged; the student already has its own noisy acceleration sequence inside the TCN history.
+The TCN uses 64 channels, kernel size 5, ELU activations, dilations 1/1/2/4, and a 32-value output with the optional final `tanh` described above. The actor gets 585 history values plus three current commands: **588 inputs**. It never receives simulator linear velocity, applied force, contact force, or the teacher's acceleration window. The clean acceleration window is privileged; the student already has its own noisy acceleration sequence inside the TCN history.
 
 The student's acceleration comes from the simulated IMU mounting point. The privileged acceleration comes from the base link origin. Both are gravity-free and expressed in base axes. They differ by the rigid-body lever-arm terms. The privileged value has no sensor noise or transport clipping. The student keeps the existing IMU noise, bias, orientation, and clipping model.
 
@@ -139,7 +159,9 @@ The learning algorithms already existed. Configuration alone was not sufficient:
 
 ## Validation boundary
 
-Verified locally: 30 CPU checks (including the existing race DAgger regressions), 22 task/live-physics checks, and 34 legacy-observation checks passed. One teacher PPO iteration, one action-supervised DAgger iteration, and one student PPO iteration completed with 8 environments. Both PPO stages used symmetry augmentation and offline W&B snapshots. The public headless player loaded teacher, adapter, and final-student checkpoints. Independent physics checks covered acceleration sampling, contact-force values, partial resets, and terminal histories.
+Original pipeline validation: 30 CPU checks (including the existing race DAgger regressions), 22 task/live-physics checks, and 34 legacy-observation checks passed. One teacher PPO iteration, one action-supervised DAgger iteration, and one student PPO iteration completed with 8 environments. Both PPO stages used symmetry augmentation and offline W&B snapshots. The public headless player loaded teacher, adapter, and final-student checkpoints. Independent physics checks covered acceleration sampling, contact-force values, partial resets, and terminal histories.
+
+Latent-switch follow-up: 54 CPU checks and 28 task/live-physics checks passed. Both `True` and `False` completed real four-environment teacher → action-supervised DAgger → PPO chains. Unbounded teacher, adapter, and PPO checkpoints passed public headless playback. A standalone copied PPO `.pt` restored `False` for playback and resumed PPO without a sidecar or repeated flag.
 
 These small runs check integration and exact initialization. They do not establish learned two-feet performance, better generalization, high-environment-count throughput, or hardware transfer. The encoder's benefit still needs a matched comparison against the direct-IMU policy, with held-out commands, pushes, delays, friction, and IMU noise.
 

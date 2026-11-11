@@ -416,6 +416,8 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     include_foot_height_obs = False
     teacher_latent_dim = 32
     teacher_latent_activation = "identity"  # Legacy teachers remain unbounded; new teachers can match the TCN's tanh.
+    # TCN output activation. The two-feet IMU variants use this switch for BOTH encoder outputs.
+    apply_tanh_to_latent = True
     teacher_encoder_hidden_dims = [256, 128, 64]
     # Extra clean simulator signals for the encoded teacher and the student's privileged critic.
     # These are never included in the student actor's history.
@@ -892,6 +894,8 @@ class Solo12EnvCfg(DirectRLEnvCfg):
 
     def refresh_base_imu_dimensions(self):
         """Recompute student observation dimensions after Hydra overrides."""
+        if type(self.apply_tanh_to_latent) is not bool:
+            raise ValueError("apply_tanh_to_latent must be a boolean.")
         if type(self.include_lin_acc_steps_in_imu_obs) is not int or self.include_lin_acc_steps_in_imu_obs < 0:
             raise ValueError("include_lin_acc_steps_in_imu_obs must be an integer >= 0.")
         if self.teacher_foot_force_obs not in {"none", "norm", "vector"}:
@@ -1062,6 +1066,11 @@ class Solo12TwoFeetImuTeacherEnvCfg(Solo12TwoFeetEnvCfg):
     # Issued commands are available on the robot; simulated delay-line outputs are not.
     action_obs_is_last_executed = False
     base_imu_history_action_is_last_executed = False
+
+    def refresh_base_imu_dimensions(self):
+        # One public setting controls teacher and student; retain the legacy teacher field as derived metadata.
+        self.teacher_latent_activation = "tanh" if self.apply_tanh_to_latent else "identity"
+        super().refresh_base_imu_dimensions()
 
 
 @configclass

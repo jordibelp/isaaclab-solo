@@ -22,6 +22,19 @@ symmetry = importlib.util.module_from_spec(sym_spec)
 sym_spec.loader.exec_module(symmetry)
 
 
+@pytest.mark.parametrize("apply_tanh", [True, False])
+def test_tcn_latent_switch_changes_only_the_final_activation(apply_tanh):
+    encoder = models.BaseImuTcnEncoder(
+        history_len=9, sample_dim=45, channels=8, latent_dim=7, kernel_size=3,
+        apply_tanh_to_latent=apply_tanh,
+    )
+    with torch.no_grad():
+        encoder.to_latent[1].weight.zero_()
+        encoder.to_latent[1].bias.fill_(3.)
+    expected = torch.tanh(torch.tensor(3.)) if apply_tanh else torch.tensor(3.)
+    torch.testing.assert_close(encoder(torch.zeros(2, 405)), expected.expand(2, 7))
+
+
 def train_definitions():
     path = Path(__file__).with_name("train.py")
     names = {
@@ -36,6 +49,7 @@ def train_definitions():
 
 class ContractEnv(SimpleNamespace):
     def refresh_runtime_dependent_config(self):
+        self.teacher_latent_activation = "tanh" if self.apply_tanh_to_latent else "identity"
         self.teacher_encoder_obs_dim = (
             45 + 4 * self.include_foot_height_obs + 3 * self.include_lin_acc_steps_in_imu_obs
             + 3 * self.teacher_include_base_force + {"none": 0, "norm": 4, "vector": 12}[self.teacher_foot_force_obs]
@@ -50,7 +64,7 @@ class ContractEnv(SimpleNamespace):
 def contract_env():
     cfg = ContractEnv(
         policy_model="base_imu_student_rl", include_foot_height_obs=False, include_lin_acc_steps_in_imu_obs=4,
-        teacher_include_base_force=True, teacher_foot_force_obs="norm", teacher_latent_activation="identity", action_obs_is_last_executed=False,
+        teacher_include_base_force=True, teacher_foot_force_obs="norm", apply_tanh_to_latent=True, action_obs_is_last_executed=False,
         base_imu_history_action_is_last_executed=False, imu_ekf_processed_inputs=True,
         use_rotMat_on_imu_encoder=False, decimation=4, sim=SimpleNamespace(dt=0.005),
         base_imu_history_policy_steps=2, base_imu_tcn_channels=8, base_imu_tcn_kernel_size=3,
@@ -60,22 +74,28 @@ def contract_env():
     return cfg
 
 
-@pytest.fixture
-def chain(tmp_path):
+@pytest.fixture(params=[True, False], ids=["bounded", "unbounded"])
+def chain(tmp_path, request):
     torch.manual_seed(71)
     cfg = contract_env()
+    cfg.apply_tanh_to_latent = request.param
+    cfg.refresh_runtime_dependent_config()
     obs = TensorDict({"policy": torch.randn(6, 67), "critic": torch.randn(6, 67)}, batch_size=[6])
     teacher = models.Solo12BaseImuTeacherActorCritic(
         obs, {"policy": ["policy"], "critic": ["critic"]}, 12,
         teacher_encoder_obs_dim=64, teacher_latent_dim=7, teacher_encoder_hidden_dims=[17, 11],
         actor_hidden_dims=[16, 12], critic_hidden_dims=[19, 13], actor_obs_normalization=True,
         critic_obs_normalization=True, noise_std_type="log",
+        teacher_latent_activation=cfg.teacher_latent_activation,
     )
     teacher.update_normalization(obs)
     teacher.eval()
     teacher_path = tmp_path / "teacher.pt"
     torch.save({"model_state_dict": teacher.state_dict()}, teacher_path)
-    adapter = models.BaseImuTcnEncoder(history_len=9, sample_dim=45, channels=8, latent_dim=7, kernel_size=3)
+    adapter = models.BaseImuTcnEncoder(
+        history_len=9, sample_dim=45, channels=8, latent_dim=7, kernel_size=3,
+        apply_tanh_to_latent=cfg.apply_tanh_to_latent,
+    )
     history = torch.randn(6, 405)
     normalizer = EmpiricalNormalization(405)
     normalizer.update(history)
@@ -112,6 +132,7 @@ def test_public_handoff_restores_exact_actions_critic_and_all_tensors(chain, nor
     assert env_cfg.base_imu_history_length == 9
     assert policy_cfg.actor_hidden_dims == [16, 12]
     assert policy_cfg.critic_hidden_dims == [19, 13]
+    assert policy_cfg.apply_tanh_to_latent == c.cfg.apply_tanh_to_latent
     student_obs = TensorDict({"policy": torch.cat((c.history, c.obs["policy"][:, -3:]), -1),
                              "critic": c.obs["critic"]}, batch_size=[6])
     student = models.Solo12BaseImuStudentActorCritic(
@@ -184,6 +205,7 @@ def test_action_loss_updates_only_the_history_encoder(chain):
 
 def test_new_teacher_can_match_the_students_bounded_latent_without_changing_old_teacher_outputs(chain):
     teacher = chain.teacher
+    teacher.teacher_latent_activation = "identity"
     inputs = chain.obs["policy"] * 1000
     original = teacher.teacher_encoder(inputs[:, :64])
     torch.testing.assert_close(teacher.encode_teacher(inputs), original, rtol=0, atol=0)
@@ -240,7 +262,10 @@ def test_single_endpoint_history_is_a_valid_no_history_ablation(chain):
     c = chain
     c.checkpoint["dims"]["history_len"] = 1
     c.checkpoint["layout"]["history_len"] = 1
-    adapter = models.BaseImuTcnEncoder(history_len=1, sample_dim=45, channels=8, latent_dim=7, kernel_size=3)
+    adapter = models.BaseImuTcnEncoder(
+        history_len=1, sample_dim=45, channels=8, latent_dim=7, kernel_size=3,
+        apply_tanh_to_latent=c.cfg.apply_tanh_to_latent,
+    )
     c.checkpoint["adapter_state_dict"] = adapter.state_dict()
     c.checkpoint["history_normalizer_state_dict"] = None
     cfg = SimpleNamespace()
@@ -258,3 +283,51 @@ def test_adapter_cannot_initialize_a_race_or_teacher_task(chain):
     chain.cfg.policy_model = "base_imu_teacher"
     with pytest.raises(ValueError, match="base_imu_student_rl"):
         pipeline.configure_base_imu_student(chain.cfg, SimpleNamespace(), chain.checkpoint, str(chain.teacher_path))
+
+
+def test_latent_activation_survives_teacher_adapter_and_ppo_metadata(chain):
+    c = chain
+    expected = c.cfg.apply_tanh_to_latent
+    pipeline.save_training_contract(str(c.tmp_path), c.cfg, SimpleNamespace())
+    c.cfg.apply_tanh_to_latent = not expected
+    pipeline.restore_latent_activation_from_checkpoint(c.cfg, str(c.teacher_path))
+    assert c.cfg.apply_tanh_to_latent == expected
+    assert c.cfg.teacher_latent_activation == ("tanh" if expected else "identity")
+    adapter_path = c.tmp_path / "adapter.pt"
+    torch.save(c.checkpoint, adapter_path)
+    c.cfg.apply_tanh_to_latent = not expected
+    pipeline.restore_latent_activation_from_checkpoint(c.cfg, str(adapter_path))
+    assert c.cfg.apply_tanh_to_latent == expected
+
+
+def test_legacy_adapter_defaults_to_its_original_tanh(chain):
+    c = chain
+    c.checkpoint["layout"].pop("apply_tanh_to_latent")
+    c.checkpoint["observation_contract"].pop("apply_tanh_to_latent")
+    c.cfg.apply_tanh_to_latent = False
+    cfg = SimpleNamespace()
+    pipeline.configure_base_imu_student(c.cfg, cfg, c.checkpoint, str(c.teacher_path))
+    assert cfg.apply_tanh_to_latent is True
+
+
+def test_inconsistent_latent_metadata_is_rejected(chain):
+    c = chain
+    c.checkpoint["layout"]["apply_tanh_to_latent"] = not c.cfg.apply_tanh_to_latent
+    with pytest.raises(ValueError, match="disagree on apply_tanh_to_latent"):
+        pipeline.configure_base_imu_student(c.cfg, SimpleNamespace(), c.checkpoint, str(c.teacher_path))
+
+
+def test_standalone_ppo_checkpoint_keeps_activation_without_mutating_existing_infos(chain):
+    c = chain
+    expected = c.cfg.apply_tanh_to_latent
+    existing = {"best_model_value": 12.3}
+    runner = SimpleNamespace(save=lambda path, infos=None: torch.save({"infos": infos}, path))
+    pipeline.attach_latent_contract_to_runner(runner, c.cfg)
+    path = c.tmp_path / "standalone" / "policy.pt"
+    path.parent.mkdir()
+    runner.save(str(path), infos=existing)
+    assert existing == {"best_model_value": 12.3}
+    assert torch.load(path, weights_only=False)["infos"]["best_model_value"] == 12.3
+    c.cfg.apply_tanh_to_latent = not expected
+    pipeline.restore_latent_activation_from_checkpoint(c.cfg, str(path))
+    assert c.cfg.apply_tanh_to_latent == expected

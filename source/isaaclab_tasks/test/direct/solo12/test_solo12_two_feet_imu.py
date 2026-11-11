@@ -17,6 +17,16 @@ from isaaclab_tasks.direct.solo12.solo12_env_cfg import (
 )
 
 
+@pytest.mark.parametrize("apply_tanh", [True, False])
+@pytest.mark.parametrize("cls", [Solo12TwoFeetImuTeacherEnvCfg, Solo12TwoFeetImuStudentDaggerEnvCfg, Solo12TwoFeetImuStudentRlEnvCfg])
+def test_one_hydra_field_controls_both_latent_ranges(cls, apply_tanh):
+    cfg = cls()
+    assert cfg.apply_tanh_to_latent is True
+    cfg.from_dict({"apply_tanh_to_latent": apply_tanh})
+    cfg.refresh_runtime_dependent_config()
+    assert cfg.teacher_latent_activation == ("tanh" if apply_tanh else "identity")
+
+
 @pytest.mark.parametrize("task, cls, actor_width", [
     ("solo12-two-feet-IMU-teacher", Solo12TwoFeetImuTeacherEnvCfg, 67),
     ("solo12-two-feet-IMU-student-dagger", Solo12TwoFeetImuStudentDaggerEnvCfg, 655),

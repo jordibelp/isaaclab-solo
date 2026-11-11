@@ -465,6 +465,7 @@ def _sync_base_imu_policy_cfg_from_env_cfg(env_cfg, agent_cfg) -> None:
         "base_imu_tcn_latent_dim": "tcn_latent_dim",
         "base_imu_tcn_kernel_size": "tcn_kernel_size",
         "base_imu_tcn_activation": "tcn_activation",
+        "apply_tanh_to_latent": "apply_tanh_to_latent",
         "feed_history_encoding_to_critic": "feed_history_encoding_to_critic",
     }
     for env_field, policy_field in env_to_policy_fields.items():
@@ -2982,6 +2983,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             dagger_adapter_checkpoint_arg if dagger_adapter_checkpoint_arg is not None else args_cli.checkpoint,
         )
     input_checkpoint_name = _infer_input_checkpoint_name(resume_path)
+    if should_resume and str(getattr(env_cfg, "policy_model", "")).startswith("base_imu_"):
+        from solo12_imu_pipeline import restore_latent_activation_from_checkpoint
+
+        restore_latent_activation_from_checkpoint(env_cfg, resume_path)
+        _sync_base_imu_policy_cfg_from_env_cfg(env_cfg, agent_cfg)
 
     if args_cli.video:
         video_kwargs = {
@@ -3027,6 +3033,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
     if agent_cfg.class_name == "OnPolicyRunner":
         _configure_ppo_optimizer(runner, agent_cfg)
+        if str(getattr(env_cfg, "policy_model", "")).startswith("base_imu_"):
+            from solo12_imu_pipeline import attach_latent_contract_to_runner
+
+            attach_latent_contract_to_runner(runner, env_cfg)
 
     layer_norm_result = None
     if mitigation_spec.layer_norm:
