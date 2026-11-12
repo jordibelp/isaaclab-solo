@@ -2,6 +2,7 @@
 """CPU checks for the live go-to player: goal ownership, deadlines, holds, resets and views."""
 import ast
 import math
+import time
 from pathlib import Path
 
 import pytest
@@ -19,7 +20,7 @@ def load_definitions(path, scope, constants=False):
 
 CMD_UI = load_definitions(FOLDER.parent / "borinot_cmd_vel/playback_ui.py", {"math": math})
 UI = load_definitions(FOLDER / "playback_ui.py", {
-    "math": math, "quat_apply_inverse": inverse, "camera_pose": CMD_UI["camera_pose"],
+    "math": math, "time": time, "quat_apply_inverse": inverse, "camera_pose": CMD_UI["camera_pose"],
     "training_deadline_interval": task_math.training_deadline_interval}, constants=True)
 GOAL = (1.0, -0.5, 2.0)
 
@@ -394,6 +395,27 @@ def test_slider_edits_only_change_the_draft_until_go(index, value):
     assert torch.equal(env._goal_position_w, before[0]) and torch.equal(env._episode_steps, before[1])
     if index == 3:
         assert not panel.auto_deadline and panel.requested_deadline() == value
+
+
+def test_playback_speed_changes_only_wall_pacing_and_measures_unpaused_progress(monkeypatch):
+    from types import SimpleNamespace
+    env = play_env()
+    assert controls(env, GOAL).speed is None  # unpaced unless the player passes a speed
+    panel = UI["GoalControls"](env, GOAL, None, [(-6., 6.)] * 4, show_ui=False, speed=1.0)
+    assert UI["PLAYBACK_SPEEDS"] == (0.25, 0.5, 0.75, 1.0)
+    before = env._goal_position_w.clone(), env._episode_steps.clone()
+    panel.set_speed(0.25)
+    assert panel.speed == 0.25 and panel.speed_description() == "Target x0.25 of real time."
+    assert panel.apply_requests(None, "unchanged") == ("unchanged", False)
+    assert torch.equal(env._goal_position_w, before[0]) and torch.equal(env._episode_steps, before[1])
+    clock = iter((10.0, 15.0, 15.4))
+    monkeypatch.setitem(UI, "time", SimpleNamespace(perf_counter=lambda: next(clock)))
+    panel._measure_speed(1.0)
+    panel._measure_speed(1.0)  # five paused wall seconds: no simulated progress, no measurement
+    assert panel.measured_speed is None
+    panel._measure_speed(1.1)  # 0.1 simulated s in 0.4 wall s
+    assert panel.measured_speed == pytest.approx(0.25)
+    assert panel.speed_description() == "Target x0.25 of real time; measured x0.25."
 
 
 @pytest.mark.parametrize("episodes", [False, True])

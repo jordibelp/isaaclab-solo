@@ -579,6 +579,12 @@ Inference restores normalizers and weights, not optimizer state or a
 training-sized replay buffer. `--headless --no-real-time` is useful for a
 smoke check.
 
+For slow motion, use the **PLAYBACK SPEED** buttons (**x0.25**, **x0.5**,
+**x0.75**, **x1**) in the panel, or start with `--playback_speed=0.5`. They only
+stretch wall-clock time; physics and policy rates stay unchanged. The panel
+shows the target and the measured speed. `--no-real-time` removes pacing, so it
+cannot be combined with `--playback_speed`.
+
 ## Logs and interpretation
 
 `info["reward_terms"]` contains signed per-step reward contributions.

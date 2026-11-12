@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """Live goal/deadline controls and flight cameras, used only by the public go-to player."""
 import math
+import time
 
 from isaaclab.utils.math import quat_apply_inverse
 from isaaclab_tasks.direct.borinot_cmd_vel.playback_ui import camera_pose
@@ -8,6 +9,7 @@ from isaaclab_tasks.direct.borinot_cmd_vel.playback_ui import camera_pose
 from .task_math import training_deadline_interval
 
 CAMERAS = ("goal", "follow", "chase", "side", "top", "free")
+PLAYBACK_SPEEDS = (0.25, 0.5, 0.75, 1.0)  # fractions of real time; physics and policy rates are unchanged
 HORIZONTAL_FOV_DEG = 60.0  # Kit default perspective camera: 18.15 mm focal length, 20.955 mm aperture
 REST_SPEED_M_S = 0.25  # training goals always start from rest
 
@@ -96,8 +98,10 @@ def describe_state(state):
 class GoalControls:
     """UI callbacks queue intent; goal/reset changes are applied before inference."""
 
-    def __init__(self, env, goal, deadline_s, ranges, camera="goal", show_ui=True, relative=False):
+    def __init__(self, env, goal, deadline_s, ranges, camera="goal", show_ui=True, relative=False, speed=None):
         self.env, self.camera = env, camera
+        self.speed = speed  # wall-clock pacing target (fraction of real time); None: unpaced
+        self.measured_speed = self._speed_mark = None
         self.goal = list(goal)
         self.relative = bool(relative)
         self.auto_deadline = deadline_s is None
@@ -121,7 +125,7 @@ class GoalControls:
     def _build_window(self, ranges):
         import omni.ui as ui
 
-        self.window = ui.Window("Borinot live goal control", width=570, height=820,
+        self.window = ui.Window("Borinot live goal control", width=570, height=880,
                                 dock_preference=ui.DockPreference.RIGHT_TOP)
         with self.window.frame, ui.ScrollingFrame():
             with ui.VStack(spacing=8, height=0):
@@ -162,6 +166,12 @@ class GoalControls:
                 with ui.HStack(height=32):
                     ui.Button("Reset robot", clicked_fn=self.request_reset)
                     self.pause_button = ui.Button("Pause", clicked_fn=self.toggle_pause)
+                if self.speed is not None:
+                    ui.Label("PLAYBACK SPEED (slow motion only; physics and policy rates unchanged)", height=22)
+                    with ui.HStack(height=30):
+                        for speed in PLAYBACK_SPEEDS:
+                            ui.Button(f"x{speed:g}", clicked_fn=lambda s=speed: self.set_speed(s))
+                    self.speed_label = ui.Label(self.speed_description(), height=22)
                 self._build_sequence_editor(ui)
                 ui.Label("CAMERA", height=22)
                 with ui.HStack(height=30):
@@ -361,6 +371,22 @@ class GoalControls:
     def set_camera(self, camera):
         self.camera = camera
 
+    def set_speed(self, speed):
+        self.speed = float(speed)
+        if self.window:
+            self.speed_label.text = self.speed_description()
+
+    def speed_description(self):
+        measured = "" if self.measured_speed is None else f"; measured x{self.measured_speed:.2f}"
+        return f"Target x{self.speed:g} of real time{measured}."
+
+    def _measure_speed(self, time_s):
+        """Simulated seconds per wall second since the previous label refresh. Pauses are excluded."""
+        now = time.perf_counter()
+        if self._speed_mark is not None and time_s > self._speed_mark[0]:
+            self.measured_speed = (time_s - self._speed_mark[0]) / (now - self._speed_mark[1])
+        self._speed_mark = (time_s, now)
+
     def requested_deadline(self):
         return None if self.auto_deadline else self.deadline_s
 
@@ -481,6 +507,9 @@ class GoalControls:
                                   f" - manual resets {self.manual_resets}" + (f"\n{self.message}" if self.message else ""))
         if hasattr(self, "sequence_label"):
             self.sequence_label.text = self.sequence_message
+        if self.speed is not None:
+            self._measure_speed(time_s)
+            self.speed_label.text = self.speed_description()
 
     def close(self):
         if self._preview is not None:

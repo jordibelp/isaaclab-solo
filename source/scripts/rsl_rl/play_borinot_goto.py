@@ -18,6 +18,9 @@ parser.add_argument("--num_envs", type=int, default=1)
 parser.add_argument("--seed", type=int, default=42)
 parser.add_argument("--duration_s", type=float, default=30.0)
 parser.add_argument("--real-time", action=argparse.BooleanOptionalAction, default=True)
+parser.add_argument("--playback_speed", type=float, default=1.0,
+                    help="Initial pacing as a fraction of real time, e.g. 0.25 for slow motion. "
+                         "The panel buttons change it live. Physics and policy rates are unchanged.")
 parser.add_argument("--goal_init", "--goal", type=float, nargs=3, default=None, metavar=("X", "Y", "Z"),
                     help="Initial XYZ in metres, interpreted with --goal-frame. Default: home (world) or zero (relative).")
 parser.add_argument("--goal-frame", choices=("world", "relative"), default="world",
@@ -47,6 +50,10 @@ if args.deadline_s is not None and (not math.isfinite(args.deadline_s) or args.d
     parser.error("deadline_s must be positive and finite.")
 if not math.isfinite(args.log_interval_s) or args.log_interval_s < 0:
     parser.error("log_interval_s must be finite and nonnegative.")
+if not math.isfinite(args.playback_speed) or args.playback_speed <= 0:
+    parser.error("playback_speed must be positive and finite.")
+if not args.real_time and args.playback_speed != 1.0:
+    parser.error("--playback_speed paces playback; remove --no-real-time to use it.")
 if args.random_goals and (args.goal_init is not None or args.deadline_s is not None or args.reset_at_deadline
                          or args.goal_frame != "world"):
     parser.error("--random-goals samples goals and deadlines; do not combine it with live-goal options.")
@@ -133,7 +140,8 @@ def main(env_cfg, agent_cfg):
             model = runner.alg.policy
         policy = runner.get_inference_policy(device=env.device)
         controls = GoalControls(play_env, goal or home, args.deadline_s, ranges, args.camera,
-                                show_ui=args.ui and not args.random_goals and play_env.sim.has_gui(), relative=relative)
+                                show_ui=args.ui and not args.random_goals and play_env.sim.has_gui(), relative=relative,
+                                speed=args.playback_speed if args.real_time else None)
         initial_goal = (play_env._goal_position_w[0] - play_env.scene.env_origins[0]).tolist()
         push_limit_n = stage_force_limit(env_cfg, play_env.goal_curriculum.level)
         mode = "random" if args.random_goals else ("episodes" if play_env.reset_at_deadline else "chain")
@@ -178,8 +186,8 @@ def main(env_cfg, agent_cfg):
                     print(f"[GOAL] t={completed * play_env.step_dt:.2f} s, robot 0: {describe_result(result, number)}",
                           flush=True)
                 printed = len(play_env.play_results)
-                if args.real_time:
-                    time.sleep(max(0.0, play_env.step_dt - (time.perf_counter() - start)))
+                if controls.speed is not None:
+                    time.sleep(max(0.0, play_env.step_dt / controls.speed - (time.perf_counter() - start)))
         print("BORINOT_GOTO_PLAY " + json.dumps({
             "task": args.task, "mode": mode, "control_mode": env_cfg.control_mode, "steps": completed, "finite": True,
             "checkpoint_name": Path(checkpoint).name, "checkpoint_path": checkpoint,
@@ -198,7 +206,7 @@ def main(env_cfg, agent_cfg):
             "totals": play_env.play_totals, "hold_worst_distance_m": play_env.play_hold_worst_distance_m,
             "robot0_results": play_env.play_results[-20:], "robot0_result_count": len(play_env.play_results),
             "resets": resets, "manual_resets": controls.manual_resets, "camera": controls.camera,
-            "simulated_s": completed * play_env.step_dt,
+            "simulated_s": completed * play_env.step_dt, "final_playback_speed": controls.speed,
         }), flush=True)
     finally:
         if controls is not None:

@@ -134,6 +134,15 @@ The viewer and control window refresh at up to 30 frames/s by default, independe
 of physics and policy. Change this with `--mj_fps=60` or `--mj_fps=20`. No physics
 or policy steps are skipped. Live numeric labels are drawn only on a UI refresh.
 
+The GoTo player can also play in slow motion. Its control window has a
+**PLAYBACK SPEED** row with **x0.25**, **x0.5**, **x0.75** and **x1** buttons.
+They change only the wall-clock pacing: physics, policy and controller rates stay
+the same, so the rollout is identical, just slower to watch. The label under the
+buttons shows the target and the measured speed. If x1 measures below 1, the
+computer cannot keep up with real time; slower choices still work. Add
+`--playback_speed=0.25` (any positive value) to start slow, also with `--headless`.
+It cannot be combined with `--no-real-time`.
+
 For example, a short unpaced benchmark of the supplied GoTo policy:
 
 ```bash
