@@ -56,6 +56,8 @@ class RslRlPpoSolo12BaseImuTeacherCfg(RslRlPpoActorCriticCfg):
     teacher_latent_activation: str = _SOLO12_BASE_IMU_TEACHER_CFG.teacher_latent_activation
     teacher_encoder_hidden_dims: list[int] = _SOLO12_BASE_IMU_TEACHER_CFG.teacher_encoder_hidden_dims
     command_dim: int = 3
+    priv_critic_includes_perception_encoding: bool = False
+    priv_critic_detached_perception_encoding: bool = True
 
 
 @configclass
@@ -71,6 +73,8 @@ class RslRlPpoSolo12BaseImuStudentCfg(RslRlPpoActorCriticCfg):
     tcn_activation: str = _SOLO12_BASE_IMU_STUDENT_CFG.base_imu_tcn_activation
     apply_tanh_to_latent: bool = _SOLO12_BASE_IMU_STUDENT_CFG.apply_tanh_to_latent
     feed_history_encoding_to_critic: bool = _SOLO12_BASE_IMU_STUDENT_CFG.feed_history_encoding_to_critic
+    priv_critic_includes_perception_encoding: bool = False
+    priv_critic_detached_perception_encoding: bool = True
 
 
 @configclass
@@ -152,6 +156,9 @@ class Solo12BaseImuTeacherPPORunnerCfg(Solo12PPORunnerCfg):
 
 @configclass
 class Solo12BaseImuStudentRlPPORunnerCfg(Solo12PPORunnerCfg):
+    # Initial rollout/update iterations devoted to the critic after a DAgger handoff.
+    # These count toward max_iterations; resumed checkpoints continue saved progress.
+    critic_warmup_iterations: int = 0
     run_name = "[ClusterIRI]-Solo12 base IMU student RL TCN"
     obs_groups = {"policy": ["policy"], "critic": ["critic"]}
     policy = RslRlPpoSolo12BaseImuStudentCfg(

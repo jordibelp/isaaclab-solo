@@ -99,6 +99,18 @@ class BaseImuTcnEncoder(nn.Module):
 
 class _GaussianActorMixin:
     is_recurrent: bool = False
+    critic_warmup_active: bool = False
+
+    def _critic_with_perception(self, obs: TensorDict, critic_input: torch.Tensor) -> torch.Tensor:
+        """Use the actor's normalized inputs and encoder, never a second perception model."""
+        if not self.priv_critic_includes_perception_encoding:
+            return critic_input
+        actor_obs = self.actor_obs_normalizer(self.get_actor_obs(obs))
+        z = self._actor_input(actor_obs)[:, :-self.command_dim]
+        if self.priv_critic_detached_perception_encoding or self.critic_warmup_active:
+            z = z.detach()
+        # Preserve the command at the end: [privileged features, actor encoding, command].
+        return torch.cat((critic_input[:, :-self.command_dim], z, critic_input[:, -self.command_dim:]), dim=-1)
 
     def reset(self, dones: torch.Tensor | None = None) -> None:
         pass
@@ -171,6 +183,8 @@ class Solo12BaseImuTeacherActorCritic(nn.Module, _GaussianActorMixin):
         teacher_encoder_activation: str = "elu",
         teacher_latent_activation: str = "identity",
         command_dim: int = 3,
+        priv_critic_includes_perception_encoding: bool = False,
+        priv_critic_detached_perception_encoding: bool = True,
         **kwargs: dict[str, Any],
     ) -> None:
         if kwargs:
@@ -188,6 +202,8 @@ class Solo12BaseImuTeacherActorCritic(nn.Module, _GaussianActorMixin):
             raise ValueError("teacher_latent_activation must be 'identity' or 'tanh'.")
         self.teacher_latent_activation = teacher_latent_activation
         self.command_dim = int(command_dim)
+        self.priv_critic_includes_perception_encoding = priv_critic_includes_perception_encoding
+        self.priv_critic_detached_perception_encoding = priv_critic_detached_perception_encoding
 
         num_actor_obs = self._obs_dim(obs, obs_groups["policy"])
         num_critic_obs = self._obs_dim(obs, obs_groups["critic"])
@@ -209,7 +225,8 @@ class Solo12BaseImuTeacherActorCritic(nn.Module, _GaussianActorMixin):
             teacher_encoder_activation,
         )
         self.actor = MLP(self.teacher_latent_dim + self.command_dim, num_actions, actor_hidden_dims, activation)
-        self.critic = MLP(num_critic_obs, 1, critic_hidden_dims, activation)
+        critic_input_dim = num_critic_obs + (self.teacher_latent_dim if priv_critic_includes_perception_encoding else 0)
+        self.critic = MLP(critic_input_dim, 1, critic_hidden_dims, activation)
         print(f"Teacher encoder: {self.teacher_encoder}")
         print(f"Teacher latent activation: {self.teacher_latent_activation}")
         print(f"Actor MLP: {self.actor}")
@@ -245,10 +262,10 @@ class Solo12BaseImuTeacherActorCritic(nn.Module, _GaussianActorMixin):
 
     def evaluate(self, obs: TensorDict, **kwargs: dict[str, Any]) -> torch.Tensor:
         critic_obs = self.critic_obs_normalizer(self.get_critic_obs(obs))
-        return self.critic(critic_obs)
+        return self.critic(self._critic_with_perception(obs, critic_obs))
 
     def update_normalization(self, obs: TensorDict) -> None:
-        if self.actor_obs_normalization:
+        if self.actor_obs_normalization and not self.critic_warmup_active:
             self.actor_obs_normalizer.update(self.get_actor_obs(obs))
         if self.critic_obs_normalization:
             self.critic_obs_normalizer.update(self.get_critic_obs(obs))
@@ -280,6 +297,8 @@ class Solo12BaseImuStudentActorCritic(nn.Module, _GaussianActorMixin):
         tcn_activation: str = "elu",
         apply_tanh_to_latent: bool = True,
         feed_history_encoding_to_critic: bool = False,
+        priv_critic_includes_perception_encoding: bool = False,
+        priv_critic_detached_perception_encoding: bool = True,
         **kwargs: dict[str, Any],
     ) -> None:
         if kwargs:
@@ -298,6 +317,12 @@ class Solo12BaseImuStudentActorCritic(nn.Module, _GaussianActorMixin):
         self.command_dim = int(command_dim)
         self.tcn_latent_dim = int(tcn_latent_dim)
         self.feed_history_encoding_to_critic = bool(feed_history_encoding_to_critic)
+        self.priv_critic_includes_perception_encoding = priv_critic_includes_perception_encoding
+        self.priv_critic_detached_perception_encoding = priv_critic_detached_perception_encoding
+        if self.feed_history_encoding_to_critic and self.priv_critic_includes_perception_encoding:
+            raise ValueError(
+                "Choose either the legacy separate critic TCN or the shared actor perception encoding, not both."
+            )
 
         num_actor_obs = self._obs_dim(obs, obs_groups["policy"])
         num_critic_obs = self._obs_dim(obs, obs_groups["critic"])
@@ -329,7 +354,7 @@ class Solo12BaseImuStudentActorCritic(nn.Module, _GaussianActorMixin):
         self.actor = MLP(self.tcn_latent_dim + self.command_dim, num_actions, actor_hidden_dims, activation)
         critic_input_dim = self.teacher_critic_obs_dim + (
             self.tcn_latent_dim if self.feed_history_encoding_to_critic else 0
-        )
+        ) + (self.tcn_latent_dim if priv_critic_includes_perception_encoding else 0)
         self.critic = MLP(critic_input_dim, 1, critic_hidden_dims, activation)
         print(f"Actor base-IMU TCN: {self.actor_history_encoder}")
         print(f"Actor MLP: {self.actor}")
@@ -372,10 +397,10 @@ class Solo12BaseImuStudentActorCritic(nn.Module, _GaussianActorMixin):
 
     def evaluate(self, obs: TensorDict, **kwargs: dict[str, Any]) -> torch.Tensor:
         critic_obs = self.critic_obs_normalizer(self.get_critic_obs(obs))
-        return self.critic(self._critic_input(critic_obs))
+        return self.critic(self._critic_with_perception(obs, self._critic_input(critic_obs)))
 
     def update_normalization(self, obs: TensorDict) -> None:
-        if self.actor_obs_normalization:
+        if self.actor_obs_normalization and not self.critic_warmup_active:
             self.actor_obs_normalizer.update(self.get_actor_obs(obs))
         if self.critic_obs_normalization:
             self.critic_obs_normalizer.update(self.get_critic_obs(obs))

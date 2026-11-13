@@ -424,6 +424,8 @@ def _sync_base_imu_policy_cfg_from_env_cfg(env_cfg, agent_cfg) -> None:
         "base_imu_tcn_activation": "tcn_activation",
         "apply_tanh_to_latent": "apply_tanh_to_latent",
         "feed_history_encoding_to_critic": "feed_history_encoding_to_critic",
+        "priv_critic_includes_perception_encoding": "priv_critic_includes_perception_encoding",
+        "priv_critic_detached_perception_encoding": "priv_critic_detached_perception_encoding",
     }
     for env_field, policy_field in env_to_policy_fields.items():
         if hasattr(env_cfg, env_field) and hasattr(policy_cfg, policy_field):

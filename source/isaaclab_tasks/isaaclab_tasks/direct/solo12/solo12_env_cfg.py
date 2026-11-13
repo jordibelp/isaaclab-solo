@@ -426,6 +426,10 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     teacher_include_base_force = False
     teacher_foot_force_obs = "none"  # "none", "norm" (4 scalars), or "vector" (4 base-frame vectors).
     feed_history_encoding_to_critic = False
+    # Reuse the actor's actual perception output in the privileged PPO critic.
+    # Unlike feed_history_encoding_to_critic, this does not create a second TCN.
+    priv_critic_includes_perception_encoding = False
+    priv_critic_detached_perception_encoding = True
 
     # Round-wise input-permutation experiment (arXiv:2405.19153). These values
     # are used only when train.py receives --plasticity-loss-exp. A "step" here
@@ -917,6 +921,16 @@ class Solo12EnvCfg(DirectRLEnvCfg):
 
     def refresh_base_imu_dimensions(self):
         """Recompute student observation dimensions after Hydra overrides."""
+        for name in ("priv_critic_includes_perception_encoding", "priv_critic_detached_perception_encoding"):
+            if type(getattr(self, name)) is not bool:
+                raise ValueError(f"{name} must be a boolean.")
+        if self.priv_critic_includes_perception_encoding:
+            if self.policy_model not in {"base_imu_teacher", "base_imu_student_rl", "base_imu_student_dagger"}:
+                raise ValueError("priv_critic_includes_perception_encoding requires a base-IMU encoded policy.")
+            if self.feed_history_encoding_to_critic:
+                raise ValueError(
+                    "Choose either feed_history_encoding_to_critic or priv_critic_includes_perception_encoding."
+                )
         if type(self.apply_tanh_to_latent) is not bool:
             raise ValueError("apply_tanh_to_latent must be a boolean.")
         if type(self.include_lin_acc_steps_in_imu_obs) is not int or self.include_lin_acc_steps_in_imu_obs < 0:

@@ -25,7 +25,10 @@ ENV_FIELDS = (
 POLICY_FIELDS = (
     "actor_hidden_dims", "critic_hidden_dims", "activation", "actor_obs_normalization",
     "critic_obs_normalization", "noise_std_type", "teacher_encoder_hidden_dims", "teacher_latent_dim", "teacher_latent_activation", "apply_tanh_to_latent",
+    "priv_critic_includes_perception_encoding", "priv_critic_detached_perception_encoding",
 )
+PERCEPTION_DEFAULTS = {"priv_critic_includes_perception_encoding": False,
+                       "priv_critic_detached_perception_encoding": True}
 
 
 def observation_contract(env_cfg) -> dict:
@@ -51,27 +54,37 @@ def adapter_latent_tanh(checkpoint: dict) -> bool:
 
 
 def restore_latent_activation_from_checkpoint(env_cfg, checkpoint_path: str) -> None:
-    """Recover a parameter-free activation from metadata; it cannot be inferred from tensor shapes."""
+    """Restore activation and critic topology for standalone PPO resume/playback."""
     path = Path(checkpoint_path).expanduser()
     checkpoint = torch.load(path, map_location="cpu", weights_only=False)
     if "adapter_state_dict" in checkpoint:
         saved = {**(checkpoint.get("observation_contract") or {}),
                  "apply_tanh_to_latent": adapter_latent_tanh(checkpoint)}
+        critic_contract = checkpoint.get("teacher_policy", {})
     else:
         saved = (checkpoint.get("infos") or {}).get("solo12_imu_latent")
+        critic_contract = (checkpoint.get("infos") or {}).get("solo12_imu_critic")
         if saved is None:
             sidecar = path.parent / "params" / CONTRACT_FILE
             if not sidecar.is_file():
                 sidecar = path.parent.parent / "params" / CONTRACT_FILE
-            saved = json.loads(sidecar.read_text())["observation_contract"] if sidecar.is_file() else {}
+            sidecar_data = json.loads(sidecar.read_text()) if sidecar.is_file() else {}
+            saved = sidecar_data.get("observation_contract", {})
+            if critic_contract is None:
+                critic_contract = sidecar_data.get("policy", {})
     for name in ("apply_tanh_to_latent", "teacher_latent_activation"):
         if name in saved:
             setattr(env_cfg, name, saved[name])
+    for name, default in PERCEPTION_DEFAULTS.items():
+        value = (critic_contract or {}).get(name, default)
+        if getattr(env_cfg, name, default) != value:
+            print(f"[INFO]: Restoring checkpoint {name}={value}; full PPO resume/playback preserves saved topology.")
+        setattr(env_cfg, name, value)
     env_cfg.refresh_runtime_dependent_config()
 
 
 def attach_latent_contract_to_runner(runner, env_cfg) -> None:
-    """Keep the activation choice inside every PPO .pt, including copied standalone checkpoints."""
+    """Embed activation, critic topology and warm-up progress in every standalone PPO .pt."""
     original_save = runner.save
 
     def save(path, infos=None):
@@ -79,6 +92,12 @@ def attach_latent_contract_to_runner(runner, env_cfg) -> None:
             "apply_tanh_to_latent": env_cfg.apply_tanh_to_latent,
             "teacher_latent_activation": env_cfg.teacher_latent_activation,
         }}
+        infos["solo12_imu_critic"] = {name: getattr(env_cfg, name, default)
+                                       for name, default in PERCEPTION_DEFAULTS.items()}
+        alg = getattr(runner, "alg", None)
+        if hasattr(alg, "critic_warmup_remaining") and hasattr(alg.policy, "actor_history_encoder"):
+            infos["solo12_critic_warmup"] = {"remaining": alg.critic_warmup_remaining,
+                                            "completed": alg.critic_warmup_completed}
         return original_save(path, infos=infos)
 
     runner.save = save
@@ -129,14 +148,23 @@ def configure_teacher_for_dagger(env_cfg, policy_cfg, checkpoint_path: str) -> d
     saved = json.loads(sidecar.read_text()) if sidecar.is_file() else {}
     state = checkpoint_model_state(checkpoint_path)
     encoder_in, encoder_hidden, latent_dim = mlp_shape(state, "teacher_encoder")
+    critic_in, _, _ = mlp_shape(state, "critic")
+    if critic_in not in {encoder_in + 3, encoder_in + 3 + latent_dim}:
+        raise ValueError("Teacher critic input does not match its privileged/perception contract.")
+    includes_encoding = critic_in == encoder_in + 3 + latent_dim
     if saved:
         apply_observation_contract(env_cfg, saved["observation_contract"])
         for name, value in saved.get("policy", {}).items():
             if name in POLICY_FIELDS and hasattr(policy_cfg, name):
                 setattr(policy_cfg, name, value)
+    else:
+        restore_latent_activation_from_checkpoint(env_cfg, checkpoint_path)
     env_cfg.teacher_encoder_hidden_dims = encoder_hidden
     env_cfg.teacher_latent_dim = latent_dim
     env_cfg.base_imu_tcn_latent_dim = latent_dim
+    env_cfg.priv_critic_includes_perception_encoding = includes_encoding
+    env_cfg.priv_critic_detached_perception_encoding = saved.get("policy", {}).get(
+        "priv_critic_detached_perception_encoding", getattr(env_cfg, "priv_critic_detached_perception_encoding", True))
     env_cfg.refresh_runtime_dependent_config()
     if env_cfg.teacher_encoder_obs_dim != encoder_in:
         raise ValueError(
@@ -146,6 +174,8 @@ def configure_teacher_for_dagger(env_cfg, policy_cfg, checkpoint_path: str) -> d
     policy_cfg.teacher_encoder_obs_dim = encoder_in
     policy_cfg.teacher_encoder_hidden_dims = encoder_hidden
     policy_cfg.teacher_latent_dim = latent_dim
+    for name in PERCEPTION_DEFAULTS:
+        setattr(policy_cfg, name, getattr(env_cfg, name))
     for prefix in ("actor", "critic"):
         setattr(policy_cfg, f"{prefix}_hidden_dims", mlp_shape(state, prefix)[1])
         setattr(policy_cfg, f"{prefix}_obs_normalization", any(k.startswith(f"{prefix}_obs_normalizer.") for k in state))
@@ -218,6 +248,15 @@ def configure_base_imu_student(env_cfg, policy_cfg, checkpoint: dict, teacher_ch
             or env_cfg.base_imu_history_sample_dim != int(dims["history_sample_dim"])
             or latent_dim != int(dims["latent_dim"])):
         raise ValueError("DAgger/teacher observation contract does not match the selected student task.")
+    critic_in = mlp_shape(state, "critic")[0]
+    if critic_in not in {env_cfg.teacher_critic_obs_dim, env_cfg.teacher_critic_obs_dim + latent_dim}:
+        raise ValueError("Teacher critic input does not match the privileged/perception contract.")
+    if critic_in != env_cfg.teacher_critic_obs_dim and not getattr(
+        env_cfg, "priv_critic_includes_perception_encoding", False
+    ):
+        raise ValueError(
+            "Teacher critic uses a perception encoding; enable env.priv_critic_includes_perception_encoding=True."
+        )
     for name, value in checkpoint.get("teacher_policy", {}).items():
         if name in POLICY_FIELDS and hasattr(policy_cfg, name):
             setattr(policy_cfg, name, value)
@@ -232,9 +271,39 @@ def configure_base_imu_student(env_cfg, policy_cfg, checkpoint: dict, teacher_ch
                                    or any(k.startswith("actor_obs_normalizer.") for k in state),
         "critic_obs_normalization": any(k.startswith("critic_obs_normalizer.") for k in state),
         "noise_std_type": "log" if "log_std" in state else "scalar",
+        **{name: getattr(env_cfg, name, default) for name, default in PERCEPTION_DEFAULTS.items()},
     }.items():
         setattr(policy_cfg, name, value)
     print(f"[INFO]: Configured base-IMU student: history={history_len}x{env_cfg.base_imu_history_sample_dim}, "
           f"privileged critic={env_cfg.teacher_critic_obs_dim}, TCN={env_cfg.base_imu_tcn_channels}ch/"
           f"k{env_cfg.base_imu_tcn_kernel_size}, latent={latent_dim}, "
           f"apply_tanh_to_latent={env_cfg.apply_tanh_to_latent}.", flush=True)
+
+
+def expand_privileged_critic_weight(source: torch.Tensor, target: torch.Tensor,
+                                    privileged_obs_dim: int, latent_dim: int, command_dim: int) -> torch.Tensor:
+    """Add zero-weight encoding columns, preserving a direct privileged critic's function."""
+    if source.shape != (target.shape[0], privileged_obs_dim) or target.shape[1] != privileged_obs_dim + latent_dim:
+        raise ValueError("Cannot expand critic weight: expected a direct privileged critic with the same hidden width.")
+    expanded = torch.zeros_like(target)
+    features = privileged_obs_dim - command_dim
+    expanded[:, :features] = source[:, :features].to(expanded.device)
+    expanded[:, -command_dim:] = source[:, -command_dim:].to(expanded.device)
+    return expanded
+
+
+def configure_critic_warmup(runner, iterations: int, *, from_adapter: bool, checkpoint_infos=None) -> None:
+    """Start once at a handoff, or continue (never restart) checkpointed warm-up progress."""
+    if type(iterations) is not int or iterations < 0:
+        raise ValueError("agent.critic_warmup_iterations must be a non-negative integer.")
+    saved = (checkpoint_infos or {}).get("solo12_critic_warmup")
+    if from_adapter:
+        if iterations:
+            runner.alg.start_critic_warmup(iterations)
+    elif saved is not None:
+        runner.alg.start_critic_warmup(saved["remaining"], completed=saved["completed"])
+    elif iterations:
+        raise ValueError("Critic warm-up requires a DAgger adapter handoff; PPO resume needs saved warm-up progress.")
+    if getattr(runner.alg, "critic_warmup_remaining", 0):
+        print(f"[INFO]: Critic-only warm-up: {runner.alg.critic_warmup_remaining} rollout/update iterations remaining; "
+              "actor, perception encoder, action noise and actor normalization stay fixed.", flush=True)

@@ -155,9 +155,83 @@ SOLO_IMU_ADAPTER=/absolute/path/to/the/dagger_run/checkpoints/adapter_latest.pt
 ./isaaclab.sh -p source/scripts/rsl_rl/train.py --task solo12-two-feet-IMU-student-rl --init-from-dagger-adapter "$SOLO_IMU_ADAPTER" --num_envs 9000 --headless --seed 230914 --symmetry-mode augmentation --max_iterations 15000 --run_name two-feet-imu-student-ppo '--kit_args=--/UJITSO/geometry=false --/UJITSO/textures=false --/UJITSO/materials=false'
 ```
 
-This initializes the actor TCN from DAgger. If DAgger fine-tuned a student head, PPO starts from that **modified head**, not the original teacher actor. Older or frozen-head adapters use the original teacher head. The **direct privileged critic and action-noise parameter always start from the original teacher**. Actor normalization combines DAgger history statistics with original teacher command statistics. Critic normalization also comes from the original teacher. Transfer is strict: missing or mismatched tensors fail instead of leaving random parts of the policy.
+This initializes the actor TCN from DAgger. If DAgger fine-tuned a student head, PPO starts from that **modified head**, not the original teacher actor. Older or frozen-head adapters use the original teacher head. By default, the **direct privileged critic and action-noise parameter start from the original teacher**. Actor normalization combines DAgger history statistics with original teacher command statistics. Critic normalization also comes from the original teacher. Transfer is strict: missing or mismatched tensors fail instead of leaving random parts of the policy. The optional critic-input expansion below is explicit and initializes only the new columns to zero.
 
 PPO gets a **fresh optimizer and learning clock**, not the teacher's optimizer. The initial learning rate is 0.0002 with the inherited adaptive schedule. All student policy networks then train. There is no imitation loss in this phase. Do not also pass `--checkpoint` or `--resume` for this initialization. Ordinary PPO checkpoint resume is a different operation.
+
+### Optional: give the privileged critic the actor's perception encoding
+
+Both the teacher and student PPO tasks accept these environment overrides:
+
+```bash
+env.priv_critic_includes_perception_encoding=False env.priv_critic_detached_perception_encoding=True
+```
+
+These are the defaults, so existing runs keep their original architecture and gradient paths.
+Set the first flag to `True` to give the critic **[privileged features, actor encoding, command]**.
+For the usual two-feet settings this is 64 + 32 + 3 = 99 inputs, rather than 67.
+The teacher uses its privileged MLP encoding. The student uses its actor TCN encoding.
+The critic recomputes that encoding from the **same actor observations, normalization and encoder weights**.
+It does not encode the clean critic observations or create a separate perception network.
+The actor's own observations and action computation do not change.
+
+With detachment enabled, only the critic's connection to the encoding is detached. The actor loss
+still trains the perception encoder. With detachment disabled, the value loss also trains that
+same encoder. This can affect the policy even when the actor head is unchanged.
+
+The older `env.feed_history_encoding_to_critic` flag creates a separate critic TCN. It is not the
+same experiment and cannot be enabled together with the new shared-perception option.
+
+The existing teacher task name remains valid. `solo12-two-feet-IMU-teacher-rl` is an alias for
+`solo12-two-feet-IMU-teacher`; both use the same environment and PPO configuration.
+
+For a DAgger handoff from a direct privileged critic, enabling the new input copies every old
+critic weight and inserts **zero-weight encoding columns** in its first layer. This preserves
+the inherited value function up to floating-point roundoff, instead of starting a random critic.
+If the teacher already used the encoding, enable it for the student too; dropping those learned
+inputs is rejected. DAgger reconstructs either teacher architecture automatically.
+
+New PPO checkpoints embed both flags. Full PPO resume and public playback restore the saved
+topology, including when the checkpoint is copied away from its sidecar files. A full optimizer
+resume does not switch architectures; use the new option when starting a teacher or initializing
+a student from DAgger. A finite learned encoding is not a guarantee of a fully Markov state.
+
+### Optional: critic-only warm-up at the student handoff
+
+The student runner adds `agent.critic_warmup_iterations=0`. Zero disables warm-up.
+For example, append the following to the student PPO handoff command above:
+
+```bash
+env.priv_critic_includes_perception_encoding=True agent.critic_warmup_iterations=50
+```
+
+Here 50 is an example, not a tuned recommendation. Each warm-up iteration collects the usual
+sampled-policy rollout and runs the configured number of epochs and minibatches. These iterations
+**count toward `max_iterations`**. During them:
+
+- The actor head, perception encoder, action noise and actor-normalization statistics stay fixed.
+- The critic and its observation-normalization statistics can adapt.
+- The critic fits unclipped mean squared error against discounted rollout returns. Lambda is 1,
+  so intermediate old value predictions do not enter the targets. Rollout ends and timeouts still
+  bootstrap from the critic; these are not full-episode Monte Carlo targets.
+- No actor, entropy, symmetry-augmentation or mirror-loss update runs. The adaptive KL learning-rate
+  schedule does not run either. The critic uses the configured optimizer and learning rate.
+- The encoder stays frozen **even if detachment is disabled** for subsequent normal PPO training.
+
+Normal PPO starts on the next rollout after the last warm-up update. Its usual normalization,
+losses and gradient settings resume. Warm-up is a separate ablation and also works without the
+new critic encoding input.
+
+The runner logs `Loss/critic_warmup_active`, `Loss/critic_warmup_remaining_iterations` and
+`Loss/critic_warmup_completed_iterations`, as well as the critic loss and gradient norm.
+Checkpoints save the remaining/completed counts. Resuming an unfinished warm-up continues it;
+resuming after completion does not start it again. A fresh warm-up requires a DAgger handoff,
+not an ordinary PPO checkpoint with no saved warm-up progress.
+
+Warm-up currently supports single-process base-IMU student PPO. Do not combine it with CBP,
+plasticity interventions or actor weight projection, which can modify the policy outside its loss.
+It is not enabled for teacher training. Keeping actor weights fixed does not guarantee good
+behavior: verify the sampled frozen policy on the intended simulator before interpreting results.
 
 Curriculum progress and promotion statistics do not transfer. Each stage starts from its configured phase. `env.two_feet_curriculum_start_phase=K` selects phases 1–5. An adapter filename does not select a phase. For a fixed-difficulty comparison, disable advancement explicitly and match physical settings, commands, reset distributions, and seeds.
 
@@ -183,6 +257,19 @@ The learning algorithms already existed. Configuration alone was not sufficient:
 6. Saved the actual policy implementation and contract helper with offline W&B source snapshots.
 
 ## Validation boundary
+
+Shared-perception and critic-warm-up follow-up (2026-11-13): 123 CPU checks passed, covering
+both policy types, normalization, gradient detachment, critic expansion, saved topology,
+warm-up isolation with existing AdamW momentum, and PPO/BatchNorm/compile regressions.
+A local 16-environment chain trained an encoding-aware teacher, fine-tuned a DAgger head,
+performed two critic-only student updates, then performed a normal PPO update, with symmetry
+configured. All 23 actor-side state tensors were bit-identical across the warm-up checkpoints;
+the critic changed during warm-up and the actor changed after it. A partial warm-up checkpoint
+resumed its one remaining critic-only update before PPO. Public headless playback loaded a copied
+standalone student checkpoint with neither flag repeated. Four CPU comparisons against the
+pre-change code found bit-identical default parameters, actions, values and one full PPO update,
+for teacher/student with normalization on/off. These checks do not demonstrate better learning
+or resolve the original cluster collapse.
 
 Actor-fine-tuning follow-up (2026-11-11): 149 focused CPU checks passed, including both latent activations, coefficient-driven supervision, selected-network gradients, modified-head playback and exact PPO handoff. Eleven local integration checks passed with four training environments: a fresh teacher, joint DAgger, continuation, rejection of a discarded saved head, latent-only and frozen-head DAgger, one PPO iteration, and public Isaac/MuJoCo adapter and PPO playback. The live trainer changed the TCN and student head while preserving every original teacher tensor exactly. The saved adapter also passed exact TCN/head transfer, original-teacher critic/noise transfer and five batch-one action comparisons. Live checks used the default bounded latent. This proves integration, not learning performance, large-scale throughput, cluster readiness or hardware transfer.
 

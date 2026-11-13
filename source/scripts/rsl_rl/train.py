@@ -433,6 +433,7 @@ _SOLO12_DIRECT_SYMMETRY_TASKS = {
     "solo12-v0",
     "solo12-two-feet",
     "solo12-two-feet-IMU-teacher",
+    "solo12-two-feet-IMU-teacher-rl",
     "solo12-two-feet-IMU-student-rl",
     "solo12-backflip",
     "Isaac-Solo12-Laas-Direct-v0",
@@ -467,6 +468,8 @@ def _sync_base_imu_policy_cfg_from_env_cfg(env_cfg, agent_cfg) -> None:
         "base_imu_tcn_activation": "tcn_activation",
         "apply_tanh_to_latent": "apply_tanh_to_latent",
         "feed_history_encoding_to_critic": "feed_history_encoding_to_critic",
+        "priv_critic_includes_perception_encoding": "priv_critic_includes_perception_encoding",
+        "priv_critic_detached_perception_encoding": "priv_critic_detached_perception_encoding",
     }
     for env_field, policy_field in env_to_policy_fields.items():
         if hasattr(env_cfg, env_field) and hasattr(policy_cfg, policy_field):
@@ -1965,6 +1968,17 @@ def _initialize_student_from_dagger_adapter(runner, adapter_checkpoint_path: str
         if not torch.is_tensor(value):
             transfer_errors.append(f"{label} tensor {source_key!r} is not a tensor")
             return
+        if (not race_tcn_policy and source_key == "critic.0.weight"
+                and getattr(policy, "priv_critic_includes_perception_encoding", False)
+                and value.shape != target_state[target_key].shape
+                and value.shape == (target_state[target_key].shape[0], policy.teacher_critic_obs_dim)):
+            from solo12_imu_pipeline import expand_privileged_critic_weight
+
+            value = expand_privileged_critic_weight(
+                value, target_state[target_key], policy.teacher_critic_obs_dim,
+                policy.tcn_latent_dim, policy.command_dim,
+            )
+            print("[INFO]: Expanded inherited privileged critic with zero-weight actor-perception columns.")
         if tuple(value.shape) != tuple(target_state[target_key].shape):
             transfer_errors.append(
                 f"{label} tensor {source_key!r} shape {tuple(value.shape)} != "
@@ -2714,6 +2728,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     elif args_cli.checkpoint is not None and not agent_cfg.resume:
         print("[INFO]: --checkpoint was provided; enabling resume automatically.")
         agent_cfg.resume = True
+    critic_warmup_iterations = getattr(agent_cfg, "critic_warmup_iterations", 0)
+    if type(critic_warmup_iterations) is not int or critic_warmup_iterations < 0:
+        raise ValueError("agent.critic_warmup_iterations must be a non-negative integer.")
+    if critic_warmup_iterations and (
+        getattr(env_cfg, "policy_model", None) != "base_imu_student_rl"
+        or not (dagger_adapter_checkpoint_arg is not None or agent_cfg.resume)
+    ):
+        raise ValueError(
+            "Critic warm-up is only available at a base-IMU student DAgger handoff or saved warm-up resume."
+        )
     if args_cli.plasticity_loss_exp_reset_all and (
         args_cli.reuse_mlp or dagger_adapter_checkpoint_arg is not None
     ):
@@ -2986,7 +3010,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if should_resume and str(getattr(env_cfg, "policy_model", "")).startswith("base_imu_"):
         from solo12_imu_pipeline import restore_latent_activation_from_checkpoint
 
+        requested_perception = env_cfg.priv_critic_includes_perception_encoding
         restore_latent_activation_from_checkpoint(env_cfg, resume_path)
+        if requested_perception and not env_cfg.priv_critic_includes_perception_encoding:
+            raise ValueError(
+                "Full PPO optimizer resume cannot add critic perception inputs. Enable them for a fresh teacher "
+                "or a student initialized with --init-from-dagger-adapter."
+            )
         _sync_base_imu_policy_cfg_from_env_cfg(env_cfg, agent_cfg)
 
     if args_cli.video:
@@ -3101,6 +3131,19 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     _apply_agent_weight_decay_to_optimizer(runner, agent_cfg)
     _apply_agent_adam_betas_to_optimizer(runner, agent_cfg)
     _apply_sac_alpha_optimizer_hparams(runner, agent_cfg)
+    if getattr(env_cfg, "policy_model", "") == "base_imu_student_rl":
+        from solo12_imu_pipeline import configure_critic_warmup
+
+        configure_critic_warmup(
+            runner, critic_warmup_iterations, from_adapter=dagger_adapter_checkpoint_arg is not None,
+            checkpoint_infos=loaded_checkpoint_infos,
+        )
+        if runner.alg.critic_warmup_remaining and (
+            args_cli.use_cbp or args_cli.plasticity_loss_exp or mitigation_spec.name != "none" or actor_weight_norm
+        ):
+            raise ValueError(
+                "Critic warm-up cannot be combined with CBP, plasticity interventions or actor weight projection."
+            )
     mitigation_controller = None
     if mitigation_spec.name != "none":
         if float(getattr(agent_cfg, "weight_decay", 0.0) or 0.0) != 0.0:
