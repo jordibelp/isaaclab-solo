@@ -714,6 +714,17 @@ class CameraModeState:
             return self._normalize(self.mode)
 
 
+def _position_target_for_telemetry(raw_env, *, bringup=False):
+    """Torque commands are not joint angles; leave that unavailable channel as NaN."""
+    if getattr(raw_env.cfg, "control_mode", "position") != "torque":
+        names = ("_bringup_q_desired",) if bringup else ()
+        for name in (*names, "_delayed_processed_actions", "_processed_actions"):
+            value = getattr(raw_env, name, None)
+            if value is not None:
+                return value
+    return torch.full_like(raw_env._robot.data.joint_pos[:, raw_env._joint_ids], float("nan"))
+
+
 def _infer_wandb_run_id_from_checkpoint(checkpoint_path: str) -> str | None:
     stem = Path(checkpoint_path).stem.lower()
     tokens = [token for token in re.split(r"[^a-z0-9]+", stem) if token]
@@ -1884,6 +1895,8 @@ def _save_and_upload_tracking_metadata(
         "episode_length_s": float(env_cfg.episode_length_s),
         "num_envs": int(args_cli.num_envs),
         "policy_dt": float(dt),
+        "control_mode": getattr(env_cfg, "control_mode", "position"),
+        "checkpoint_name": Path(resume_path).name,
         "kp": float(env_cfg.kp),
         "kd": float(env_cfg.kd),
         "env_config": env_cfg.to_dict() if hasattr(env_cfg, "to_dict") else str(env_cfg),
@@ -2629,13 +2642,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 pass
 
         if sequence_recorder is not None:
-            q_desired = getattr(raw_env, "_bringup_q_desired", None)
-            if q_desired is None:
-                q_desired = getattr(raw_env, "_delayed_processed_actions", None)
-            if q_desired is None:
-                q_desired = getattr(raw_env, "_processed_actions", None)
-            if q_desired is None:
-                q_desired = torch.full_like(raw_env._robot.data.joint_pos[:, raw_env._joint_ids], float("nan"))
+            q_desired = _position_target_for_telemetry(raw_env, bringup=True)
             sequence_recorder.record(
                 time_s=(timestep + 1) * float(dt),
                 command=raw_env._commands[0],
@@ -2684,13 +2691,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             tracking_times_s.append((timestep + 1) * float(dt))
             tracking_lin_vel_xy.append((base_vel[0].item(), base_vel[1].item()))
             tracking_yaw_rate.append(base_ang_vel_z)
-            q_desired = getattr(raw_env, "_delayed_processed_actions", None)
-            if q_desired is None:
-                q_desired = getattr(raw_env, "_processed_actions", None)
-            if q_desired is None:
-                q_desired = torch.full_like(
-                    raw_env._robot.data.joint_pos[:, raw_env._joint_ids], float("nan")
-                )
+            q_desired = _position_target_for_telemetry(raw_env)
             tracking_joint_positions.append(
                 raw_env._robot.data.joint_pos[0, raw_env._joint_ids].detach().cpu().tolist()
             )

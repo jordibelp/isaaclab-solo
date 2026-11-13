@@ -1421,10 +1421,19 @@ class Solo12Env(DirectRLEnv):
         self._update_base_push_wrench()
 
         self._actions = actions.clone()
-        self._processed_actions = self.cfg.action_scale * self._actions + self._q_offset_action_and_obs
+        if self.cfg.control_mode == "torque":
+            self._processed_actions = (self.cfg.action_scale * self._actions).clamp(
+                -self.cfg.effort_limit_sim, self.cfg.effort_limit_sim
+            )
+        else:
+            self._processed_actions = self.cfg.action_scale * self._actions + self._q_offset_action_and_obs
 
     def _apply_action(self):
         self._delayed_processed_actions = self._action_delay_buffer.compute(self._processed_actions)
+        if self.cfg.control_mode == "torque":
+            self._applied_actions = self._delayed_processed_actions / self.cfg.action_scale
+            self._robot.set_joint_effort_target(self._delayed_processed_actions, joint_ids=self._joint_ids)
+            return
         self._applied_actions = (
             self._delayed_processed_actions - self._q_offset_action_and_obs
         ) / self.cfg.action_scale
@@ -1886,6 +1895,17 @@ class Solo12Env(DirectRLEnv):
     def _get_teacher_critic_obs(self, corrupt: bool) -> torch.Tensor:
         return torch.cat((self._get_teacher_encoder_obs(corrupt=corrupt), self._commands), dim=-1)
 
+    def _action_rate_l2(self) -> torch.Tensor:
+        if self.cfg.control_mode == "torque":
+            # Penalize issued, clipped torque changes, normalized by nominal action_scale.
+            # For a fixed physical ramp, delta grows with dt; divide by dt before squaring.
+            bound = self.cfg.effort_limit_sim / self.cfg.action_scale
+            delta = self._actions.clamp(-bound, bound) - self._previous_actions.clamp(-bound, bound)
+            delta = delta / (self.cfg.action_rate_reference_hz * self.step_dt)
+        else:
+            delta = self._actions - self._previous_actions
+        return torch.sum(torch.square(delta), dim=1)
+
     def _get_rewards(self) -> torch.Tensor:
         rewards = self._reward_terms()
         reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
@@ -1926,7 +1946,7 @@ class Solo12Env(DirectRLEnv):
             self._robot.data.joint_pos[:, self._joint_ids],
             self._joint_soft_pos_limits,
         )
-        action_rate = torch.sum(torch.square(self._actions - self._previous_actions), dim=1)
+        action_rate = self._action_rate_l2()
         flat_orientation = torch.sum(torch.square(self._robot.data.projected_gravity_b[:, :2]), dim=1)
         base_height = self._robot.data.root_pos_w[:, 2] - self._terrain.env_origins[:, 2]
         base_height_error = torch.square(base_height - self.cfg.base_z_desired)
@@ -2097,7 +2117,15 @@ class Solo12Env(DirectRLEnv):
         self._robot.write_root_pose_to_sim(root_pose, env_ids)
         self._robot.write_root_velocity_to_sim(root_velocity, env_ids)
         self._robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
-        self._robot.set_joint_position_target(joint_pos[:, self._joint_ids], joint_ids=self._joint_ids, env_ids=env_ids)
+        if self.cfg.control_mode == "torque":
+            # Do not leave the preceding episode's held effort active after a reset.
+            self._robot.set_joint_effort_target(
+                self._processed_actions[env_ids], joint_ids=self._joint_ids, env_ids=env_ids
+            )
+        else:
+            self._robot.set_joint_position_target(
+                joint_pos[:, self._joint_ids], joint_ids=self._joint_ids, env_ids=env_ids
+            )
 
         # A reset happens after rewards were computed for this transition. Keep
         # those per-step metrics and add the completed-episode metrics instead

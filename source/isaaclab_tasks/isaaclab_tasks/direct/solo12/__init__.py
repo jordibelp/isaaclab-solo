@@ -50,6 +50,26 @@ gym.register(
 )
 
 
+for _task_id, _cfg_name in (
+    ("solo12-v0-torque", "Solo12TorqueEnvCfg"),
+    ("solo12-two-feet-torque", "Solo12TwoFeetTorqueEnvCfg"),
+):
+    gym.register(
+        id=_task_id,
+        entry_point=f"{__name__}.solo12_env:Solo12Env",
+        disable_env_checker=True,
+        kwargs={
+            "env_cfg_entry_point": f"{__name__}.solo12_env_cfg:{_cfg_name}",
+            "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml",
+            "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:Solo12PPORunnerCfg",
+            "rsl_rl_with_symmetry_cfg_entry_point": (
+                f"{agents.__name__}.rsl_rl_ppo_cfg:Solo12PPORunnerWithSymmetryCfg"
+            ),
+            "rsl_rl_sac_cfg_entry_point": f"{agents.__name__}.rsl_rl_sac_cfg:Solo12SACRunnerCfg",
+        },
+    )
+
+
 def _register(task_id: str, cfg_name: str, rsl_rl_cfg_name: str):
     gym.register(
         id=task_id,

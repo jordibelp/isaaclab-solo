@@ -41,6 +41,10 @@ def apply_observation_contract(env_cfg, contract: dict) -> None:
             setattr(env_cfg, name, contract[name])
     if "physics_dt" in contract:
         env_cfg.sim.dt = float(contract["physics_dt"])
+        if hasattr(env_cfg, "physics_hz"):
+            # Legacy contracts store dt/decimation, not the newer authoritative Hz fields.
+            env_cfg.physics_hz = 1.0 / env_cfg.sim.dt
+            env_cfg.policy_hz = env_cfg.physics_hz / env_cfg.decimation
     env_cfg.refresh_runtime_dependent_config()
 
 

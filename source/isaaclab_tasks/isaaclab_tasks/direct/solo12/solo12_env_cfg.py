@@ -380,8 +380,14 @@ class EventCfg:
 @configclass
 class Solo12EnvCfg(DirectRLEnvCfg):
     episode_length_s = 20.0
+    # Authoritative clocks; dt, decimation and sensor periods are refreshed after Hydra overrides.
+    physics_hz = 200
+    policy_hz = 50
     decimation = 4
+    control_mode = "position"  # "position" (PD reference) or "torque" (zero-order-held effort).
     action_scale = 0.25
+    # Torque smoothness uses differences relative to a 50 Hz interval, not raw differences.
+    action_rate_reference_hz = 50.0
     action_space = len(JOINT_NAMES)
     observation_space = BASE_OBSERVATION_SPACE
     state_space = 0 # why is this zero? 
@@ -807,6 +813,7 @@ class Solo12EnvCfg(DirectRLEnvCfg):
                 term.mode = "curriculum_startup"
 
     def refresh_runtime_dependent_config(self):
+        self._refresh_control_config()
         delay = self.base_push_initial_delay_range_s
         if delay is not None and (
             not isinstance(delay, (tuple, list))
@@ -832,6 +839,35 @@ class Solo12EnvCfg(DirectRLEnvCfg):
             if damping is not None and (not math.isfinite(damping) or damping < 0.0):
                 raise ValueError("compliant_contact_damping must be finite and non-negative.")
 
+    def _refresh_control_config(self):
+        for name in ("physics_hz", "policy_hz", "action_rate_reference_hz"):
+            value = getattr(self, name)
+            if (
+                isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value) or value <= 0
+            ):
+                raise ValueError(f"{name} must be positive and finite.")
+        ratio = self.physics_hz / self.policy_hz
+        if not math.isfinite(ratio) or ratio < 1 or not math.isclose(ratio, round(ratio), rel_tol=0.0, abs_tol=1e-9):
+            raise ValueError("physics_hz must be an integer multiple of policy_hz (and >= policy_hz).")
+        self.decimation = int(round(ratio))
+        self.sim.dt = 1.0 / self.physics_hz
+        self.sim.render_interval = self.decimation
+        self.contact_sensor.update_period = self.sim.dt
+        self.base_external_contact_sensor.update_period = self.sim.dt
+        if self.control_mode not in {"position", "torque"}:
+            raise ValueError("control_mode must be 'position' or 'torque'.")
+        if self.control_mode == "torque":
+            for name in ("action_scale", "effort_limit_sim"):
+                value = getattr(self, name)
+                if (
+                    isinstance(value, bool) or not isinstance(value, (int, float))
+                    or not math.isfinite(value) or value <= 0
+                ):
+                    raise ValueError(f"Torque control requires positive finite {name}.")
+            if self.bringup_clip_rad != 0.0:
+                raise ValueError("bringup_clip_rad is a position-control option; use 0 for torque control.")
+
     def apply_events_randomization_setting(self):
         """Disable all configured event randomizations when explicitly requested."""
         if not self.include_events_randomization:
@@ -854,8 +890,9 @@ class Solo12EnvCfg(DirectRLEnvCfg):
 
     def _apply_runtime_overrides_to_nested_cfg(self):
         self.robot.spawn.articulation_props.enabled_self_collisions = bool(self.enabled_self_collisions)
-        self.robot.actuators["legs"].stiffness = self.kp
-        self.robot.actuators["legs"].damping = self.kd
+        # Zero gains remove ALL position/velocity feedback; the actuator only forwards effort.
+        self.robot.actuators["legs"].stiffness = 0.0 if self.control_mode == "torque" else self.kp
+        self.robot.actuators["legs"].damping = 0.0 if self.control_mode == "torque" else self.kd
         self.robot.actuators["legs"].effort_limit_sim = self.effort_limit_sim
         self.terrain.physics_material.compliant_contact_stiffness = _optional_compliant_contact_value(
             self.compliant_contact_stiffness
@@ -921,6 +958,7 @@ class Solo12EnvCfg(DirectRLEnvCfg):
 
     def refresh_base_imu_dimensions(self):
         """Recompute student observation dimensions after Hydra overrides."""
+        self._refresh_control_config()
         for name in ("priv_critic_includes_perception_encoding", "priv_critic_detached_perception_encoding"):
             if type(getattr(self, name)) is not bool:
                 raise ValueError(f"{name} must be a boolean.")
@@ -1089,6 +1127,28 @@ class Solo12TwoFeetEnvCfg(Solo12EnvCfg):
     base_push_interval_range_s = (2.0, 5.0)
     # Include early disturbances without shortening the push-free gaps later in the episode.
     base_push_initial_delay_range_s = (0.0, 5.0)
+
+
+@configclass
+class Solo12TorqueEnvCfg(Solo12EnvCfg):
+    """Direct joint effort; action_scale is N*m per unit policy action, not radians."""
+
+    control_mode = "torque"
+    kp = 0.0
+    kd = 0.0
+    action_scale = EFFORT_LIMIT_SIM
+    action_rate_reward_scale = -0.01
+
+
+@configclass
+class Solo12TwoFeetTorqueEnvCfg(Solo12TwoFeetEnvCfg):
+    """Original two-feet task and curriculum, with direct effort instead of PD."""
+
+    control_mode = "torque"
+    kp = 0.0
+    kd = 0.0
+    action_scale = EFFORT_LIMIT_SIM
+    action_rate_reward_scale = -0.01
 
 
 @configclass

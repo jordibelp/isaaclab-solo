@@ -15,11 +15,16 @@ from rsl_rl_sac.algorithms import SAC
 
 
 class Solo12SAC(SAC):
-    """SAC with action bounds matching Solo12's direct position-action mapping."""
+    """SAC with action bounds matching Solo12's selected position or torque mapping."""
 
     @staticmethod
     def _compute_action_scaling(env, device: str) -> tuple[torch.Tensor, torch.Tensor]:
         unwrapped = getattr(env, "unwrapped", env)
+        if getattr(unwrapped.cfg, "control_mode", "position") == "torque":
+            bound = unwrapped.cfg.effort_limit_sim / unwrapped.cfg.action_scale
+            upper = torch.full((len(unwrapped._joint_ids),), bound, device=device)
+            print(f"Solo12 SAC: symmetric torque action bounds +/-{bound:g} (zero torque at action 0).")
+            return upper, upper.clone()
         limits = unwrapped._joint_soft_pos_limits[0].to(device)
         center = unwrapped._q_offset_action_and_obs.to(device)
         if center.ndim > 1:
