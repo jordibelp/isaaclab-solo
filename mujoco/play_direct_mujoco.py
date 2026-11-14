@@ -10,6 +10,7 @@ import json
 import math
 import os
 import subprocess
+import sys
 import time
 import warnings
 from datetime import datetime
@@ -20,6 +21,7 @@ import numpy as np
 import torch
 
 from solo12_imu_policy import DEFAULT_CONTRACT, TASK_MODELS, EncodedPolicy
+from solo12_imu_diagnostics import ImuImpactRecorder, wrap_q11, log_imu_csv
 
 
 PHYSICS_DT = 1.0 / 200.0
@@ -95,6 +97,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--wandb-entity")
     parser.add_argument("--wandb-name")
     parser.add_argument("--no-wandb", action="store_true", help="Keep artifacts local without uploading to W&B.")
+    parser.add_argument("--log-imu-impacts", action="store_true",
+                        help="Save all 200 Hz IMU accelerations (world/body), Q11 overflow, and ground contacts.")
+    parser.add_argument("--ill-wrapping-test", action="store_true",
+                        help="Test H1a: truncate and wrap signed 16-bit Q11 acceleration before clipping/history. "
+                             "Also enables IMU logging. This is a hypothesis, not a validated hardware model.")
     return parser
 
 
@@ -241,7 +248,7 @@ def quat_rotation(q_wxyz: np.ndarray) -> np.ndarray:
 class Solo12Mujoco:
     def __init__(self, model_path: Path, kp: float = DEFAULT_KP, kd: float = DEFAULT_KD,
                  spawn_z: float = 0.35, env_overrides: dict | None = None, bringup_clip_rad: float = 0.0,
-                 policy_model: str = "simple_mlp"):
+                 policy_model: str = "simple_mlp", ill_wrapping_test: bool = False):
         if not math.isfinite(bringup_clip_rad) or bringup_clip_rad < 0.0:
             raise ValueError("bringup_clip_rad must be finite and non-negative (0 disables clipping).")
         self.bringup_clip_rad = float(bringup_clip_rad)
@@ -272,6 +279,10 @@ class Solo12Mujoco:
         self._teacher_lin_acc_history = np.zeros((self.imu_acc_steps if self.encoded_imu else 0, 3))
         self.history_len = overrides.get("history_len", 13) if policy_model in ("base_imu_student_rl", "base_imu_student_dagger") else 0
         self._base_imu_history = np.zeros((self.history_len, 45))
+        self.ill_wrapping_test = ill_wrapping_test
+        self.imu_diagnostics = None
+        if ill_wrapping_test and not ((self.base_obs_from_imu and self.imu_acc_steps) or self.history_len):
+            raise ValueError("--ill-wrapping-test requires a policy that consumes IMU acceleration.")
         self.include_foot_height_obs = overrides.get("include_foot_height_obs", False)
         self.teacher_include_base_force = overrides.get("teacher_include_base_force", False)
         self.teacher_foot_force_obs = overrides.get("teacher_foot_force_obs", "none")
@@ -314,7 +325,9 @@ class Solo12Mujoco:
         self.model.actuator_forcerange[self.actuator_ids, 0] = -self.effort_limit
         self.model.actuator_forcerange[self.actuator_ids, 1] = self.effort_limit
 
-    def reset(self) -> None:
+    def reset(self, reason: str = "manual") -> None:
+        if self.imu_diagnostics is not None:
+            self.imu_diagnostics.reset(reason)
         mujoco.mj_resetData(self.model, self.data)
         self.data.qpos[:7] = (0.0, 0.0, self.spawn_z, 0.0, 0.0, 0.0, 1.0)
         self.data.qpos[self.joint_qpos] = SAFE_Q
@@ -344,8 +357,8 @@ class Solo12Mujoco:
         return rotation, angular, linear
 
     def _record_base_imu_sample(self) -> None:
-        """Record clean gravity-free IMU acceleration after each 5 ms physics step."""
-        if not self.encoded_imu and (not self.base_obs_from_imu or not self.imu_acc_steps):
+        """Sample gravity-free acceleration, optionally wrapping before observation clipping."""
+        if self.imu_diagnostics is None and not self.encoded_imu and (not self.base_obs_from_imu or not self.imu_acc_steps):
             return
         rotation, angular, linear = self._base_imu_kinematics()
         com_acceleration = (linear - self._previous_imu_com_velocity) / PHYSICS_DT
@@ -354,6 +367,9 @@ class Solo12Mujoco:
         acceleration = com_acceleration + np.cross(angular_acceleration, lever)
         acceleration += np.cross(angular, np.cross(angular, lever))
         acceleration_b = rotation.T @ acceleration
+        raw_acceleration_b = acceleration_b.copy()
+        if self.ill_wrapping_test:
+            acceleration_b = wrap_q11(acceleration_b)
         if self._teacher_lin_acc_history.size:
             origin_lever = -rotation @ self.model.body_ipos[self.base_id]
             origin_acc = com_acceleration + np.cross(angular_acceleration, origin_lever)
@@ -362,6 +378,11 @@ class Solo12Mujoco:
             self._teacher_lin_acc_history[-1] = rotation.T @ origin_acc
         if self.base_imu_clip:
             acceleration_b = acceleration_b.clip(-self.base_imu_ekf_acc_clip, self.base_imu_ekf_acc_clip)
+        if self.imu_diagnostics is not None:
+            clipped = (raw_acceleration_b.clip(-self.base_imu_ekf_acc_clip, self.base_imu_ekf_acc_clip)
+                       if self.base_imu_clip else raw_acceleration_b)
+            self.imu_diagnostics.record(self, rotation, acceleration, raw_acceleration_b,
+                                        clipped, wrap_q11(raw_acceleration_b), acceleration_b)
         if self.base_obs_from_imu and self.imu_acc_steps:
             self._imu_lin_acc_history[:-1] = self._imu_lin_acc_history[1:]
             self._imu_lin_acc_history[-1] = acceleration_b
@@ -714,6 +735,7 @@ def upload_to_wandb(
     *, project: str, entity: str | None, run_name: str, config: dict, summary: dict,
     artifact_paths: list[Path], plot_paths: list[Path], artifact_name: str,
     history_path: Path | None = None,
+    imu_history_path: Path | None = None,
 ) -> str | None:
     """Upload a completed evaluation while keeping local results authoritative."""
     try:
@@ -723,6 +745,8 @@ def upload_to_wandb(
         run.summary.update(summary)
         if history_path is not None:
             log_tracking_csv(run, history_path)
+        if imu_history_path is not None:
+            log_imu_csv(run, imu_history_path)
         image_log = {f"plots/{path.stem}": wandb.Image(str(path)) for path in plot_paths}
         if image_log:
             run.log(image_log)
@@ -781,7 +805,7 @@ def run_live(args, sim: Solo12Mujoco, policy: Policy, command_ranges) -> None:
         episode_elapsed += POLICY_DT
         if sim.base_hit_ground() or episode_elapsed >= args.episode_length_s:
             print(f"[INFO] Reset ({'base contact' if sim.base_hit_ground() else 'timeout'})", flush=True)
-            sim.reset(); episode_elapsed = 0.0
+            sim.reset(reason="base_contact" if sim.base_hit_ground() else "timeout"); episode_elapsed = 0.0
         observation = sim.observation(command)
         camera.update(sim.data.qpos[:3], sim.data.qpos[3:7])
         with viewer.lock():
@@ -792,7 +816,8 @@ def run_live(args, sim: Solo12Mujoco, policy: Policy, command_ranges) -> None:
             break
         time.sleep(max(0.0, POLICY_DT - (time.perf_counter() - wall_start)))
     viewer.close()
-    print("[INFO] Live session finished; no artifacts are recorded in live mode.", flush=True)
+    print("[INFO] Live session finished; " + ("IMU artifacts recorded." if sim.imu_diagnostics else
+                                             "no artifacts are recorded in live mode."), flush=True)
 
 
 def run_tracking(args, sim: Solo12Mujoco, policy: Policy, checkpoint: Path, model_path: Path,
@@ -802,7 +827,8 @@ def run_tracking(args, sim: Solo12Mujoco, policy: Policy, checkpoint: Path, mode
     started_at = datetime.now().astimezone()
     timestamp = started_at.strftime("%Y%m%d_%H%M%S")
     output_root = args.output_dir or Path("logs/mujoco/cmd_tracking")
-    output_dir = create_run_directory(output_root, checkpoint.stem, timestamp)
+    output_dir = (sim.imu_diagnostics.output_dir if sim.imu_diagnostics is not None else
+                  create_run_directory(output_root, checkpoint.stem, timestamp))
     config = {
         "task": args.task,
         "simulator": "mujoco",
@@ -843,6 +869,7 @@ def run_tracking(args, sim: Solo12Mujoco, policy: Policy, checkpoint: Path, mode
             "base_imu_ekf_acc_clip_mps2": sim.base_imu_ekf_acc_clip,
             "acceleration_history_order": "oldest first, XYZ per sample; zeroed on reset",
             "noise_enabled": False,
+            "ill_wrapping_test": sim.ill_wrapping_test,
         },
         "kp": sim.kp,
         "kd": sim.kd,
@@ -891,7 +918,8 @@ def run_tracking(args, sim: Solo12Mujoco, policy: Policy, checkpoint: Path, mode
         reset_next_sample = False
         if sim.base_hit_ground() or episode_elapsed >= args.episode_length_s:
             print(f"[INFO] Reset at t={t + POLICY_DT:.3f} s ({'base contact' if sim.base_hit_ground() else 'timeout'})")
-            sim.reset(); episode_elapsed = 0.0; reset_next_sample = True
+            sim.reset(reason="base_contact" if sim.base_hit_ground() else "timeout")
+            episode_elapsed = 0.0; reset_next_sample = True
         observation = sim.observation(command)
         if viewer is not None:
             camera.update(sim.data.qpos[:3], sim.data.qpos[3:7])
@@ -903,6 +931,8 @@ def run_tracking(args, sim: Solo12Mujoco, policy: Policy, checkpoint: Path, mode
             time.sleep(max(0.0, POLICY_DT - (time.perf_counter() - wall_start)))
     if viewer is not None: viewer.close()
     result_paths = save_results(output_dir, rows, commands)
+    if sim.imu_diagnostics is not None:
+        result_paths.extend(sim.imu_diagnostics.close())
     summary = summarize_rows(rows)
     summary_path = output_dir / "summary.json"
     summary_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
@@ -920,6 +950,7 @@ def run_tracking(args, sim: Solo12Mujoco, policy: Policy, checkpoint: Path, mode
             plot_paths=[path for path in result_paths if path.suffix == ".png"],
             artifact_name=f"{checkpoint.stem}-{timestamp}",
             history_path=result_paths[0],
+            imu_history_path=output_dir / "imu_acceleration.csv" if sim.imu_diagnostics is not None else None,
         )
         if run_url:
             print(f"[INFO] W&B run: {run_url}")
@@ -967,7 +998,8 @@ def main() -> None:
     model_path = Path(__file__).with_name("solo12.xml").resolve()
     sim = Solo12Mujoco(model_path, kp=kp, kd=kd, spawn_z=args.spawn_z,
                      env_overrides=getattr(policy, "contract", env_overrides),
-                     bringup_clip_rad=args.bringup_clip_rad, policy_model=TASK_MODELS.get(args.task, "simple_mlp"))
+                     bringup_clip_rad=args.bringup_clip_rad, policy_model=TASK_MODELS.get(args.task, "simple_mlp"),
+                     ill_wrapping_test=args.ill_wrapping_test)
     observation_size = sim.observation(tuple(args.cmd_init)).size
     if observation_size != policy.input_dim:
         raise ValueError(
@@ -986,10 +1018,43 @@ def main() -> None:
           f"(Isaac play w/ --disable_training_gain_sync: {DEFAULT_KP:g}/{DEFAULT_KD:g}; "
           f"training run: {TRAINING_KP:g}/{TRAINING_KD:g})", flush=True)
 
-    if args.track_cmds is None:
-        run_live(args, sim, policy, command_ranges)
-    else:
-        run_tracking(args, sim, policy, checkpoint, model_path, env_overrides, ignored)
+    if args.log_imu_impacts or args.ill_wrapping_test:
+        root = args.output_dir or Path("logs/mujoco/imu_impacts")
+        mode = "wrap" if args.ill_wrapping_test else "baseline"
+        output_dir = create_run_directory(root, checkpoint.stem, f"{datetime.now():%Y%m%d_%H%M%S}-{mode}")
+        sim.imu_diagnostics = ImuImpactRecorder(output_dir, PHYSICS_DT, ill_wrapping_test=args.ill_wrapping_test)
+        config = {
+            "checkpoint": str(checkpoint), "checkpoint_name": checkpoint.name,
+            "checkpoint_sha256": checkpoint_sha256(checkpoint), "git_revision": git_revision(),
+            "mujoco_version": mujoco.__version__, "model_xml": str(model_path),
+            "model_xml_sha256": checkpoint_sha256(model_path), "argv": sys.argv,
+            "task": args.task, "policy_model": sim.policy_model, "input_dim": observation_size,
+            "saved_contract": getattr(policy, "contract", None),
+            "physics_dt_s": PHYSICS_DT, "policy_dt_s": POLICY_DT,
+            "ill_wrapping_test": args.ill_wrapping_test,
+            "wrapping_model": "trunc(a_body * 2048), modulo 65536, signed decode / 2048; before observation clip",
+            "hardware_status": "stress hypothesis; deployed compiler overflow behavior not verified",
+            "acceleration": "gravity-free linear acceleration at IMU point; rest=0, freefall=gravity",
+            "axes": "sensor axes assumed aligned with base, as local rotate_vector=[1,2,3]; world Z is diagnostic only",
+            "imu_offset_pos_b_m": IMU_OFFSET_B.tolist(),
+            "base_imu_clip": sim.base_imu_clip, "base_imu_ekf_acc_clip_mps2": sim.base_imu_ekf_acc_clip,
+            "kp": sim.kp, "kd": sim.kd, "effort_limit_nm": sim.effort_limit,
+            "command_init": args.cmd_init, "track_cmds": args.track_cmds,
+            "duration_s": args.duration_s, "episode_length_s": args.episode_length_s,
+            "spawn_z": sim.spawn_z, "env_overrides": env_overrides, "ignored_isaaclab_overrides": ignored,
+            "counterfactuals": "clip and wrap applied to this trajectory, not separate closed-loop rollouts",
+        }
+        (output_dir / "imu_config.json").write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+        print(f"[IMU] {'Q11 WRAPPING TEST' if args.ill_wrapping_test else 'Measurement only'}; "
+              f"all physics samples saved to {output_dir}", flush=True)
+    try:
+        if args.track_cmds is None:
+            run_live(args, sim, policy, command_ranges)
+        else:
+            run_tracking(args, sim, policy, checkpoint, model_path, env_overrides, ignored)
+    finally:
+        if sim.imu_diagnostics is not None:
+            sim.imu_diagnostics.close()
 
 
 if __name__ == "__main__":

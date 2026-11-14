@@ -84,6 +84,10 @@ output includes every tracking sample plus the resolved observation contract in
 1,000 policy steps and zero base-contact resets on 2026-11-09. This short check does
 not establish hardware transfer or broad robustness.
 
+For physics-rate impact measurements and the opt-in `--ill-wrapping-test` H1a probe,
+see [IMU wrapping test](IMU_WRAPPING_TEST.md). Normal playback is unchanged without
+`--log-imu-impacts` or `--ill-wrapping-test`.
+
 ## Two-feet IMU teacher, DAgger and student PPO
 
 | Task | Checkpoint | Inference inputs |
