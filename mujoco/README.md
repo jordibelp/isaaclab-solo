@@ -13,6 +13,11 @@ teacher/student tasks below. It preserves the inference contract used by `play_d
 - planar tracking in the two-feet gravity-aligned base-footprint frame
 - 5 s per requested command and matching CSV/error-plot format
 
+## Shared-command policy comparison
+
+To compare two policies side by side with one command panel and separate base-collision
+counters, see [Joint inference](JOINT_INFERENCE.md). The original player is unchanged.
+
 ## PD gains: play vs training
 
 `play_direct_0325.py --disable_training_gain_sync` plays the **env cfg** gains, which for
