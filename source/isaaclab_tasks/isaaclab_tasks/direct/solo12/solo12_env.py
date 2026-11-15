@@ -57,6 +57,16 @@ _BOUNDED_POSITIVE_REWARD_KEYS = (
 _REAR_THIGH_JOINT_OFFSET_X = 0.1946
 
 
+def _wrap_imu_lin_acc_int16(acc_b: torch.Tensor) -> torch.Tensor:
+    """Explicit signed Q11 wrap hypothesis, not a platform-dependent overflowing cast.
+
+    Each base/sensor-axis component is in m/s². Truncate toward zero, retain the
+    low 16 bits, and decode with 2048 counts per m/s². No state or RNG is used.
+    """
+    counts = torch.trunc(acc_b * 2048.0)
+    return (torch.remainder(counts + 32768.0, 65536.0) - 32768.0) / 2048.0
+
+
 def _reward_step_factor(key: str, step_dt: float) -> float:
     """Return the time factor used when constructing a reward term."""
     return 1.0 if key in _REWARD_KEYS_WITHOUT_STEP_DT else step_dt
@@ -1578,6 +1588,8 @@ class Solo12Env(DirectRLEnv):
             if corrupt:
                 gyro_b, acc_b = self._maybe_corrupt_base_imu_vectors(gyro_b, acc_b, ekf_processed=True)
                 ekf_quat_w = self._maybe_corrupt_base_imu_orientation(ekf_quat_w)
+                if getattr(self.cfg, "corrupt_imu_lin_acc_int16_wrap", False):
+                    acc_b = _wrap_imu_lin_acc_int16(acc_b)
             orientation = self._get_base_imu_orientation_obs(ekf_quat_w)
             if self.cfg.base_imu_clip:
                 gyro_b = gyro_b.clamp(-self.cfg.base_imu_gyro_clip, self.cfg.base_imu_gyro_clip)
@@ -1726,7 +1738,12 @@ class Solo12Env(DirectRLEnv):
 
         observations = {
             "policy": self._get_simple_mlp_obs(
-                noisy=self.cfg.noisy_actor_obs, include_lin_vel=self.cfg.actor_obs_has_lin_vel()
+                # Select the hardware-facing history even when play disables stochastic noise.
+                # The noise helpers still respect noisy_actor_obs; a clean critic uses the other history.
+                noisy=self.cfg.noisy_actor_obs or (
+                    self.cfg.base_obs_from_imu and getattr(self.cfg, "corrupt_imu_lin_acc_int16_wrap", False)
+                ),
+                include_lin_vel=self.cfg.actor_obs_has_lin_vel(),
             )
         }
         if not self.cfg.noisy_critic_obs:

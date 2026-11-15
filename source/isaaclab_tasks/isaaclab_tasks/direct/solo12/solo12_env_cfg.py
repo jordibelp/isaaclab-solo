@@ -491,6 +491,10 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     base_imu_ekf_acc_bias_init_std = 0.05  # m/s^2, correlated gravity-removal/model residual
     base_imu_ekf_acc_bias_rw_std_per_step = 2.0e-5  # m/s^2 per 200 Hz physics step
     base_imu_ekf_acc_clip = 32767.0 / 2048.0  # master-board signed Q11 transport limit
+    # Opt-in H1a transport hypothesis: truncate, wrap signed int16 Q11, then apply the usual clip.
+    # Hardware-facing processed IMU acceleration only; privileged teacher/critic signals stay clean.
+    # Independent of Gaussian noise switches. Raw specific force uses different transport units.
+    corrupt_imu_lin_acc_int16_wrap = False
     # Attitude error is applied as an axis-angle perturbation before deriving projected gravity/rotation matrix.
     # Robustness bias scales follow the CX5 attitude accuracy: 0.25 deg roll/pitch and 0.8 deg heading.
     base_imu_orientation_noise_std_rpy = tuple(math.radians(v) for v in (0.03, 0.03, 0.10))
@@ -959,6 +963,10 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     def refresh_base_imu_dimensions(self):
         """Recompute student observation dimensions after Hydra overrides."""
         self._refresh_control_config()
+        if type(self.corrupt_imu_lin_acc_int16_wrap) is not bool:
+            raise ValueError("corrupt_imu_lin_acc_int16_wrap must be a boolean.")
+        if self.corrupt_imu_lin_acc_int16_wrap and not self.imu_ekf_processed_inputs:
+            raise ValueError("corrupt_imu_lin_acc_int16_wrap requires imu_ekf_processed_inputs=True.")
         for name in ("priv_critic_includes_perception_encoding", "priv_critic_detached_perception_encoding"):
             if type(getattr(self, name)) is not bool:
                 raise ValueError(f"{name} must be a boolean.")

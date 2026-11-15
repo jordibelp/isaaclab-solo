@@ -76,6 +76,57 @@ The student's acceleration comes from the simulated IMU mounting point. The priv
 
 We use issued-action history for the new tasks. The robot can know its issued commands. It cannot directly observe which command an unknown simulated delay line executed. Existing tasks still allow their old executed-action setting.
 
+## Optional processed-acceleration integer wrapping
+
+Append this environment override to a training or IsaacLab playback command:
+
+```text
+env.corrupt_imu_lin_acc_int16_wrap=True
+```
+
+The default is `False`. It preserves the previous observation path and random draws.
+The field is inherited by all two-feet configurations, including PD/torque MLP,
+teacher (and teacher-rl alias), DAgger, and student PPO. It changes only the
+hardware-facing processed IMU acceleration, not rewards, dynamics or tensor sizes.
+It is a model of the suspected hardware transport behavior, not confirmation that
+the deployed compiler wraps an out-of-range C cast.
+
+For a plain MLP that should consume acceleration, keep its matching IMU settings:
+
+```text
+env.base_obs_from_imu=True env.remove_root_lin_vel_b_from_actor_obs=True env.include_lin_acc_steps_in_imu_obs=4 env.corrupt_imu_lin_acc_int16_wrap=True
+```
+
+The flag does not add acceleration channels to a mocap-only policy. A privileged
+teacher still receives clean simulator-state acceleration. DAgger labels and the
+student's privileged critic remain clean. The student's actual IMU history wraps;
+a critic explicitly configured to consume that actor history/latent sees its effects.
+Raw-specific-force mode (`imu_ekf_processed_inputs=False`) rejects the flag because
+that hardware field has different units and transport range.
+
+For each completed physics sample, the model first applies the existing sensor
+noise/bias, then truncates each body/sensor-axis acceleration times 2048 toward zero,
+retains the low 16 bits, interprets them as signed, and divides by 2048. Thus +17
+becomes -15 m/s², -17 becomes +15, and +50 becomes -14. Even in-range readings get
+Q11 quantization. This is deterministic and independent of `noisy_actor_obs`,
+`noisy_imu`, and noise scales. It does not corrupt gyro or attitude. The existing
+`base_imu_clip` and `base_imu_ekf_acc_clip` apply **after** wrapping, before history
+insertion. Turning clipping off does not turn wrapping off. Histories retain their
+current acquisition clock, ordering, zero padding, and partial-reset behavior.
+
+Set the flag explicitly at each desired simulator stage, including DAgger, student
+PPO and IsaacLab playback. It is recorded in the usual environment config; it is
+not a network-layout field copied from the clean teacher's structural contract.
+Playback can disable stochastic training noise without disabling explicit wrapping.
+The separate MuJoCo player uses its existing `--ill-wrapping-test` switch.
+Do not wrap an already received hardware value again in the ROS policy node.
+
+Training may improve tolerance to this particular corruption, but the representation
+loses information: readings separated by 32 m/s² have the same decoded value.
+History may help, but recovery and hardware transfer are not guaranteed. If the
+engineer fixes firmware clipping, re-evaluate a wrap-trained policy against that
+new cleanly clipped input distribution.
+
 ## Commands
 
 Commands below run from the canonical repository. Every command is one shell line. They are launch recipes, not jobs already submitted. Cluster code synchronization and Slurm submission are separate actions.
