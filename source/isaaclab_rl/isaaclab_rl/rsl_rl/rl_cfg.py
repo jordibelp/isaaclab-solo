@@ -390,6 +390,20 @@ class RslRlOnPolicyRunnerCfg(RslRlBaseRunnerCfg):
     class_name: str = "OnPolicyRunner"
     """The runner class name. Default is OnPolicyRunner."""
 
+    min_learning_rate: float = 1.0e-5
+    """Lower adaptive PPO LR limit. ``algorithm.learning_rate`` remains the initial LR.
+
+    Requires ``scripts/tools/install_rsl_rl_ppo_lr_limits.py --apply`` in the active Python environment.
+    Fixed schedules do not use these limits.
+    """
+
+    max_learning_rate: float = 1.0e-2
+    """Upper adaptive PPO LR limit; the default preserves RSL-RL's previous hardcoded cap.
+
+    For adaptive schedules require ``0 < min_learning_rate <= algorithm.learning_rate <= max_learning_rate``.
+    CLI example: ``agent.min_learning_rate=1e-5 agent.max_learning_rate=5e-4``.
+    """
+
     local_redundancy: RslRlLocalRedundancyCfg = RslRlLocalRedundancyCfg()
 
     critic: RslRlPpoCriticCfg = RslRlPpoCriticCfg()
