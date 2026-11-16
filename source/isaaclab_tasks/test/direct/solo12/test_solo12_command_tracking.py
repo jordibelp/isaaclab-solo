@@ -112,6 +112,16 @@ def test_soft_joint_limits_accept_one_degree_margin_per_joint():
     torch.testing.assert_close(soft_limits, expected)
 
 
+def _legacy_joint_limit_cfg():
+    """Keep the original range tests independent of the new hardware-aligned defaults."""
+    cfg = Solo12EnvCfg()
+    cfg.use_asymmetric_hip_limits = False
+    cfg.joint_physical_limit_hip = (-50.0, 50.0)
+    cfg.joint_physical_limit_thigh = (-90.0, 90.0)
+    cfg.joint_physical_limit_calf = (-170.0, 170.0)
+    return cfg
+
+
 def test_configured_joint_limits_override_hard_limits_and_build_per_type_soft_limits():
     class FakeRobot:
         def __init__(self):
@@ -124,7 +134,7 @@ def test_configured_joint_limits_override_hard_limits_and_build_per_type_soft_li
 
     env = object.__new__(Solo12Env)
     env._is_closed = True
-    env.cfg = Solo12EnvCfg()
+    env.cfg = _legacy_joint_limit_cfg()
     env._joint_ids = list(range(len(JOINT_NAMES)))
     env._robot = FakeRobot()
 
@@ -156,7 +166,7 @@ def test_asymmetric_thigh_limits_shift_front_negative_and_rear_positive():
 
     env = object.__new__(Solo12Env)
     env._is_closed = True
-    env.cfg = Solo12EnvCfg()
+    env.cfg = _legacy_joint_limit_cfg()
     env.cfg.use_asymmetric_thigh_limits = True
     env._joint_ids = list(range(len(JOINT_NAMES)))
     env._robot = FakeRobot()
@@ -194,7 +204,7 @@ def test_asymmetric_calf_limits_bend_front_negative_and_rear_positive():
 
     env = object.__new__(Solo12Env)
     env._is_closed = True
-    env.cfg = Solo12EnvCfg()
+    env.cfg = _legacy_joint_limit_cfg()
     env.cfg.use_asymmetric_calf_limits = True
     env.cfg.joint_soft_limit_calf_delta = 15.0
     env._joint_ids = list(range(len(JOINT_NAMES)))

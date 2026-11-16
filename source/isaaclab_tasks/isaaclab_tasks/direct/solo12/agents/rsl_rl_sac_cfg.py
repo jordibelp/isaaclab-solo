@@ -38,13 +38,9 @@ class Solo12SAC(SAC):
             raise ValueError("Solo12 SAC computed non-finite action bounds from the task soft joint limits.")
         if torch.any(upper <= 0) or torch.any(lower <= 0):
             raise ValueError("Solo12 SAC action center must lie strictly inside every soft joint limit.")
-        soft_limit_deltas = ", ".join(
-            f"{joint_type}={getattr(unwrapped.cfg, f'joint_soft_limit_{joint_type}_delta'):g} deg"
-            for joint_type in ("hip", "thigh", "calf")
-        )
         print(
             "Solo12 SAC: action bounds use q_offset_action_and_obs, env.action_scale, "
-            f"and per-joint-type joint-limit margins ({soft_limit_deltas})."
+            "and the resolved task soft joint limits (absolute ranges or fallback margins)."
         )
         print(f"  lower magnitudes: {lower}")
         print(f"  upper magnitudes: {upper}")

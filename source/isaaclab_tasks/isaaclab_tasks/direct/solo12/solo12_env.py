@@ -130,6 +130,17 @@ def _compute_joint_soft_pos_limits(
     return soft_limits
 
 
+def _validate_joint_limit_pair(value, config_name: str) -> None:
+    """Require a finite, strictly ordered (lower, upper) angle pair in degrees."""
+    if (
+        not isinstance(value, (tuple, list))
+        or len(value) != 2
+        or not all(isinstance(v, (int, float)) and math.isfinite(v) for v in value)
+        or value[0] >= value[1]
+    ):
+        raise ValueError(f"{config_name} must be a finite (lower, upper) pair with lower < upper; got {value}.")
+
+
 def _joint_pos_limit_violation(
     joint_pos: torch.Tensor, soft_joint_pos_limits: torch.Tensor
 ) -> torch.Tensor:
@@ -741,37 +752,59 @@ class Solo12Env(DirectRLEnv):
         return joint_pos
 
     def _configure_joint_position_limits(self) -> None:
-        """Apply configured physical limits and derive per-joint-type task soft limits."""
+        """Apply hard limits and absolute soft ranges, falling back to inward deltas."""
         asymmetric = {
-            "hip": False,
+            "hip": self.cfg.use_asymmetric_hip_limits,
             "thigh": self.cfg.use_asymmetric_thigh_limits,
             "calf": self.cfg.use_asymmetric_calf_limits,
         }
-        joint_types = []
-        physical_limit_cfg_names = []
+        physical_pairs = []
+        soft_pairs = []
+        soft_deltas = []
+        hard_settings = {}
+        soft_settings = {}
         for joint_name in self.cfg.joint_names:
             joint_type = next(
                 (name for name in ("hip", "thigh", "calf") if joint_name.endswith(f"_{name}_joint")), None
             )
             if joint_type is None:
                 raise ValueError(f"Cannot select configured joint limits for unknown Solo12 joint '{joint_name}'.")
-            joint_types.append(joint_type)
-
-            if asymmetric[joint_type]:
-                if joint_name.startswith(("FL_", "FR_")):
-                    physical_limit_cfg_names.append(f"joint_physical_limit_front_{joint_type}")
-                elif joint_name.startswith(("RL_", "RR_")):
-                    physical_limit_cfg_names.append(f"joint_physical_limit_rear_{joint_type}")
-                else:
-                    raise ValueError(
-                        f"Cannot select front/rear {joint_type} limits for unknown Solo12 leg in joint "
-                        f"'{joint_name}'."
-                    )
+            leg = joint_name.split("_", 1)[0]
+            if leg not in ("FL", "FR", "RL", "RR"):
+                raise ValueError(f"Cannot select configured joint limits for unknown Solo12 leg in '{joint_name}'.")
+            if joint_type == "hip":
+                side = "left" if leg in ("FL", "RL") else "right"
             else:
-                physical_limit_cfg_names.append(f"joint_physical_limit_{joint_type}")
+                side = "front" if leg in ("FL", "FR") else "rear"
+            hard_name = f"joint_physical_limit_{side + '_' if asymmetric[joint_type] else ''}{joint_type}"
+            hard_pair = getattr(self.cfg, hard_name)
+            _validate_joint_limit_pair(hard_pair, hard_name)
+            physical_pairs.append(hard_pair)
+            hard_settings[hard_name] = hard_pair
+
+            soft_name = f"joint_soft_limit_{side}_{joint_type}"
+            soft_pair = getattr(self.cfg, soft_name)
+            if soft_pair is None:
+                soft_name = f"joint_soft_limit_{joint_type}"
+                soft_pair = getattr(self.cfg, soft_name)
+            if soft_pair is not None:
+                _validate_joint_limit_pair(soft_pair, soft_name)
+                if soft_pair[0] < hard_pair[0] or soft_pair[1] > hard_pair[1]:
+                    raise ValueError(
+                        f"{soft_name}={soft_pair} must lie inside physical range {hard_name}={hard_pair} "
+                        f"for {joint_name}."
+                    )
+                delta = 0.0  # Explicit ranges ignore unused legacy deltas, including their validation.
+                soft_settings[soft_name] = soft_pair
+            else:
+                delta_name = f"joint_soft_limit_{joint_type}_delta"
+                delta = getattr(self.cfg, delta_name)
+                soft_settings[delta_name] = delta
+            soft_pairs.append(soft_pair)
+            soft_deltas.append(delta)
 
         physical_limits_degrees = torch.tensor(
-            [getattr(self.cfg, config_name) for config_name in physical_limit_cfg_names],
+            physical_pairs,
             device=self._robot.data.joint_pos_limits.device,
             dtype=self._robot.data.joint_pos_limits.dtype,
         )
@@ -788,31 +821,28 @@ class Solo12Env(DirectRLEnv):
             .unsqueeze(0)
             .expand(self._robot.data.joint_pos_limits.shape[0], -1, -1)
         )
-        self._robot.write_joint_position_limit_to_sim(physical_limits, joint_ids=self._joint_ids)
-
         soft_limit_deltas_degrees = torch.tensor(
-            [getattr(self.cfg, f"joint_soft_limit_{joint_type}_delta") for joint_type in joint_types],
+            soft_deltas,
             device=self._robot.data.joint_pos_limits.device,
             dtype=self._robot.data.joint_pos_limits.dtype,
         )
-        self._joint_soft_pos_limits = _compute_joint_soft_pos_limits(
-            self._robot.data.joint_pos_limits[:, self._joint_ids, :], soft_limit_deltas_degrees
-        )
+        soft_limits = _compute_joint_soft_pos_limits(physical_limits, soft_limit_deltas_degrees)
+        for joint_index, pair in enumerate(soft_pairs):
+            if pair is not None:
+                soft_limits[:, joint_index] = torch.deg2rad(soft_limits.new_tensor(pair))
 
-        limit_names = []
-        for joint_type in ("hip", "thigh", "calf"):
-            sides = ("front_", "rear_") if asymmetric[joint_type] else ("",)
-            limit_names += [f"{side}{joint_type}" for side in sides]
+        # Validate everything before changing the live articulation.
+        self._robot.write_joint_position_limit_to_sim(physical_limits, joint_ids=self._joint_ids)
+        self._joint_soft_pos_limits = soft_limits
         hard_limits_summary = ", ".join(
-            f"{name}={getattr(self.cfg, f'joint_physical_limit_{name}')} deg" for name in limit_names
+            f"{name}={value} deg" for name, value in hard_settings.items()
         )
-        soft_deltas_summary = ", ".join(
-            f"{joint_type}={getattr(self.cfg, f'joint_soft_limit_{joint_type}_delta'):g} deg"
-            for joint_type in ("hip", "thigh", "calf")
+        soft_limits_summary = ", ".join(
+            f"{name}={value} deg" for name, value in soft_settings.items()
         )
         print(
             f"[INFO] Applied Solo12 joint limits: hard [{hard_limits_summary}]; "
-            f"soft inward deltas [{soft_deltas_summary}].",
+            f"soft settings [{soft_limits_summary}].",
             flush=True,
         )
 

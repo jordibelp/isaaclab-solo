@@ -744,9 +744,18 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     joint_accel_reward_scale = 0.0
 
     # Physical hard limits in degrees. These override the limits authored in the USD.
-    joint_physical_limit_hip = (-50.0, 50.0)
-    joint_physical_limit_thigh = (-90.0, 90.0)
-    joint_physical_limit_calf = (-170.0, 170.0)
+    # Active defaults match the calibrated-coordinate thresholds in 1116_lab_solo12.yaml
+    # (2026-11-16). Hardware crosses into safety damping at these thresholds; PhysX instead
+    # enforces joint stops. Matching numbers does not reproduce that hardware safety response.
+    joint_physical_limit_thigh = (-math.degrees(3.5), math.degrees(3.5))
+    joint_physical_limit_calf = (-math.degrees(3.5), math.degrees(3.5))
+
+    # Left = FL/RL, right = FR/RR. Disable this flag to use the common hip range below.
+    # The common fallback is the conservative intersection of the left/right ranges.
+    use_asymmetric_hip_limits = True
+    joint_physical_limit_left_hip = (-math.degrees(1.22), math.degrees(2.35))
+    joint_physical_limit_right_hip = (-math.degrees(2.35), math.degrees(1.22))
+    joint_physical_limit_hip = (-math.degrees(1.22), math.degrees(1.22))
 
     # Optionally replace the common thigh range above with front/rear-specific ranges.
     # The asymmetric defaults shift equal-width ranges toward the joint directions used
@@ -763,8 +772,25 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     joint_physical_limit_front_calf = (-170.0, 20.0)
     joint_physical_limit_rear_calf = (-20.0, 170.0)
 
-    # Per-joint-type safety margins in degrees. The task's soft lower/upper limits are
-    # the configured physical limits moved inward by these amounts on each side.
+    # Optional absolute task soft limits in degrees, in the same joint coordinates as the hard
+    # limits (not offsets from the standing pose). Precedence for each joint is:
+    # side-specific absolute pair > common absolute pair > physical range with delta below.
+    # None means fall back. Side-specific soft ranges do not depend on the hard-limit flags.
+    # Active pairs must be finite, ordered, and inside the corresponding physical range.
+    # These feed the position penalty and existing rear-thigh airborne reset clamping;
+    # SAC position policies also use them for action scaling. PPO targets are not clipped here.
+    joint_soft_limit_hip: tuple[float, float] | None = None
+    joint_soft_limit_left_hip: tuple[float, float] | None = None
+    joint_soft_limit_right_hip: tuple[float, float] | None = None
+    joint_soft_limit_thigh: tuple[float, float] | None = None
+    joint_soft_limit_front_thigh: tuple[float, float] | None = None
+    joint_soft_limit_rear_thigh: tuple[float, float] | None = None
+    joint_soft_limit_calf: tuple[float, float] | None = None
+    joint_soft_limit_front_calf: tuple[float, float] | None = None
+    joint_soft_limit_rear_calf: tuple[float, float] | None = None
+
+    # Backward-compatible margins in degrees, used only where no absolute soft pair is set.
+    # The soft lower/upper limits are the physical limits moved inward by these amounts.
     joint_soft_limit_hip_delta = 5.0
     joint_soft_limit_thigh_delta = 10.0
     joint_soft_limit_calf_delta = 5.0
