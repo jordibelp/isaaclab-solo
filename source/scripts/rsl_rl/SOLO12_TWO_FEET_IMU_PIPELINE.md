@@ -118,7 +118,8 @@ Set the flag explicitly at each desired simulator stage, including DAgger, stude
 PPO and IsaacLab playback. It is recorded in the usual environment config; it is
 not a network-layout field copied from the clean teacher's structural contract.
 Playback can disable stochastic training noise without disabling explicit wrapping.
-The separate MuJoCo player uses its existing `--ill-wrapping-test` switch.
+The MuJoCo player accepts the same `env.corrupt_imu_lin_acc_int16_wrap=True`
+override (default `False`); its old `--ill-wrapping-test` switch has been removed.
 Do not wrap an already received hardware value again in the ROS policy node.
 
 Training may improve tolerance to this particular corruption, but the representation

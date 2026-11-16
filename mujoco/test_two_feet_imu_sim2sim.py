@@ -272,6 +272,16 @@ def test_task_and_override_parser():
     assert values["base_imu_history_policy_steps"] == 2
 
 
+@pytest.mark.parametrize("enabled", [True, False])
+@pytest.mark.parametrize("stage", ["student-dagger", "student-rl"])
+def test_runtime_wrapping_override_survives_checkpoint_contract(checkpoints, enabled, stage):
+    path = checkpoints.adapter_path if stage == "student-dagger" else checkpoints.student_path
+    policy = EncodedPolicy(path, f"solo12-two-feet-IMU-{stage}", {"corrupt_imu_lin_acc_int16_wrap": enabled})
+    sim = player.Solo12Mujoco(MODEL, policy_model=policy.policy_model, env_overrides=policy.contract)
+    assert sim.corrupt_imu_lin_acc_int16_wrap is enabled
+    assert sim.observation((0., 0., 0.)).size == policy.input_dim
+
+
 def test_student_physics_history_matches_independent_endpoint_oracle(monkeypatch):
     env = player.Solo12Mujoco(MODEL, policy_model="base_imu_student_rl", env_overrides={"base_imu_clip": False})
     original = mujoco.mj_step

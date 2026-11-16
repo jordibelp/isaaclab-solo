@@ -89,9 +89,9 @@ output includes every tracking sample plus the resolved observation contract in
 1,000 policy steps and zero base-contact resets on 2026-11-09. This short check does
 not establish hardware transfer or broad robustness.
 
-For physics-rate impact measurements and the opt-in `--ill-wrapping-test` H1a probe,
+For physics-rate impact measurements and the opt-in `env.corrupt_imu_lin_acc_int16_wrap=True` H1a probe,
 see [IMU wrapping test](IMU_WRAPPING_TEST.md). Normal playback is unchanged without
-`--log-imu-impacts` or `--ill-wrapping-test`.
+`--log-imu-impacts` or `env.corrupt_imu_lin_acc_int16_wrap=True`.
 
 ## Two-feet IMU teacher, DAgger and student PPO
 

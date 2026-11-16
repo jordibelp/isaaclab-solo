@@ -99,9 +99,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-wandb", action="store_true", help="Keep artifacts local without uploading to W&B.")
     parser.add_argument("--log-imu-impacts", action="store_true",
                         help="Save all 200 Hz IMU accelerations (world/body), Q11 overflow, and ground contacts.")
-    parser.add_argument("--ill-wrapping-test", action="store_true",
-                        help="Test H1a: truncate and wrap signed 16-bit Q11 acceleration before clipping/history. "
-                             "Also enables IMU logging. This is a hypothesis, not a validated hardware model.")
     return parser
 
 
@@ -122,6 +119,7 @@ _ENV_OBSERVATION_BOOL_KEYS = {
     "env.remove_root_lin_vel_b_from_obs", "env.base_imu_clip", "env.imu_ekf_processed_inputs",
     "env.include_foot_height_obs", "env.teacher_include_base_force", "env.apply_tanh_to_latent",
     "env.use_rotMat_on_imu_encoder", "env.action_obs_is_last_executed", "env.base_imu_history_action_is_last_executed",
+    "env.corrupt_imu_lin_acc_int16_wrap",
 }
 _ENV_IMU_CLIP_KEYS = {"env.base_imu_gyro_clip", "env.base_imu_ekf_acc_clip"}
 
@@ -134,6 +132,8 @@ def consume_env_overrides(unknown: list[str]) -> tuple[dict, list[str]]:
     ignored: list[str] = []
     for token in unknown:
         key, _, raw = token.partition("=")
+        if key == "--ill-wrapping-test":
+            raise ValueError("--ill-wrapping-test was removed; use env.corrupt_imu_lin_acc_int16_wrap=True.")
         if key in _ENV_JOINT_LIMIT_KEYS:
             try:
                 low, high = map(float, ast.literal_eval(raw))
@@ -248,7 +248,7 @@ def quat_rotation(q_wxyz: np.ndarray) -> np.ndarray:
 class Solo12Mujoco:
     def __init__(self, model_path: Path, kp: float = DEFAULT_KP, kd: float = DEFAULT_KD,
                  spawn_z: float = 0.35, env_overrides: dict | None = None, bringup_clip_rad: float = 0.0,
-                 policy_model: str = "simple_mlp", ill_wrapping_test: bool = False):
+                 policy_model: str = "simple_mlp"):
         if not math.isfinite(bringup_clip_rad) or bringup_clip_rad < 0.0:
             raise ValueError("bringup_clip_rad must be finite and non-negative (0 disables clipping).")
         self.bringup_clip_rad = float(bringup_clip_rad)
@@ -279,10 +279,10 @@ class Solo12Mujoco:
         self._teacher_lin_acc_history = np.zeros((self.imu_acc_steps if self.encoded_imu else 0, 3))
         self.history_len = overrides.get("history_len", 13) if policy_model in ("base_imu_student_rl", "base_imu_student_dagger") else 0
         self._base_imu_history = np.zeros((self.history_len, 45))
-        self.ill_wrapping_test = ill_wrapping_test
+        self.corrupt_imu_lin_acc_int16_wrap = overrides.get("corrupt_imu_lin_acc_int16_wrap", False)
         self.imu_diagnostics = None
-        if ill_wrapping_test and not ((self.base_obs_from_imu and self.imu_acc_steps) or self.history_len):
-            raise ValueError("--ill-wrapping-test requires a policy that consumes IMU acceleration.")
+        if self.corrupt_imu_lin_acc_int16_wrap and not ((self.base_obs_from_imu and self.imu_acc_steps) or self.history_len):
+            raise ValueError("env.corrupt_imu_lin_acc_int16_wrap=True requires a policy that consumes IMU acceleration.")
         self.include_foot_height_obs = overrides.get("include_foot_height_obs", False)
         self.teacher_include_base_force = overrides.get("teacher_include_base_force", False)
         self.teacher_foot_force_obs = overrides.get("teacher_foot_force_obs", "none")
@@ -368,7 +368,7 @@ class Solo12Mujoco:
         acceleration += np.cross(angular, np.cross(angular, lever))
         acceleration_b = rotation.T @ acceleration
         raw_acceleration_b = acceleration_b.copy()
-        if self.ill_wrapping_test:
+        if self.corrupt_imu_lin_acc_int16_wrap:
             acceleration_b = wrap_q11(acceleration_b)
         if self._teacher_lin_acc_history.size:
             origin_lever = -rotation @ self.model.body_ipos[self.base_id]
@@ -869,7 +869,8 @@ def run_tracking(args, sim: Solo12Mujoco, policy: Policy, checkpoint: Path, mode
             "base_imu_ekf_acc_clip_mps2": sim.base_imu_ekf_acc_clip,
             "acceleration_history_order": "oldest first, XYZ per sample; zeroed on reset",
             "noise_enabled": False,
-            "ill_wrapping_test": sim.ill_wrapping_test,
+            "corrupt_imu_lin_acc_int16_wrap": sim.corrupt_imu_lin_acc_int16_wrap,
+            "ill_wrapping_test": sim.corrupt_imu_lin_acc_int16_wrap,  # Legacy telemetry key.
         },
         "kp": sim.kp,
         "kd": sim.kd,
@@ -998,8 +999,7 @@ def main() -> None:
     model_path = Path(__file__).with_name("solo12.xml").resolve()
     sim = Solo12Mujoco(model_path, kp=kp, kd=kd, spawn_z=args.spawn_z,
                      env_overrides=getattr(policy, "contract", env_overrides),
-                     bringup_clip_rad=args.bringup_clip_rad, policy_model=TASK_MODELS.get(args.task, "simple_mlp"),
-                     ill_wrapping_test=args.ill_wrapping_test)
+                     bringup_clip_rad=args.bringup_clip_rad, policy_model=TASK_MODELS.get(args.task, "simple_mlp"))
     observation_size = sim.observation(tuple(args.cmd_init)).size
     if observation_size != policy.input_dim:
         raise ValueError(
@@ -1018,11 +1018,11 @@ def main() -> None:
           f"(Isaac play w/ --disable_training_gain_sync: {DEFAULT_KP:g}/{DEFAULT_KD:g}; "
           f"training run: {TRAINING_KP:g}/{TRAINING_KD:g})", flush=True)
 
-    if args.log_imu_impacts or args.ill_wrapping_test:
+    if args.log_imu_impacts or sim.corrupt_imu_lin_acc_int16_wrap:
         root = args.output_dir or Path("logs/mujoco/imu_impacts")
-        mode = "wrap" if args.ill_wrapping_test else "baseline"
+        mode = "wrap" if sim.corrupt_imu_lin_acc_int16_wrap else "baseline"
         output_dir = create_run_directory(root, checkpoint.stem, f"{datetime.now():%Y%m%d_%H%M%S}-{mode}")
-        sim.imu_diagnostics = ImuImpactRecorder(output_dir, PHYSICS_DT, ill_wrapping_test=args.ill_wrapping_test)
+        sim.imu_diagnostics = ImuImpactRecorder(output_dir, PHYSICS_DT, ill_wrapping_test=sim.corrupt_imu_lin_acc_int16_wrap)
         config = {
             "checkpoint": str(checkpoint), "checkpoint_name": checkpoint.name,
             "checkpoint_sha256": checkpoint_sha256(checkpoint), "git_revision": git_revision(),
@@ -1031,7 +1031,8 @@ def main() -> None:
             "task": args.task, "policy_model": sim.policy_model, "input_dim": observation_size,
             "saved_contract": getattr(policy, "contract", None),
             "physics_dt_s": PHYSICS_DT, "policy_dt_s": POLICY_DT,
-            "ill_wrapping_test": args.ill_wrapping_test,
+            "corrupt_imu_lin_acc_int16_wrap": sim.corrupt_imu_lin_acc_int16_wrap,
+            "ill_wrapping_test": sim.corrupt_imu_lin_acc_int16_wrap,  # Legacy telemetry key.
             "wrapping_model": "trunc(a_body * 2048), modulo 65536, signed decode / 2048; before observation clip",
             "hardware_status": "stress hypothesis; deployed compiler overflow behavior not verified",
             "acceleration": "gravity-free linear acceleration at IMU point; rest=0, freefall=gravity",
@@ -1045,7 +1046,7 @@ def main() -> None:
             "counterfactuals": "clip and wrap applied to this trajectory, not separate closed-loop rollouts",
         }
         (output_dir / "imu_config.json").write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
-        print(f"[IMU] {'Q11 WRAPPING TEST' if args.ill_wrapping_test else 'Measurement only'}; "
+        print(f"[IMU] {'Q11 WRAPPING TEST' if sim.corrupt_imu_lin_acc_int16_wrap else 'Measurement only'}; "
               f"all physics samples saved to {output_dir}", flush=True)
     try:
         if args.track_cmds is None:

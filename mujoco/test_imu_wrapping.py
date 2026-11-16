@@ -16,10 +16,33 @@ IMU = dict(base_obs_from_imu=True, remove_root_lin_vel_b_from_actor_obs=True,
            include_lin_acc_steps_in_imu_obs=4)
 
 
-def test_wrapping_flag_is_explicit():
-    args = player.build_parser().parse_args(["--checkpoint=x.pt", "--ill-wrapping-test"])
-    assert args.ill_wrapping_test
-    assert not player.build_parser().parse_args(["--checkpoint=x.pt"]).ill_wrapping_test
+@pytest.mark.parametrize("value,enabled", [("True", True), ("False", False), ("true", True), ("false", False)])
+def test_wrapping_env_override_is_consumed(value, enabled):
+    overrides, ignored = player.consume_env_overrides([f"env.corrupt_imu_lin_acc_int16_wrap={value}"])
+    assert not ignored
+    assert overrides == {"corrupt_imu_lin_acc_int16_wrap": enabled}
+
+
+@pytest.mark.parametrize("value", ["maybe", "1", ""])
+def test_invalid_wrapping_override_is_rejected(value):
+    with pytest.raises(ValueError, match="requires True or False"):
+        player.consume_env_overrides([f"env.corrupt_imu_lin_acc_int16_wrap={value}"])
+
+
+def test_wrapping_override_uses_last_value():
+    overrides, ignored = player.consume_env_overrides([
+        "env.corrupt_imu_lin_acc_int16_wrap=True", "env.corrupt_imu_lin_acc_int16_wrap=False",
+    ])
+    assert not ignored
+    assert overrides == {"corrupt_imu_lin_acc_int16_wrap": False}
+
+
+def test_retired_wrapping_flag_is_not_silently_ignored():
+    parser = player.build_parser()
+    assert "--ill-wrapping-test" not in parser.format_help()
+    _, unknown = parser.parse_known_args(["--checkpoint=x.pt", "--ill-wrapping-test"])
+    with pytest.raises(ValueError, match="env.corrupt_imu_lin_acc_int16_wrap=True"):
+        player.consume_env_overrides(unknown)
 
 
 def test_q11_signed_boundaries_and_multi_wrap():
@@ -42,7 +65,9 @@ def inject_world_acceleration(env, world_acc, rotation):
 
 @pytest.mark.parametrize("clip", [True, False])
 def test_wrap_before_clip_and_history_in_body_axes(clip):
-    env = player.Solo12Mujoco(MODEL, env_overrides={**IMU, "base_imu_clip": clip}, ill_wrapping_test=True)
+    env = player.Solo12Mujoco(MODEL, env_overrides={
+        **IMU, "base_imu_clip": clip, "corrupt_imu_lin_acc_int16_wrap": True,
+    })
     rotation = Rotation.from_euler("y", 90, degrees=True).as_matrix()
     inject_world_acceleration(env, [0., 0., 17.], rotation)
     np.testing.assert_allclose(env.observation((0., 0., 0.))[6:18].reshape(4, 3)[-1], [15., 0., 0.], atol=.001)
@@ -54,9 +79,27 @@ def test_wrap_before_clip_and_history_in_body_axes(clip):
 
 def test_wrap_rejects_policy_without_acceleration():
     with pytest.raises(ValueError, match="acceleration"):
-        player.Solo12Mujoco(MODEL, ill_wrapping_test=True)
+        player.Solo12Mujoco(MODEL, env_overrides={"corrupt_imu_lin_acc_int16_wrap": True})
     with pytest.raises(ValueError, match="acceleration"):
-        player.Solo12Mujoco(MODEL, policy_model="base_imu_teacher", ill_wrapping_test=True)
+        player.Solo12Mujoco(MODEL, policy_model="base_imu_teacher",
+                           env_overrides={"corrupt_imu_lin_acc_int16_wrap": True})
+
+
+def test_explicit_false_is_identical_to_default_off():
+    baseline = player.Solo12Mujoco(MODEL, env_overrides=IMU)
+    disabled = player.Solo12Mujoco(MODEL, env_overrides={**IMU, "corrupt_imu_lin_acc_int16_wrap": False})
+    assert not baseline.corrupt_imu_lin_acc_int16_wrap
+    assert not disabled.corrupt_imu_lin_acc_int16_wrap
+    for env in (baseline, disabled):
+        inject_world_acceleration(env, [17., -19., 20.], np.eye(3))
+    np.testing.assert_array_equal(disabled.observation((0., 0., 0.)), baseline.observation((0., 0., 0.)))
+    np.testing.assert_allclose(disabled._imu_lin_acc_history[-1],
+                               np.array([17., -19., 20.]).clip(-player.IMU_EKF_ACC_CLIP, player.IMU_EKF_ACC_CLIP))
+    for _ in range(10):
+        baseline.step(np.linspace(-.2, .2, 12))
+        disabled.step(np.linspace(-.2, .2, 12))
+        np.testing.assert_array_equal(disabled.data.qpos, baseline.data.qpos)
+        np.testing.assert_array_equal(disabled.observation((0., 0., 0.)), baseline.observation((0., 0., 0.)))
 
 
 def test_telemetry_does_not_change_rollout_and_keeps_every_substep(tmp_path):
@@ -104,10 +147,12 @@ def test_logger_has_world_z_body_xyz_counterfactuals_and_contacts(tmp_path):
     assert summary["raw_world_z_max_mps2"] == pytest.approx(17.)
 
 
-def test_student_wraps_sensor_history_but_teacher_stays_clean():
+@pytest.mark.parametrize("policy_model", ["base_imu_student_rl", "base_imu_student_dagger"])
+def test_student_wraps_sensor_history_but_teacher_stays_clean(policy_model):
     from solo12_imu_diagnostics import wrap_q11
-    clean = player.Solo12Mujoco(MODEL, policy_model="base_imu_student_rl")
-    wrapped = player.Solo12Mujoco(MODEL, policy_model="base_imu_student_rl", ill_wrapping_test=True)
+    clean = player.Solo12Mujoco(MODEL, policy_model=policy_model)
+    wrapped = player.Solo12Mujoco(MODEL, policy_model=policy_model,
+                                 env_overrides={"corrupt_imu_lin_acc_int16_wrap": True})
     inject_world_acceleration(clean, [17., -19., 20.], np.eye(3))
     inject_world_acceleration(wrapped, [17., -19., 20.], np.eye(3))
     obs = wrapped.observation((0., 0., 0.))[:-3].reshape(-1, 45)
@@ -158,27 +203,37 @@ def test_quantizer_matches_independent_integer_bit_oracle():
     np.testing.assert_array_equal(wrap_q11(values), expected)
 
 
-def test_live_dispatch_auto_logs_and_finalizes_on_interrupt(tmp_path, monkeypatch):
+@pytest.mark.parametrize("enabled,log_impacts", [(True, False), (False, True), (False, False), (None, False)])
+def test_live_dispatch_auto_logs_and_finalizes_on_interrupt(tmp_path, monkeypatch, enabled, log_impacts):
     import sys
     checkpoint = tmp_path / "actor.pt"
     checkpoint.write_bytes(b"checkpoint stub; actor loader replaced only in this test")
     monkeypatch.setattr(player, "Policy", lambda _: SimpleNamespace(input_dim=57, checkpoint_format="ppo"))
 
     def interrupted_live(args, sim, policy, command_ranges):
-        assert sim.ill_wrapping_test
+        assert sim.corrupt_imu_lin_acc_int16_wrap is bool(enabled)
         sim.step(np.zeros(12))
         raise KeyboardInterrupt
 
     monkeypatch.setattr(player, "run_live", interrupted_live)
+    options = ([f"env.corrupt_imu_lin_acc_int16_wrap={enabled}"] if enabled is not None else [])
+    if log_impacts:
+        options.append("--log-imu-impacts")
     monkeypatch.setattr(sys, "argv", ["play_direct_mujoco.py", f"--checkpoint={checkpoint}",
-                                    "--ill-wrapping-test", f"--output-dir={tmp_path}/out",
+                                    *options, f"--output-dir={tmp_path}/out",
                                     "env.base_obs_from_imu=True", "env.include_lin_acc_steps_in_imu_obs=4",
                                     "env.remove_root_lin_vel_b_from_actor_obs=True"])
     with pytest.raises(KeyboardInterrupt):
         player.main()
     summaries = list((tmp_path / "out").glob("*/*/imu_summary.json"))
+    if not (enabled or log_impacts):
+        assert not summaries
+        assert not (tmp_path / "out").exists()
+        return
     assert len(summaries) == 1
     assert json.loads(summaries[0].read_text())["samples"] == 4
     config = json.loads(summaries[0].with_name("imu_config.json").read_text())
-    assert config["ill_wrapping_test"]
+    assert config["corrupt_imu_lin_acc_int16_wrap"] is enabled
+    assert config["ill_wrapping_test"] is enabled
+    assert not config["ignored_isaaclab_overrides"]
     assert config["input_dim"] == 57

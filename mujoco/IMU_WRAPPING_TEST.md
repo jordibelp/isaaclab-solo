@@ -2,10 +2,15 @@
 
 ## Use with the existing command
 
-Keep your existing `play_direct_mujoco.py` command and append **one** flag:
+Keep your existing `play_direct_mujoco.py` command and append one option:
 
 - `--log-imu-impacts`: measure without changing the policy inputs.
-- `--ill-wrapping-test`: apply the suspected wrapping to acceleration inputs. This also enables logging.
+- `env.corrupt_imu_lin_acc_int16_wrap=True`: apply the suspected wrapping to acceleration inputs. This also enables logging.
+
+The environment override matches IsaacLab training and playback. It defaults to
+`False`; omit it or set it to `False` for clean acceleration. Repeated overrides
+use the last value. The old `--ill-wrapping-test` flag has been removed; using it
+raises an error with the replacement instead of silently running without wrapping.
 
 Both work in the live viewer and in scripted headless playback. Neither is enabled
 by default. Live runs save local diagnostics but do not upload to W&B. Scripted
@@ -53,7 +58,7 @@ Sources inspected:
 - ODRI `imu.cpp` and the bring-up `solo12.yaml` axis map.
 
 **An out-of-range C float-to-integer cast does not guarantee modular wrapping.**
-The deployed firmware/compiler behavior has not been verified. This flag tests
+The deployed firmware/compiler behavior has not been verified. This setting tests
 the proposed failure mechanism; it is not a calibrated hardware model.
 
 The test truncates each body component toward zero after multiplying by 2048,
@@ -66,10 +71,10 @@ insertion. Subsequent software clipping cannot recover the original acceleration
 The normal clip setting remains active, including its symmetric negative limit.
 Setting `env.base_imu_clip=False` does not disable the wrapping test.
 
-The flag changes only acceleration observations, including student TCN history.
+The setting changes only acceleration observations, including student TCN history.
 It leaves gyro, gravity direction, dynamics, gains, actions and privileged teacher
 acceleration unchanged. It includes Q11 quantization even inside the transport range.
-Policies without an IMU-acceleration input reject the wrapping flag.
+Policies without an IMU-acceleration input reject the wrapping setting.
 
 ## Outputs
 
@@ -88,6 +93,10 @@ then the checkpoint name and a timestamp ending in `baseline` or `wrap`.
   with overflow markers. Dotted vertical lines mark resets.
 - `imu_config.json`: checkpoint/model hashes, revision, CLI, effective sensor/gain
   settings, and assumptions. Scripted runs also retain `run_config.json`.
+
+Both config files record `corrupt_imu_lin_acc_int16_wrap`. The legacy telemetry key
+`ill_wrapping_test` remains in configs and summaries for existing analysis scripts;
+it no longer names a CLI flag.
 
 CSV names include units and axes. All numeric CSV samples are logged as W&B
 `imu/*` signals on `imu/time_s` during scripted upload; the PNG is only an extra.
