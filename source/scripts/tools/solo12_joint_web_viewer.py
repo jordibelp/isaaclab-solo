@@ -9,7 +9,7 @@ python3 source/scripts/tools/solo12_joint_web_viewer.py --export /tmp/solo12-joi
 from __future__ import annotations
 
 import argparse
-import ast
+import hashlib
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -20,6 +20,7 @@ from solo12_twofeet_pose_viewer import ASSETS, REPO, robot_model, task_defaults
 
 TEMPLATE = Path(__file__).with_name("joint_web_viewer") / "viewer.html"
 COMMAND_LIMITS = {
+    "use_asymmetric_hip_limits": False,
     "joint_physical_limit_hip": [-70.0, 70.0],
     "joint_physical_limit_calf": [-179.0, 179.0],
     "use_asymmetric_thigh_limits": True,
@@ -33,17 +34,11 @@ COMMAND_LIMITS = {
 
 def build_html():
     defaults = task_defaults()
-    tree = ast.parse((REPO / "source/isaaclab_tasks/isaaclab_tasks/direct/solo12/solo12_env_cfg.py").read_text())
-    config = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "Solo12EnvCfg")
-    for node in config.body:
-        if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name):
-            key = node.targets[0].id
-            if key in ("use_asymmetric_thigh_limits", "use_asymmetric_calf_limits"):
-                defaults[key] = ast.literal_eval(node.value)
     task_limits = {key: value for key, value in defaults.items()
                    if key.startswith(("joint_physical_limit_", "joint_soft_limit_", "use_asymmetric_"))}
     payload = {"defaults": defaults, "task_limits": task_limits,
-               "command_limits": task_limits | COMMAND_LIMITS, "robot": robot_model()}
+               "command_limits": task_limits | COMMAND_LIMITS, "robot": robot_model(),
+               "config_sha256": hashlib.sha256((REPO / "source/isaaclab_tasks/isaaclab_tasks/direct/solo12/solo12_env_cfg.py").read_bytes()).hexdigest()}
     return TEMPLATE.read_text().replace("/* THREE_LIBRARY */", (ASSETS / "vendor/three-r160.min.js").read_text()).replace(
         "/* THREE_LICENSE */", (ASSETS / "vendor/THREE-LICENSE").read_text()
     ).replace("/* MODEL_DATA */null", json.dumps(payload, separators=(",", ":")))

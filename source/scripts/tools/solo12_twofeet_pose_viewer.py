@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+import math
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import webbrowser
@@ -23,6 +24,20 @@ import xml.etree.ElementTree as ET
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[2]
 ASSETS = HERE / "twofeet_pose_viewer"
+
+
+def config_literal(node):
+    """Read literals plus math.degrees(number); never evaluate arbitrary config code."""
+    if isinstance(node, (ast.Tuple, ast.List)):
+        return [config_literal(item) for item in node.elts]
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+        value = config_literal(node.operand)
+        return -value if isinstance(node.op, ast.USub) else value
+    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name) and node.func.value.id == "math"
+            and node.func.attr == "degrees" and len(node.args) == 1 and not node.keywords):
+        return math.degrees(ast.literal_eval(node.args[0]))
+    return ast.literal_eval(node)
 
 
 def task_defaults():
@@ -39,13 +54,13 @@ def task_defaults():
                 values["joint_pose"] = ast.literal_eval(node.value.args[0].args[1])
         if isinstance(node, ast.ClassDef) and node.name == "Solo12EnvCfg":
             for field in node.body:
-                if not isinstance(field, ast.Assign):
+                if not isinstance(field, (ast.Assign, ast.AnnAssign)):
                     continue
-                name = field.targets[0].id
-                if name.startswith(("twofeet_airborne_reset_", "joint_physical_limit_", "joint_soft_limit_")) or name in (
+                name = (field.target if isinstance(field, ast.AnnAssign) else field.targets[0]).id
+                if name.startswith(("twofeet_airborne_reset_", "joint_physical_limit_", "joint_soft_limit_", "use_asymmetric_")) or name in (
                     "flexed_initial_joint_pos_noise_range", "reset_base_lin_vel_range", "reset_base_ang_vel_range"
                 ):
-                    values[name] = ast.literal_eval(field.value)
+                    values[name] = config_literal(field.value)
     env_tree = ast.parse((task / "solo12_env.py").read_text())
     offset = next(n.value for n in env_tree.body if isinstance(n, ast.Assign)
                   and isinstance(n.targets[0], ast.Name) and n.targets[0].id == "_REAR_THIGH_JOINT_OFFSET_X")
