@@ -780,12 +780,12 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     # These feed the position penalty and existing rear-thigh airborne reset clamping;
     # SAC position policies also use them for action scaling. PPO targets are not clipped here.
     joint_soft_limit_hip: tuple[float, float] | None = None
-    joint_soft_limit_left_hip: tuple[float, float] | None = None
-    joint_soft_limit_right_hip: tuple[float, float] | None = None
-    joint_soft_limit_thigh: tuple[float, float] | None = None
+    joint_soft_limit_left_hip: tuple[float, float] | None = (-50.0,+110.0)
+    joint_soft_limit_right_hip: tuple[float, float] | None = (-110.0,+50.0)
+    joint_soft_limit_thigh: tuple[float, float] | None = (-135.0,+135.0)
     joint_soft_limit_front_thigh: tuple[float, float] | None = None
     joint_soft_limit_rear_thigh: tuple[float, float] | None = None
-    joint_soft_limit_calf: tuple[float, float] | None = None
+    joint_soft_limit_calf: tuple[float, float] | None = (-170.0,170.0)
     joint_soft_limit_front_calf: tuple[float, float] | None = None
     joint_soft_limit_rear_calf: tuple[float, float] | None = None
 
@@ -1161,6 +1161,10 @@ class Solo12TwoFeetEnvCfg(Solo12EnvCfg):
     base_push_interval_range_s = (2.0, 5.0)
     # Include early disturbances without shortening the push-free gaps later in the episode.
     base_push_initial_delay_range_s = (0.0, 5.0)
+
+
+    joint_soft_limit_front_thigh: tuple[float, float] | None = (-135.0,+135.0)
+    joint_soft_limit_rear_thigh: tuple[float, float] | None = (-90.0,+170)
 
 
 @configclass
