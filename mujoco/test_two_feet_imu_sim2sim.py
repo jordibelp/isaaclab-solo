@@ -89,6 +89,74 @@ def test_loaded_actor_matches_production_batch_one(checkpoints, stage, inputs):
             np.testing.assert_array_equal(policy(observation.numpy()), expected)
 
 
+@pytest.mark.parametrize("critic_mode", ["plain", "shared-detached", "shared-trainable", "separate"])
+@pytest.mark.parametrize("critic_state", ["original", "mismatched", "absent"])
+def test_student_ppo_only_loads_actor(checkpoints, critic_mode, critic_state):
+    c = checkpoints
+    models, _ = production_modules()
+    separate = critic_mode == "separate"
+    shared = critic_mode.startswith("shared-")
+    detached = critic_mode != "shared-trainable"
+    obs = {"policy": torch.randn(12, 408), "critic": torch.randn(12, 67 + (405 if separate else 0))}
+    reference = models.Solo12BaseImuStudentActorCritic(
+        obs, {"policy": ["policy"], "critic": ["critic"]}, 12,
+        history_len=9, history_sample_dim=45, teacher_critic_obs_dim=67,
+        actor_hidden_dims=[11, 8], critic_hidden_dims=[15, 10],
+        tcn_channels=8, tcn_latent_dim=7, tcn_kernel_size=3,
+        actor_obs_normalization=True, critic_obs_normalization=True, apply_tanh_to_latent=c.bounded,
+        feed_history_encoding_to_critic=separate, priv_critic_includes_perception_encoding=shared,
+        priv_critic_detached_perception_encoding=detached,
+    )
+    reference.update_normalization(obs)
+    reference.eval()
+    payload = torch.load(c.student_path, map_location="cpu", weights_only=False)
+    state = reference.state_dict()
+    if critic_state == "mismatched":
+        # Even an incompatible critic architecture/normalizer/TCN is irrelevant to inference.
+        state["critic.0.weight"] = torch.zeros(2, 3)
+        state["critic_obs_normalizer._mean"] = torch.zeros(1, 123)
+        state["critic_history_encoder.conv_stack.0.conv.weight"] = torch.zeros(1, 2, 3)
+    elif critic_state == "absent":
+        state = {key: value for key, value in state.items()
+                 if not key.startswith("critic") and key not in ("std", "log_std")}
+    payload["model_state_dict"] = state
+    payload["infos"]["solo12_imu_critic"] = {
+        "priv_critic_includes_perception_encoding": shared,
+        "priv_critic_detached_perception_encoding": detached,
+    }
+    torch.save(payload, c.student_path)
+    policy = EncodedPolicy(c.student_path, "solo12-two-feet-IMU-student-rl", {})
+    assert not any(key.startswith("critic") or key in ("std", "log_std") for key in policy.network.state_dict())
+    observations = torch.randn(16, 408, generator=torch.Generator().manual_seed(41))
+    with torch.inference_mode():
+        for observation in observations:
+            expected = reference.act_inference({"policy": observation[None]}).numpy()[0]
+            np.testing.assert_array_equal(policy(observation.numpy()), expected)
+
+
+@pytest.mark.parametrize("corruption", [
+    "missing_actor", "missing_encoder", "missing_normalizer",
+    "actor_shape", "encoder_shape", "normalizer_shape", "unexpected_actor", "unexpected_key",
+])
+def test_student_actor_loading_remains_strict(checkpoints, corruption):
+    c = checkpoints
+    payload = torch.load(c.student_path, map_location="cpu", weights_only=False)
+    state = payload["model_state_dict"]
+    if corruption.startswith("missing_"):
+        key = {"missing_actor": "actor.0.bias", "missing_encoder": "actor_history_encoder.conv_stack.2.conv.bias",
+               "missing_normalizer": "actor_obs_normalizer._var"}[corruption]
+        del state[key]
+    elif corruption.endswith("_shape"):
+        key = {"actor_shape": "actor.0.bias", "encoder_shape": "actor_history_encoder.conv_stack.2.conv.bias",
+               "normalizer_shape": "actor_obs_normalizer._var"}[corruption]
+        state[key] = torch.zeros(1)
+    else:
+        state["actor.unexpected" if corruption == "unexpected_actor" else "unexpected"] = torch.zeros(1)
+    torch.save(payload, c.student_path)
+    with pytest.raises(RuntimeError):
+        EncodedPolicy(c.student_path, "solo12-two-feet-IMU-student-rl", {})
+
+
 @pytest.mark.parametrize("normalize_teacher,normalize_history", [(False, False), (True, False), (False, True)])
 def test_dagger_preserves_identity_normalization(checkpoints, normalize_teacher, normalize_history):
     c = checkpoints

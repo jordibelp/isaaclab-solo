@@ -138,29 +138,26 @@ class EncodedPolicy(torch.nn.Module):
                 tcn_state = {key.removeprefix("actor_history_encoder."): value for key, value in state.items()
                              if key.startswith("actor_history_encoder.")}
                 encoder = self._tcn(models, tcn_state, {"activation": self.contract.get("base_imu_tcn_activation", "elu")})
-                channels, _, kernel = tcn_state["conv_stack.0.conv.weight"].shape
                 actor_in, actor_hidden, _ = pipeline.mlp_shape(state, "actor")
-                critic_in, critic_hidden, _ = pipeline.mlp_shape(state, "critic")
-                feed_history = any(key.startswith("critic_history_encoder.") for key in state)
                 latent = encoder.to_latent[1].out_features
                 if actor_in != latent + 3:
                     raise ValueError("Student latent and actor dimensions disagree.")
-                teacher_dim = critic_in - (latent if feed_history else 0)
                 self.input_dim = self.history_len * 45 + 3
-                obs = {"policy": torch.zeros(1, self.input_dim),
-                       "critic": torch.zeros(1, teacher_dim + (self.history_len * 45 if feed_history else 0))}
-                self.network = models.Solo12BaseImuStudentActorCritic(
-                    obs, {"policy": ["policy"], "critic": ["critic"]}, 12,
-                    actor_hidden_dims=actor_hidden, critic_hidden_dims=critic_hidden, activation=activation,
-                    actor_obs_normalization="actor_obs_normalizer._mean" in state,
-                    critic_obs_normalization="critic_obs_normalizer._mean" in state,
-                    noise_std_type="log" if "log_std" in state else "scalar",
-                    history_len=self.history_len, history_sample_dim=45, teacher_critic_obs_dim=teacher_dim,
-                    tcn_channels=channels, tcn_latent_dim=latent, tcn_kernel_size=kernel,
-                    tcn_activation=self.contract["base_imu_tcn_activation"],
-                    apply_tanh_to_latent=self.contract["apply_tanh_to_latent"], feed_history_encoding_to_critic=feed_history,
-                )
-                self.network.load_state_dict(state, strict=True)
+                # Deterministic playback needs neither a value function nor action noise.
+                # Keep production actor modules and strict loading, but never reconstruct
+                # the unused critic from its MLP width (which may include a shared latent).
+                normalizer = (models.EmpiricalNormalization(self.input_dim)
+                              if any(key.startswith("actor_obs_normalizer.") for key in state)
+                              else torch.nn.Identity())
+                self.network = torch.nn.ModuleDict({
+                    "actor_obs_normalizer": normalizer,
+                    "actor_history_encoder": encoder,
+                    "actor": models.MLP(actor_in, 12, actor_hidden, activation),
+                })
+                actor_state = {key: value for key, value in state.items()
+                               if not key.startswith(("critic.", "critic_obs_normalizer.", "critic_history_encoder."))
+                               and key not in ("std", "log_std")}
+                self.network.load_state_dict(actor_state, strict=True)
             self.checkpoint_format = "ppo"
         if self.policy_model != "base_imu_teacher":
             if (self.history_len - 1) % 4:
@@ -219,6 +216,10 @@ class EncodedPolicy(torch.nn.Module):
             command = self.network.actor_obs_normalizer(teacher_obs)[:, -3:]
             latent = self.history_encoder(self.history_normalizer(obs[:, :-3]))
             result = self.network.actor(torch.cat((latent, command), dim=-1))
+        elif self.policy_model == "base_imu_student_rl":
+            actor_obs = self.network["actor_obs_normalizer"](obs)
+            latent = self.network["actor_history_encoder"](actor_obs[:, :-3])
+            result = self.network["actor"](torch.cat((latent, actor_obs[:, -3:]), dim=-1))
         else:
             result = self.network.act_inference({"policy": obs})
         return result.squeeze(0).numpy()
