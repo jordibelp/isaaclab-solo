@@ -21,9 +21,9 @@ class Solo12SAC(SAC):
     def _compute_action_scaling(env, device: str) -> tuple[torch.Tensor, torch.Tensor]:
         unwrapped = getattr(env, "unwrapped", env)
         if getattr(unwrapped.cfg, "control_mode", "position") == "torque":
-            bound = unwrapped.cfg.effort_limit_sim / unwrapped.cfg.action_scale
+            bound = unwrapped.cfg.effort_limit_sim
             upper = torch.full((len(unwrapped._joint_ids),), bound, device=device)
-            print(f"Solo12 SAC: symmetric torque action bounds +/-{bound:g} (zero torque at action 0).")
+            print(f"Solo12 SAC: symmetric torque action bounds +/-{bound:g} N*m (zero torque at action 0).")
             return upper, upper.clone()
         limits = unwrapped._joint_soft_pos_limits[0].to(device)
         center = unwrapped._q_offset_action_and_obs.to(device)

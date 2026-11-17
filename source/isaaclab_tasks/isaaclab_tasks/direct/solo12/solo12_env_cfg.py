@@ -385,7 +385,7 @@ class Solo12EnvCfg(DirectRLEnvCfg):
     policy_hz = 50
     decimation = 4
     control_mode = "position"  # "position" (PD reference) or "torque" (zero-order-held effort).
-    action_scale = 0.25
+    action_scale = 0.25  # Position-reference scaling only; torque actions are already N*m.
     # Torque smoothness uses differences relative to a 50 Hz interval, not raw differences.
     action_rate_reference_hz = 50.0
     action_space = len(JOINT_NAMES)
@@ -888,13 +888,12 @@ class Solo12EnvCfg(DirectRLEnvCfg):
         if self.control_mode not in {"position", "torque"}:
             raise ValueError("control_mode must be 'position' or 'torque'.")
         if self.control_mode == "torque":
-            for name in ("action_scale", "effort_limit_sim"):
-                value = getattr(self, name)
-                if (
-                    isinstance(value, bool) or not isinstance(value, (int, float))
-                    or not math.isfinite(value) or value <= 0
-                ):
-                    raise ValueError(f"Torque control requires positive finite {name}.")
+            value = self.effort_limit_sim
+            if (
+                isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value) or value <= 0
+            ):
+                raise ValueError("Torque control requires positive finite effort_limit_sim.")
             if self.bringup_clip_rad != 0.0:
                 raise ValueError("bringup_clip_rad is a position-control option; use 0 for torque control.")
 
@@ -1169,12 +1168,12 @@ class Solo12TwoFeetEnvCfg(Solo12EnvCfg):
 
 @configclass
 class Solo12TorqueEnvCfg(Solo12EnvCfg):
-    """Direct joint effort; action_scale is N*m per unit policy action, not radians."""
+    """Direct joint effort in N*m, clipped to +/-effort_limit_sim without scaling."""
 
     control_mode = "torque"
     kp = 0.0
     kd = 0.0
-    action_scale = EFFORT_LIMIT_SIM
+    action_scale = 1.0  # Not consumed in torque mode.
     action_rate_reward_scale = -0.01
 
 
@@ -1185,7 +1184,7 @@ class Solo12TwoFeetTorqueEnvCfg(Solo12TwoFeetEnvCfg):
     control_mode = "torque"
     kp = 0.0
     kd = 0.0
-    action_scale = EFFORT_LIMIT_SIM
+    action_scale = 1.0  # Not consumed in torque mode.
     action_rate_reward_scale = -0.01
 
 

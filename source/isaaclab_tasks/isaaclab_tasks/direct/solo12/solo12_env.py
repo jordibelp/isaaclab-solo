@@ -22,7 +22,7 @@ from isaaclab.sim import schemas as sim_schemas
 from isaaclab.utils.buffers import DelayBuffer
 
 from . import floor_stiffness
-from .solo12_env_cfg import PRIVILEGED_OBS_GROUP, Solo12EnvCfg
+from .solo12_env_cfg import EFFORT_LIMIT_SIM, PRIVILEGED_OBS_GROUP, Solo12EnvCfg
 
 
 _EPISODE_REWARD_KEYS = (
@@ -1462,7 +1462,7 @@ class Solo12Env(DirectRLEnv):
 
         self._actions = actions.clone()
         if self.cfg.control_mode == "torque":
-            self._processed_actions = (self.cfg.action_scale * self._actions).clamp(
+            self._processed_actions = self._actions.clamp(
                 -self.cfg.effort_limit_sim, self.cfg.effort_limit_sim
             )
         else:
@@ -1471,7 +1471,7 @@ class Solo12Env(DirectRLEnv):
     def _apply_action(self):
         self._delayed_processed_actions = self._action_delay_buffer.compute(self._processed_actions)
         if self.cfg.control_mode == "torque":
-            self._applied_actions = self._delayed_processed_actions / self.cfg.action_scale
+            self._applied_actions = self._delayed_processed_actions
             self._robot.set_joint_effort_target(self._delayed_processed_actions, joint_ids=self._joint_ids)
             return
         self._applied_actions = (
@@ -1944,11 +1944,11 @@ class Solo12Env(DirectRLEnv):
 
     def _action_rate_l2(self) -> torch.Tensor:
         if self.cfg.control_mode == "torque":
-            # Penalize issued, clipped torque changes, normalized by nominal action_scale.
+            # Actions are N*m. Keep the original physical cost's nominal torque reference.
             # For a fixed physical ramp, delta grows with dt; divide by dt before squaring.
-            bound = self.cfg.effort_limit_sim / self.cfg.action_scale
+            bound = self.cfg.effort_limit_sim
             delta = self._actions.clamp(-bound, bound) - self._previous_actions.clamp(-bound, bound)
-            delta = delta / (self.cfg.action_rate_reference_hz * self.step_dt)
+            delta = delta / (EFFORT_LIMIT_SIM * self.cfg.action_rate_reference_hz * self.step_dt)
         else:
             delta = self._actions - self._previous_actions
         return torch.sum(torch.square(delta), dim=1)

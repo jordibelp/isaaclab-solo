@@ -14,11 +14,21 @@ its actions to mean the same thing.
 
 ### Action contract
 
-Torque tasks compute `torque_nm = clip(action_scale * action, -effort_limit_sim, +effort_limit_sim)`.
-The default `action_scale` is **2.65 N*m per unit action**. The default cap is
-**2.65 N*m**. These are separate settings: reducing the cap does not silently change
-the action scale. Zero action means zero torque, with no nominal-pose torque offset.
+Torque tasks compute `torque_nm = clip(action, -effort_limit_sim, +effort_limit_sim)`.
+The policy action is directly in **N*m**, without multiplication by `action_scale`.
+For example, action `0.5` requests **0.5 N*m**. The default cap is **2.65 N*m**.
+`action_scale` is only used by position control; torque-task configs set it to 1.0
+for clarity, but overriding it does not change torque commands or SAC bounds.
+Zero action means zero torque, with no nominal-pose torque offset.
 The nominal pose still centres the joint-position observations.
+
+**Action-unit change (17 November 2026):** earlier torque policies used
+`clip(2.65 * action, ...)` by default. Their checkpoints are not drop-in compatible
+with this interface, including their previous-action observation inputs. Train a
+fresh policy rather than resuming or playing an old torque checkpoint unchanged.
+With PPO's unchanged `init_noise_std=1.0`, initial noise now has a standard deviation
+of **1 N*m**, not 2.65 N*m. This unit change does not change the entropy coefficient
+or prevent learned noise from growing.
 
 Both actuator gains are zero. The environment sends effort targets, not angle
 targets. There is no hidden damping controller, gravity compensation, torque filter,
@@ -34,7 +44,7 @@ this mode are the feed-forward efforts sent to PhysX. Contact/limit constraint
 forces are not an actuator torque measurement.
 
 RSL PPO and SAC registrations are included, along with the existing symmetry
-configuration. SAC bounds are symmetric `effort_limit_sim / action_scale`, not
+configuration. SAC bounds are symmetric `effort_limit_sim` in N*m, not
 bounds calculated from joint angles. The new SKRL entry points reference the
 existing `skrl_ppo_cfg.yaml`; only the RSL training paths were exercised here.
 
@@ -73,7 +83,10 @@ Position tasks keep their original raw-action difference penalty and weight
 
 Torque tasks default to **`action_rate_reward_scale=-0.01`**. Their signal is the
 sum over joints of squared changes in the **clipped, issued torque command divided
-by action_scale**, scaled by `(policy_hz / action_rate_reference_hz)^2`.
+by the nominal torque reference of 2.65 N*m** (`EFFORT_LIMIT_SIM`), scaled by
+`(policy_hz / action_rate_reference_hz)^2`. This keeps the physical cost unchanged
+from the old default action scale, including when the configured effort cap is
+reduced. Changing action units must not silently retune the reward by 2.65 squared.
 The reference rate defaults to 50 Hz. As before, the weighted signal is multiplied
 by the policy timestep when added to reward.
 
@@ -107,7 +120,7 @@ use the table above. Omit `--checkpoint` for fresh training. Add
 PPO. This changes the algorithm as well as the action interface; compare within
 one algorithm first.
 
-Playback must use the **training task, rates, action scale and effort cap**:
+Playback must use the **training task, rates, action-unit contract and effort cap**:
 
 ```bash
 ./isaaclab.sh -p source/scripts/rsl_rl/play_direct_0325.py \
@@ -193,6 +206,20 @@ No reviewed source establishes stability for this exact task at all four rates.
   these differences rather than calling it an isolated rate experiment.
 
 ## Verification boundary
+
+The direct-N*m update was verified locally on 17 November 2026 with **119 focused
+and regression CPU tests**, including 58 control checks. Both torque tasks passed
+real PhysX checks at 100 Hz policy / 200 Hz physics: unsaturated commands in N*m,
+clipping at default/reduced effort caps, zero gains, SAC bounds and partial resets.
+An explicit `action_scale=7.0` did not change the torque mapping. The unchanged
+position task matched the parent configuration and all 24 seeded rollout frames
+bit-for-bit across four robots. Fresh PPO with symmetry augmentation and SAC each
+completed two local training iterations. Small test-only PhysX buffers and flat
+terrain kept the checks within the free laptop GPU memory; production buffer and
+terrain defaults were not changed. These are integration checks, not evidence of
+learned walking or a full-training comparison.
+
+### Original scaled-action implementation
 
 Verified locally on 13 November 2026, using Isaac Sim 5.1. The parent revision
 was `a5a9ad1`. **182 CPU tests passed**, including 32 new control checks. A
