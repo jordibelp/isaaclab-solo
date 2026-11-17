@@ -54,7 +54,7 @@ class BorinotCmdVelEnvCfg(BorinotGoalkeeperEnvCfg):
 
     base_push_interval_range_s = (2.0, 5.0)  # start-to-start; first push delayed after reset
     base_push_duration_range_s = (0.5, 2.0)
-    base_push_application_radius_m = 0.12
+    base_push_application_radius_m = 0.17
     base_push_application_half_height_m = 0.03
     forces_applied_to_base_curriculum = (0.0,1.0,3.0,6.0,9.0)  # max |world-Z force|, N
     curriculum = True
