@@ -523,7 +523,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         )
     teacher_obs_dim = int(raw_env.cfg.teacher_critic_obs_dim)
     history_dim = int(raw_env.cfg.base_imu_history_flat_dim)
-    command_dim = 3
+    command_dim = int(agent_cfg.policy.command_dim)
     policy_obs_dim = int(vec_env.get_observations()["policy"].shape[-1])
     expected_obs_dim = teacher_obs_dim + history_dim + command_dim
     if policy_obs_dim != expected_obs_dim:
@@ -554,6 +554,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     student_actor = copy.deepcopy(teacher.actor).requires_grad_(True) if args_cli.finetune_student_actor else None
     if args_cli.adapter_checkpoint is not None:
         ckpt = torch.load(os.path.abspath(os.path.expanduser(args_cli.adapter_checkpoint)), map_location=device, weights_only=False)
+        if hasattr(env_cfg, "adaptation_contract") and (
+                ckpt.get("observation_contract") != env_cfg.adaptation_contract()
+                or ckpt.get("teacher_checkpoint") != teacher_checkpoint):
+            raise ValueError("Borinot adapter continuation requires the same observation contract and teacher.")
         saved_tanh = adapter_latent_tanh(ckpt)
         if saved_tanh != raw_env.cfg.apply_tanh_to_latent:
             raise ValueError("Adapter apply_tanh_to_latent does not match the teacher/student contract.")
@@ -602,7 +606,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 "latent_dim": latent_dim,
                 "command_dim": command_dim,
             },
-            imu_layout={
+            imu_layout={} if hasattr(env_cfg, "adaptation_contract") else {
                 "imu_ekf_processed_inputs": bool(raw_env.cfg.imu_ekf_processed_inputs),
                 "use_rotMat_on_imu_encoder": bool(raw_env.cfg.use_rotMat_on_imu_encoder),
                 "base_imu_obs_dim": int(raw_env.cfg.base_imu_obs_dim),
@@ -610,7 +614,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         )
 
     start_time = time.time()
-    print(f"[INFO] Logging Solo12 base-IMU DAgger run in: {log_dir}", flush=True)
+    print(f"[INFO] Logging {args_cli.task} DAgger run in: {log_dir}", flush=True)
     print(f"[INFO] Teacher checkpoint: {teacher_checkpoint}", flush=True)
     print(f"[INFO] DAgger objective: latent MSE + {args_cli.action_loss_coef:g} * action MSE; "
           f"trainable: {'TCN and student actor' if student_actor is not None else 'TCN only'}.", flush=True)

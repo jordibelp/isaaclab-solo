@@ -10,7 +10,7 @@ from pathlib import Path
 from isaaclab.app import AppLauncher
 
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument("--task", default="Borinot-cmd-vel", choices=("Borinot-cmd-vel", "Borinot-Cmd-Vel-Direct-v0"))
+parser.add_argument("--task", default="Borinot-cmd-vel", choices=("Borinot-cmd-vel-teacher", "Borinot-cmd-vel-student-rl", "Borinot-cmd-vel", "Borinot-Cmd-Vel-Direct-v0"))
 parser.add_argument("--agent", default="rsl_rl_cfg_entry_point")
 parser.add_argument("--checkpoint", required=True)
 parser.add_argument("--num_envs", type=int, default=1)
@@ -68,6 +68,11 @@ def main(env_cfg, agent_cfg):
     curriculum_config = configure_play_curriculum(env_cfg, infos, checkpoint, override_keys, args.curriculum_level)
     if curriculum_config is not None:
         print(f"[INFO] Playback command/force schedule: {curriculum_config}", flush=True)
+    play_class = BorinotCmdVelPlayEnv
+    if hasattr(env_cfg, "adaptation_contract"):
+        from isaaclab_tasks.direct.borinot_adaptive.playback import VelocityPlayEnv, configure_perception
+        configure_perception(metadata, env_cfg, agent_cfg.policy)
+        play_class = VelocityPlayEnv
     del metadata
     env_cfg.scene.num_envs = args.num_envs
     env_cfg.seed = agent_cfg.seed = args.seed
@@ -95,7 +100,7 @@ def main(env_cfg, agent_cfg):
     pose = camera_pose(args.camera, env_cfg.robot_home)
     if pose is not None:
         env_cfg.viewer.eye, env_cfg.viewer.lookat = pose
-    env = RslRlVecEnvWrapper(BorinotCmdVelPlayEnv(
+    env = RslRlVecEnvWrapper(play_class(
         cfg=env_cfg, command=None if args.random_commands else args.cmd_init), clip_actions=agent_cfg.clip_actions)
     controls = None
     try:

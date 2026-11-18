@@ -10,7 +10,7 @@ from pathlib import Path
 from isaaclab.app import AppLauncher
 
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument("--task", default="Borinot-goto", choices=(
+parser.add_argument("--task", default="Borinot-goto", choices=("Borinot-goto-teacher", "Borinot-goto-student-rl",
     "Borinot-goto", "Borinot-GoTo-Direct-v0", "Borinot-goto-minTime", "Borinot-GoTo-MinTime-Direct-v0"))
 parser.add_argument("--agent", default="rsl_rl_cfg_entry_point")
 parser.add_argument("--checkpoint", required=True)
@@ -90,6 +90,11 @@ def main(env_cfg, agent_cfg):
     env_cfg.goal_curriculum_start_level = (args.curriculum_level if args.curriculum_level is not None else
         checkpoint_goal_level(metadata.get("infos") or {}, env_cfg.goal_curriculum_start_level, override_keys,
                               max_level=max_curriculum_level(env_cfg)))
+    play_class = BorinotGoToPlayEnv
+    if hasattr(env_cfg, "adaptation_contract"):
+        from isaaclab_tasks.direct.borinot_adaptive.playback import GoToPlayEnv, configure_perception
+        configure_perception(metadata, env_cfg, agent_cfg.policy)
+        play_class = GoToPlayEnv
     del metadata
     env_cfg.scene.num_envs = args.num_envs
     env_cfg.seed = agent_cfg.seed = args.seed
@@ -123,7 +128,7 @@ def main(env_cfg, agent_cfg):
     pose = goal_camera_pose(home, camera_goal or home) if args.camera == "goal" else camera_pose(args.camera, home)
     if pose is not None:
         env_cfg.viewer.eye, env_cfg.viewer.lookat = pose
-    env = RslRlVecEnvWrapper(BorinotGoToPlayEnv(env_cfg, goal=goal, deadline_s=args.deadline_s,
+    env = RslRlVecEnvWrapper(play_class(env_cfg, goal=goal, deadline_s=args.deadline_s,
                                                 reset_at_deadline=args.reset_at_deadline, goal_relative=relative),
                             clip_actions=agent_cfg.clip_actions)
     play_env = env.unwrapped

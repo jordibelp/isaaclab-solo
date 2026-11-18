@@ -32,10 +32,23 @@ PERCEPTION_DEFAULTS = {"priv_critic_includes_perception_encoding": False,
 
 
 def observation_contract(env_cfg) -> dict:
+    if hasattr(env_cfg, "adaptation_contract"):
+        return env_cfg.adaptation_contract()
     return {**{name: getattr(env_cfg, name) for name in ENV_FIELDS}, "physics_dt": float(env_cfg.sim.dt)}
 
 
 def apply_observation_contract(env_cfg, contract: dict) -> None:
+    if hasattr(env_cfg, "adaptation_contract") or contract.get("family"):
+        if contract.get("family") != "borinot-direct-v1" or not hasattr(env_cfg, "adaptation_contract"):
+            raise ValueError("Incompatible adaptation observation family.")
+        env_cfg.refresh_runtime_dependent_config()
+        if contract["command_dim"] != env_cfg.command_dim:
+            raise ValueError("Incompatible Borinot command task.")
+        for name in env_cfg.adaptation_contract():
+            if name not in ("family", "command_dim"):
+                setattr(env_cfg, name, contract[name])
+        env_cfg.refresh_runtime_dependent_config()
+        return
     for name in ENV_FIELDS:
         if name in contract:
             setattr(env_cfg, name, contract[name])
@@ -76,6 +89,8 @@ def restore_latent_activation_from_checkpoint(env_cfg, checkpoint_path: str) -> 
             saved = sidecar_data.get("observation_contract", {})
             if critic_contract is None:
                 critic_contract = sidecar_data.get("policy", {})
+    if hasattr(env_cfg, "adaptation_contract"):
+        apply_observation_contract(env_cfg, saved or {})
     for name in ("apply_tanh_to_latent", "teacher_latent_activation"):
         if name in saved:
             setattr(env_cfg, name, saved[name])
@@ -96,6 +111,8 @@ def attach_latent_contract_to_runner(runner, env_cfg) -> None:
             "apply_tanh_to_latent": env_cfg.apply_tanh_to_latent,
             "teacher_latent_activation": env_cfg.teacher_latent_activation,
         }}
+        if hasattr(env_cfg, "adaptation_contract"):
+            infos["solo12_imu_latent"].update(observation_contract(env_cfg))
         infos["solo12_imu_critic"] = {name: getattr(env_cfg, name, default)
                                        for name, default in PERCEPTION_DEFAULTS.items()}
         alg = getattr(runner, "alg", None)
@@ -153,9 +170,10 @@ def configure_teacher_for_dagger(env_cfg, policy_cfg, checkpoint_path: str) -> d
     state = checkpoint_model_state(checkpoint_path)
     encoder_in, encoder_hidden, latent_dim = mlp_shape(state, "teacher_encoder")
     critic_in, _, _ = mlp_shape(state, "critic")
-    if critic_in not in {encoder_in + 3, encoder_in + 3 + latent_dim}:
+    bypass_dim = getattr(policy_cfg, "command_dim", 3)
+    if critic_in not in {encoder_in + bypass_dim, encoder_in + bypass_dim + latent_dim}:
         raise ValueError("Teacher critic input does not match its privileged/perception contract.")
-    includes_encoding = critic_in == encoder_in + 3 + latent_dim
+    includes_encoding = critic_in == encoder_in + bypass_dim + latent_dim
     if saved:
         apply_observation_contract(env_cfg, saved["observation_contract"])
         for name, value in saved.get("policy", {}).items():
