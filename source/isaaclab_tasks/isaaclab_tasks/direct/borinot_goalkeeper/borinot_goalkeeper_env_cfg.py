@@ -81,7 +81,7 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     robot = ArticulationCfg(
         prim_path="/World/envs/env_.*/Robot",
         spawn=sim_utils.UsdFileCfg(
-            usd_path=str(Path(__file__).resolve().parents[4] / "isaaclab_assets/data/Robots/Borinot/borinotFlat_6b3e09ce.usd"),
+            usd_path=str(Path(__file__).resolve().parents[4] / "isaaclab_assets/data/Robots/Borinot/borinotFlat_6b3e09ce.usd"), 
             activate_contact_sensors=True,
             rigid_props=sim_utils.RigidBodyPropertiesCfg(enable_gyroscopic_forces=True),
             articulation_props=sim_utils.ArticulationRootPropertiesCfg(
@@ -230,7 +230,7 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     rwd_scale_robot_crash = -1.0  # non-ball contact on robot_crash_body_names or excessive tilt; independent of reset flags
     reset_robot_on_robot_crash = True
     self_collision_triggers_reset = True  # False: keep self-contact physics/penalties, but reset only for scene contact
-    reset_robot_on_tilt_threshold = True
+    reset_robot_on_tilt_threshold = False
     robot_crash_body_names = ("base",)  # monitored crash bodies; reset behavior is controlled by the switches above
     robot_crash_force_threshold_n = 0.1
     robot_tilt_threshold_degs = 70.0  # degrees from world vertical; converted internally for the cosine test
