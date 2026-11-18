@@ -29,6 +29,23 @@ def main(cfg, _agent):
     try:
         env.reset()
         rotor, wind = env._rotor_plant, env._wind
+        if not cfg.enable_domain_randomization:
+            assert rotor is None and wind is None
+            assert env._actuator_delay.high == 0 and env._actuator_delay._queue is None
+            if hasattr(cfg, "include_events_randomization"):
+                assert cfg.events is None
+            if hasattr(env, "_force_limits"):
+                assert not env._force_limits.any() and cfg.forces_applied_to_base_curriculum == (0.0, 2.0)
+            if hasattr(cfg, "reset_rpy_noise_degs"):
+                assert cfg.reset_rpy_noise_degs == (0.0, 0.0, 0.0)
+            with torch.inference_mode():
+                for _ in range(8):
+                    obs, reward, *_ = env.step(torch.full_like(env.actions, .1))
+                    assert torch.isfinite(obs["policy"]).all() and torch.isfinite(reward).all()
+                    if hasattr(env, "_base_push_force_z_w"):
+                        assert not env._base_push_force_z_w.any()
+            print(f"NOMINAL_PHYSICS_OK {args.task}", flush=True)
+            return
         assert rotor is not None and wind is not None and wind.cfg.wind_enabled
         delay = env._actuator_delay
         assert cfg.actuator_delay_range == "auto" and (delay.low, delay.high) == (0, int(.02 / env.physics_dt + 1e-6))

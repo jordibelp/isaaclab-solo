@@ -34,6 +34,8 @@ def goal_success_parts(cfg, distance, lin_vel_w, ang_vel_w):
 
 def stage_force_limit(cfg, level):
     """Maximum |world-Z push| in N: entry k from level start_forces_randn_curriculum_idx + k, none before."""
+    if not getattr(cfg, "enable_domain_randomization", True):
+        return 0.0
     forces, index = cfg.forces_applied_to_base_curriculum, level - cfg.start_forces_randn_curriculum_idx
     return 0.0 if index < 0 else forces[min(index, len(forces) - 1)]
 

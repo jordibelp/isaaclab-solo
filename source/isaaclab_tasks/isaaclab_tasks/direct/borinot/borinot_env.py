@@ -17,7 +17,9 @@ from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 
 from .borinot_env_cfg import BorinotEnvCfg
 from .action_limits import clipped_limit_rewards, raw_action_limit_costs
-from .flight_randomization import make_flight_randomization, validate_flight_randomization
+from .flight_randomization import (
+    configure_domain_randomization, make_flight_randomization, validate_flight_randomization,
+)
 from .flight_randomization_cfg import BorinotFlightRandomizationCfg
 from .inertial_properties import apply_inertial_properties, validate_inertial_properties
 from .inertial_properties_cfg import BorinotInertialPropertiesCfg
@@ -109,6 +111,7 @@ class BorinotEnv(DirectRLEnv):
     cfg: BorinotEnvCfg
     
     def __init__(self, cfg: BorinotEnvCfg, render_mode: str | None = None, **kwargs):
+        configure_domain_randomization(cfg)
         validate_flight_randomization(cfg.flight_randomization)
         validate_inertial_properties(cfg.inertial_properties)
         actuator_delay_bounds(cfg)

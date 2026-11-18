@@ -22,6 +22,7 @@ from isaaclab_tasks.controllers.borinot_cbrt import CbrtControllerCfg
 
 @configclass
 class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
+    enable_domain_randomization = True  # False: nominal physics and no reset jitter or disturbances
     flight_randomization: BorinotFlightRandomizationCfg = BorinotFlightRandomizationCfg()
     inertial_properties: BorinotInertialPropertiesCfg = BorinotInertialPropertiesCfg()
     control_mode = "thrust_and_torque_control"

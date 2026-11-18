@@ -5,6 +5,26 @@ import math
 import torch
 
 
+def configure_domain_randomization(cfg):
+    """Apply the nominal-physics override after CLI overrides, before scene creation."""
+    if not isinstance(cfg.enable_domain_randomization, bool):
+        raise ValueError("enable_domain_randomization must be boolean.")
+    if cfg.enable_domain_randomization:
+        return
+    flight = cfg.flight_randomization
+    flight.motor_time_constant_range_s = None
+    flight.thrust_shared_gain_delta = flight.thrust_rotor_gain_delta = flight.km_gain_delta = 0.0
+    flight.wind_enabled = False
+    cfg.actuator_delay, cfg.actuator_delay_range = 0.0, None
+    if hasattr(cfg, "include_events_randomization"):
+        cfg.include_events_randomization = False
+    for name in ("reset_xy_noise", "reset_z_noise", "reset_joint_noise", "reset_xy_noise_m", "reset_z_noise_m"):
+        if hasattr(cfg, name):
+            setattr(cfg, name, 0.0)
+    if hasattr(cfg, "reset_rpy_noise_degs"):
+        cfg.reset_rpy_noise_degs = (0.0, 0.0, 0.0)
+
+
 def validate_flight_randomization(cfg):
     def bounds(name, values, allow_zero=False):
         if (not isinstance(values, (list, tuple)) or len(values) != 2

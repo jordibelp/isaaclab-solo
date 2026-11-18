@@ -9,8 +9,9 @@ import torch
 from test_task import curriculum_env, method, task_math
 
 
-def command_env(limits=(1., 3., 5.), forces=(0., 1., 3.), start=0, skip=False):
+def command_env(limits=(1., 3., 5.), forces=(0., 1., 3.), start=0, skip=False, randomize=True):
     env = curriculum_env()
+    env.cfg.enable_domain_randomization = randomize
     env.cfg.command_lin_vel_lim_curriculum = limits
     env.cfg.forces_applied_to_base_curriculum = forces
     env.cfg.command_lin_vel_x_range = (-.2, .4)
@@ -137,3 +138,11 @@ def test_training_checkpoint_hook_tracks_combined_stage_and_selected_command_lim
     assert state["global_idx"] == 4 and state["max_velx_range_idx"] == 2 and state["base_push_force_idx"] == 2
     assert state["command_lin_vel_x_abs"] == 5.
     assert scope[names[1]](state) == ((4, None), "best_model_curriculum_idx_4.pt")
+
+
+def test_nominal_physics_keeps_the_force_stage_indices_and_zeroes_force_limits():
+    reference = command_env(start=4)
+    nominal = command_env(start=4, randomize=False)
+    assert nominal.force_level == reference.force_level == 4
+    torch.testing.assert_close(nominal._command_ranges, reference._command_ranges)
+    assert reference._force_limits[4] > 0 and not nominal._force_limits.any()

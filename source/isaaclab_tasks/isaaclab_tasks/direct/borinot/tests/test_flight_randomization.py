@@ -74,3 +74,23 @@ def test_wind_drag_opposes_air_relative_motion_and_pulses_expire():
     force, moment = wind.wrench_world(velocity)
     torch.testing.assert_close(force, torch.tensor([[-.08, 0., 0.]]).expand(32, -1))
     assert not moment.any()
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_master_switch_overrides_uncertainty_but_keeps_nominal_and_task_settings(enabled):
+    cfg = SimpleNamespace(enable_domain_randomization=enabled, flight_randomization=config(), actuator_delay=.02,
+                          actuator_delay_range="auto", include_events_randomization=True, reset_xy_noise_m=.02,
+                          reset_rpy_noise_degs=(3., 4., 5.), motor_time_constant_s=.04,
+                          goal_curriculum_start_level=7, forces_applied_to_base_curriculum=(0., 2., 5.))
+    model.configure_domain_randomization(cfg)
+    flight = cfg.flight_randomization
+    assert (flight.motor_time_constant_range_s is not None) == enabled
+    assert flight.thrust_shared_gain_delta == (.10 if enabled else 0.)
+    assert flight.thrust_rotor_gain_delta == (.03 if enabled else 0.)
+    assert flight.km_gain_delta == (.10 if enabled else 0.)
+    assert flight.wind_enabled == cfg.include_events_randomization == enabled
+    assert (cfg.actuator_delay, cfg.actuator_delay_range) == ((.02, "auto") if enabled else (0., None))
+    assert cfg.reset_xy_noise_m == (.02 if enabled else 0.)
+    assert cfg.reset_rpy_noise_degs == ((3., 4., 5.) if enabled else (0., 0., 0.))
+    assert cfg.motor_time_constant_s == .04
+    assert cfg.goal_curriculum_start_level == 7 and cfg.forces_applied_to_base_curriculum == (0., 2., 5.)

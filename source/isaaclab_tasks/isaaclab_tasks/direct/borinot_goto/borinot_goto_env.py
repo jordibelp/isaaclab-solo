@@ -51,7 +51,7 @@ class BorinotGoToEnv(BorinotCmdVelEnv):
     def _update_pushes(self):
         # Same pulses as Borinot-cmd-vel. Without any nonzero force, skip the
         # sampling so push-free runs keep their previous random stream.
-        if any(self.cfg.forces_applied_to_base_curriculum):
+        if getattr(self.cfg, "enable_domain_randomization", True) and any(self.cfg.forces_applied_to_base_curriculum):
             super()._update_pushes()
 
     def _pre_physics_step(self, actions):
@@ -218,7 +218,7 @@ class BorinotGoToEnv(BorinotCmdVelEnv):
         self._goal_position_w[env_ids] = goals
         self._goal_deadline_steps[env_ids] = steps
         self._goal_episode_level[env_ids] = self._episode_stage[env_ids] = self.goal_curriculum.level
-        if any(self.cfg.forces_applied_to_base_curriculum):
+        if getattr(self.cfg, "enable_domain_randomization", True) and any(self.cfg.forces_applied_to_base_curriculum):
             # Episodes (about 1-3.5 s) are shorter than the 2-5 s push spacing, and the
             # parent waits one full interval. Start the push clock at a random phase:
             # the first push may begin at any tick of that interval.

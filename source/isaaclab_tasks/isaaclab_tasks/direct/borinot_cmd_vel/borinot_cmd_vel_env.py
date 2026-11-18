@@ -16,7 +16,9 @@ from isaaclab.utils.math import matrix_from_quat, quat_apply_inverse, quat_from_
 from isaaclab_tasks.direct.borinot_goalkeeper.actuator_delay import ActuatorDelay, actuator_delay_bounds
 from isaaclab_tasks.direct.borinot_goalkeeper.borinot_goalkeeper_env import BorinotGoalkeeperEnv
 from isaaclab_tasks.direct.borinot.action_limits import clipped_limit_rewards, raw_action_limit_costs
-from isaaclab_tasks.direct.borinot.flight_randomization import make_flight_randomization, validate_flight_randomization
+from isaaclab_tasks.direct.borinot.flight_randomization import (
+    configure_domain_randomization, make_flight_randomization, validate_flight_randomization,
+)
 from isaaclab_tasks.direct.borinot.flight_randomization_cfg import BorinotFlightRandomizationCfg
 from isaaclab_tasks.direct.borinot.inertial_properties import apply_inertial_properties, validate_inertial_properties
 from isaaclab_tasks.direct.borinot.inertial_properties_cfg import BorinotInertialPropertiesCfg
@@ -45,6 +47,7 @@ class BorinotCmdVelEnv(DirectRLEnv):
     _step_wrench = BorinotGoalkeeperEnv._step_wrench
 
     def __init__(self, cfg: BorinotCmdVelEnvCfg, render_mode=None, **kwargs):
+        configure_domain_randomization(cfg)
         validate_flight_randomization(cfg.flight_randomization)
         validate_inertial_properties(cfg.inertial_properties)
         cfg.configure_control()  # after Hydra, before spaces/physics
@@ -145,7 +148,7 @@ class BorinotCmdVelEnv(DirectRLEnv):
         for stage, (limit, _) in enumerate(stages):
             if limit is not None:
                 self._command_ranges[stage, :2] = torch.tensor((-limit, limit), device=self.device)
-        self._force_limits = torch.tensor([force for _, force in stages], device=self.device)
+        self._force_limits = torch.tensor([force if cfg.enable_domain_randomization else 0.0 for _, force in stages], device=self.device)
         # Legacy name retained for playback consumers; now indexes combined stages.
         self._set_curriculum_level(len(stages) - 1 if cfg.skip_curriculum else cfg.curriculum_start_level)
         self._episode_stage = torch.full_like(self._command_steps_left, self.force_level)
@@ -194,6 +197,8 @@ class BorinotCmdVelEnv(DirectRLEnv):
         self._command_steps_left[env_ids] = max(1, math.ceil(self.cfg.command_resampling_time_s / self.step_dt))
 
     def _update_pushes(self):
+        if not getattr(self.cfg, "enable_domain_randomization", True):
+            return
         # Start-to-start intervals. Duration cannot exceed the minimum interval.
         start_ids = (self._base_push_steps_until_next <= 0).nonzero().flatten()
         if len(start_ids):

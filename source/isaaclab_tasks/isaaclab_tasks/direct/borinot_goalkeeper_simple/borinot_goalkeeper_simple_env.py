@@ -18,7 +18,9 @@ from isaaclab.utils.math import matrix_from_quat, quat_apply, quat_apply_inverse
 from isaaclab_tasks.direct.borinot_goalkeeper.actuator_delay import ActuatorDelay, actuator_delay_bounds
 from isaaclab_tasks.direct.borinot_goalkeeper.borinot_goalkeeper_env import BorinotGoalkeeperEnv
 from isaaclab_tasks.direct.borinot.action_limits import clipped_limit_rewards, raw_action_limit_costs
-from isaaclab_tasks.direct.borinot.flight_randomization import make_flight_randomization, validate_flight_randomization
+from isaaclab_tasks.direct.borinot.flight_randomization import (
+    configure_domain_randomization, make_flight_randomization, validate_flight_randomization,
+)
 from isaaclab_tasks.direct.borinot.inertial_properties import apply_inertial_properties, validate_inertial_properties
 from isaaclab_tasks.direct.borinot_goalkeeper.events import configure_randomization
 from isaaclab_tasks.direct.borinot_goalkeeper.paddle import attach_paddle
@@ -58,6 +60,7 @@ class BorinotGoalkeeperSimpleEnv(DirectRLEnv):
     get_code_snapshot_files = BorinotGoalkeeperEnv.get_code_snapshot_files
 
     def __init__(self, cfg: BorinotGoalkeeperSimpleEnvCfg, render_mode=None, **kwargs):
+        configure_domain_randomization(cfg)
         validate_flight_randomization(cfg.flight_randomization)
         validate_inertial_properties(cfg.inertial_properties)
         cfg.configure_control()

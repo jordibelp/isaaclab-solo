@@ -22,7 +22,9 @@ from isaaclab_tasks.controllers.borinot_model_wrench_yawless import ModelWrenchY
 from isaaclab_tasks.controllers.borinot_model_wrench_indi import ModelWrenchIndiController, ModelWrenchYawlessIndiController
 from isaaclab_tasks.direct.borinot.model_description import nominal_model_description
 from isaaclab_tasks.direct.borinot.action_limits import clipped_limit_rewards, raw_action_limit_costs, relative_limit_cost
-from isaaclab_tasks.direct.borinot.flight_randomization import make_flight_randomization, validate_flight_randomization
+from isaaclab_tasks.direct.borinot.flight_randomization import (
+    configure_domain_randomization, make_flight_randomization, validate_flight_randomization,
+)
 from isaaclab_tasks.direct.borinot.flight_randomization_cfg import BorinotFlightRandomizationCfg
 from isaaclab_tasks.direct.borinot.inertial_properties import apply_inertial_properties, validate_inertial_properties
 from isaaclab_tasks.direct.borinot.inertial_properties_cfg import BorinotInertialPropertiesCfg
@@ -56,6 +58,7 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
             make_flight_randomization, BorinotFlightRandomizationCfg)]
 
     def __init__(self, cfg: BorinotGoalkeeperEnvCfg, render_mode=None, **kwargs):
+        configure_domain_randomization(cfg)
         validate_flight_randomization(cfg.flight_randomization)
         validate_inertial_properties(cfg.inertial_properties)
         cfg.configure_control()

@@ -259,6 +259,8 @@ def main(env_cfg, agent_cfg):
         configure_environment(env_cfg)
     env_cfg.configure_control()  # derived action/observation sizes and rates after Hydra
     env_cfg.robot.init_state.pos = tuple(env_cfg.robot_home)
+    if args_cli.actuator_delays and not env_cfg.enable_domain_randomization:
+        parser.error("--actuator_delays requires env.enable_domain_randomization=True.")
     delays = args_cli.actuator_delays or [None]
     for delay in delays:
         if delay is not None:

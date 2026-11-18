@@ -24,19 +24,19 @@ across episode resets. The controller's model and command limits remain nominal.
 Actual thrust can differ from the nominal command ceiling because the plant gain
 also affects thrust at maximum commanded speed. No observation dimensions change.
 
-For old-checkpoint comparisons, disable the new defaults explicitly:
+## Inference A/B switch
 
-```text
-env.flight_randomization.motor_time_constant_range_s=null
-env.flight_randomization.thrust_shared_gain_delta=0.0
-env.flight_randomization.thrust_rotor_gain_delta=0.0
-env.flight_randomization.km_gain_delta=0.0
-env.actuator_delay_range=null
-```
+Append `env.enable_domain_randomization=False` to the usual playback command
+for nominal physics. This wins over individual settings: it disables startup
+mass/CoM/inertia/friction events, rotor variation, command delay, wind, gusts,
+moments, vertical pushes, and robot reset jitter. The motor keeps its nominal
+lag (instant response on legacy Borinot).
 
-This restores the previous fixed motor lag (instant response on legacy Borinot)
-and, with `env.actuator_delay=0.0`, disables the delay. The existing startup
-mass, CoM, inertia and friction events still use their own settings.
+Set `env.enable_domain_randomization=True` (the default) to use the usual
+individual settings. It does not turn on optional wind by itself.
+Neither setting changes the observation layout, goal/command/shot sampling,
+or curriculum levels. Use fixed or explicitly paired scenarios to compare the
+same checkpoint; the same seed alone need not produce identical scenarios.
 
 ## Optional wind, gusts, and external moments
 
