@@ -23,3 +23,18 @@ p=source/scripts/rsl_rl
 ```
 
 Carry the same plant, disturbance, reward and curriculum overrides into every stage. Select the curriculum start explicitly: a checkpoint filename is not a reset distribution. The adapter is not a standalone policy. Do not give it to the playback script. W&B reference etiezqty supplies architecture, not weights or Solo12 symmetry transforms. Training and testing here are simulation only.
+
+### Try a slower encoder in playback
+
+Add `env.encoder_hz=20` to either adaptive playback command. The actor uses
+the checkpoint's `policy_hz` and reads fresh measurements and commands on
+every tick. Only the latent is held: with a 200 Hz actor the encoder runs every
+10 ticks, and with a 100 Hz actor it runs every 5. Each reset refreshes the
+latent on the first subsequent tick. The encoder rate must divide the actor
+rate evenly; leave it unset (or use 0) to encode every actor tick.
+
+This is a playback-only ablation for teacher or student PPO checkpoints. It
+does not change sensor sampling, the TCN history window, or the PPO/DAgger
+training cadence. Playback restores the checkpoint's actor rate and history
+layout; train the checkpoint at `env.policy_hz=200` to test a 200 Hz actor
+(and carry the matching observation contract through the student handoff).

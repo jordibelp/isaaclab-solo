@@ -85,6 +85,13 @@ def main(env_cfg, agent_cfg):
     if args.episode_length_s is not None:
         env_cfg.episode_length_s = args.episode_length_s
     env_cfg.configure_control()
+    encoder_ticks = 1
+    if hasattr(env_cfg, "adaptation_contract"):
+        from isaaclab_tasks.direct.borinot_adaptive.inference import HeldLatentInference, encoder_period
+
+        encoder_ticks = encoder_period(env_cfg.policy_hz, env_cfg.encoder_hz)
+        print(f"[INFO] Adaptive playback: actor {env_cfg.policy_hz:g} Hz, "
+              f"encoder {env_cfg.policy_hz / encoder_ticks:g} Hz.", flush=True)
     ranges = []
     for index, (axis, field) in enumerate(zip(("vx", "vy", "vz", "wz"), RANGE_FIELDS)):
         bounds = getattr(args, f"{axis}_range")
@@ -114,6 +121,9 @@ def main(env_cfg, agent_cfg):
             runner.load(checkpoint, load_optimizer=False)
             policy_model = runner.alg.policy
         policy = runner.get_inference_policy(device=env.device)
+        held_policy = HeldLatentInference(policy_model, encoder_ticks) if encoder_ticks > 1 else None
+        if held_policy is not None:
+            policy = held_policy
         controls = FlightControls(env.unwrapped, args.cmd_init, ranges, args.camera,
                                   show_ui=args.ui and not args.random_commands and env.unwrapped.sim.has_gui())
         observation = env.get_observations()
@@ -131,7 +141,10 @@ def main(env_cfg, agent_cfg):
                 start = time.perf_counter()
                 if controls.reset_requested:
                     observation, _ = env.reset()
-                    policy_model.reset(torch.ones(env.num_envs, dtype=torch.bool, device=env.device))
+                    every_env = torch.ones(env.num_envs, dtype=torch.bool, device=env.device)
+                    policy_model.reset(every_env)
+                    if held_policy is not None:
+                        held_policy.reset(every_env)
                     controls.reset_requested = False
                     controls.manual_resets += 1
                 if not args.random_commands and tuple(controls.command) != applied_command:
@@ -151,6 +164,8 @@ def main(env_cfg, agent_cfg):
                         and all(torch.isfinite(value).all() for value in observation.values())):
                     raise RuntimeError("Non-finite policy rollout.")
                 policy_model.reset(dones)
+                if held_policy is not None:
+                    held_policy.reset(dones)
                 tracking += torch.stack([info["tracking"][key].mean() for key in ("xyz", "yaw", "xy")])
                 episodes += int(dones.sum())
                 completed += 1

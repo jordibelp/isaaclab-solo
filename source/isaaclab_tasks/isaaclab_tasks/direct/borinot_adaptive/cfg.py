@@ -7,6 +7,7 @@ from isaaclab_tasks.direct.borinot_goto.borinot_goto_env_cfg import BorinotGoToE
 @configclass
 class AdaptiveConfig:
     policy_model = "base_imu_teacher"
+    encoder_hz: int = 0  # Playback only; zero follows policy_hz.
     base_imu_history_policy_steps = 15
     base_imu_history_sample_dim = 28
     base_imu_tcn_channels = 64

@@ -105,6 +105,13 @@ def main(env_cfg, agent_cfg):
     if configure is not None:
         configure(env_cfg)
     env_cfg.configure_control()
+    encoder_ticks = 1
+    if hasattr(env_cfg, "adaptation_contract"):
+        from isaaclab_tasks.direct.borinot_adaptive.inference import HeldLatentInference, encoder_period
+
+        encoder_ticks = encoder_period(env_cfg.policy_hz, env_cfg.encoder_hz)
+        print(f"[INFO] Adaptive playback: actor {env_cfg.policy_hz:g} Hz, "
+              f"encoder {env_cfg.policy_hz / encoder_ticks:g} Hz.", flush=True)
     home = tuple(env_cfg.robot_home)
     relative = args.goal_frame == "relative"
     default_goal = (0.0, 0.0, 0.0) if relative else home
@@ -144,6 +151,9 @@ def main(env_cfg, agent_cfg):
             runner.load(checkpoint, load_optimizer=False)
             model = runner.alg.policy
         policy = runner.get_inference_policy(device=env.device)
+        held_policy = HeldLatentInference(model, encoder_ticks) if encoder_ticks > 1 else None
+        if held_policy is not None:
+            policy = held_policy
         controls = GoalControls(play_env, goal or home, args.deadline_s, ranges, args.camera,
                                 show_ui=args.ui and not args.random_goals and play_env.sim.has_gui(), relative=relative,
                                 speed=args.playback_speed if args.real_time else None)
@@ -169,6 +179,8 @@ def main(env_cfg, agent_cfg):
                 observation, did_reset = controls.apply_requests(env, observation, completed * play_env.step_dt)
                 if did_reset:
                     model.reset(every_env)
+                    if held_policy is not None:
+                        held_policy.reset(every_env)
                 controls.update(completed * play_env.step_dt)
                 if controls.paused:
                     play_env.sim.render()
@@ -185,6 +197,8 @@ def main(env_cfg, agent_cfg):
                 if not (torch.isfinite(reward).all() and all(torch.isfinite(v).all() for v in observation.values())):
                     raise RuntimeError("Non-finite rollout.")
                 model.reset(dones)
+                if held_policy is not None:
+                    held_policy.reset(dones)
                 resets += int(dones.sum())
                 completed += 1
                 for number, result in enumerate(play_env.play_results[printed:], printed + 1):
