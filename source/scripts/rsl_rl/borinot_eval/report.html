@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>@@TITLE@@ · Borinot Eval</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#101720;color:#e9f1f8;font:15px/1.54 system-ui,sans-serif}
+main{max-width:1560px;margin:0 auto;padding:30px clamp(16px,4vw,58px) 50px}h1,h2,p{margin:0}
+h1{font-size:clamp(28px,5vw,46px);line-height:1.1;letter-spacing:-.045em}h2{margin:28px 0 8px;font-size:21px}
+p{color:#a9bbce;margin-top:8px}.kicker{color:#87e2cf;text-transform:uppercase;letter-spacing:.16em;font-size:12px;font-weight:750;margin-bottom:10px}
+nav{margin-top:14px;display:flex;gap:13px;flex-wrap:wrap}a{color:#87e2cf}button,select{color:#edf7ff;background:#233144;border:1px solid #41566b;border-radius:7px;padding:7px 9px;font:inherit}
+button{cursor:pointer}.scroll{overflow:auto;border:1px solid #29394a;border-radius:10px}
+table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums;font-size:13px}th,td{padding:9px 10px;white-space:nowrap;text-align:left;border-bottom:1px solid #29394a}
+th{background:#1b2937;color:#c5d8ea}tr:last-child td{border-bottom:0}td:first-child{font-weight:650}
+#controls{display:flex;flex-wrap:wrap;align-items:center;gap:12px;margin:12px 0}label{display:flex;align-items:center;gap:6px;color:#b7c6d5}
+#seek{min-width:155px;flex:1;accent-color:#87e2cf}#clock{min-width:63px;font-variant-numeric:tabular-nums}
+#panels{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,270px),1fr));gap:11px}
+article{background:#182532;border:1px solid #29394a;border-radius:12px;overflow:hidden}article header{padding:9px 12px 0;font-weight:700}
+canvas{width:100%;height:auto;display:block;aspect-ratio:1.65}
+.detail{font-size:13px;padding:0 12px 9px;color:#c3d0da;white-space:normal}#scenario-label{margin:0 0 9px}
+</style>
+</head>
+<body><main>
+<header><div class="kicker">Borinot / evaluation</div><h1>@@TITLE@@</h1><p>@@SUBTITLE@@</p>
+<nav><a href="summary.csv">Summary CSV</a><a href="episodes.csv">All trials CSV</a><a href="recipe.json">Evaluation recipe</a><a href="#replay">Jump to replay</a></nav></header>
+<h2>Results</h2>@@SUMMARY@@<p>@@BLURB@@</p>
+@@PAIRED@@
+<section id="replay"><h2>Side-by-side replay</h2>
+<p>Recorded simulation poses on one clock. Each panel stops at its own terminal state. The robot drawing is a schematic, not a camera render.</p>
+<div id="controls">
+<button id="play" type="button">Play</button>
+<label>Condition <select id="condition"></select></label><label>Trial <select id="trial"></select></label>
+<label>View <select id="view"><option value="iso">3D</option><option value="side">Side</option><option value="top">Top</option></select></label>
+<label>Speed <select id="speed"><option value=".25">0.25×</option><option value=".5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option></select></label>
+<input id="seek" type="range" min="0" max="1" step=".001" value="0" aria-label="Replay position"><output id="clock">0.00 s</output>
+</div>
+<p id="scenario-label"></p><div id="panels"></div>
+</section>
+</main>
+<script id="data" type="application/json">@@DATA@@</script>
+<script>
+'use strict';
+const $ = id => document.getElementById(id);
+const {kind, runs} = JSON.parse($('data').textContent);
+const colors = ['#8ae7d2','#86b9ff','#f0ad73','#d9a7e8','#e6db80','#e98aa1'];
+const coord = v => v.map(x=>x.toFixed(2)).join(', ');
+let cards = [], elapsed = 0, duration = 0, playing = false, last = null, transform;
+function options(select, values) {
+  select.replaceChildren(...values.map(([value, label]) => new Option(label,value)));
+}
+function choose() {
+  playing = false; elapsed = 0; $('play').textContent = 'Play'; $('panels').replaceChildren();
+  const id = Number($('trial').value), condition = $('condition').value;
+  const eligible = runs.filter(r => condition === '__all__' || r.condition === condition);
+  cards = eligible.flatMap((run,i) => {
+    const trial = run.trials.find(t=>t.scenario_id===id);
+    if (!trial) return [];
+    const el = document.createElement('article'), title=document.createElement('header');
+    const canvas=document.createElement('canvas'), detail=document.createElement('div');
+    title.textContent = run.label;
+    canvas.width=660; canvas.height=400; canvas.setAttribute('aria-label','Schematic flight replay for '+run.label);
+    detail.className='detail'; el.append(title,canvas,detail); $('panels').append(el);
+    return [{run,trial,canvas,detail,color:colors[i%colors.length]}];
+  });
+  duration = Math.max(0,...cards.map(c=>c.trial.episode.duration_s));
+  $('seek').max = duration;
+  const episode = cards[0]?.trial.episode;
+  $('scenario-label').textContent = episode?.target_xyz_m ? 'Goal: ('+coord(episode.target_xyz_m)+') m · deadline '+episode.deadline_s.toFixed(2)+' s'
+    : episode?.velocity_command ? 'Command: ('+coord(episode.velocity_command)+') · linear components in m/s, yaw in rad/s'
+    : 'Native goalkeeper shots · matching seed, not a forced shot sequence';
+  fit(); drawAll();
+}
+function projection(p) {
+  const [x,y,z]=p;
+  switch($('view').value) {
+    case 'side': return [x,z];
+    case 'top': return [x,y];
+    default: return [.91*x-.42*y,.88*z+.22*x+.43*y];
+  }
+}
+function fit() {
+  const pts = cards.flatMap(c=>c.trial.frames.map(f=>f.slice(0,3)));
+  for (const c of cards) if (c.trial.episode.target_xyz_m) pts.push(c.trial.episode.target_xyz_m);
+  if (!pts.length) return;
+  const floor = pts.map(([x,y])=>[x,y,0]);
+  const coords=pts.concat(floor).map(projection);
+  const xs=coords.map(p=>p[0]), ys=coords.map(p=>p[1]);
+  const a=Math.min(...xs), b=Math.max(...xs), c=Math.min(...ys), d=Math.max(...ys);
+  const scale=Math.min(530/Math.max(2.8,b-a+.7),310/Math.max(2,d-c+.6));
+  transform = p => {const [x,y] = projection(p); return [330+scale*(x-(a+b)/2),200-scale*(y-(c+d)/2)];};
+}
+function rotate([w,x,y,z], [a,b,c]) {
+  const dx=2*(y*c-z*b),dy=2*(z*a-x*c),dz=2*(x*b-y*a);
+  return [a+w*dx+y*dz-z*dy,b+w*dy+z*dx-x*dz,c+w*dz+x*dy-y*dx];
+}
+function add(a,b){return a.map((v,i)=>v+b[i]);}
+function draw(card) {
+  const {canvas,trial,run,color,detail}=card, g=canvas.getContext('2d');
+  const k = Math.min(trial.frames.length-1,Math.floor(elapsed/trial.dt+1e-8));
+  const f=trial.frames[k], pos=f.slice(0,3), q=f.slice(3,7), ep=trial.episode;
+  function line(points,color,width,dash=[]) {
+    if(points.length<2)return;
+    g.beginPath();g.setLineDash(dash);g.strokeStyle=color;g.lineWidth=width;
+    points.forEach((p,i)=>i?g.lineTo(...transform(p)):g.moveTo(...transform(p)));
+    g.stroke();g.setLineDash([]);
+  }
+  function spot(p,r,color){g.beginPath();g.fillStyle=color;g.arc(...transform(p),r,0,Math.PI*2);g.fill();}
+  g.fillStyle='#13202d';g.fillRect(0,0,660,400);
+  const tx=Math.round(ep.target_xyz_m?.[0] ?? 0), ty=Math.round(ep.target_xyz_m?.[1] ?? 0);
+  for(let x=Math.min(-3,tx-3);x<=Math.max(3,tx+3);x++)
+    line([[x,Math.min(-3,ty-3),0],[x,Math.max(3,ty+3),0]],'#25394c',1);
+  for(let y=Math.min(-3,ty-3);y<=Math.max(3,ty+3);y++)
+    line([[Math.min(-3,tx-3),y,0],[Math.max(3,tx+3),y,0]],'#25394c',1);
+  line(trial.frames.slice(0,k+1).map(p=>p.slice(0,3)), color,2);
+  if(ep.target_xyz_m){
+    const goal=ep.target_xyz_m;
+    line([[goal[0],goal[1],0],goal], '#e9c06f',1,[4,5]);spot(goal,6,'#ead08a');
+  }
+  line([[pos[0],pos[1],0],pos], '#57697a',1,[4,5]);
+  for(const rotor of run.rotors) {
+    const point=add(pos,rotate(q,rotor));line([pos,point],color,3);spot(point,4,color);
+  }
+  const links=Array.from({length:run.legLinks},(_,i)=>f.slice(7+i*3,10+i*3));
+  line([pos,...links], '#e6eaf1',4);for(const p of links)spot(p,3,'#e6eaf1');
+  spot(pos,6,color);
+  const j=7+3*run.legLinks;
+  if(kind==='keeper' && f[j+3]) spot(f.slice(j,j+3),6,'#e9c06f');
+  const done=elapsed+1e-8>=ep.duration_s;
+  const end=ep.robot_failure?'Safety failure':(kind==='goal'?(ep.success?'Settled success':'Deadline miss'):'Trial finished');
+  detail.textContent=run.condition+' · '+run.hz+' Hz · '+(done?end:((k*trial.dt).toFixed(2)+' s in flight'));
+}
+function drawAll(){
+  for(const card of cards) draw(card);
+  $('seek').value=elapsed; $('clock').textContent=elapsed.toFixed(2)+' s';
+}
+function loop(ts){
+  if(playing){
+    if(last!==null) elapsed=Math.min(duration,elapsed+(ts-last)/1000*Number($('speed').value));
+    if(elapsed>=duration){playing=false;$('play').textContent='Play';}
+    drawAll();
+  }
+  last=ts; requestAnimationFrame(loop);
+}
+if(!runs.length){
+  $('controls').style.display='none';
+  $('scenario-label').textContent='No replay trials were requested.';
+}else{
+  const conditions=[...new Set(runs.map(r=>r.condition))];
+  options($('condition'),conditions.map(x=>[x,x]).concat(conditions.length>1?[['__all__','All conditions']]:[]));
+  $('condition').value=conditions.includes('20 ms')?'20 ms':conditions[0];
+  options($('trial'),runs[0].trials.map(t=>[t.scenario_id,'#'+(t.scenario_id+1)]));
+  $('condition').onchange=$('trial').onchange=choose;
+  $('view').onchange=()=>{fit();drawAll();};
+  $('seek').oninput=()=>{playing=false;$('play').textContent='Play';elapsed=Number($('seek').value);drawAll();};
+  $('play').onclick=()=>{if(elapsed>=duration)elapsed=0;playing=!playing;$('play').textContent=playing?'Pause':'Play';};
+  choose();requestAnimationFrame(loop);
+}
+</script>
+</body></html>

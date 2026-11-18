@@ -194,6 +194,9 @@ class BorinotGoToEnv(BorinotCmdVelEnv):
         self.extras["log"] = logs
 
     def _sample_reset_goals(self, start_position_w, env_ids):
+        return self._sample_training_goals(start_position_w, env_ids)
+
+    def _sample_training_goals(self, start_position_w, env_ids):
         difficulty, _ = stage_settings(self.cfg, self.goal_curriculum.level)
         return sample_goals(start_position_w, self.cfg, difficulty, self.step_dt)
 
@@ -210,11 +213,11 @@ class BorinotGoToEnv(BorinotCmdVelEnv):
         if env_ids is None:
             env_ids = self.robot._ALL_INDICES
         super()._reset_idx(env_ids)  # logs old outcome, resets the SAME shared plant/control state
-        difficulty, factor = stage_settings(self.cfg, self.goal_curriculum.level)
+        _, factor = stage_settings(self.cfg, self.goal_curriculum.level)
         if self.cfg.init_base_attitude_points_to_goal:
             goals, steps = self._goal_position_w[env_ids], self._goal_deadline_steps[env_ids]
         else:
-            goals, steps = sample_goals(self.robot.data.root_pos_w[env_ids], self.cfg, difficulty, self.step_dt)
+            goals, steps = self._sample_training_goals(self.robot.data.root_pos_w[env_ids], env_ids)
         self._goal_position_w[env_ids] = goals
         self._goal_deadline_steps[env_ids] = steps
         self._goal_episode_level[env_ids] = self._episode_stage[env_ids] = self.goal_curriculum.level
