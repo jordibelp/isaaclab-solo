@@ -107,7 +107,10 @@ A minimal GoTo MinTime recipe (edit the checkpoint path and training settings):
 - **Delay:** 20 ms at 200 Hz is four physics ticks. It is a full policy period at
   50 Hz, but only 0.4 periods at 20 Hz. This is a delay of the policy command
   entering the low-level controller; it is not measurement delay. An explicit
-  sweep value or range endpoint must be on the physics grid.
+  fixed/sweep value must be on the physics grid. Range endpoints also need to
+  be on the grid by default. Set `env.actuator_delay_sampling=seconds` in the
+  Hydra overrides field to sample a condition’s range in seconds before rounding
+  up to a tick.
 
 ## What the numbers mean
 

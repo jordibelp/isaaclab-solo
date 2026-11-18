@@ -21,6 +21,24 @@ the actor or critic inputs. Existing checkpoint requirements still apply:
 match its algorithm, control mode, action units, observations, and physical settings.
 Do not switch an INDI checkpoint into direct thrust/torque mode.
 
+### Sample in seconds instead of ticks
+
+Set `env.actuator_delay_sampling=seconds` to draw one uniform delay in
+continuous time at each reset. The requested range does not depend on the
+physics rate: `auto` means 0–20 ms, or set an explicit range in seconds:
+
+```bash
+env.actuator_delay_sampling=seconds 'env.actuator_delay_range=[0.0,0.02]'
+```
+
+The command takes effect on the first physics tick at or after the sampled delay.
+This rounds the realized delay up by less than one physics tick. At 120 Hz, for
+example, a requested 20 ms takes effect at 25 ms. At 200 Hz the continuous 0–20 ms
+draw normally yields 5, 10, 15, or 20 ms; exact zero has no probability mass.
+Use the default `ticks` mode if you want zero to be sampled as often as other
+ticks or need `auto` to cap the realized delay at 20 ms. Fixed delays still
+require an exact tick, and metrics report the realized delay.
+
 ## Where the delay acts
 
 We delay the policy command **before** INDI, PI, joint PD/PID, and the motor
@@ -46,8 +64,8 @@ Whether INDI wins remains a hypothesis to test.
 
 We queue commands every physics step. Delay values must be exact multiples of
 the physics timestep. At 200 Hz, valid values include 0, 5, 10, 15, and 20 ms.
-At 300 Hz, 10 ms is three steps. Off-grid values fail with an error; we do not
-silently round. For the legacy task, the grid comes from `env.sim.dt` (120 Hz
+At 300 Hz, 10 ms is three steps. Fixed delays and range endpoints in
+`ticks` mode must be on the physics grid. For the legacy task, the grid comes from `env.sim.dt` (120 Hz
 by default), not a separate frequency setting.
 
 - A fixed delay stays the same across robot episodes.

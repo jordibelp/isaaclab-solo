@@ -306,3 +306,47 @@ def test_episode_log_reports_the_mean_delay_of_completed_episodes_only():
     env._episode_steps[1] = 0  # initial/non-episode reset
     update_curriculum(env, torch.arange(3))
     torch.testing.assert_close(env.extras["log"]["Episode/actuator_delay_s"], torch.tensor(.02))
+
+
+@pytest.mark.parametrize("hz", [120, 200, 400])
+@pytest.mark.parametrize("bounds", ["auto", (0.001, 0.019)])
+def test_seconds_sampling_is_uniform_in_time_before_converting_to_ticks(hz, bounds):
+    cfg = delay_cfg(delay_range=bounds, physics_hz=hz)
+    cfg.actuator_delay_sampling = "seconds"
+    n = 2000
+    low, high = (0., .02) if bounds == "auto" else bounds
+    torch.manual_seed(17)
+    expected_time = low + torch.rand(n, dtype=torch.float64) * (high - low)
+    torch.manual_seed(17)
+    delay = ActuatorDelay(cfg, n, 1, "cpu")
+    ids = torch.arange(n)
+    delay.reset(ids)
+    assert torch.equal(delay.steps, (expected_time * hz).ceil().long())
+    assert ((delay.seconds.double() - expected_time) >= -1e-8).all()
+    assert (delay.seconds.double() - expected_time).max() <= 1/hz + 1e-8
+    for tick in range(delay.high + 1):
+        command = torch.ones(n, 1)
+        assert torch.equal(delay(command)[:, 0], (delay.steps <= tick).float())
+
+
+def test_seconds_sampling_keeps_fixed_delay_strict_and_clears_only_selected_queues():
+    cfg = delay_cfg(delay_range=(.011, .011))
+    cfg.actuator_delay_sampling = "seconds"
+    delay = ActuatorDelay(cfg, 2, 1, "cpu")
+    ids = torch.tensor([0])
+    for _ in range(4):
+        delay(torch.ones(2, 1))
+    assert delay.steps.tolist() == [3, 3]
+    delay.reset(ids)
+    assert not delay._queue[:, 0].any() and delay._queue[:, 1].all()
+    cfg.actuator_delay_range = None
+    cfg.actuator_delay = .011
+    with pytest.raises(ValueError, match="whole number"):
+        actuator_delay.actuator_delay_bounds(cfg)
+
+
+def test_invalid_sampling_mode_is_rejected():
+    cfg = delay_cfg()
+    cfg.actuator_delay_sampling = "steps_first_maybe"
+    with pytest.raises(ValueError, match="actuator_delay_sampling"):
+        actuator_delay.actuator_delay_bounds(cfg)

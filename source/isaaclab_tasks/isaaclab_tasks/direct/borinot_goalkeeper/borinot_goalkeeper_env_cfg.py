@@ -179,7 +179,8 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     # Policy-command latency [s], in whole physics steps (5 ms at 200 Hz). The old command reaches
     # INDI/PI/PD/PID and the motors; those loops still use current measurements. See README.
     actuator_delay = 0.0  # fixed for every episode, e.g. env.actuator_delay=0.02 at evaluation
-    actuator_delay_range = "auto"  # sample from whole physics ticks within 0–20 ms
+    actuator_delay_range = "auto"  # default requested range: 0–20 ms
+    actuator_delay_sampling = "ticks"  # "seconds": sample in continuous time, then round up to a physics tick
     critic_obs_includes_rotor_omega = False  # append six current post-lag rotor speed magnitudes (rad/s), critic only
     # Eagle/PX4 motor order, body-frame metres, 0.185 m radius; spin is the body-yaw torque sign.
     # Hardware profile: hidro-iri/eagle_mpc_lib@96c65ab, yaml/borinot_flying_arm_2/platform/borinot.yaml.

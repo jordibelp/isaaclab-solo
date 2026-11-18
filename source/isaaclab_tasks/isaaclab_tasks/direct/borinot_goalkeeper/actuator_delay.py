@@ -5,32 +5,52 @@ import math
 import torch
 
 
-def delay_steps(seconds, physics_hz, name="actuator_delay"):
-    """Whole physics steps for a delay in seconds. Off-grid values fail instead of rounding."""
+def _checked_seconds(seconds, name):
     if isinstance(seconds, bool) or not isinstance(seconds, (int, float)) or not math.isfinite(seconds) or seconds < 0:
         raise ValueError(f"{name} must be a finite non-negative number of seconds, got {seconds!r}.")
+    return seconds
+
+
+def delay_steps(seconds, physics_hz, name="actuator_delay"):
+    """Whole physics steps for a delay in seconds. Off-grid values fail instead of rounding."""
+    seconds = _checked_seconds(seconds, name)
     steps = round(seconds * physics_hz)
     if abs(steps - seconds * physics_hz) > 1e-6:
         raise ValueError(f"{name}={seconds:g} s is not a whole number of {1000 / physics_hz:g} ms physics steps.")
     return steps
 
 
-def actuator_delay_bounds(cfg):
-    """(min, max) policy-command delay in physics steps, from actuator_delay or actuator_delay_range."""
-    physics_hz = cfg.physics_hz if hasattr(cfg, "physics_hz") else 1 / cfg.sim.dt
+def _delay_plan(cfg, physics_hz):
+    """Return queue bounds and, if enabled, the requested continuous range in seconds."""
+    mode = getattr(cfg, "actuator_delay_sampling", "ticks")
+    if mode not in ("ticks", "seconds"):
+        raise ValueError("actuator_delay_sampling must be 'ticks' or 'seconds'.")
     fixed = delay_steps(cfg.actuator_delay, physics_hz)
-    if cfg.actuator_delay_range == "auto":
-        # Keep the 20 ms cap even at sample rates that do not divide it (legacy: 120 Hz).
-        return (fixed, fixed) if fixed else (0, math.floor(0.020 * physics_hz + 1e-9))
-    if cfg.actuator_delay_range is None:
-        return fixed, fixed
-    if not isinstance(cfg.actuator_delay_range, (list, tuple)) or len(cfg.actuator_delay_range) != 2:
+    bounds = cfg.actuator_delay_range
+    if bounds is None or (bounds == "auto" and fixed):
+        return fixed, fixed, None
+    if bounds == "auto":
+        if mode == "ticks":
+            return 0, math.floor(0.020 * physics_hz + 1e-9), None
+        bounds = (0.0, 0.020)
+    if not isinstance(bounds, (list, tuple)) or len(bounds) != 2:
         raise ValueError("actuator_delay_range must be auto, None or (min, max) seconds.")
     if fixed:
         raise ValueError("Set either actuator_delay or actuator_delay_range, not both.")
-    low, high = (delay_steps(value, physics_hz, "actuator_delay_range") for value in cfg.actuator_delay_range)
+    name = "actuator_delay_range"
+    low, high = (_checked_seconds(value, name) for value in bounds)
     if low > high:
-        raise ValueError("actuator_delay_range must be ordered (min, max).")
+        raise ValueError(f"{name} must be ordered (min, max).")
+    if mode == "seconds":
+        # Avoid a spurious extra tick when an exact grid endpoint has floating-point error.
+        return math.ceil(low * physics_hz - 1e-9), math.ceil(high * physics_hz - 1e-9), (low, high)
+    return delay_steps(low, physics_hz, name), delay_steps(high, physics_hz, name), None
+
+
+def actuator_delay_bounds(cfg):
+    """Effective (min, max) policy-command delay in physics steps."""
+    hz = cfg.physics_hz if hasattr(cfg, "physics_hz") else 1 / cfg.sim.dt
+    low, high, _ = _delay_plan(cfg, hz)
     return low, high
 
 
@@ -45,8 +65,9 @@ class ActuatorDelay:
     """
 
     def __init__(self, cfg, num_envs, action_dim, device, dtype=torch.float32):
-        self.low, self.high = actuator_delay_bounds(cfg)
         self.physics_dt = 1 / cfg.physics_hz if hasattr(cfg, "physics_hz") else cfg.sim.dt
+        self._hz = cfg.physics_hz if hasattr(cfg, "physics_hz") else 1 / cfg.sim.dt
+        self.low, self.high, self._seconds_range = _delay_plan(cfg, self._hz)
         self.steps = torch.full((num_envs,), self.low, dtype=torch.long, device=device)
         # A zero delay allocates nothing and returns the policy command itself.
         self._queue = torch.zeros(self.high + 1, num_envs, action_dim, dtype=dtype, device=device) if self.high else None
@@ -59,7 +80,12 @@ class ActuatorDelay:
 
     def reset(self, env_ids):
         if self.high > self.low:
-            self.steps[env_ids] = torch.randint(self.low, self.high + 1, (len(env_ids),), device=self.steps.device)
+            if self._seconds_range is None:
+                self.steps[env_ids] = torch.randint(self.low, self.high + 1, (len(env_ids),), device=self.steps.device)
+            else:
+                low, high = self._seconds_range
+                seconds = low + torch.rand(len(env_ids), dtype=torch.float64, device=self.steps.device) * (high - low)
+                self.steps[env_ids] = (seconds * self._hz).ceil().long().clamp_(self.low, self.high)
         if self._queue is not None:
             self._queue[:, env_ids] = 0.0
 

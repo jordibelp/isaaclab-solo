@@ -29,7 +29,8 @@ class BorinotEnvCfg(DirectRLEnvCfg):
     sim: SimulationCfg = SimulationCfg(dt=1/120, render_interval=decimation)
     # Policy-command delay in seconds, quantized to sim.dt; sampled again at every robot reset.
     actuator_delay = 0.0
-    actuator_delay_range = "auto"  # sample from whole physics ticks within 0–20 ms
+    actuator_delay_range = "auto"  # default requested range: 0–20 ms
+    actuator_delay_sampling = "ticks"  # "seconds": sample in continuous time, then round up to a physics tick
 
     episode_len: int = 256
     dt_control: float = sim.dt * decimation
