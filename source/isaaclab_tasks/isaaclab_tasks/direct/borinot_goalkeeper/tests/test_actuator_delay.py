@@ -285,11 +285,17 @@ def literal_fields(path):
 
 @pytest.mark.parametrize("path", ["borinot_goalkeeper/borinot_goalkeeper_env_cfg.py",
                                   "borinot_goalkeeper_simple/borinot_goalkeeper_simple_env_cfg.py"])
-def test_defaults_add_no_delay_and_cmd_vel_inherits_them(path):
+def test_defaults_auto_sample_up_to_20ms_and_cmd_vel_inherits_them(path):
     fields = literal_fields(path)
     delay, delay_range = (ast.literal_eval(fields[name]) for name in ("actuator_delay", "actuator_delay_range"))
-    assert type(delay) is float and delay == 0.0 and delay_range is None
+    assert type(delay) is float and delay == 0.0 and delay_range == "auto"
     assert not {"actuator_delay", "actuator_delay_range"} & literal_fields("borinot_cmd_vel/borinot_cmd_vel_env_cfg.py").keys()
+
+
+@pytest.mark.parametrize("hz,max_steps", [(120, 2), (200, 4), (240, 4), (250, 5)])
+def test_auto_floors_to_the_physics_grid_and_fixed_override_wins(hz, max_steps):
+    assert actuator_delay.actuator_delay_bounds(delay_cfg(delay_range="auto", physics_hz=hz)) == (0, max_steps)
+    assert actuator_delay.actuator_delay_bounds(delay_cfg(delay=1/hz, delay_range="auto", physics_hz=hz)) == (1, 1)
 
 
 def test_episode_log_reports_the_mean_delay_of_completed_episodes_only():

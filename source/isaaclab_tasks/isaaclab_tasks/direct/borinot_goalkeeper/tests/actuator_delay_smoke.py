@@ -2,7 +2,7 @@
 """Live PhysX: a delayed policy command reaches the plant d physics steps late; feedback loops are not delayed.
 
 Seeded GPU rollouts repeat bit for bit, so each environment is compared with its own neutral rollout.
-Pass env.actuator_delay_range=[0.0,0.04] for the timing checks, or nothing for the default zero-delay checks.
+Pass env.actuator_delay_range=[0.0,0.04] for the timing checks, or env.actuator_delay_range=null for zero-delay checks.
 ./isaaclab.sh -p <this file> --task Borinot-Goalkeeper-Direct-v0 --output out.json --headless env.control_mode=dsam_indi
 """
 import argparse
@@ -47,6 +47,8 @@ def main(cfg, agent_cfg):
         check("integer_literal_for_float_delay_is_rejected", True, message=str(error))
     indi = cfg.control_mode == "dsam_indi"
     torque = cfg.control_mode == "thrust_and_torque_control"
+    if cfg.actuator_delay_range == "auto":
+        cfg.actuator_delay_range = None  # This fixture compares explicit zero or >=8 tick sweep bounds.
     cfg.curriculum = False
     cfg.scene.num_envs = 9
     cfg.sim.device = args.device

@@ -22,6 +22,8 @@ from isaaclab_tasks.controllers.borinot_model_wrench_yawless import ModelWrenchY
 from isaaclab_tasks.controllers.borinot_model_wrench_indi import ModelWrenchIndiController, ModelWrenchYawlessIndiController
 from isaaclab_tasks.direct.borinot.model_description import nominal_model_description
 from isaaclab_tasks.direct.borinot.action_limits import clipped_limit_rewards, raw_action_limit_costs, relative_limit_cost
+from isaaclab_tasks.direct.borinot.flight_randomization import make_flight_randomization, validate_flight_randomization
+from isaaclab_tasks.direct.borinot.flight_randomization_cfg import BorinotFlightRandomizationCfg
 from isaaclab_tasks.direct.borinot.inertial_properties import apply_inertial_properties, validate_inertial_properties
 from isaaclab_tasks.direct.borinot.inertial_properties_cfg import BorinotInertialPropertiesCfg
 
@@ -50,9 +52,11 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         """Retain the shared implementation when archiving a training run."""
         return [inspect.getsourcefile(obj) for obj in (
             BorinotGoalkeeperEnv, IndiController, WrenchController, ModelWrenchController, ModelWrenchYawlessController, ModelWrenchIndiController, ModelWrenchYawlessIndiController, nominal_model_description, CbrtController, raw_action_limit_costs, decode_angle_actions, DesiredActuationMetrics, ActuatorDelay,
-            apply_inertial_properties, BorinotInertialPropertiesCfg)]
+            apply_inertial_properties, BorinotInertialPropertiesCfg,
+            make_flight_randomization, BorinotFlightRandomizationCfg)]
 
     def __init__(self, cfg: BorinotGoalkeeperEnvCfg, render_mode=None, **kwargs):
+        validate_flight_randomization(cfg.flight_randomization)
         validate_inertial_properties(cfg.inertial_properties)
         cfg.configure_control()
         configure_randomization(cfg)
@@ -130,6 +134,11 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         self._desired_actuation = (
             DesiredActuationMetrics(cfg, self._hover_per_rotor, self.num_envs, self.device)
             if cfg.control_mode == "thrust_and_torque_control" and not cfg.hold_arm else None)
+        reset_thrust = self._hover_per_rotor
+        if cfg.control_mode in ("wrench", "model_wrench", "model_wrench_indi", "model_wrench_yawless",
+                                "model_wrench_yawless_indi", "cbrt", "cbrt_indi"):
+            reset_thrust = min(reset_thrust, reset_thrust * cfg.thrust_to_weight)
+        self._rotor_plant, self._wind = make_flight_randomization(self, reset_thrust, cfg.motor_time_constant_s)
         if cfg.control_mode == "dsam_indi":
             self._init_indi()
         elif cfg.control_mode in ("wrench", "model_wrench", "model_wrench_indi", "model_wrench_yawless", "model_wrench_yawless_indi"):
@@ -438,7 +447,19 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         cap = self._hover_per_rotor * self.cfg.thrust_to_weight
         commands.clamp_(min=0.0, max=None if self.cfg.remove_thrust_clipping else cap)
         self._actuator_commands[:, :6] = commands / cap
-        if self.cfg.control_mode in ("dsam_indi", "wrench", "model_wrench", "model_wrench_indi", "model_wrench_yawless", "model_wrench_yawless_indi", "cbrt", "cbrt_indi"):
+        rotor = getattr(self, "_rotor_plant", None)
+        transient = None
+        if rotor is not None:
+            # Controllers still predict rotor behavior using the nominal model. Their own
+            # speed and reconstructed wrench are never replaced by the sampled plant.
+            g2 = None
+            if self.cfg.control_mode == "dsam_indi":
+                g2 = controller.allocator.g2[1:]
+            elif self.cfg.control_mode in ("model_wrench_indi", "model_wrench_yawless_indi"):
+                g2 = controller.g2[1:]
+            thrust, plant_yaw, transient = rotor.step(commands, g2)
+            self._rotor_thrust.copy_(thrust)
+        elif self.cfg.control_mode in ("dsam_indi", "wrench", "model_wrench", "model_wrench_indi", "model_wrench_yawless", "model_wrench_yawless_indi", "cbrt", "cbrt_indi"):
             # These controllers have already advanced their own speed-lag state once.
             self._rotor_thrust.copy_(self.cfg.kf * controller.rotor_speed.square())
         elif self.cfg.motor_time_constant_s == 0:
@@ -454,7 +475,11 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
             # Preserve the legacy PI mode's thrust-lag dynamics.
             self._rotor_thrust.add_(self._motor_alpha * (commands - self._rotor_thrust))
         wrench = self._rotor_thrust @ self._allocation.T
-        if self.cfg.control_mode in ("dsam_indi", "model_wrench_indi", "model_wrench_yawless_indi"):
+        if rotor is not None:
+            wrench[:, 3] = plant_yaw
+            if transient is not None:
+                wrench[:, 1:] += transient
+        elif self.cfg.control_mode in ("dsam_indi", "model_wrench_indi", "model_wrench_yawless_indi"):
             wrench[:, 1:] += controller.transient_torque
         # Forces act at the fixed rotor positions, about each environment's actual CoM.
         wrench[:, 1] -= self._base_com_offset[:, 1] * wrench[:, 0]
@@ -464,6 +489,16 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         self.robot.permanent_wrench_composer.set_forces_and_torques(
             forces=force, torques=wrench[:, None, 1:4], body_ids=[self.base_id], is_global=False,
         )
+        wind = getattr(self, "_wind", None)
+        if wind is not None:
+            if self._physics_samples == 1:
+                wind.update()
+            data = self.robot.data
+            force_w, moment_w = wind.wrench_world(data.root_lin_vel_w)
+            self.robot.permanent_wrench_composer.add_forces_and_torques(
+                forces=quat_apply_inverse(data.root_quat_w, force_w)[:, None],
+                torques=quat_apply_inverse(data.root_quat_w, moment_w)[:, None],
+                body_ids=[self.base_id], is_global=False)
         if self.cfg.control_mode in ("dsam_indi", "wrench", "model_wrench", "model_wrench_indi", "model_wrench_yawless", "model_wrench_yawless_indi", "cbrt", "cbrt_indi"):
             # Implicit gains are zero: software PID (INDI) / PD (wrench/CBRT) runs at physics rate.
             self.robot.set_joint_effort_target(joint_effort, joint_ids=self.joint_ids)
@@ -496,7 +531,8 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
             self._action_limit_costs[:, 1] += relative_limit_cost(
                 self.robot.data.computed_torque[:, self.joint_ids], -limit, limit, limit) / self.cfg.decimation
         omega = torch.sqrt(self._rotor_thrust.clamp_min(0.0) / self.cfg.kf)
-        rotor_mechanical_w = (self.cfg.km * omega**3).sum(-1)
+        rotor = getattr(self, "_rotor_plant", None)
+        rotor_mechanical_w = rotor.power() if rotor is not None else (self.cfg.km * omega**3).sum(-1)
         self._power_sum_w[:, 0] += rotor_mechanical_w
         self._power_sum_w[:, 1] += rotor_mechanical_w * (1.0 / self.cfg.p_el_motor_efficiency - 1.0)
         # Implicit-actuator effort is a clipped PD estimate, not measured PhysX torque.
@@ -731,7 +767,8 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         critic = common + ball_parts + [phase] + tail + [self._ball_parameters]
         if self.cfg.critic_obs_includes_rotor_omega:
             # Applied thrust retains motor lag, unlike the latest policy command.
-            critic.append(torch.sqrt(self._rotor_thrust.clamp_min(0.0) / self.cfg.kf))
+            rotor = getattr(self, "_rotor_plant", None)
+            critic.append(rotor.speed if rotor is not None else torch.sqrt(self._rotor_thrust.clamp_min(0.0) / self.cfg.kf))
         return {"policy": torch.cat(policy, dim=-1),
                 "critic": torch.cat(critic, dim=-1)}
 
@@ -877,6 +914,12 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
             value[env_ids] = 0
         self._actuator_delay.reset(env_ids)  # after _update_curriculum logged the finished episodes' delays
         self._rotor_thrust[env_ids] = self._hover_per_rotor
+        rotor = getattr(self, "_rotor_plant", None)
+        if rotor is not None:
+            self._rotor_thrust[env_ids] = rotor.reset(env_ids)
+        wind = getattr(self, "_wind", None)
+        if wind is not None:
+            wind.reset(env_ids)
         if self.cfg.control_mode == "dsam_indi":
             self._indi.reset(env_ids)
         elif self.cfg.control_mode in ("wrench", "model_wrench", "model_wrench_indi", "model_wrench_yawless", "model_wrench_yawless_indi"):

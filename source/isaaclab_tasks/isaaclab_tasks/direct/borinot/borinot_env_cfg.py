@@ -15,10 +15,12 @@ from isaaclab.sensors import ContactSensorCfg
 from isaaclab.utils import configclass
 from pathlib import Path
 import numpy as np 
+from .flight_randomization_cfg import BorinotFlightRandomizationCfg
 from .inertial_properties_cfg import BorinotInertialPropertiesCfg
 
 @configclass
 class BorinotEnvCfg(DirectRLEnvCfg):
+    flight_randomization: BorinotFlightRandomizationCfg = BorinotFlightRandomizationCfg()
     inertial_properties: BorinotInertialPropertiesCfg = BorinotInertialPropertiesCfg()
 
     # control every N physics steps
@@ -26,7 +28,7 @@ class BorinotEnvCfg(DirectRLEnvCfg):
     sim: SimulationCfg = SimulationCfg(dt=1/120, render_interval=decimation)
     # Policy-command delay in seconds, quantized to sim.dt; sampled again at every robot reset.
     actuator_delay = 0.0
-    actuator_delay_range = None
+    actuator_delay_range = "auto"  # sample from whole physics ticks within 0–20 ms
 
     episode_len: int = 256
     dt_control: float = sim.dt * decimation

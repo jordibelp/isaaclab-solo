@@ -18,6 +18,7 @@ from isaaclab.utils.math import matrix_from_quat, quat_apply, quat_apply_inverse
 from isaaclab_tasks.direct.borinot_goalkeeper.actuator_delay import ActuatorDelay, actuator_delay_bounds
 from isaaclab_tasks.direct.borinot_goalkeeper.borinot_goalkeeper_env import BorinotGoalkeeperEnv
 from isaaclab_tasks.direct.borinot.action_limits import clipped_limit_rewards, raw_action_limit_costs
+from isaaclab_tasks.direct.borinot.flight_randomization import make_flight_randomization, validate_flight_randomization
 from isaaclab_tasks.direct.borinot.inertial_properties import apply_inertial_properties, validate_inertial_properties
 from isaaclab_tasks.direct.borinot_goalkeeper.events import configure_randomization
 from isaaclab_tasks.direct.borinot_goalkeeper.paddle import attach_paddle
@@ -57,6 +58,7 @@ class BorinotGoalkeeperSimpleEnv(DirectRLEnv):
     get_code_snapshot_files = BorinotGoalkeeperEnv.get_code_snapshot_files
 
     def __init__(self, cfg: BorinotGoalkeeperSimpleEnvCfg, render_mode=None, **kwargs):
+        validate_flight_randomization(cfg.flight_randomization)
         validate_inertial_properties(cfg.inertial_properties)
         cfg.configure_control()
         configure_randomization(cfg)
@@ -128,6 +130,11 @@ class BorinotGoalkeeperSimpleEnv(DirectRLEnv):
         self._motor_alpha = (
             1.0 if cfg.motor_time_constant_s == 0 else 1 - math.exp(-self.physics_dt / cfg.motor_time_constant_s)
         )
+        reset_thrust = self._hover_per_rotor
+        if cfg.control_mode in ("wrench", "model_wrench", "model_wrench_indi", "model_wrench_yawless",
+                                "model_wrench_yawless_indi", "cbrt", "cbrt_indi"):
+            reset_thrust = min(reset_thrust, reset_thrust * cfg.thrust_to_weight)
+        self._rotor_plant, self._wind = make_flight_randomization(self, reset_thrust, cfg.motor_time_constant_s)
         if cfg.control_mode == "dsam_indi":
             self._init_indi()
         elif cfg.control_mode in ("wrench", "model_wrench", "model_wrench_indi", "model_wrench_yawless", "model_wrench_yawless_indi"):
@@ -560,6 +567,12 @@ class BorinotGoalkeeperSimpleEnv(DirectRLEnv):
             buffer[env_ids] = 0
         self._actuator_delay.reset(env_ids)  # after _update_curriculum logged the finished episodes' delays
         self._rotor_thrust[env_ids] = self._hover_per_rotor
+        rotor = getattr(self, "_rotor_plant", None)
+        if rotor is not None:
+            self._rotor_thrust[env_ids] = rotor.reset(env_ids)
+        wind = getattr(self, "_wind", None)
+        if wind is not None:
+            wind.reset(env_ids)
         if self.cfg.control_mode == "dsam_indi":
             self._indi.reset(env_ids)
         elif self.cfg.control_mode in ("wrench", "model_wrench", "model_wrench_indi", "model_wrench_yawless", "model_wrench_yawless_indi"):

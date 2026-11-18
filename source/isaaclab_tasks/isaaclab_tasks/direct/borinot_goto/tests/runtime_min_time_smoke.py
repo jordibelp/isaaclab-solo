@@ -27,6 +27,10 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 def main(cfg, agent_cfg):
     cfg.scene.num_envs, cfg.sim.device, cfg.seed = 4, args.device, 42
     cfg.include_events_randomization = False
+    cfg.actuator_delay_range = None
+    cfg.flight_randomization.motor_time_constant_range_s = None
+    cfg.flight_randomization.thrust_shared_gain_delta = cfg.flight_randomization.thrust_rotor_gain_delta = 0.0
+    cfg.flight_randomization.km_gain_delta = 0.0
     cfg.forces_applied_to_base_curriculum = [0.0]
     cfg.reset_xy_noise_m = cfg.reset_z_noise_m = 0.0
     cfg.reset_rpy_noise_degs = (0.0, 0.0, 0.0)

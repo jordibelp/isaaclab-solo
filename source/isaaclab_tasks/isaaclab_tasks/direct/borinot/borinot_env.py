@@ -17,6 +17,8 @@ from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 
 from .borinot_env_cfg import BorinotEnvCfg
 from .action_limits import clipped_limit_rewards, raw_action_limit_costs
+from .flight_randomization import make_flight_randomization, validate_flight_randomization
+from .flight_randomization_cfg import BorinotFlightRandomizationCfg
 from .inertial_properties import apply_inertial_properties, validate_inertial_properties
 from .inertial_properties_cfg import BorinotInertialPropertiesCfg
 from isaaclab_tasks.direct.borinot_goalkeeper.actuator_delay import ActuatorDelay, actuator_delay_bounds
@@ -107,6 +109,7 @@ class BorinotEnv(DirectRLEnv):
     cfg: BorinotEnvCfg
     
     def __init__(self, cfg: BorinotEnvCfg, render_mode: str | None = None, **kwargs):
+        validate_flight_randomization(cfg.flight_randomization)
         validate_inertial_properties(cfg.inertial_properties)
         actuator_delay_bounds(cfg)
         super().__init__(cfg, render_mode, **kwargs)
@@ -128,6 +131,8 @@ class BorinotEnv(DirectRLEnv):
         self._rotor_spin = torch.tensor(self.cfg.rotor_spin, dtype=torch.float32, device=self.device)  # (6,)
         self._z_axis = torch.tensor([0.0, 0.0, 1.0], dtype=torch.float32, device=self.device)
 
+        reset_thrust = float(self._map_thrust(torch.zeros(1, device=self.device)))
+        self._rotor_plant, self._wind = make_flight_randomization(self, reset_thrust, nominal_tau=0.0)
         self._kf = self.cfg.kf
         self._km = self.cfg.km
         self._km_over_kf = float(self._km / self._kf) if self._kf > 0 else 0.0
@@ -414,6 +419,10 @@ class BorinotEnv(DirectRLEnv):
         if not self.cfg.des_joint_out:
             self.robot.set_joint_effort_target(leg_torques, joint_ids=self._leg_dof_ids)
 
+        rotor = getattr(self, "_rotor_plant", None)
+        if rotor is not None:
+            thrusts, plant_yaw, _ = rotor.step(thrusts.clamp_min(0.0))
+
         # Rotor wrench in BASE (body local) frame
         F_i_b = thrusts.unsqueeze(-1) * self._z_axis.view(1, 1, 3)  # (N,6,3)
         r_b = self._rotor_pos_b.view(1, 6, 3).expand(self.num_envs, -1, -1)
@@ -421,6 +430,8 @@ class BorinotEnv(DirectRLEnv):
 
         # Reaction/drag torque about +Z (base frame)
         tau_drag_z = self._km_over_kf * (thrusts * self._rotor_spin.view(1, 6)).sum(dim=1)  # (N,)
+        if rotor is not None:
+            tau_drag_z = plant_yaw
         tau_drag_b = tau_drag_z.unsqueeze(-1) * self._z_axis.view(1, 3)  # (N,3)
 
         F_sum_b = F_i_b.sum(dim=1)              # (N,3)
@@ -435,6 +446,17 @@ class BorinotEnv(DirectRLEnv):
             body_ids=[int(self._base_body_id[0])],
             is_global=False,
         )
+
+        wind = getattr(self, "_wind", None)
+        if wind is not None:
+            if self._physics_samples == 1:
+                wind.update()
+            data = self.robot.data
+            force_w, moment_w = wind.wrench_world(data.root_lin_vel_w)
+            self.robot.permanent_wrench_composer.add_forces_and_torques(
+                forces=_quat_inv_apply(data.root_quat_w, force_w)[:, None],
+                torques=_quat_inv_apply(data.root_quat_w, moment_w)[:, None],
+                body_ids=[int(self._base_body_id[0])], is_global=False)
 
         self._update_j_force_overload()
         self._each_decimation_calls()
@@ -451,7 +473,8 @@ class BorinotEnv(DirectRLEnv):
         if self._power_samples == self._physics_samples:
             return
         omega = torch.sqrt(self._thrusts.clamp_min(0.0) / self._kf)
-        rotor_mechanical_w = (self._km * omega**3).sum(-1)
+        rotor = getattr(self, "_rotor_plant", None)
+        rotor_mechanical_w = rotor.power() if rotor is not None else (self._km * omega**3).sum(-1)
         self._power_sum_w[:, 0] += rotor_mechanical_w
         self._power_sum_w[:, 1] += rotor_mechanical_w * (1.0 / self.cfg.p_el_motor_efficiency - 1.0)
         # Signed joint power; negative values represent ideal regenerative transfer.
@@ -738,6 +761,10 @@ class BorinotEnv(DirectRLEnv):
         self._action_limit_costs[env_ids_t] = 0.0
         self._last_actions[env_ids_t] = 0.0
         self._thrusts[env_ids_t] = 0.0
+        if self._rotor_plant is not None:
+            self._thrusts[env_ids_t] = self._rotor_plant.reset(env_ids_t)
+        if self._wind is not None:
+            self._wind.reset(env_ids_t)
         self._leg_torques[env_ids_t] = 0.0
         self._power_sum_w[env_ids_t] = 0.0
         self._joint_vel_prev[env_ids_t] = 0.0
@@ -748,4 +775,5 @@ class BorinotEnv(DirectRLEnv):
 
     def get_code_snapshot_files(self):
         return [inspect.getsourcefile(obj) for obj in (
-            raw_action_limit_costs, ActuatorDelay, apply_inertial_properties, BorinotInertialPropertiesCfg)]
+            raw_action_limit_costs, ActuatorDelay, apply_inertial_properties, BorinotInertialPropertiesCfg,
+            make_flight_randomization, BorinotFlightRandomizationCfg)]

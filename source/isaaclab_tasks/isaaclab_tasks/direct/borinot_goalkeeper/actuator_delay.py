@@ -19,10 +19,13 @@ def actuator_delay_bounds(cfg):
     """(min, max) policy-command delay in physics steps, from actuator_delay or actuator_delay_range."""
     physics_hz = cfg.physics_hz if hasattr(cfg, "physics_hz") else 1 / cfg.sim.dt
     fixed = delay_steps(cfg.actuator_delay, physics_hz)
+    if cfg.actuator_delay_range == "auto":
+        # Keep the 20 ms cap even at sample rates that do not divide it (legacy: 120 Hz).
+        return (fixed, fixed) if fixed else (0, math.floor(0.020 * physics_hz + 1e-9))
     if cfg.actuator_delay_range is None:
         return fixed, fixed
     if not isinstance(cfg.actuator_delay_range, (list, tuple)) or len(cfg.actuator_delay_range) != 2:
-        raise ValueError("actuator_delay_range must be None or (min, max) seconds.")
+        raise ValueError("actuator_delay_range must be auto, None or (min, max) seconds.")
     if fixed:
         raise ValueError("Set either actuator_delay or actuator_delay_range, not both.")
     low, high = (delay_steps(value, physics_hz, "actuator_delay_range") for value in cfg.actuator_delay_range)

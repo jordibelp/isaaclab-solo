@@ -16,6 +16,8 @@ from isaaclab.utils.math import matrix_from_quat, quat_apply_inverse, quat_from_
 from isaaclab_tasks.direct.borinot_goalkeeper.actuator_delay import ActuatorDelay, actuator_delay_bounds
 from isaaclab_tasks.direct.borinot_goalkeeper.borinot_goalkeeper_env import BorinotGoalkeeperEnv
 from isaaclab_tasks.direct.borinot.action_limits import clipped_limit_rewards, raw_action_limit_costs
+from isaaclab_tasks.direct.borinot.flight_randomization import make_flight_randomization, validate_flight_randomization
+from isaaclab_tasks.direct.borinot.flight_randomization_cfg import BorinotFlightRandomizationCfg
 from isaaclab_tasks.direct.borinot.inertial_properties import apply_inertial_properties, validate_inertial_properties
 from isaaclab_tasks.direct.borinot.inertial_properties_cfg import BorinotInertialPropertiesCfg
 from isaaclab_tasks.direct.borinot_goalkeeper.events import configure_randomization
@@ -43,6 +45,7 @@ class BorinotCmdVelEnv(DirectRLEnv):
     _step_wrench = BorinotGoalkeeperEnv._step_wrench
 
     def __init__(self, cfg: BorinotCmdVelEnvCfg, render_mode=None, **kwargs):
+        validate_flight_randomization(cfg.flight_randomization)
         validate_inertial_properties(cfg.inertial_properties)
         cfg.configure_control()  # after Hydra, before spaces/physics
         configure_randomization(cfg)
@@ -99,6 +102,11 @@ class BorinotCmdVelEnv(DirectRLEnv):
         self._actuator_commands[:, :6] = 1.0 / cfg.thrust_to_weight
         self._previous_actuator_commands = self._actuator_commands.clone()
         self._motor_alpha = 1.0 if cfg.motor_time_constant_s == 0 else 1 - math.exp(-self.physics_dt / cfg.motor_time_constant_s)
+        reset_thrust = self._hover_per_rotor
+        if cfg.control_mode in ("wrench", "model_wrench", "model_wrench_indi", "model_wrench_yawless",
+                                "model_wrench_yawless_indi", "cbrt", "cbrt_indi"):
+            reset_thrust = min(reset_thrust, reset_thrust * cfg.thrust_to_weight)
+        self._rotor_plant, self._wind = make_flight_randomization(self, reset_thrust, cfg.motor_time_constant_s)
         if cfg.control_mode == "dsam_indi":
             self._init_indi()
         elif cfg.control_mode in ("wrench", "model_wrench", "model_wrench_indi", "model_wrench_yawless", "model_wrench_yawless_indi"):
@@ -400,7 +408,8 @@ class BorinotCmdVelEnv(DirectRLEnv):
         return [inspect.getsourcefile(obj) for obj in (
             BorinotGoalkeeperEnv, configure_randomization, attach_paddle, configure_end_effector,
             IndiController, WrenchController, ModelWrenchController, ModelWrenchYawlessController, ModelWrenchIndiController, ModelWrenchYawlessIndiController, nominal_model_description, CbrtController, tracking_metrics, raw_action_limit_costs, decode_angle_actions, ActuatorDelay,
-            apply_inertial_properties, BorinotInertialPropertiesCfg)]
+            apply_inertial_properties, BorinotInertialPropertiesCfg,
+            make_flight_randomization, BorinotFlightRandomizationCfg)]
 
     def _sample_reset_attitude(self, root, env_ids):
         """Set the reset attitude before writing the root and resetting controllers."""
@@ -445,6 +454,12 @@ class BorinotCmdVelEnv(DirectRLEnv):
         self._self_contact_bodies[env_ids] = False
         self._actuator_delay.reset(env_ids)  # after _update_curriculum logged the finished episodes' delays
         self._rotor_thrust[env_ids] = self._hover_per_rotor
+        rotor = getattr(self, "_rotor_plant", None)
+        if rotor is not None:
+            self._rotor_thrust[env_ids] = rotor.reset(env_ids)
+        wind = getattr(self, "_wind", None)
+        if wind is not None:
+            wind.reset(env_ids)
         self._episode_stage[env_ids] = self.force_level
         self._base_push_steps_until_next[env_ids] = sample_steps(
             n, self.cfg.base_push_interval_range_s, self.step_dt, self.device)

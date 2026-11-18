@@ -962,6 +962,8 @@ Already-running processes do not load these edits automatically.
 
 Use `env.actuator_delay=0.02` for a fixed 20 ms policy-command delay, or
 `env.actuator_delay=0.0 'env.actuator_delay_range=[0.0,0.04]'` to sample a new
-delay per robot episode. Defaults add no delay. Inner controllers still use
+delay per robot episode. The default samples whole physics ticks from 0 to 20 ms. Inner controllers still use
 current measurements. See [timing, training and evaluation commands](ACTUATOR_DELAY.md)
 for the shared conventions and the fixed-stage goalkeeper checkpoint evaluator.
+
+See [shared flight randomization](../borinot/FLIGHT_RANDOMIZATION.md) for rotor variation, wind, gusts, and external moments.

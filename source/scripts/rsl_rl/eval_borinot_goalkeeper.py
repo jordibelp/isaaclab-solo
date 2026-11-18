@@ -299,8 +299,9 @@ def main(env_cfg, agent_cfg):
                 start = time.perf_counter()
                 rows, outcomes = evaluate(env, policy, policy_model, quota, simple)
                 summary = summarize(rows, outcomes, raw.step_dt, args_cli.seed)
-                summary["actuator_delay_s"] = (raw.cfg.actuator_delay if raw.cfg.actuator_delay_range is None
-                                               else list(raw.cfg.actuator_delay_range))
+                delay = raw._actuator_delay
+                low_s, high_s = delay.low * delay.physics_dt, delay.high * delay.physics_dt
+                summary["actuator_delay_s"] = low_s if delay.low == delay.high else [low_s, high_s]
                 summary["wall_time_s"] = time.perf_counter() - start
                 results.append(summary)
                 low, high = summary["save_fraction_ci95"]

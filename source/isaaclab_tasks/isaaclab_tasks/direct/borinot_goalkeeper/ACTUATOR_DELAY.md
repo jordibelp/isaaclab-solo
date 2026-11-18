@@ -2,16 +2,20 @@
 
 ## What is available
 
-All four Borinot tasks support `env.actuator_delay` and `env.actuator_delay_range`:
+All Borinot tasks support `env.actuator_delay` and `env.actuator_delay_range`:
 
 | Task | Delay support | Hit/save evaluation |
 |---|---|---|
 | `Borinot-Goalkeeper-Direct-v0` | All control modes; PPO and SAC | New goalkeeper evaluator |
 | `Borinot-Goalkeeper-Simple-Direct-v0` | All control modes; PPO and SAC | Same evaluator, with `--task` |
 | `Borinot-cmd-vel` | All control modes; PPO and SAC | Use its existing tracking playback, not a goalkeeper score |
+| `Borinot-goto`, `Borinot-goto-minTime` | All control modes; PPO and SAC | Use go-to playback |
 | `Borinot-Direct-v0` | Legacy rotor/torque and rotor/joint-angle interfaces | No goalkeeper shots in this task |
 
-Defaults are `actuator_delay = 0.0` and `actuator_delay_range = None`.
+Defaults are `actuator_delay = 0.0` and `actuator_delay_range = "auto"`.
+This samples uniformly at each reset over whole physics steps up to 20 ms:
+0, 5, 10, 15, or 20 ms at 200 Hz (0, 8.33, or 16.67 ms at legacy 120 Hz).
+Use `env.actuator_delay_range=null` with `env.actuator_delay=0.0` for no delay.
 Existing action and observation sizes do not change. The delay is not added to
 the actor or critic inputs. Existing checkpoint requirements still apply:
 match its algorithm, control mode, action units, observations, and physical settings.
@@ -167,9 +171,9 @@ For example, from the activated local environment:
 ```
 
 That draws 0, 5, ..., 40 ms at 200 Hz. Use the same range for the direct-control
-condition. A fixed training delay uses `env.actuator_delay=0.02` with no range.
-To test a randomized-trained policy at one fixed delay, explicitly clear the
-range (`env.actuator_delay_range=null`) if it is present in your command/config.
+condition. A positive fixed delay such as `env.actuator_delay=0.02` overrides
+`"auto"`. Clear an explicit interval with `env.actuator_delay_range=null`
+before selecting a fixed delay.
 For the legacy 120 Hz task, choose compatible endpoints, such as `[0.0,0.05]`.
 
 ## Suggested comparison

@@ -399,7 +399,10 @@ almost no goal episode would see a push. Here, each reset instead starts the
 push clock at a random point of that interval: the first push may begin at
 any tick. Later pushes keep the normal spacing.
 
-To train or replay without pushes, set `env.forces_applied_to_base_curriculum=[0.0]`.
+To train or replay without vertical pushes, set `env.forces_applied_to_base_curriculum=[0.0]`.
+[Shared flight randomization](../borinot/FLIGHT_RANDOMIZATION.md) covers motor response, thrust,
+yaw calibration, and policy delay. Wind, gusts, and moments are independent of the vertical
+pushes; add them with `env.flight_randomization.wind_enabled=True`.
 A list with no positive force skips push sampling entirely, so the random
 stream matches a push-free run.
 

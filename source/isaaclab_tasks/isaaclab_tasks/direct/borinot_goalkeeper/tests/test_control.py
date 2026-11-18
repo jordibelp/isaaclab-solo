@@ -134,6 +134,7 @@ def test_invalid_control_settings_fail_before_simulation(field, value):
 
 def action_env(mode, hold_arm=False, motor_time_constant_s=None, physics_hz=200):
     cfg = config()
+    cfg.actuator_delay_range = None  # This fixture isolates actuator behavior from delay.
     cfg.control_mode, cfg.hold_arm = mode, hold_arm
     cfg.physics_hz = physics_hz
     if motor_time_constant_s is not None:

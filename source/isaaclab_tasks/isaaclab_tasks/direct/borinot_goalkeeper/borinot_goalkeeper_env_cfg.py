@@ -11,6 +11,7 @@ from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.utils import configclass
 
 from .events import BorinotEventCfg
+from isaaclab_tasks.direct.borinot.flight_randomization_cfg import BorinotFlightRandomizationCfg
 from isaaclab_tasks.direct.borinot.inertial_properties_cfg import BorinotInertialPropertiesCfg
 from isaaclab_tasks.controllers.borinot_angles import angle_action_size
 from isaaclab_tasks.controllers.borinot_indi import IndiControllerCfg
@@ -21,6 +22,7 @@ from isaaclab_tasks.controllers.borinot_cbrt import CbrtControllerCfg
 
 @configclass
 class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
+    flight_randomization: BorinotFlightRandomizationCfg = BorinotFlightRandomizationCfg()
     inertial_properties: BorinotInertialPropertiesCfg = BorinotInertialPropertiesCfg()
     control_mode = "thrust_and_torque_control"
     # Model-wrench family, including both hybrids: include the prior physics tick's
@@ -176,7 +178,7 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     # Policy-command latency [s], in whole physics steps (5 ms at 200 Hz). The old command reaches
     # INDI/PI/PD/PID and the motors; those loops still use current measurements. See README.
     actuator_delay = 0.0  # fixed for every episode, e.g. env.actuator_delay=0.02 at evaluation
-    actuator_delay_range = None  # (min, max) [s]: a new uniform delay per environment at every robot reset
+    actuator_delay_range = "auto"  # sample from whole physics ticks within 0–20 ms
     critic_obs_includes_rotor_omega = False  # append six current post-lag rotor speed magnitudes (rad/s), critic only
     # Eagle/PX4 motor order, body-frame metres, 0.185 m radius; spin is the body-yaw torque sign.
     # Hardware profile: hidro-iri/eagle_mpc_lib@96c65ab, yaml/borinot_flying_arm_2/platform/borinot.yaml.
