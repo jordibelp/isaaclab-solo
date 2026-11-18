@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import math
 import random
+import re
+import shlex
 from pathlib import Path
 
 TASKS = {
@@ -59,9 +61,44 @@ def integer(value, name, low=0):
     return value
 
 
+def split_env_overrides(text):
+    if not isinstance(text, str):
+        raise ValueError("Hydra overrides must be a text line.")
+    tokens = shlex.split(text)
+    for token in tokens:
+        if not re.fullmatch(r"env(?:\.[A-Za-z_][A-Za-z0-9_]*)+", token.partition("=")[0]) or "=" not in token:
+            raise ValueError(f"Expected an env.path=value override, got {token!r}.")
+    return tokens
+
+
+def parse_env_overrides(text):
+    """Parse Hydra values in order, without launching Hydra or a shell."""
+    tokens = split_env_overrides(text)
+    if not tokens:
+        return []
+    from hydra.core.override_parser.overrides_parser import OverridesParser
+    from hydra.errors import HydraException
+
+    result = []
+    try:
+        overrides = OverridesParser.create().parse_overrides(tokens)
+        for override in overrides:
+            if override.is_sweep_override():
+                raise ValueError("Hydra sweeps are not supported here. Use the GUI conditions for delay sweeps.")
+            value = override.value()
+            for key in reversed(override.key_or_group.split(".")[1:]):
+                value = {key: value}
+            result.append(value)
+    except HydraException as exc:
+        raise ValueError(str(exc)) from exc
+    return result
+
+
 def validate(recipe, base, *, require_weights=True):
     fields(recipe, ("task", "seed", "stage", "episodes", "num_envs", "replay_count", "scenario",
-                    "env", "policies", "conditions"), "recipe")
+                    "env", "hydra_overrides", "policies", "conditions"), "recipe")
+    hydra_overrides = recipe.get("hydra_overrides", "")
+    split_env_overrides(hydra_overrides)
     task = recipe.get("task", "Borinot-goto-minTime")
     if task not in TASKS:
         raise ValueError(f"Unknown task {task!r}. Choose from: {', '.join(TASKS)}.")
@@ -153,7 +190,7 @@ def validate(recipe, base, *, require_weights=True):
             "stage": integer(recipe.get("stage", 0), "stage"), "episodes": episodes,
             "num_envs": min(episodes, integer(recipe.get("num_envs", 64), "num_envs", 1)),
             "replay_count": min(episodes, replay), "scenario": scenario, "env": shared,
-            "policies": policies, "conditions": conditions}
+            "hydra_overrides": hydra_overrides.strip(), "policies": policies, "conditions": conditions}
 
 
 def plan_scenarios(spec):

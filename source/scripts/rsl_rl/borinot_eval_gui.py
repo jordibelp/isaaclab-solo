@@ -164,6 +164,15 @@ class EvalWindow:
         self.box_line = self.line(("Half-extents (m)", self.extent), ("Deadline range (s)", self.time_range))
         self.shared, self.box_center = {}, [0., 0., 1.5]
         self.body.pack_start(button("Shared environment config…", self.edit_shared), False, False, 0)
+        self.hydra_overrides = entry(width=50)
+        self.hydra_overrides.set_placeholder_text("env.reset_robot_on_tilt_threshold=False")
+        self.hydra_overrides.set_tooltip_text(
+            "Space-separated env.path=value settings for every policy and condition. Dedicated GUI controls take priority."
+        )
+        row = Gtk.Box(spacing=8)
+        row.pack_start(Gtk.Label(label="Hydra env overrides"), False, False, 0)
+        row.pack_start(self.hydra_overrides, True, True, 0)
+        self.body.pack_start(row, False, False, 0)
 
         self.section("2 · Checkpoints")
         self.policy_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
@@ -344,6 +353,7 @@ class EvalWindow:
         return {"task": task, "episodes": int(self.trials.get_text()), "num_envs": int(self.batch.get_text()),
                 "seed": int(self.seed.get_text()), "stage": int(self.stage.get_text()), "replay_count": int(self.replay.get_text()),
                 "scenario": scenario, "env": self.shared, "conditions": conditions,
+                "hydra_overrides": self.hydra_overrides.get_text(),
                 "policies": [row.values(kind) for row in self.policies]}
 
     def checked_recipe(self):
@@ -354,6 +364,7 @@ class EvalWindow:
         for row in list(self.policies):
             self.remove_policy(row)
         self.shared = spec["env"]
+        self.hydra_overrides.set_text(spec["hydra_overrides"])
         self.task.set_active_id(spec["task"])
         for widget, key in ((self.stage, "stage"), (self.seed, "seed"), (self.trials, "episodes"),
                             (self.batch, "num_envs"), (self.replay, "replay_count")):

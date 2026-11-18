@@ -9,7 +9,7 @@ import traceback
 from pathlib import Path
 
 from borinot_eval.metrics import OUTCOMES, SAVE, summarize
-from borinot_eval.spec import apply_condition, read_json, write_json
+from borinot_eval.spec import apply_condition, parse_env_overrides, read_json, write_json
 from isaaclab.app import AppLauncher
 
 parser = argparse.ArgumentParser(description=__doc__)
@@ -164,6 +164,8 @@ def make_cfg(spec, policy, condition):
     agent = load_cfg_from_registry(task, policy["agent"])
     config_overrides(cfg, spec["env"])
     config_overrides(cfg, policy.get("env", {}))
+    for override in parse_env_overrides(spec.get("hydra_overrides", "")):
+        config_overrides(cfg, override)
     config_overrides(agent, policy.get("runner", {}))
     if hasattr(cfg, "configure_control"):
         if "control_mode" in policy:

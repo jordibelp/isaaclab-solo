@@ -19,6 +19,11 @@ system Python (with GTK 3/PyGObject installed):
    policy rate, agent and observation settings. Use the training config rather
    than the filename. If you have them, load a saved recipe instead. The config
    buttons let you set additional shared environment and per-policy settings.
+   For quick changes, paste space-separated settings into **Hydra env overrides**,
+   for example `env.reset_robot_on_tilt_threshold=False`. The line is saved
+   as `hydra_overrides` in the recipe and applies to every policy and condition.
+   It takes priority over the environment JSON. Dedicated controls for the
+   scenario, policy rate, stage, delay, and randomizations still take priority.
 3. Select each condition to set its delay and perturbations. Fixed delay is
    written in milliseconds (for example `20`). A range is written `min:max`
    (for example `0:20`). With no boxes checked, you get nominal physics with

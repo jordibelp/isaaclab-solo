@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 from borinot_eval.metrics import paired_goal_changes
-from borinot_eval.spec import plan_scenarios, read_json, validate, write_json
+from borinot_eval.spec import parse_env_overrides, plan_scenarios, read_json, validate, write_json
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
@@ -122,6 +122,8 @@ def main():
     try:
         spec = validate(read_json(recipe_path), recipe_path.resolve().parent, require_weights=not args.from_results)
         plan_scenarios(spec)
+        if not args.from_results:
+            parse_env_overrides(spec["hydra_overrides"])
     except (ValueError, TypeError, KeyError, OSError) as exc:
         parser.error(str(exc))
     if args.from_results:

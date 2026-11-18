@@ -136,3 +136,19 @@ def test_report_escapes_checkpoint_labels_as_data(tmp_path):
     html = (tmp_path / "report.html").read_text()
     assert "</script><script>unsafe</script>" not in html
     assert "\\u003c/script>" in html and "&lt;/script&gt;" in html
+
+
+def test_hydra_overrides_parse_values_and_keep_order(tmp_path):
+    from borinot_eval.spec import parse_env_overrides
+
+    text = ("env.reset_robot_on_tilt_threshold=True env.reset_robot_on_tilt_threshold=False "
+            "'env.flight_height_range_m=[0.15, 20.0]' env.flight_randomization.motor_time_constant_range_s=null")
+    spec = validate(sample_recipe(tmp_path) | {"hydra_overrides": text}, tmp_path)
+    assert spec["hydra_overrides"] == text
+    assert parse_env_overrides(text) == [
+        {"reset_robot_on_tilt_threshold": True}, {"reset_robot_on_tilt_threshold": False},
+        {"flight_height_range_m": [.15, 20.]}, {"flight_randomization": {"motor_time_constant_range_s": None}},
+    ]
+    for invalid in ("env.physics_hz=100,200", "agent.seed=1", "~env.physics_hz", "env.physics_hz=["):
+        with pytest.raises(ValueError):
+            parse_env_overrides(invalid)
