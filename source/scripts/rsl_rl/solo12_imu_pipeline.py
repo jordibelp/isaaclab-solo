@@ -50,8 +50,9 @@ def apply_observation_contract(env_cfg, contract: dict) -> None:
         if contract["command_dim"] != env_cfg.command_dim:
             raise ValueError("Incompatible Borinot command task.")
         for name in expected:
-            if name not in ("family", "command_dim"):
+            if name not in ("family", "command_dim", "control_mode"):
                 setattr(env_cfg, name, contract[name])
+        env_cfg.control_mode = contract.get("control_mode", "thrust_and_torque_control")
         env_cfg.refresh_runtime_dependent_config()
         return
     for name in ENV_FIELDS:

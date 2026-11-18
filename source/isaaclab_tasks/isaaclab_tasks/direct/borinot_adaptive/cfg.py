@@ -33,9 +33,10 @@ class AdaptiveConfig:
 
     def refresh_base_imu_dimensions(self):
         import math
-        if (self.control_mode != "thrust_and_torque_control" or self.hold_arm or self.sac_action_mapping
+        if (self.control_mode not in ("thrust_and_torque_control", "thrust_and_PD_joint_pos_control")
+                or self.action_space != 8 or self.hold_arm or self.sac_action_mapping
                 or getattr(self, "remove_time_from_actor_obs", False)):
-            raise ValueError("Adaptive v1 requires direct PPO thrust + torque and the complete command.")
+            raise ValueError("Adaptive Borinot requires PPO with six thrust actions, two scalar joint torque or PD position actions, and the complete command.")
         if self.base_imu_history_policy_steps < 1 or len(self.sensor_std) != 6 or not all(
                 math.isfinite(v) and v >= 0 for v in self.sensor_std):
             raise ValueError("Invalid adaptive history or sensor noise.")
@@ -52,12 +53,16 @@ class AdaptiveConfig:
         }[self.policy_model]
 
     def adaptation_contract(self):
-        return dict(family="borinot-direct-v2", command_dim=self.command_dim,
+        contract = dict(family="borinot-direct-v2", command_dim=self.command_dim,
                     physics_hz=self.physics_hz, policy_hz=self.policy_hz, sensor_std=list(self.sensor_std),
                     base_imu_history_policy_steps=self.base_imu_history_policy_steps,
                     rotor_action_scale=self.rotor_action_scale, action_clamp=self.action_clamp,
                     remove_thrust_clipping=self.remove_thrust_clipping,
                     apply_tanh_to_latent=self.apply_tanh_to_latent)
+        # Legacy contracts omit the mode and always mean direct torque.
+        if self.control_mode != "thrust_and_torque_control":
+            contract["control_mode"] = self.control_mode
+        return contract
 
 
 @configclass

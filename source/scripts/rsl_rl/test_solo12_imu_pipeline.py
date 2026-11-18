@@ -506,3 +506,28 @@ def test_standalone_ppo_checkpoint_keeps_activation_without_mutating_existing_in
     c.cfg.apply_tanh_to_latent = not expected
     pipeline.restore_latent_activation_from_checkpoint(c.cfg, str(path))
     assert c.cfg.apply_tanh_to_latent == expected
+
+
+@pytest.mark.parametrize("saved_mode", [None, "thrust_and_PD_joint_pos_control"])
+def test_borinot_contract_restores_joint_action_semantics(saved_mode):
+    torque = "thrust_and_torque_control"
+    pd = "thrust_and_PD_joint_pos_control"
+
+    class BorinotConfig(SimpleNamespace):
+        def adaptation_contract(self):
+            contract = dict(family="borinot-direct-v2", command_dim=self.command_dim, policy_hz=self.policy_hz)
+            if self.control_mode != torque:
+                contract["control_mode"] = self.control_mode
+            return contract
+
+        def refresh_runtime_dependent_config(self):
+            self.drive_stiffness = 9.0 if self.control_mode == pd else 0.0
+
+    cfg = BorinotConfig(command_dim=33, policy_hz=100, control_mode=pd if saved_mode is None else torque)
+    saved = dict(family="borinot-direct-v2", command_dim=33, policy_hz=50)
+    if saved_mode is not None:
+        saved["control_mode"] = saved_mode
+    pipeline.apply_observation_contract(cfg, saved)
+    assert cfg.control_mode == (saved_mode or torque)
+    assert cfg.drive_stiffness == (9.0 if saved_mode == pd else 0.0)
+    assert cfg.adaptation_contract() == saved

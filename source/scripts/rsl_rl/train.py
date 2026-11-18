@@ -2964,6 +2964,27 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     log_dir = os.path.join(log_root_path, log_dir_name)
 
+    should_resume = (agent_cfg.resume or agent_cfg.algorithm.class_name == "Distillation") and not args_cli.reuse_mlp
+    resume_path = None
+    if should_resume or args_cli.reuse_mlp or dagger_adapter_checkpoint_arg is not None:
+        resume_path = _resolve_resume_path(
+            log_root_path,
+            agent_cfg,
+            dagger_adapter_checkpoint_arg if dagger_adapter_checkpoint_arg is not None else args_cli.checkpoint,
+        )
+    input_checkpoint_name = _infer_input_checkpoint_name(resume_path)
+    if should_resume and str(getattr(env_cfg, "policy_model", "")).startswith("base_imu_"):
+        from solo12_imu_pipeline import restore_latent_activation_from_checkpoint
+
+        requested_perception = env_cfg.priv_critic_includes_perception_encoding
+        restore_latent_activation_from_checkpoint(env_cfg, resume_path)
+        if requested_perception and not env_cfg.priv_critic_includes_perception_encoding:
+            raise ValueError(
+                "Full PPO optimizer resume cannot add critic perception inputs. Enable them for a fresh teacher "
+                "or a student initialized with --init-from-dagger-adapter."
+            )
+        _sync_base_imu_policy_cfg_from_env_cfg(env_cfg, agent_cfg)
+
     if isinstance(env_cfg, ManagerBasedRLEnvCfg):
         env_cfg.export_io_descriptors = args_cli.export_io_descriptors
     else:
@@ -2999,27 +3020,6 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     if isinstance(env.unwrapped, DirectMARLEnv):
         env = multi_agent_to_single_agent(env)
-
-    should_resume = (agent_cfg.resume or agent_cfg.algorithm.class_name == "Distillation") and not args_cli.reuse_mlp
-    resume_path = None
-    if should_resume or args_cli.reuse_mlp or dagger_adapter_checkpoint_arg is not None:
-        resume_path = _resolve_resume_path(
-            log_root_path,
-            agent_cfg,
-            dagger_adapter_checkpoint_arg if dagger_adapter_checkpoint_arg is not None else args_cli.checkpoint,
-        )
-    input_checkpoint_name = _infer_input_checkpoint_name(resume_path)
-    if should_resume and str(getattr(env_cfg, "policy_model", "")).startswith("base_imu_"):
-        from solo12_imu_pipeline import restore_latent_activation_from_checkpoint
-
-        requested_perception = env_cfg.priv_critic_includes_perception_encoding
-        restore_latent_activation_from_checkpoint(env_cfg, resume_path)
-        if requested_perception and not env_cfg.priv_critic_includes_perception_encoding:
-            raise ValueError(
-                "Full PPO optimizer resume cannot add critic perception inputs. Enable them for a fresh teacher "
-                "or a student initialized with --init-from-dagger-adapter."
-            )
-        _sync_base_imu_policy_cfg_from_env_cfg(env_cfg, agent_cfg)
 
     if args_cli.video:
         video_kwargs = {
