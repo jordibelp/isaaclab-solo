@@ -9,22 +9,16 @@ from isaaclab_tasks.direct.borinot_cmd_vel.borinot_cmd_vel_env import BorinotCmd
 from isaaclab_tasks.direct.borinot_goto.borinot_goto_env import BorinotGoToEnv
 
 
-def attitude6(quat):
-    # First two columns of R_WB, column-major (body x then body y in world).
-    return matrix_from_quat(quat)[:, :, :2].transpose(1, 2).flatten(1)
-
-
 class AdaptiveMeasurements:
     def __init__(self, cfg, **kwargs):
         super().__init__(cfg, **kwargs)
         n = self.num_envs
         self._history = torch.zeros(n, 1 if cfg.policy_model == "base_imu_teacher" else cfg.base_imu_history_length,
-                                    27, device=self.device)
-        self._clean = torch.zeros(n, 19, device=self.device)
+                                    cfg.base_imu_history_sample_dim, device=self.device)
+        self._clean = torch.zeros(n, cfg.base_imu_history_sample_dim - cfg.action_space, device=self.device)
         self._measured_quat = torch.zeros(n, 4, device=self.device)
         self._last_disturbance = torch.zeros(n, 6, device=self.device)
         self._static = self._read_startup_properties()
-        self._gravity_w = torch.tensor(cfg.sim.gravity, device=self.device)
         self._sample_after_reset = None
 
     def _read_startup_properties(self):
@@ -63,17 +57,22 @@ class AdaptiveMeasurements:
         d = self.robot.data
         quat = d.root_quat_w[ids]
         gyro = d.root_ang_vel_b[ids]
-        acc = quat_apply_inverse(quat, d.body_lin_acc_w[ids, self.base_id] - self._gravity_w)
+        acc = quat_apply_inverse(quat, d.body_lin_acc_w[ids, self.base_id])
         q = d.joint_pos[ids][:, self.joint_ids]
         dq = d.joint_vel[ids][:, self.joint_ids]
-        pos = d.root_pos_w[ids] - self.scene.env_origins[ids]
-        self._clean[ids] = torch.cat((gyro, acc, q, dq, attitude6(quat), pos), -1)
-        sg, sa, sq, sd, sr, sp = self.cfg.sensor_std
-        mq = quat_box_plus(quat, sr * torch.randn_like(gyro))
+        height = d.root_pos_w[ids, 2:3]
+        clean = torch.cat((gyro, acc, q, dq, matrix_from_quat(quat).flatten(1), height), -1)
+        self._clean[ids] = clean
+        sg, sa, sq, sd, sr, sz = self.cfg.sensor_std
+        if any(self.cfg.sensor_std):
+            mq = quat_box_plus(quat, sr * torch.randn_like(gyro))
+            measured = torch.cat((gyro + sg * torch.randn_like(gyro), acc + sa * torch.randn_like(acc),
+                                  q + sq * torch.randn_like(q), dq + sd * torch.randn_like(dq),
+                                  matrix_from_quat(mq).flatten(1), height + sz * torch.randn_like(height)), -1)
+        else:
+            mq, measured = quat, clean
         self._measured_quat[ids] = mq
-        sample = torch.cat((gyro + sg * torch.randn_like(gyro), acc + sa * torch.randn_like(acc),
-                            q + sq * torch.randn_like(q), dq + sd * torch.randn_like(dq),
-                            attitude6(mq), pos + sp * torch.randn_like(pos), self.actions[ids]), -1)
+        sample = torch.cat((measured, self.actions[ids]), -1)
         self._history[ids, -1] = sample
 
     def _sample_physics_events(self):
@@ -115,8 +114,10 @@ class AdaptiveMeasurements:
 
 class GoToAdaptiveEnv(AdaptiveMeasurements, BorinotGoToEnv):
     def _adaptation_command(self, current):
-        target = self._goal_position_w - self.scene.env_origins
-        delta = quat_apply_inverse(self._measured_quat, target - current[:, 16:19])
+        target = self._goal_position_w
+        # The command still needs relative XY; absolute XY is not part of the sensor sample.
+        measured_pos = torch.cat((self.robot.data.root_pos_w[:, :2], current[:, -9:-8]), -1)
+        delta = quat_apply_inverse(self._measured_quat, target - measured_pos)
         exact = quat_apply_inverse(self.robot.data.root_quat_w, self._goal_position_w - self.robot.data.root_pos_w)
         left = (self._goal_deadline_steps - self._episode_steps).clamp_min(0)
         clocks = torch.stack((left / self._goal_deadline_steps, left * self.step_dt), -1)

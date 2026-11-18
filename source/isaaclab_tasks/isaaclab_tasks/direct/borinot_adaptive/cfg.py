@@ -8,20 +8,20 @@ from isaaclab_tasks.direct.borinot_goto.borinot_goto_env_cfg import BorinotGoToE
 class AdaptiveConfig:
     policy_model = "base_imu_teacher"
     base_imu_history_policy_steps = 15
-    base_imu_history_sample_dim = 27
+    base_imu_history_sample_dim = 28
     base_imu_tcn_channels = 64
     base_imu_tcn_kernel_size = 5
     base_imu_tcn_activation = "elu"
     base_imu_tcn_latent_dim = 32
-    teacher_encoder_obs_dim = 65
+    teacher_encoder_obs_dim = 66
     teacher_encoder_hidden_dims = [256, 128, 64]
     teacher_latent_dim = 32
     apply_tanh_to_latent = True
     priv_critic_includes_perception_encoding = False
     priv_critic_detached_perception_encoding = True
     feed_history_encoding_to_critic = False
-    # std per axis: gyro, specific force, joint position/velocity, attitude, position
-    sensor_std = (0.02, 0.15, 0.002, 0.03, 0.005, 0.003)
+    # std per axis: gyro, linear acceleration, joint position/velocity, attitude, height
+    sensor_std = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
 
     def configure_control(self):
         super().configure_control()
@@ -51,7 +51,7 @@ class AdaptiveConfig:
         }[self.policy_model]
 
     def adaptation_contract(self):
-        return dict(family="borinot-direct-v1", command_dim=self.command_dim,
+        return dict(family="borinot-direct-v2", command_dim=self.command_dim,
                     physics_hz=self.physics_hz, policy_hz=self.policy_hz, sensor_std=list(self.sensor_std),
                     base_imu_history_policy_steps=self.base_imu_history_policy_steps,
                     rotor_action_scale=self.rotor_action_scale, action_clamp=self.action_clamp,

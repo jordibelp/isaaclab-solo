@@ -39,12 +39,17 @@ def observation_contract(env_cfg) -> dict:
 
 def apply_observation_contract(env_cfg, contract: dict) -> None:
     if hasattr(env_cfg, "adaptation_contract") or contract.get("family"):
-        if contract.get("family") != "borinot-direct-v1" or not hasattr(env_cfg, "adaptation_contract"):
+        if not hasattr(env_cfg, "adaptation_contract"):
             raise ValueError("Incompatible adaptation observation family.")
         env_cfg.refresh_runtime_dependent_config()
+        expected = env_cfg.adaptation_contract()
+        if contract.get("family") != expected["family"]:
+            raise ValueError(
+                f"Incompatible adaptation observation family: expected {expected['family']}, got {contract.get('family')}."
+            )
         if contract["command_dim"] != env_cfg.command_dim:
             raise ValueError("Incompatible Borinot command task.")
-        for name in env_cfg.adaptation_contract():
+        for name in expected:
             if name not in ("family", "command_dim"):
                 setattr(env_cfg, name, contract[name])
         env_cfg.refresh_runtime_dependent_config()

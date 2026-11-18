@@ -21,28 +21,28 @@
 \begin{document}
 \maketitle
 \section*{Decision}
-Give the actor three inputs: the latest noisy measurement, a learned summary of the recent past, and the current command. A change of goal can change the action immediately. It need not first change our estimate of mass or wind. The fast measurement path also lets the actor react to a turn before the history contains enough evidence to explain it.
+Give the actor three inputs: the latest measurement, a learned summary of the recent past, and the current command. A change of goal can change the action immediately. It need not first change our estimate of mass or wind. The fast measurement path also lets the actor react to a turn before the history contains enough evidence to explain it.
 
 We use the same plant, objectives, resets and curricula as the respective Borinot tasks. The policy emits six rotor requests and two arm torques. Rotor commands map to thrust around nominal hover; the simulator still applies physical limits, delay, motor dynamics and the rotor geometry. The two arm requests are in N\,m, not position targets. There is no hand-designed attitude, rate or joint PD controller between the policy and these commands.
 
 \section*{One actor head, two ways to see}
-Let $x_t$ be the latest available 27-value sensor/action sample, $H_t$ the ordered window ending at $x_t$, $p_t$ the 65 simulator-only features, and $c_t$ the deployable command. Brackets mean concatenation. At a policy tick:
+Let $x_t$ be the latest available 28-value sensor/action sample, $H_t$ the ordered window ending at $x_t$, $p_t$ the 66 privileged features, and $c_t$ the deployable command. Brackets mean concatenation. At a policy tick:
 \begin{align}
 z_t &= E(p_t) &&\text{teacher},\\
 \hat z_t &= T(H_t) &&\text{student},\\
 \mu_t &= A([z_t\ \text{or}\ \hat z_t, x_t,c_t]). &&
 \end{align}
-The teacher and student see the \emph{same} noisy current sample on their direct paths. The teacher cannot substitute an exact goal vector for the noisy command on that path. The critic uses $V([p_t,x_t,c_t^*])$, where $c_t^*$ uses exact pose for GoTo. It sees both what happened and what the actor measured. By default it has no encoder and no gradient into perception. This differs deliberately from the detached-latent critic in the reference Solo12 run.
+The teacher and student see the \emph{same} current sample on their direct paths. The critic uses $V([p_t,x_t,c_t^*])$, where $c_t^*$ uses exact pose for GoTo. The optional detached-latent setting also gives the critic the actor encoding, without sending value gradients into that encoder.
 
 \section*{What the robot measures}
-In order, each $x_t$ contains body angular velocity (3), accelerometer specific force (3), joint angles (2), joint velocities (2), attitude (6), arena-local position (3), and previous issued action (8). Joint order follows the plant (thigh, calf). The attitude entries are the first two columns of the body-to-world rotation, one column at a time. Unlike Euler angles, they have no wrap discontinuity. Position includes height; a separate height would duplicate it. A fixed arena origin and externally estimated pose are assumptions, not free information.
+In order, each $x_t$ contains body angular velocity (3), body-frame kinematic linear acceleration (3), joint angles (2), joint velocities (2), attitude (9), world height (1), and previous issued action (8). Joint order follows the plant (thigh, calf). Attitude is the full body-to-world rotation matrix flattened row by row, as in normal CmdVel and GoTo. Absolute XY is not part of the observation or history.
 
-The accelerometer proxy measures $R_{WB}^{\top}(a_{\rm CoM}^W-g^W)$: it reads about $+9.81$ along body $z$ in level hover, not zero. It assumes a sensor at the base centre of mass; a displaced real IMU needs a lever-arm correction. Body linear velocity is \emph{not} a student input. Position history makes translation observable without assuming that acceleration alone determines velocity.
+The model receives $R_{WB}^{\top}a_{\rm CoM}^W$, not accelerometer specific force. It therefore reads zero in steady hover, and matches the definition of the optional acceleration observation in normal CmdVel. The student receives no direct linear velocity or horizontal position history; the teacher and critic still see true body-frame linear velocity.
 
-We perturb gyro, specific force, joint angle, joint velocity, attitude and position independently at each acquisition. Initial per-axis standard deviations are respectively $0.02$ rad/s, $0.15$ m/s$^2$, $0.002$ rad, $0.03$ rad/s, $0.005$ rad and $0.003$ m. Attitude noise is a small rotation, not independent noise on matrix entries. The known issued action is not corrupted. These are starting values, not fits to a Borinot log. They do not model mocap latency, bias drift, dropouts or correlated filter errors.
+All six observation noise standard deviations default to zero for comparison with the normal tasks. Optional per-axis Gaussian noise can still be enabled for gyro, linear acceleration, joints, attitude (as a rotation) and height. The issued action is not corrupted.
 
 \section*{Commands and timing}
-For GoTo we convert the world goal into a displacement using the \emph{same measured position and attitude} as the current sensor sample. We append remaining time as an episode fraction and in seconds. The critic uses exact displacement and the same clocks. For velocity tracking the four numbers are requested heading-frame $v_x,v_y$, world $v_z$ and world-$z$ angular velocity. They are instructions, not measured velocities. Neither family feeds commands to the encoder.
+For GoTo we convert the world goal into a displacement using the current pose (including the same height and attitude as the sensor sample). We append remaining time as an episode fraction and in seconds. The critic uses exact displacement and the same clocks. For velocity tracking the four numbers are requested heading-frame $v_x,v_y$, world $v_z$ and world-$z$ angular velocity. They are instructions, not measured velocities. Neither family feeds commands to the encoder.
 
 The default policy runs at 100 Hz; sensors sample at 200 Hz. The 31 samples contain 30 intervals: 150 ms, including both endpoints. Each completed substep records the action issued for that interval, before unknown actuator delay. We never use the next action. Reset clears only the affected vehicle's history, places the reset sample at the last index, and sets action memory to zero. Re-reading an observation does not advance the window or redraw its noise.
 
@@ -51,7 +51,7 @@ These are values applied to the simulation or read back from it, not nominal con
 \begin{center}\small
 \begin{tabular}{@{}lr@{}}
 \toprule Feature group & Width\\\midrule
-Clean gyro, specific force, joints, attitude, position & 19\\
+Clean gyro, linear acceleration, joints, attitude, height & 20\\
 True base linear velocity in body axes & 3\\
 Total mass, base mass (kg) & 2\\
 Base inertia, six entries (kg\,m$^2$) & 6\\
@@ -62,7 +62,7 @@ Static, dynamic, viscous joint friction pairs & 6\\
 Episode command delay (s) & 1\\
 Applied external force and moment & $3+3$\\
 Realized rotor thrust / nominal rotor hover & 6\\\midrule
-Total & 65\\\bottomrule
+Total & 66\\\bottomrule
 \end{tabular}
 \end{center}
 The inertia entries are $xx,yy,zz,xy,xz,yz$ from the sampled base tensor, not the attitude-dependent inertia of the entire moving arm. The six $k_f$ values and shared $k_m$ are divided by their nominal coefficients; the gains are then order one, not tiny SI numbers. The lag feature is the actual discrete coefficient $1-\exp(-\Delta t/\tau_i)$. An instantaneous rotor has coefficient one. No fictional PID gains are included. Friction uses the simulator's native semantics; missing components are zero, and 4.5 static friction is not the same physical quantity as 5.x friction effort.
@@ -72,11 +72,11 @@ The wrench is the last applied push plus wind drag and external moment, in the b
 \section*{Learning and handoff}
 We checked the saved \href{https://wandb.ai/jordibelp/borinotIsaacLab/runs/etiezqty}{Solo12 teacher run etiezqty}. Its encoder uses 256--128--64 hidden units with ELU and a 32-value tanh output. Its actor and critic each use 512--256--128, not the smaller generic two-feet defaults. We reuse those widths, not the weights. The student reuses the Solo12 causal TCN: four left-padded convolutions, 64 channels, kernel five, dilations 1,1,2,4, ELU; flatten the window and project to the bounded latent. We run the TCN every policy tick. This is not the asynchronous deployment rate in \href{https://arxiv.org/html/2107.04034v1}{Kumar et al., Rapid Motor Adaptation (2021)}.
 
-\textbf{A. Teacher PPO.} Jointly train the privileged encoder and action head with the task reward. Train the direct privileged value network and exploration scale. The critic receives 97 values for GoTo or 96 for velocity. The normalized actor bypass called \texttt{command\_dim} in the shared code includes \emph{both} $x_t$ and the actual command: 32 or 31 values.
+\textbf{A. Teacher PPO.} Jointly train the privileged encoder and action head with the task reward. Train the direct privileged value network and exploration scale. The critic receives 99 base values for GoTo or 98 for velocity. The normalized actor bypass called \texttt{command\_dim} in the shared code includes \emph{both} $x_t$ and the actual command: 33 or 32 values.
 
 \textbf{B. DAgger.} Execute the student, then label states it actually visits with the frozen teacher. Aggregate examples across rollouts. Fit the TCN with latent MSE plus $0.25$ times action-mean MSE through the frozen head. Thus latent error matters most where it changes control, but action agreement alone cannot hide an arbitrary encoding. The action loss is on network outputs before plant clipping, not on measured torques. The shared trainer also permits a separately trainable student head; this is not the default.
 
-\textbf{C. Student PPO.} Initialize from the fitted TCN, teacher head (or the explicitly fitted student head), teacher critic, exploration scale and matching normalization slices. Use a fresh optimizer; allow the networks to change. The history contributes $31\times27=837$ inputs. The complete student observation is 869 for GoTo or 868 for velocity; the critic never needs the history. Keep training-distribution overrides and curriculum stage explicit across launches. The companion README provides exact commands.
+\textbf{C. Student PPO.} Initialize from the fitted TCN, teacher head (or the explicitly fitted student head), teacher critic, exploration scale and matching normalization slices. Use a fresh optimizer; allow the networks to change. The history contributes $31\times28=868$ inputs. The complete student observation is 901 for GoTo or 900 for velocity; the critic does not receive raw history. Keep training-distribution overrides and curriculum stage explicit across launches. The companion README provides exact commands.
 
 \section*{What would count as successful adaptation?}
 Short flight histories do not uniquely identify all physical parameters. For example, a heavier vehicle and weaker rotors can produce the same vertical acceleration. At constant hover, added mass and a steady downward push can look alike. The latent should predict the \emph{control correction}, not necessarily a separately calibrated mass, thrust constant and wind vector. Clean instantaneous teacher features can make the teacher stronger than any causal student; a new gust is a useful test of this limit.

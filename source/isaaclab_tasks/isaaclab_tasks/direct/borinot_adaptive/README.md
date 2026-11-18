@@ -1,6 +1,8 @@
 # Adaptive direct-actuator Borinot
 
-Two tasks, one observation contract. See **borinot-adaptation.tex** for signal order, frames, timing, observability and experiment design. No geometric controller or allocation inverse is in the action path. These tasks require motion-capture-quality pose, an IMU and encoders; they are not IMU-only.
+Two tasks, one observation contract. See **borinot-adaptation.tex** for signal order, frames, timing, observability and experiment design. No geometric controller or allocation inverse is in the action path. Observations are clean by default: body-frame kinematic linear acceleration, the full flattened rotation matrix, and world height (no absolute XY in the sensor history). GoTo still receives the relative goal and deadline. The student still has no direct linear velocity; this is not an identical-input baseline. Hardware would need estimated pose and kinematic acceleration, not just raw IMU and encoder samples.
+
+This is observation contract `borinot-direct-v2`. Earlier adaptive teacher, DAgger and student checkpoints use a different input layout; use the old revision to play them or start a fresh teacher under v2.
 
 From the IsaacLab root, with the usual environment activated:
 
