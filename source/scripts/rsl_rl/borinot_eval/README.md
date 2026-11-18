@@ -28,6 +28,8 @@ system Python (with GTK 3/PyGObject installed):
    written in milliseconds (for example `20`). A range is written `min:max`
    (for example `0:20`). With no boxes checked, you get nominal physics with
    only the selected delay. Use `0` and `20` for the baseline and stress test.
+   **+ Condition** copies the selected delay and checkboxes into a new, separately
+   named condition. Change the new copy without affecting the original.
 4. Run. **Open report** shows the metrics and side-by-side pose replay. The
    panels share a clock, camera, scenario, play/pause and scrubber. They freeze
    when their respective episodes end. It is a schematic rendered from measured

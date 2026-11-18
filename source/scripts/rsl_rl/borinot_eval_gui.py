@@ -298,7 +298,12 @@ class EvalWindow:
 
     def add_condition(self):
         self.stash_condition()
-        self.conditions.append(("", "0", []))
+        _, delay, flags = self.conditions[self.current]
+        names = {label.strip() for label, _, _ in self.conditions}
+        index = len(self.conditions) + 1
+        while f"Condition {index}" in names:
+            index += 1
+        self.conditions.append((f"Condition {index}", delay, flags.copy()))
         self.condition_menu(len(self.conditions) - 1)
 
     def remove_condition(self):

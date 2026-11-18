@@ -180,11 +180,16 @@ def validate(recipe, base, *, require_weights=True):
             supported.discard("vertical_push")
         if set(names) - supported:
             raise ValueError(f"Randomizations not available on {task}: {sorted(set(names) - supported)}")
-        conditions.append(c | {"label": c.get("label") or label, "randomizations": names})
-    if not conditions or any(not isinstance(c["label"], str) for c in conditions) or len(
-        {c["label"] for c in conditions}
-    ) != len(conditions):
-        raise ValueError("At least one condition is required, with distinct labels.")
+        custom_label = c.get("label", "")
+        if not isinstance(custom_label, str):
+            raise ValueError("Condition labels must be text.")
+        conditions.append(c | {"label": custom_label.strip() or label, "randomizations": names})
+    if not conditions:
+        raise ValueError("Add at least one condition.")
+    labels = [c["label"] for c in conditions]
+    for index, label in enumerate(labels):
+        if label in labels[:index]:
+            raise ValueError(f"Duplicate condition label {label!r}. Give each condition a distinct label.")
 
     return {"task": task, "kind": kind, "seed": integer(recipe.get("seed", 42), "seed"),
             "stage": integer(recipe.get("stage", 0), "stage"), "episodes": episodes,

@@ -47,7 +47,7 @@ def test_invalid_range_and_unknown_randomization_rejected(tmp_path):
         validate(src | {"conditions": [{"delay_range_ms": [20, 0]}]}, tmp_path)
     with pytest.raises(ValueError, match="Unknown randomization"):
         validate(src | {"conditions": [{"randomizations": ["sensor noise"]}]}, tmp_path)
-    with pytest.raises(ValueError, match="distinct labels"):
+    with pytest.raises(ValueError, match="Duplicate condition label"):
         validate(src | {"conditions": [{"delay_ms": 20}, {"delay_ms": 20}]}, tmp_path)
     src["scenario"]["sample_box"]["deadline_s"] = [2.21, 2.28]
     with pytest.raises(ValueError, match="shared by all policy rates"):
