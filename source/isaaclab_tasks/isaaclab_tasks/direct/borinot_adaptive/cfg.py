@@ -34,6 +34,8 @@ class AdaptiveConfig:
 
     def refresh_base_imu_dimensions(self):
         import math
+        if self.include_prev_action_steps > 1:
+            raise ValueError("Adaptive Borinot uses its own history; set include_prev_action_steps to 0 or 1.")
         if (self.control_mode not in ("thrust_and_torque_control", "thrust_and_PD_joint_pos_control")
                 or self.action_space != 8 or self.hold_arm or self.sac_action_mapping
                 or getattr(self, "remove_time_from_actor_obs", False)):

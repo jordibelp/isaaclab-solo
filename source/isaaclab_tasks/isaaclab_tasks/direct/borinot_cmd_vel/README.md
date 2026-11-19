@@ -118,6 +118,31 @@ power**, not episode energy.
 
 ## Observations and control modes
 
+### Previous policy commands
+
+`env.include_prev_action_steps=0` (default) or `=1` keeps the original
+one-command observation. A value of `N > 1` keeps the latest command in its
+usual slot and appends the other `N-1` commands, newest to oldest, to the
+end of the observation. All entries use the existing policy-action
+representation and input clamps. They are sampled once per policy step,
+**before** actuator delay, controller/allocation processing, and motor lag;
+they are not measurements of applied thrust or torque. A robot episode reset
+clears that environment's history to zero. A new ball in a continuing
+goalkeeper episode does not clear it.
+
+This works for CmdVel, GoTo (including MinTime), and both Goalkeeper tasks
+with every control mode. Only the actor gains inputs in asymmetric training.
+Symmetric CmdVel/GoTo also give the same history to the critic.
+Adaptive teacher/student tasks use a separate history and only accept
+`0` or `1` here. The legacy `Borinot-Direct-v0` is unchanged.
+
+For an ablation inspired by [Learning to Fly in Seconds](https://arxiv.org/html/2311.13081),
+start with `0`, `5`, and `10` (at 100 Hz, commands are aged up to 10,
+50, and 100 ms, respectively). Match the seeds, control mode, task and
+curriculum settings, actuator lag/delay distributions, and interaction
+budget. Train fresh policies for each length and use the matching setting
+in playback; longer histories change the network input size.
+
 The actor uses the same observable vector in both ablation conditions. The critic gets privileged inputs by default; see the [ablation settings and privileged layout](../borinot_goto/README.md#asymmetric-actorcritic-ablation). Absolute base **world height** is
 included by default (`env.include_base_height=True`). Absolute world X/Y,
 force, force point, curriculum index, and randomized physics parameters are not added.

@@ -21,6 +21,7 @@ from isaaclab_tasks.controllers.borinot_model_wrench import FloatingArmModel, Mo
 from isaaclab_tasks.controllers.borinot_model_wrench_yawless import ModelWrenchYawlessController
 from isaaclab_tasks.controllers.borinot_model_wrench_indi import ModelWrenchIndiController, ModelWrenchYawlessIndiController
 from isaaclab_tasks.direct.borinot.model_description import nominal_model_description
+from isaaclab_tasks.direct.borinot.action_history import OlderPolicyActions
 from isaaclab_tasks.direct.borinot.action_limits import clipped_limit_rewards, raw_action_limit_costs, relative_limit_cost
 from isaaclab_tasks.direct.borinot.flight_randomization import (
     configure_domain_randomization, make_flight_randomization, validate_flight_randomization,
@@ -53,7 +54,7 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
     def get_code_snapshot_files(self):
         """Retain the shared implementation when archiving a training run."""
         return [inspect.getsourcefile(obj) for obj in (
-            BorinotGoalkeeperEnv, IndiController, WrenchController, ModelWrenchController, ModelWrenchYawlessController, ModelWrenchIndiController, ModelWrenchYawlessIndiController, nominal_model_description, CbrtController, raw_action_limit_costs, decode_angle_actions, DesiredActuationMetrics, ActuatorDelay,
+            BorinotGoalkeeperEnv, IndiController, WrenchController, ModelWrenchController, ModelWrenchYawlessController, ModelWrenchIndiController, ModelWrenchYawlessIndiController, nominal_model_description, CbrtController, raw_action_limit_costs, decode_angle_actions, DesiredActuationMetrics, ActuatorDelay, OlderPolicyActions,
             apply_inertial_properties, BorinotInertialPropertiesCfg,
             make_flight_randomization, BorinotFlightRandomizationCfg)]
 
@@ -95,6 +96,8 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         self._x_axis = torch.tensor([1.0, 0.0, 0.0], device=self.device).expand(self.num_envs, -1)
         self._gravity = torch.tensor([0.0, 0.0, -1.0], device=self.device).expand(self.num_envs, -1)
         self.actions = torch.zeros(self.num_envs, cfg.action_space, device=self.device)
+        if cfg.include_prev_action_steps > 1:
+            self._older_actions = OlderPolicyActions(self.actions, cfg.include_prev_action_steps)
         self._actuator_delay = ActuatorDelay(cfg, self.num_envs, cfg.action_space, self.device)
         self._action_limit_costs = torch.zeros(self.num_envs, 3, device=self.device)
         self._rate_integral = torch.zeros(self.num_envs, 3, device=self.device)
@@ -387,6 +390,8 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
                                      actions[:, 6:]), dim=-1)
             else:
                 actions = clamp_scalar_actions(actions, self.cfg, self.cfg.action_clamp)
+        if self.cfg.include_prev_action_steps > 1:
+            self._older_actions.push(self.actions)
         self.actions.copy_(actions)
         self._previous_paddle.copy_(self._paddle_pose()[0])
         ball_pos = self.ball.data.root_pos_w - self.scene.env_origins
@@ -783,6 +788,8 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
             # Applied thrust retains motor lag, unlike the latest policy command.
             rotor = getattr(self, "_rotor_plant", None)
             critic.append(rotor.speed if rotor is not None else torch.sqrt(self._rotor_thrust.clamp_min(0.0) / self.cfg.kf))
+        if self.cfg.include_prev_action_steps > 1:
+            policy.extend(self._older_actions.parts())
         return {"policy": torch.cat(policy, dim=-1),
                 "critic": torch.cat(critic, dim=-1)}
 
@@ -917,6 +924,8 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
             self.robot.data.default_joint_pos[env_ids][:, self.joint_ids], joint_ids=self.joint_ids, env_ids=env_ids)
         self.robot.set_joint_velocity_target(joint_zero, joint_ids=self.joint_ids, env_ids=env_ids)
         self.robot.set_joint_effort_target(joint_zero, joint_ids=self.joint_ids, env_ids=env_ids)
+        if self.cfg.include_prev_action_steps > 1:
+            self._older_actions.reset(env_ids)
         for buffer in (self.actions, self._action_limit_costs, self._rate_integral, self._recovery_time,
                        self._hit, self._clear, self._new_hit, self._center_quality, self._outcome,
                        self._episode_rewards, self._episode_steps, self._episode_shots,

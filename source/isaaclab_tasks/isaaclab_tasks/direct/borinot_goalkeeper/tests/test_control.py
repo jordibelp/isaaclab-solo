@@ -25,6 +25,9 @@ clipped_limit_rewards = _limits.clipped_limit_rewards
 _delay_spec = importlib.util.spec_from_file_location("borinot_actuator_delay_test", FOLDER / "actuator_delay.py")
 actuator_delay = importlib.util.module_from_spec(_delay_spec)
 _delay_spec.loader.exec_module(actuator_delay)
+_history_spec = importlib.util.spec_from_file_location("borinot_action_history_test", FOLDER.parent / "borinot/action_history.py")
+action_history = importlib.util.module_from_spec(_history_spec)
+_history_spec.loader.exec_module(action_history)
 MODES = ("thrust_and_torque_control", "thrust_and_PD_joint_pos_control", "PI_rotors_PD_joint_pos_control")
 
 
@@ -35,6 +38,7 @@ def source_class(filename):
 def method(filename, name):
     node = next(n for n in source_class(filename).body if isinstance(n, ast.FunctionDef) and n.name == name)
     scope = {"math": math, "torch": torch, "raw_action_limit_costs": raw_action_limit_costs,
+             "extra_action_history_dim": action_history.extra_action_history_dim,
              "relative_limit_cost": relative_limit_cost, "clipped_limit_rewards": clipped_limit_rewards, **vars(angles)}
     exec(compile(ast.Module(body=[node], type_ignores=[]), filename, "exec"), scope)
     return scope[name]

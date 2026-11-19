@@ -145,7 +145,7 @@ class BorinotGoToEnv(BorinotCmdVelEnv):
             self.robot.data.root_quat_w, self._goal_position_w - self.robot.data.root_pos_w)
         self._commands[:, 3] = remaining_s / (self._goal_deadline_steps * self.step_dt)
         # Reuse all measured state and controller-memory fields, in the same order.
-        parent_obs = super()._get_observations()
+        parent_obs = super()._get_observations(append_action_history=False)
         observation = torch.cat((parent_obs["policy"], remaining_s[:, None]), dim=-1)
         critic = observation if parent_obs["critic"] is parent_obs["policy"] else torch.cat(
             (parent_obs["critic"], remaining_s[:, None]), dim=-1)
@@ -159,7 +159,10 @@ class BorinotGoToEnv(BorinotCmdVelEnv):
             policy = torch.cat((observation[:, :time_index], observation[:, time_index + 1:-1]), dim=-1)
         if self.cfg.goal_debug_vis:
             self._draw_goal_markers()
-        return {"policy": policy, "critic": critic}
+        obs = {"policy": policy, "critic": critic}
+        if self.cfg.include_prev_action_steps > 1:
+            return self._older_actions.append(obs, critic=not self.cfg.use_asym_actor_critic)
+        return obs
 
     def _update_curriculum(self, env_ids):
         completed = env_ids[self._goal_finished[env_ids] & (self._episode_steps[env_ids] > 0)]

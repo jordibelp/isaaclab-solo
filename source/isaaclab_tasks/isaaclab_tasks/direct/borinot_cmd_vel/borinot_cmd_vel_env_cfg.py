@@ -3,6 +3,7 @@ import math
 
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.utils import configclass
+from isaaclab_tasks.direct.borinot.action_history import extra_action_history_dim
 from isaaclab_tasks.direct.borinot_goalkeeper.borinot_goalkeeper_env_cfg import BorinotGoalkeeperEnvCfg
 
 from .task_math import command_force_curriculum_stages
@@ -110,6 +111,10 @@ class BorinotCmdVelEnvCfg(BorinotGoalkeeperEnvCfg):
             (self.use_asym_actor_critic or self.legacy_controller_observations)
             and self.include_integral_prop_PID_joint_control and self.control_mode in (
                 "dsam_indi", "wrench", "model_wrench", "model_wrench_indi", "model_wrench_yawless", "model_wrench_yawless_indi"))
+        extra_history = extra_action_history_dim(self)
+        self.observation_space += extra_history
+        if not self.use_asym_actor_critic:
+            self.state_space += extra_history
         self.robot.init_state.pos = tuple(self.robot_home)
         self.robot.init_state.rot = tuple(self.robot_home_quat)
         for name in ("command_lin_vel_x_range", "command_lin_vel_y_range", "command_lin_vel_z_range",

@@ -13,6 +13,7 @@ from isaaclab.utils import configclass
 from .events import BorinotEventCfg
 from isaaclab_tasks.direct.borinot.flight_randomization_cfg import BorinotFlightRandomizationCfg
 from isaaclab_tasks.direct.borinot.inertial_properties_cfg import BorinotInertialPropertiesCfg
+from isaaclab_tasks.direct.borinot.action_history import extra_action_history_dim
 from isaaclab_tasks.controllers.borinot_angles import angle_action_size
 from isaaclab_tasks.controllers.borinot_indi import IndiControllerCfg
 from isaaclab_tasks.controllers.borinot_wrench import WrenchControllerCfg
@@ -56,6 +57,7 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
     reset_on_goal = False  # True resets the robot too; goal scoring/penalty stay unchanged
     ball_park_position = (0.0, 0.0, -2.0)  # inactive ball is removed below the local floor
     action_space = 8  # derived: 8 direct, 6 PI/CBRT, 9 INDI/wrench, plus optional angle-pair dimensions
+    include_prev_action_steps = 0  # 0 keeps the legacy last command; N > 0 gives N total
     observation_space = 44  # derived: actor inputs selected by the obs_actor_includes_* flags, plus the current actions
     state_space = 56  # derived: 48 + actions + controller state (9 PI, 8 INDI) + optional rotor speeds (6)
     sim = sim_utils.SimulationCfg(
@@ -327,7 +329,7 @@ class BorinotGoalkeeperEnvCfg(DirectRLEnvCfg):
         self.state_space += 2 * (self.include_integral_prop_PID_joint_control and self.control_mode in modes[3:9])
         point, time = self.obs_actor_includes_ball_plane_intersection_point, self.obs_actor_includes_time_ball_collides_plane
         # Optional actor inputs: plane point (3), time (1), validity (1), phase (7), ball parameters (2).
-        self.observation_space = (34 + self.action_space + controller_state + 3 * point + time + (point or time)
+        self.observation_space = (34 + self.action_space + extra_action_history_dim(self) + controller_state + 3 * point + time + (point or time)
                                  + 7 * self.obs_actor_includes_phase + 2 * self.obs_actor_includes_ball_params)
         actuator = self.robot.actuators["arm"]
         use_pd = self.control_mode not in ("dsam_indi", "wrench", "model_wrench", "model_wrench_indi", "model_wrench_yawless", "model_wrench_yawless_indi", "cbrt", "cbrt_indi") and (self.control_mode != modes[0] or self.hold_arm)

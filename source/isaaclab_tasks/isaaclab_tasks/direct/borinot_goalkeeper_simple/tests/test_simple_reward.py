@@ -12,6 +12,8 @@ from types import MethodType, SimpleNamespace
 import pytest
 import torch
 
+from test_control import action_history
+
 FOLDER = Path(__file__).resolve().parents[1]
 ORIGINAL = FOLDER.parent / "borinot_goalkeeper"
 SOURCE = FOLDER / "borinot_goalkeeper_simple_env.py"
@@ -87,7 +89,7 @@ def config(**overrides):
                                           effort_limit=None, velocity_limit=None)})
     cfg = SimpleNamespace(**{**values, **overrides})
     configure = methods(FOLDER / "borinot_goalkeeper_simple_env_cfg.py")["configure_control"]
-    scope = {"math": math, **vars(angles)}
+    scope = {"math": math, "extra_action_history_dim": action_history.extra_action_history_dim, **vars(angles)}
     exec(compile(ast.Module(body=[configure], type_ignores=[]), "cfg", "exec"), scope)
     scope["configure_control"](cfg)
     return cfg

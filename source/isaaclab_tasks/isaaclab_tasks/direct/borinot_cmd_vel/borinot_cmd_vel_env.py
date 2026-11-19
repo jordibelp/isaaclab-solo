@@ -15,6 +15,7 @@ from isaaclab.sensors import ContactSensor, ContactSensorCfg
 from isaaclab.utils.math import matrix_from_quat, quat_apply_inverse, quat_from_euler_xyz, quat_mul
 from isaaclab_tasks.direct.borinot_goalkeeper.actuator_delay import ActuatorDelay, actuator_delay_bounds
 from isaaclab_tasks.direct.borinot_goalkeeper.borinot_goalkeeper_env import BorinotGoalkeeperEnv
+from isaaclab_tasks.direct.borinot.action_history import OlderPolicyActions
 from isaaclab_tasks.direct.borinot.action_limits import clipped_limit_rewards, raw_action_limit_costs
 from isaaclab_tasks.direct.borinot.flight_randomization import (
     configure_domain_randomization, make_flight_randomization, validate_flight_randomization,
@@ -73,6 +74,8 @@ class BorinotCmdVelEnv(DirectRLEnv):
         self._self_contact_bodies = torch.zeros(self.num_envs, len(self.contact_body_names),
                                                dtype=torch.bool, device=self.device)
         self.actions = torch.zeros(self.num_envs, cfg.action_space, device=self.device)
+        if cfg.include_prev_action_steps > 1:
+            self._older_actions = OlderPolicyActions(self.actions, cfg.include_prev_action_steps)
         self._actuator_delay = ActuatorDelay(cfg, self.num_envs, cfg.action_space, self.device)
         self._action_limit_costs = torch.zeros(self.num_envs, 3, device=self.device)
         self._rate_integral = torch.zeros(self.num_envs, 3, device=self.device)
@@ -239,6 +242,8 @@ class BorinotCmdVelEnv(DirectRLEnv):
                                      actions[:, 6:]), dim=-1)
             else:
                 actions = clamp_scalar_actions(actions, self.cfg, self.cfg.action_clamp)
+        if self.cfg.include_prev_action_steps > 1:
+            self._older_actions.push(self.actions)
         self.actions.copy_(actions)
         self._power_sum_w.zero_()
         self._power_samples = self._physics_samples = 0
@@ -356,7 +361,7 @@ class BorinotCmdVelEnv(DirectRLEnv):
             ("rotor_mechanical", "rotor_dissipative", "arm_mechanical", "arm_copper_loss"))}
         return sum(terms.values())
 
-    def _get_observations(self):
+    def _get_observations(self, *, append_action_history=True):
         # Expose the next command BEFORE the policy acts on it. Resampling in
         # _pre_physics_step would score one action against an unseen command.
         command_ids = (self._command_steps_left <= 0).nonzero().flatten()
@@ -375,7 +380,10 @@ class BorinotCmdVelEnv(DirectRLEnv):
         parts.append(self._commands)
         observation = torch.cat(parts, -1)
         if not (self.cfg.use_asym_actor_critic or self.cfg.legacy_controller_observations):
-            return {"policy": observation, "critic": observation}
+            obs = {"policy": observation, "critic": observation}
+            if append_action_history and self.cfg.include_prev_action_steps > 1:
+                return self._older_actions.append(obs, critic=True)
+            return obs
 
         controller_parts = []
         joint_controller = None
@@ -396,7 +404,10 @@ class BorinotCmdVelEnv(DirectRLEnv):
             critic.append(self._critic_plant_observation())
         if self.cfg.include_integral_prop_PID_joint_control and joint_controller is not None:
             critic.append(joint_controller.joint_integral / self.cfg.indi.joint_integral_limit)
-        return {"policy": policy, "critic": torch.cat(critic, -1) if len(critic) > 1 else policy}
+        obs = {"policy": policy, "critic": torch.cat(critic, -1) if len(critic) > 1 else policy}
+        if append_action_history and self.cfg.include_prev_action_steps > 1:
+            return self._older_actions.append(obs, critic=not self.cfg.use_asym_actor_critic)
+        return obs
 
     def _update_curriculum(self, env_ids):
         completed = env_ids[self._episode_steps[env_ids] > 0]
@@ -459,7 +470,7 @@ class BorinotCmdVelEnv(DirectRLEnv):
         """Archive shared plant/control helpers alongside this task's source."""
         return [inspect.getsourcefile(obj) for obj in (
             BorinotGoalkeeperEnv, configure_randomization, attach_paddle, configure_end_effector,
-            IndiController, WrenchController, ModelWrenchController, ModelWrenchYawlessController, ModelWrenchIndiController, ModelWrenchYawlessIndiController, nominal_model_description, CbrtController, tracking_metrics, raw_action_limit_costs, decode_angle_actions, ActuatorDelay,
+            IndiController, WrenchController, ModelWrenchController, ModelWrenchYawlessController, ModelWrenchIndiController, ModelWrenchYawlessIndiController, nominal_model_description, CbrtController, tracking_metrics, raw_action_limit_costs, decode_angle_actions, ActuatorDelay, OlderPolicyActions,
             apply_inertial_properties, BorinotInertialPropertiesCfg,
             make_flight_randomization, BorinotFlightRandomizationCfg)]
 
@@ -495,6 +506,8 @@ class BorinotCmdVelEnv(DirectRLEnv):
         self.robot.set_joint_effort_target(joint_zero, joint_ids=self.joint_ids, env_ids=env_ids)
         if self.cfg.obs_include_base_lin_acc:
             self._base_lin_acc_history[env_ids] = 0
+        if self.cfg.include_prev_action_steps > 1:
+            self._older_actions.reset(env_ids)
         for buffer in (self.actions, self._action_limit_costs, self._rate_integral, self._episode_steps, self._episode_xy_integral,
                        self._episode_velocity_error_integral, self._episode_energy_j, self._base_push_steps_left, self._base_push_force_z_w,
                        self._base_push_points_b, self._power_sum_w):

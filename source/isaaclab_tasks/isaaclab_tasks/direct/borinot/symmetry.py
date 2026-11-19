@@ -135,7 +135,8 @@ class BorinotSymmetry:
                 add("rate_integral", 3)
             elif self.mode in ("dsam_indi", "wrench", "model_wrench", "model_wrench_indi", "model_wrench_yawless", "model_wrench_yawless_indi", "cbrt", "cbrt_indi"):
                 add("rotors", 6)
-        self.observation_size = offset
+        self.extra_action_history_size = max(0, getattr(self.cfg, "include_prev_action_steps", 0) - 1) * self.action_size
+        self.observation_size = offset + self.extra_action_history_size
 
     def actions(self, value, name):
         if value.shape[-1] != self.action_size:
@@ -188,6 +189,10 @@ class BorinotSymmetry:
             result[:, layout["rotation"]] = (world[None, :, None]*rotation).flatten(1)
             if "actions" in layout:
                 result[:, layout["actions"]] = self.actions(value[:, layout["actions"]], name)
+            extra = self.extra_action_history_size
+            if extra and (obs_type == "policy" or not self.cfg.use_asym_actor_critic):
+                history = value[:, -extra:].reshape(-1, self.action_size)
+                result[:, -extra:] = self.actions(history, name).reshape(value.shape[0], extra)
             return result
         raise ValueError(f"Unsupported Borinot symmetry: {name}")
 

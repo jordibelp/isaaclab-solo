@@ -2,6 +2,9 @@
 
 Gym IDs: **Borinot-goto** and **Borinot-GoTo-Direct-v0**.
 
+Use `env.include_prev_action_steps` for the shared
+[policy-command history ablation](../borinot_cmd_vel/README.md#previous-policy-commands).
+
 ## Minimum-time variant
 
 Use **Borinot-goto-minTime** (alias **Borinot-GoTo-MinTime-Direct-v0**) to train

@@ -10,6 +10,7 @@ import pytest
 import torch
 from scipy.spatial.transform import Rotation
 
+from test_control import action_history
 from test_control import config as parent_config, method as parent_method
 from test_indi import indi
 from test_wrench import wrench
@@ -36,7 +37,7 @@ def config(mode=MODES[0], **overrides):
     # Compile the actual override with a real super() closure, without simulator imports.
     node.bases, node.decorator_list = [ast.Name(id="Parent", ctx=ast.Load())], []
     node.body = [n for n in node.body if isinstance(n, ast.FunctionDef) and n.name == "configure_control"]
-    scope = {"Parent": parent, "math": math,
+    scope = {"Parent": parent, "math": math, "extra_action_history_dim": action_history.extra_action_history_dim,
              "command_force_curriculum_stages": task_math.command_force_curriculum_stages}
     exec(compile(ast.fix_missing_locations(ast.Module(body=[node], type_ignores=[])), "cmd_config", "exec"), scope)
     result = scope[node.name]()
@@ -229,3 +230,27 @@ def test_new_command_layout_skips_hidden_actor_state_and_augments_critic(asymmet
     if asymmetric:
         # Joint/rotor parameters and body-frame disturbance are unchanged by world yaw.
         assert torch.equal(aug["critic"][:, -43:], obs["critic"][:, -43:].repeat(2, 1))
+
+
+@pytest.mark.parametrize("asymmetric", [False, True])
+def test_action_history_world_yaw_transforms_each_command(asymmetric):
+    cfg = config("dsam_indi", predict_yaw_as_sincos=True, include_prev_action_steps=4,
+                 use_asym_actor_critic=asymmetric, legacy_controller_observations=False)
+    baseline = config("dsam_indi", predict_yaw_as_sincos=True,
+                      use_asym_actor_critic=asymmetric, legacy_controller_observations=False)
+    extra = 3 * cfg.action_space
+    assert cfg.observation_space == baseline.observation_space + extra
+    assert cfg.state_space == baseline.state_space + (0 if asymmetric else extra)
+    transform = symmetry.BorinotSymmetry(cfg)
+    for group, width in (("policy", cfg.observation_space), ("critic", cfg.state_space)):
+        obs = torch.arange(1., 2 * width + 1.).reshape(2, width)
+        rotated = transform.observations(obs, "world_yaw_180", group)
+        slot = transform.obs_slices["actions"]
+        torch.testing.assert_close(rotated[:, slot], transform.actions(obs[:, slot], "world_yaw_180"))
+        if group == "policy" or not asymmetric:
+            for i in range(3):
+                start = width - extra + i * cfg.action_space
+                sl = slice(start, start + cfg.action_space)
+                torch.testing.assert_close(rotated[:, sl], transform.actions(obs[:, sl], "world_yaw_180"))
+        else:
+            torch.testing.assert_close(rotated[:, -extra:], obs[:, -extra:])

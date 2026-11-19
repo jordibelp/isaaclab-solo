@@ -17,6 +17,7 @@ from isaaclab.utils.math import matrix_from_quat, quat_apply, quat_apply_inverse
 
 from isaaclab_tasks.direct.borinot_goalkeeper.actuator_delay import ActuatorDelay, actuator_delay_bounds
 from isaaclab_tasks.direct.borinot_goalkeeper.borinot_goalkeeper_env import BorinotGoalkeeperEnv
+from isaaclab_tasks.direct.borinot.action_history import OlderPolicyActions
 from isaaclab_tasks.direct.borinot.action_limits import clipped_limit_rewards, raw_action_limit_costs
 from isaaclab_tasks.direct.borinot.flight_randomization import (
     configure_domain_randomization, make_flight_randomization, validate_flight_randomization,
@@ -95,6 +96,8 @@ class BorinotGoalkeeperSimpleEnv(DirectRLEnv):
 
         # Control state read by the shared _apply_action() and _sample_power().
         self.actions = torch.zeros(self.num_envs, cfg.action_space, device=self.device)
+        if cfg.include_prev_action_steps > 1:
+            self._older_actions = OlderPolicyActions(self.actions, cfg.include_prev_action_steps)
         self._actuator_delay = ActuatorDelay(cfg, self.num_envs, cfg.action_space, self.device)
         self._action_limit_costs = torch.zeros(self.num_envs, 3, device=self.device)
         self._rate_integral = torch.zeros(self.num_envs, 3, device=self.device)
@@ -260,6 +263,8 @@ class BorinotGoalkeeperSimpleEnv(DirectRLEnv):
                                      actions[:, 6:]), dim=-1)
             else:
                 actions = clamp_scalar_actions(actions, self.cfg, self.cfg.action_clamp)
+        if self.cfg.include_prev_action_steps > 1:
+            self._older_actions.push(self.actions)
         self.actions.copy_(actions)
         # Progress compares racket positions across this interval, only before the ball's first contact.
         self._previous_paddle.copy_(self._paddle_pose()[0])
@@ -445,6 +450,8 @@ class BorinotGoalkeeperSimpleEnv(DirectRLEnv):
         critic = common + ball_parts + [phase] + tail + [self._ball_parameters]
         if self.cfg.include_integral_prop_PID_joint_control and joint_controller is not None:
             critic.append(joint_controller.joint_integral / self.cfg.indi.joint_integral_limit)
+        if self.cfg.include_prev_action_steps > 1:
+            policy.extend(self._older_actions.parts())
         return {"policy": torch.cat(policy, dim=-1), "critic": torch.cat(critic, dim=-1)}
 
     def _update_curriculum(self, env_ids):
@@ -568,6 +575,8 @@ class BorinotGoalkeeperSimpleEnv(DirectRLEnv):
             self.robot.data.default_joint_pos[env_ids][:, self.joint_ids], joint_ids=self.joint_ids, env_ids=env_ids)
         self.robot.set_joint_velocity_target(joint_zero, joint_ids=self.joint_ids, env_ids=env_ids)
         self.robot.set_joint_effort_target(joint_zero, joint_ids=self.joint_ids, env_ids=env_ids)
+        if self.cfg.include_prev_action_steps > 1:
+            self._older_actions.reset(env_ids)
         for buffer in (self.actions, self._action_limit_costs, self._rate_integral, self._touched, self._ball_done, self._outcome,
                        self._episode_rewards, self._episode_steps, self._shot_steps, self._episode_energy_j,
                        self._unpaid_energy_j,

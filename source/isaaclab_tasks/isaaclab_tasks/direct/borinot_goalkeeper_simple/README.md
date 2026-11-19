@@ -227,6 +227,9 @@ Removed: floor, miss and deadline penalties, the clearance rule (`clear_*`), rec
 
 ## 7. Observations, logs and code
 
+The actor can optionally see [older policy commands](../borinot_cmd_vel/README.md#previous-policy-commands)
+via `env.include_prev_action_steps`. This leaves the critic unchanged.
+
 **Observations.** The actor inputs are identical to the original task: 44 values with the default flags (51 in PI mode). The critic's phase block has 5 values instead of 7: first contact happened, shot time, ball active, time to the next launch, and episode time. The old "cleared" and "recovery" values no longer exist. The critic therefore has 54 inputs (61 in PI mode).
 
 Since 2026-10-19, direct modes no longer observe the 6 rotor thrusts and the 3 PI-integral values; only PI mode does. Direct-mode checkpoints trained before that (53 / 63 inputs) need the earlier commit for playback.

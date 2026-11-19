@@ -469,6 +469,9 @@ SAC's rotor mapping is also different from PPO's mapping above; see [SAC_TRAININ
 
 ### Observation and checkpoint contract
 
+The actor can optionally see [older policy commands](../borinot_cmd_vel/README.md#previous-policy-commands)
+via `env.include_prev_action_steps`. This leaves the critic unchanged.
+
 The critic always receives all 48 values plus the current policy actions: 56 values in direct modes. These values are the home-position error, full root rotation matrix, base linear and angular velocities, joint positions and velocities, relative paddle position and normal, relative ball position and velocity, predicted intercept/time/validity, shot phase/time, ball-active flag, next-launch countdown, episode progress, and sampled ball mass/restitution. PI mode also adds 9 controller values after the actions: the 6 rotor thrusts divided by hover thrust, and the 3 body-rate PI integrals. That gives 63 values. Direct modes leave them out: there, the actions already command each rotor, and the PI integral does not exist. Joint velocity is divided by `velocity_lim_sim`.
 
 The actor (policy) gets a subset. Four config flags choose the optional groups. The first three are `False` by default; ball parameters are `True`:
