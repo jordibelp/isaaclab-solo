@@ -46,7 +46,7 @@ def main(cfg, agent_cfg):
         obs, _ = env.reset()
         view = env.robot.root_physx_view
         check("registered_alias", gym.spec("Borinot-Cmd-Vel-Direct-v0").entry_point == gym.spec("Borinot-cmd-vel").entry_point)
-        check("spaces_after_hydra", obs["policy"].shape == obs["critic"].shape == (8, cfg.observation_space)
+        check("spaces_after_hydra", obs["policy"].shape == (8, cfg.observation_space) and obs["critic"].shape == (8, cfg.state_space)
               and env.action_space.shape == (8, cfg.action_space))
         check("same_actor_critic", torch.equal(obs["policy"], obs["critic"]))
         check("spawn_1_5m", torch.allclose(env.robot.data.root_pos_w[:, 2] - env.scene.env_origins[:, 2],

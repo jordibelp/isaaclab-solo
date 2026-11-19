@@ -49,6 +49,9 @@ class BorinotCmdVelEnvCfg(BorinotGoalkeeperEnvCfg):
     self_collision_force_threshold_n = 0.6  # Solo undesired-contact threshold
     obs_include_base_lin_acc = False  # body-frame kinematic CoM acceleration; NOT specific force
     obs_include_base_lin_acc_steps = 2  # physics-rate XYZ samples, oldest to newest; zero-padded after reset
+    use_asym_actor_critic = True
+    legacy_controller_observations = False  # opt in only for old checkpoints (with asymmetry off)
+    privileged_plant_obs_dim = 43
     include_base_height = True  # absolute base-link world Z, metres; not relative to the reset height
     projected_gravity_in_obs = False  # redundant with the full rotation matrix; True restores legacy gravity inputs
 
@@ -88,20 +91,24 @@ class BorinotCmdVelEnvCfg(BorinotGoalkeeperEnvCfg):
         for name in ("rwd_scale_base_collision", "rwd_scale_leave_area", "rwd_scale_self_collision", "rwd_scale_tilt"):
             if not math.isfinite(getattr(self, name)):
                 raise ValueError(f"{name} must be finite.")
-        for name in ("include_base_height", "projected_gravity_in_obs"):
+        for name in ("include_base_height", "projected_gravity_in_obs", "use_asym_actor_critic", "legacy_controller_observations"):
             if not isinstance(getattr(self, name), bool):
                 raise ValueError(f"{name} must be a boolean.")
         if type(self.obs_include_base_lin_acc_steps) is not int or self.obs_include_base_lin_acc_steps < 1:
             raise ValueError("obs_include_base_lin_acc_steps must be a positive integer.")
-        # Both networks: v_b, omega_b, optional acceleration, q, dq, last action,
+        if self.use_asym_actor_critic and self.legacy_controller_observations:
+            raise ValueError("Legacy controller observations require use_asym_actor_critic=False.")
+        # Shared observable inputs: v_b, omega_b, optional acceleration, q, dq, last action,
         # optional gravity_b, row-major R_world_body, optional world height, command.
         controller_state = 6 if self.control_mode in ("dsam_indi", "wrench", "model_wrench", "model_wrench_indi", "model_wrench_yawless", "model_wrench_yawless_indi", "cbrt", "cbrt_indi") else (
                 9 if self.control_mode == "PI_rotors_PD_joint_pos_control" else 0)
-        self.observation_space = (23 + self.action_space + controller_state
+        self.observation_space = (23 + self.action_space + controller_state * self.legacy_controller_observations
                                   + 3 * self.obs_include_base_lin_acc_steps * self.obs_include_base_lin_acc
                                   + int(self.include_base_height) + 3 * int(self.projected_gravity_in_obs))
-        self.state_space = self.observation_space + 2 * (
-            self.include_integral_prop_PID_joint_control and self.control_mode in (
+        self.state_space = self.observation_space + (
+            (controller_state + self.privileged_plant_obs_dim) * self.use_asym_actor_critic) + 2 * (
+            (self.use_asym_actor_critic or self.legacy_controller_observations)
+            and self.include_integral_prop_PID_joint_control and self.control_mode in (
                 "dsam_indi", "wrench", "model_wrench", "model_wrench_indi", "model_wrench_yawless", "model_wrench_yawless_indi"))
         self.robot.init_state.pos = tuple(self.robot_home)
         self.robot.init_state.rot = tuple(self.robot_home_quat)

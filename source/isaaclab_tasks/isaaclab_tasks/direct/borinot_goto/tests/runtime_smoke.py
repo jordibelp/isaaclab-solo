@@ -44,7 +44,7 @@ def main(cfg, agent_cfg):
     try:
         obs, _ = env.reset()
         check("alias", gym.spec("Borinot-GoTo-Direct-v0").entry_point == gym.spec("Borinot-goto").entry_point)
-        check("space_after_hydra", obs["policy"].shape == obs["critic"].shape == (8, cfg.observation_space))
+        check("space_after_hydra", obs["policy"].shape == (8, cfg.observation_space) and obs["critic"].shape == (8, cfg.state_space))
         check("shared_observation_and_finite_horizon", torch.equal(obs["policy"], obs["critic"]) and cfg.is_finite_horizon)
         check("body_goal_error", torch.allclose(env._commands[:, :3], quat_apply_inverse(
             env.robot.data.root_quat_w, env._goal_position_w-env.robot.data.root_pos_w), atol=2e-6))

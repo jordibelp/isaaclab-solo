@@ -118,7 +118,7 @@ power**, not episode energy.
 
 ## Observations and control modes
 
-Policy and critic receive the same vector. Absolute base **world height** is
+The actor uses the same observable vector in both ablation conditions. The critic gets privileged inputs by default; see the [ablation settings and privileged layout](../borinot_goto/README.md#asymmetric-actorcritic-ablation). Absolute base **world height** is
 included by default (`env.include_base_height=True`). Absolute world X/Y,
 force, force point, curriculum index, and randomized physics parameters are not added.
 
@@ -159,24 +159,23 @@ length changes policy size and requires a compatible checkpoint. For an older
 checkpoint trained with the single acceleration sample, explicitly set
 `env.obs_include_base_lin_acc_steps=1`.
 
-| `env.control_mode` | Actions | Observations | Agents |
+| `env.control_mode` | Actions | Actor observations | Agents |
 | --- | --- | --- | --- |
 | `thrust_and_torque_control` (default) | 6 rotor thrusts + 2 joint torques = 8 | 32 | PPO, SAC CE, SAC MSE |
 | `thrust_and_PD_joint_pos_control` | 6 rotor thrusts + 2 joint targets = 8 | 32 | PPO, SAC CE, SAC MSE |
-| `PI_rotors_PD_joint_pos_control` | Collective + body rates + 2 joint targets = 6 | 39 | PPO |
-| `dsam_indi` | World acceleration + body rates + heading + 2 joint targets = 9 | 39 | PPO, SAC CE, SAC MSE |
-| `wrench` | World acceleration + heading + body rates + 2 joint targets = 9 | 39 | PPO, SAC CE, SAC MSE |
-| `model_wrench` / `model_wrench_indi` | Same nine-action wrench layout; explicit arm model, optional INDI correction | 39 | PPO, SAC CE, SAC MSE |
-| `model_wrench_yawless` / `model_wrench_yawless_indi` | World acceleration + body rates + 2 joint targets = 8; no heading target | 38 | PPO, SAC CE, SAC MSE |
-| `cbrt` / `cbrt_indi` | Body rates + collective + 2 joint targets = 6 | 36 | PPO, SAC CE, SAC MSE |
+| `PI_rotors_PD_joint_pos_control` | Collective + body rates + 2 joint targets = 6 | 30 | PPO |
+| `dsam_indi` | World acceleration + body rates + heading + 2 joint targets = 9 | 33 | PPO, SAC CE, SAC MSE |
+| `wrench` | World acceleration + heading + body rates + 2 joint targets = 9 | 33 | PPO, SAC CE, SAC MSE |
+| `model_wrench` / `model_wrench_indi` | Same nine-action wrench layout; explicit arm model, optional INDI correction | 33 | PPO, SAC CE, SAC MSE |
+| `model_wrench_yawless` / `model_wrench_yawless_indi` | World acceleration + body rates + 2 joint targets = 8; no heading target | 32 | PPO, SAC CE, SAC MSE |
+| `cbrt` / `cbrt_indi` | Body rates + collective + 2 joint targets = 6 | 30 | PPO, SAC CE, SAC MSE |
 
 Optional acceleration adds `3 * obs_include_base_lin_acc_steps` observations in
 every mode (six with the default history length). PI adds six actual
 rotor thrust states and three rate integrals. DSAM-INDI, wrench, and both CBRT
-variants add six realized rotor thrusts. DSAM-INDI and the wrench family use
+variants add six nominal post-lag thrusts to the critic. DSAM-INDI and the wrench family use
 joint PD by default. With `env.include_integral_prop_PID_joint_control=True`,
-they use the same joint PID law and add two normalized integral states to the
-critic only.
+they use the same joint PID law. With asymmetry enabled, the critic also receives the two normalized integrals.
 Rotor states are normalized by nominal hover thrust. As in goalkeeper, not all
 low-level filter memory is exposed. Turning height off removes one observation;
 turning projected gravity on adds three. The table assumes scalar angle actions.

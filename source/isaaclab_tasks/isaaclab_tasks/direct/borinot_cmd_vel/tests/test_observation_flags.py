@@ -45,6 +45,7 @@ def config(mode=MODES[0], **overrides):
     result.scene = SimpleNamespace(env_spacing=64.)
     result.indi, result.wrench, result.cbrt = indi.IndiControllerCfg(), wrench.WrenchControllerCfg(), cbrt.CbrtControllerCfg()
     result.control_mode = mode
+    result.use_asym_actor_critic, result.legacy_controller_observations = False, True
     for name, value in overrides.items():
         setattr(result, name, value)
     result.configure_control()
@@ -210,3 +211,21 @@ def test_observation_reads_preserve_chronological_history_without_resampling():
         assert obs["policy"] is obs["critic"]
         assert torch.equal(obs["policy"][:, 6:12], expected)
         env.robot.data.body_lin_acc_w.add_(100.)
+
+
+@pytest.mark.parametrize("asymmetric", [False, True])
+def test_new_command_layout_skips_hidden_actor_state_and_augments_critic(asymmetric):
+    from tensordict import TensorDict
+
+    cfg = config("dsam_indi", legacy_controller_observations=False, use_asym_actor_critic=asymmetric)
+    env = observation_env(cfg)
+    env._critic_plant_observation = lambda: torch.arange(86, dtype=env.actions.dtype).reshape(2, 43)
+    obs = method("_get_observations", quat_apply_inverse=inverse, matrix_from_quat=matrix)(env)
+    assert obs["policy"].shape == (2, cfg.observation_space)
+    assert obs["critic"].shape == (2, cfg.state_space)
+    assert cfg.state_space - cfg.observation_space == (49 if asymmetric else 0)
+    aug, _ = symmetry.compute_symmetric_observations_actions(env, TensorDict(obs, batch_size=[2]))
+    assert aug.batch_size == (4,)
+    if asymmetric:
+        # Joint/rotor parameters and body-frame disturbance are unchanged by world yaw.
+        assert torch.equal(aug["critic"][:, -43:], obs["critic"][:, -43:].repeat(2, 1))

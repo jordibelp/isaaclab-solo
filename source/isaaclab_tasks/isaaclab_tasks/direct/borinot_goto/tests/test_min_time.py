@@ -172,3 +172,26 @@ def test_pid_integral_is_critic_only_for_all_matched_modes(mode, hide_time):
     after = env._get_observations()
     assert torch.equal(obs["policy"], after["policy"])
     assert not after["critic"][:, -3:-1].any()
+
+
+@pytest.mark.parametrize("mode", ["dsam_indi", "model_wrench", "model_wrench_indi",
+                                  "thrust_and_PD_joint_pos_control"])
+def test_privileged_critic_toggle_does_not_change_actor(mode):
+    common = dict(legacy_controller_observations=False, obs_include_base_lin_acc=True,
+                  obs_include_base_lin_acc_steps=2)
+    symmetric = min_time_config(mode, use_asym_actor_critic=False, **common)
+    asymmetric = min_time_config(mode, use_asym_actor_critic=True, **common)
+    env = fake_env(symmetric)
+    before = env._get_observations()
+    assert before["policy"] is before["critic"]
+    env.cfg = asymmetric
+    privileged = torch.arange(86, dtype=before["policy"].dtype).reshape(2, 43)
+    env._critic_plant_observation = lambda: privileged
+    after = env._get_observations()
+    controller_dim = 0 if mode.startswith("thrust_and_") else 6
+    assert after["policy"].shape == (2, asymmetric.observation_space)
+    assert after["critic"].shape == (2, asymmetric.state_space)
+    assert asymmetric.state_space - asymmetric.observation_space == 43 + controller_dim
+    assert torch.equal(after["policy"], before["policy"])
+    assert torch.equal(after["critic"][:, :-1][:, :asymmetric.observation_space - 1], after["policy"][:, :-1])
+    assert torch.equal(after["critic"][:, -44:-1], privileged)

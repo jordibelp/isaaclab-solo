@@ -144,7 +144,7 @@ keep `--symmetry-mode=none`. The launcher rejects that incompatible layout expli
 
 ## What the policy sees
 
-By default the actor and critic receive the **same** vector, in this order:
+The actor receives this vector in either ablation condition:
 
 1. Base-body-frame linear velocity, 3 values, m/s. As in command tracking, this
    is the base rigid body's CoM velocity, not the whole robot's CoM velocity.
@@ -168,16 +168,50 @@ By default the actor and critic receive the **same** vector, in this order:
    3 values, m. This is a displacement, not an absolute position or unit vector.
 10. Normalized remaining time, 1 value: remaining seconds / assigned seconds.
     It starts at 1 and reaches 0 at the terminal state.
-11. The existing controller-state observations, if any: realized thrust and PI
-    integrator, or the six realized thrusts for INDI/wrench/CBRT.
-12. Remaining time in **seconds**, 1 value.
+11. Remaining time in **seconds**, 1 value.
+
+### Asymmetric actor–critic ablation
+
+`env.use_asym_actor_critic=True` (default) expands the critic input only.
+Set it to `False` for a critic that sees the same observations as the actor
+(keep `env.remove_time_from_actor_obs=False` in both runs for that comparison).
+Neither condition exposes controller memory to the actor. This tests the effect
+of privileged critic information, not a change in the policy interface.
+
+The asymmetric critic gets the actor inputs plus the controller state and these
+43 plant values, inserted before remaining seconds:
+
+| Values | Width |
+| --- | ---: |
+| Actual total and base mass (kg) | 2 |
+| Base inertia: diagonal then XY, XZ, YZ (kg m²) | 6 |
+| Base CoM in the base frame (m) | 3 |
+| Static, dynamic, and viscous joint friction, two joints each | 6 |
+| Per-rotor thrust gains and shared yaw-moment gain, relative to nominal | 7 |
+| Per-rotor first-order response coefficients | 6 |
+| Sampled actuator delay (s) | 1 |
+| Applied per-rotor thrust divided by nominal hover thrust | 6 |
+| Most recently applied wind + push force (N) and moment about the base CoM (N m), in base axes | 6 |
+
+The applied thrust comes from the simulated plant, not the nominal controller
+or the thrust command. The disturbance is zero until the first substep after a
+physical reset; it does not include gravity, rotor wrench, or contacts. The
+critic also retains the controller's nominal thrust state where applicable.
+With two acceleration samples, the three nine-action DSAM/model-wrench modes
+have 40 actor inputs and 89 asymmetric critic inputs (40 symmetric), with the
+default PD joint law.
+
+For checkpoints trained with the previous six controller inputs on the actor,
+pass `env.use_asym_actor_critic=False env.legacy_controller_observations=True`
+to restore that layout. This is a playback compatibility setting, not the
+symmetric ablation baseline.
 
 **Matched joint control.** DSAM-INDI and the wrench family use the same
 explicit leg PD law by default. Set `env.include_integral_prop_PID_joint_control=True`
 in both runs for the same physics-rate PID with anti-windup. Both use
 `env.indi.joint_ki` and `env.indi.joint_integral_limit` for the integral term.
-Only the critic then receives the two normalized integrals, just before
-remaining seconds. The actor size never changes with this flag. Older DSAM
+The asymmetric critic then also receives the two normalized integrals, just before
+remaining seconds. The symmetric condition keeps them hidden from both networks. The actor size never changes with this flag. Older DSAM
 checkpoints have two extra actor inputs and cannot be loaded directly; use
 their original training revision for exact replay.
 

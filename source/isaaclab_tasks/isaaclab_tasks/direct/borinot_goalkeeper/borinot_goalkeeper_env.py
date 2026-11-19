@@ -492,16 +492,22 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         self.robot.permanent_wrench_composer.set_forces_and_torques(
             forces=force, torques=wrench[:, None, 1:4], body_ids=[self.base_id], is_global=False,
         )
+        disturbance = getattr(self, "_critic_disturbance_b", None)
+        if disturbance is not None:
+            disturbance.zero_()
         wind = getattr(self, "_wind", None)
         if wind is not None:
             if self._physics_samples == 1:
                 wind.update()
             data = self.robot.data
             force_w, moment_w = wind.wrench_world(data.root_lin_vel_w)
+            force_b = quat_apply_inverse(data.root_quat_w, force_w)
+            moment_b = quat_apply_inverse(data.root_quat_w, moment_w)
+            if disturbance is not None:
+                disturbance[:, :3] = force_b
+                disturbance[:, 3:] = moment_b
             self.robot.permanent_wrench_composer.add_forces_and_torques(
-                forces=quat_apply_inverse(data.root_quat_w, force_w)[:, None],
-                torques=quat_apply_inverse(data.root_quat_w, moment_w)[:, None],
-                body_ids=[self.base_id], is_global=False)
+                forces=force_b[:, None], torques=moment_b[:, None], body_ids=[self.base_id], is_global=False)
         if self.cfg.control_mode in ("dsam_indi", "wrench", "model_wrench", "model_wrench_indi", "model_wrench_yawless", "model_wrench_yawless_indi", "cbrt", "cbrt_indi"):
             # Implicit gains are zero: software PID (INDI) / PD (wrench/CBRT) runs at physics rate.
             self.robot.set_joint_effort_target(joint_effort, joint_ids=self.joint_ids)

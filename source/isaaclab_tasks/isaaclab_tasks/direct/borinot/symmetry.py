@@ -129,7 +129,7 @@ class BorinotSymmetry:
             if getattr(self.cfg, "include_base_height", False):
                 add("height", 1)
         add("commands", 3 if self.legacy else 4)
-        if not self.legacy:
+        if not self.legacy and getattr(self.cfg, "legacy_controller_observations", True):
             if self.mode == "PI_rotors_PD_joint_pos_control":
                 add("rotors", 6)
                 add("rate_integral", 3)

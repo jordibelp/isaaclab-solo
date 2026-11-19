@@ -110,6 +110,10 @@ class BorinotCmdVelEnv(DirectRLEnv):
                                 "model_wrench_yawless_indi", "cbrt", "cbrt_indi"):
             reset_thrust = min(reset_thrust, reset_thrust * cfg.thrust_to_weight)
         self._rotor_plant, self._wind = make_flight_randomization(self, reset_thrust, cfg.motor_time_constant_s)
+        self._critic_disturbance_b = None
+        if cfg.use_asym_actor_critic:
+            self._critic_disturbance_b = self.actions.new_zeros((self.num_envs, 6))
+            self._critic_static_plant = self._read_critic_static_plant()
         if cfg.control_mode == "dsam_indi":
             self._init_indi()
         elif cfg.control_mode in ("wrench", "model_wrench", "model_wrench_indi", "model_wrench_yawless", "model_wrench_yawless_indi"):
@@ -268,6 +272,31 @@ class BorinotCmdVelEnv(DirectRLEnv):
         self._events["tilt"] |= (self.robot.data.projected_gravity_b[:, 2]
                                 > -math.cos(math.radians(self.cfg.robot_tilt_threshold_degs)))
 
+    def _read_critic_static_plant(self):
+        """Read post-startup physics properties once; delay is sampled at each reset."""
+        view = self.robot.root_physx_view
+        mass = view.get_masses().to(self.device)
+        inertia = view.get_inertias().to(self.device)[:, self.base_id]
+        data = self.robot.data
+        friction = [getattr(data, name)[:, self.joint_ids] for name in (
+            "joint_friction_coeff", "joint_dynamic_friction_coeff", "joint_viscous_friction_coeff")]
+        plant = self._rotor_plant
+
+        def columns(value, width):
+            return torch.as_tensor(value, device=self.device, dtype=mass.dtype).expand(self.num_envs, width)
+
+        return torch.cat((
+            mass.sum(dim=1, keepdim=True), mass[:, self.base_id:self.base_id + 1],
+            inertia[:, [0, 4, 8, 1, 2, 5]], self._base_com_b, *friction,
+            columns(plant.kf / self.cfg.kf if plant is not None else 1.0, 6),
+            columns(plant.km / self.cfg.km if plant is not None else 1.0, 1),
+            columns(plant.alpha if plant is not None else self._motor_alpha, 6),
+        ), dim=-1)
+
+    def _critic_plant_observation(self):
+        return torch.cat((self._critic_static_plant, self._actuator_delay.seconds[:, None],
+                          self._rotor_thrust / self._hover_per_rotor, self._critic_disturbance_b), dim=-1)
+
     def _apply_action(self):
         BorinotGoalkeeperEnv._apply_action(self)
         force_w = torch.zeros(self.num_envs, 3, device=self.device)
@@ -276,6 +305,10 @@ class BorinotCmdVelEnv(DirectRLEnv):
         # Explicit moment about each actual sampled CoM. Composer positions use
         # the link origin, while PhysX applies the resulting torque about the CoM.
         moment_b = torch.linalg.cross(self._base_push_points_b - self._base_com_b, force_b)
+        disturbance = getattr(self, "_critic_disturbance_b", None)
+        if disturbance is not None:
+            disturbance[:, :3] += force_b
+            disturbance[:, 3:] += moment_b
         self.robot.permanent_wrench_composer.add_forces_and_torques(
             forces=force_b[:, None], torques=moment_b[:, None], body_ids=[self.base_id], is_global=False)
 
@@ -340,22 +373,30 @@ class BorinotCmdVelEnv(DirectRLEnv):
         if self.cfg.include_base_height:
             parts.append(data.root_pos_w[:, 2:3])
         parts.append(self._commands)
+        observation = torch.cat(parts, -1)
+        if not (self.cfg.use_asym_actor_critic or self.cfg.legacy_controller_observations):
+            return {"policy": observation, "critic": observation}
+
+        controller_parts = []
         joint_controller = None
         if self.cfg.control_mode == "PI_rotors_PD_joint_pos_control":
-            parts += [self._rotor_thrust / self._hover_per_rotor, self._rate_integral]
+            controller_parts += [self._rotor_thrust / self._hover_per_rotor, self._rate_integral]
         elif self.cfg.control_mode == "dsam_indi":
             joint_controller = self._indi
-            parts.append(self._indi.observation())
+            controller_parts.append(self._indi.observation())
         elif self.cfg.control_mode in ("wrench", "model_wrench", "model_wrench_indi", "model_wrench_yawless", "model_wrench_yawless_indi"):
             joint_controller = self._wrench
-            parts.append(self._wrench.observation())
+            controller_parts.append(self._wrench.observation())
         elif self.cfg.control_mode in ("cbrt", "cbrt_indi"):
-            parts.append(self._cbrt.observation())
-        observation = torch.cat(parts, -1)
-        critic = [observation]
+            controller_parts.append(self._cbrt.observation())
+
+        policy = torch.cat([observation, *controller_parts], -1) if self.cfg.legacy_controller_observations else observation
+        critic = [observation, *controller_parts] if self.cfg.use_asym_actor_critic else [policy]
+        if self.cfg.use_asym_actor_critic:
+            critic.append(self._critic_plant_observation())
         if self.cfg.include_integral_prop_PID_joint_control and joint_controller is not None:
             critic.append(joint_controller.joint_integral / self.cfg.indi.joint_integral_limit)
-        return {"policy": observation, "critic": torch.cat(critic, -1) if len(critic) > 1 else observation}
+        return {"policy": policy, "critic": torch.cat(critic, -1) if len(critic) > 1 else policy}
 
     def _update_curriculum(self, env_ids):
         completed = env_ids[self._episode_steps[env_ids] > 0]
@@ -463,6 +504,9 @@ class BorinotCmdVelEnv(DirectRLEnv):
         for event in self._events.values():
             event[env_ids] = False
         self._self_contact_bodies[env_ids] = False
+        disturbance = getattr(self, "_critic_disturbance_b", None)
+        if disturbance is not None:
+            disturbance[env_ids] = 0
         self._actuator_delay.reset(env_ids)  # after _update_curriculum logged the finished episodes' delays
         self._rotor_thrust[env_ids] = self._hover_per_rotor
         rotor = getattr(self, "_rotor_plant", None)

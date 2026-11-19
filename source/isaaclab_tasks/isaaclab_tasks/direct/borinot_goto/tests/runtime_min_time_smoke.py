@@ -27,6 +27,7 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 def main(cfg, agent_cfg):
     cfg.scene.num_envs, cfg.sim.device, cfg.seed = 4, args.device, 42
     cfg.include_events_randomization = False
+    cfg.use_asym_actor_critic = False  # This fixture isolates the deadline-clock ablation.
     cfg.actuator_delay_range = None
     cfg.flight_randomization.motor_time_constant_range_s = None
     cfg.flight_randomization.thrust_shared_gain_delta = cfg.flight_randomization.thrust_rotor_gain_delta = 0.0
