@@ -105,6 +105,7 @@ class BorinotGoToPlayEnv(BorinotGoToEnv):
         self._initial_goal_distance[env_ids] = distance
         self._previous_goal_distance[env_ids] = distance
         self._minimum_goal_distance[env_ids] = distance
+        self._clear_goal_motion(env_ids)
         self._first_arrival_s[env_ids] = torch.where(distance <= self.cfg.goal_success_tolerance_m, 0.0, -1.0)
         for buffer in (self._goal_failed, self._goal_deadline_reached, self._goal_finished, self._goal_success):
             buffer[env_ids] = False

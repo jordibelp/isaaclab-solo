@@ -41,6 +41,10 @@ class BorinotGoToEnv(BorinotCmdVelEnv):
             "terminal_distance", "progress", "terminal_linear_vel", "terminal_ang_vel", "terminal_success",
             "action_rate", "energy", "base_collision", "leave_area", "self_collision", "tilt",
             "thrust_limits", "torque_limits", "action_limits", "time")}
+        self._episode_speed_sum = torch.zeros_like(self._initial_goal_distance)
+        self._episode_peak_speed = torch.zeros_like(self._initial_goal_distance)
+        self._episode_peak_acceleration = torch.zeros_like(self._initial_goal_distance)
+        self._goal_motion_samples = 0
         self._goal_markers = None
 
     def _resample_commands(self, env_ids):
@@ -58,6 +62,23 @@ class BorinotGoToEnv(BorinotCmdVelEnv):
         super()._pre_physics_step(actions)
         self._previous_goal_distance.copy_((self._goal_position_w - self.robot.data.root_pos_w).norm(dim=-1))
         self._goal_finished.zero_()
+        self._goal_motion_samples = 0
+
+    def _sample_physics_events(self):
+        super()._sample_physics_events()
+        if self._goal_motion_samples < self._physics_samples:
+            # Read each completed substep once, including the last one before reset.
+            data = self.robot.data
+            speed = data.root_lin_vel_w.norm(dim=-1)
+            acceleration = data.body_lin_acc_w[:, self.base_id].norm(dim=-1)
+            self._episode_speed_sum.add_(speed)
+            torch.maximum(self._episode_peak_speed, speed, out=self._episode_peak_speed)
+            torch.maximum(self._episode_peak_acceleration, acceleration, out=self._episode_peak_acceleration)
+            self._goal_motion_samples = self._physics_samples
+
+    def _clear_goal_motion(self, env_ids):
+        for buffer in (self._episode_speed_sum, self._episode_peak_speed, self._episode_peak_acceleration):
+            buffer[env_ids] = 0.0
 
     def _get_dones(self):
         failed, _ = super()._get_dones()  # completed-substep safety events and power
@@ -154,42 +175,62 @@ class BorinotGoToEnv(BorinotCmdVelEnv):
         goal_info = self.extras["goal"]
         deadline = goal_info["deadline_reached"][completed] & ~goal_info["failed"][completed]
         arrivals = self._first_arrival_s[completed]
+        reached = arrivals >= 0
+        successes = self._goal_success[completed]
+        terminal_distance = goal_info["distance_m"][completed]
+        initial_distance = self._initial_goal_distance[completed]
+        early_failure = goal_info["failed"][completed] & ~goal_info["deadline_reached"][completed]
+        early_success = successes & ~goal_info["deadline_reached"][completed]
+        # Per-episode values pool across unequal reset batches in PPO/SAC.
         logs = {
             "Episode/return": sum(v[completed] for v in self._episode_terms.values()).mean(),
             "Episode/duration_s": duration.mean(), "Episode/energy_j": self._episode_energy_j[completed].mean(),
             "Episode/actuator_delay_s": self._actuator_delay.seconds[completed].mean(),
             "Episode/completed_count": len(completed), "Episode/success_count": self._goal_success[completed].sum(),
-            "Goal/terminal_distance_m": goal_info["distance_m"][completed].mean(),
-            "Goal/initial_distance_m": self._initial_goal_distance[completed].mean(),
-            "Goal/minimum_distance_m": self._minimum_goal_distance[completed].mean(),
-            "Goal/deadline_s": goal_info["deadline_s"][completed].mean(),
-            "Goal/early_failure_count": (goal_info["failed"][completed] & ~goal_info["deadline_reached"][completed]).sum(),
+            "Goal/terminal_distance_m": terminal_distance,
+            "Goal/initial_distance_m": initial_distance,
+            "Goal/minimum_distance_m": self._minimum_goal_distance[completed],
+            "Goal/deadline_s": goal_info["deadline_s"][completed],
+            "Goal/reach_rate": reached.float(),
+            "Goal/success_rate": successes.float(),
+            "Goal/deadline_rate": deadline.float(),
+            "Goal/early_failure_rate": early_failure.float(),
+            "Goal/early_success_rate": early_success.float(),
+            "Goal/avg_speed_m_s": self._episode_speed_sum[completed] * (self.physics_dt / duration),
+            "Goal/peak_speed_m_s": self._episode_peak_speed[completed],
+            "Goal/peak_acceleration_m_s2": self._episode_peak_acceleration[completed],
+            "Goal/early_failure_count": early_failure.sum(),
+            "Goal/early_success_count": early_success.sum(),
             "Goal/deadline_count": deadline.sum(),
-            "Goal/ever_reached_count": (arrivals >= 0).sum(),
+            "Goal/ever_reached_count": reached.sum(),
             "Curriculum/collection_stage": self._goal_episode_level[completed].float().mean(),
             **{f"Curriculum/{key}": value for key, value in decision.items()},
             "Curriculum/selected_difficulty": stage_settings(self.cfg, self.goal_curriculum.level)[0],
             "Curriculum/selected_progress_factor": stage_settings(self.cfg, self.goal_curriculum.level)[1],
             "Curriculum/selected_force_limit_n": self._force_limits[self.goal_curriculum.level],
-            "Goal/collection_progress_factor": self._goal_progress_factor[completed].mean(),
-            "Goal/collection_force_limit_n": self._force_limits[self._goal_episode_level[completed]].mean(),
+            "Goal/collection_progress_factor": self._goal_progress_factor[completed],
+            "Goal/collection_force_limit_n": self._force_limits[self._goal_episode_level[completed]],
         }
-        # Which success conditions hold at clean deadlines; divide by Goal/deadline_count.
+        # These denominators include only clean deadline episodes, not early successes.
         ids, data = completed[deadline], self.robot.data
-        parts = goal_success_parts(self.cfg, goal_info["distance_m"][ids],
+        parts = goal_success_parts(self.cfg, terminal_distance[deadline],
                                    data.root_lin_vel_w[ids], data.root_ang_vel_w[ids])
-        logs.update({f"Goal/deadline_{name}_count": mask.sum()
-                     for name, mask in zip(("inside", "lin_vel_ok", "ang_vel_ok"), parts)})
-        if deadline.any():
-            logs["Goal/deadline_distance_m"] = goal_info["distance_m"][ids].mean()
-            logs["Goal/deadline_speed_m_s"] = data.root_lin_vel_w[ids].norm(dim=-1).mean()
-            logs["Goal/deadline_ang_speed_rad_s"] = data.root_ang_vel_w[ids].norm(dim=-1).mean()
-        if (arrivals >= 0).any():
-            logs["Goal/first_arrival_s_when_reached"] = arrivals[arrivals >= 0].mean()
-        successes = self._goal_success[completed]
+        for name, mask in zip(("inside", "lin_vel_ok", "ang_vel_ok"), parts):
+            logs[f"Goal/deadline_{name}_count"] = mask.sum()
+            if len(ids):
+                logs[f"Goal/deadline_{name}_rate"] = mask.float()
+        if len(ids):
+            logs["Goal/deadline_distance_m"] = terminal_distance[deadline]
+            logs["Goal/deadline_speed_m_s"] = data.root_lin_vel_w[ids].norm(dim=-1)
+            logs["Goal/deadline_ang_speed_rad_s"] = data.root_ang_vel_w[ids].norm(dim=-1)
+            logs["Goal/deadline_success_rate"] = successes[deadline].float()
+        if reached.any():
+            logs["Goal/first_arrival_s_when_reached"] = arrivals[reached]
         if successes.any():
-            logs["Goal/success_duration_s"] = duration[successes].mean()
-        logs["Goal/early_success_count"] = (successes & ~goal_info["deadline_reached"][completed]).sum()
+            logs["Goal/success_duration_s"] = duration[successes]
+            logs["Goal/initial_distance_when_successful_m"] = initial_distance[successes]
+            logs["Goal/avg_progress_speed_when_successful_m_s"] = (
+                (initial_distance[successes] - terminal_distance[successes]) / duration[successes])
         logs.update({f"Episode_Reward/{name}": value[completed].mean() for name, value in self._episode_terms.items()})
         self.extras["log"] = logs
 
@@ -233,6 +274,7 @@ class BorinotGoToEnv(BorinotCmdVelEnv):
         self._initial_goal_distance[env_ids] = distance
         self._previous_goal_distance[env_ids] = distance
         self._minimum_goal_distance[env_ids] = distance
+        self._clear_goal_motion(env_ids)
         self._first_arrival_s[env_ids] = torch.where(distance <= self.cfg.goal_success_tolerance_m, 0.0, -1.0)
         for buffer in (self._goal_failed, self._goal_deadline_reached, self._goal_finished, self._goal_success):
             buffer[env_ids] = False

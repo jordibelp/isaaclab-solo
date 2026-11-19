@@ -3394,6 +3394,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 richest_index = max(range(len(ep_infos)), key=lambda index: len(ep_infos[index]))
                 ep_infos[0], ep_infos[richest_index] = ep_infos[richest_index], ep_infos[0]
                 _aggregate_race_episode_statistics(ep_infos)
+                if "Goal/reach_rate" in ep_infos[0]:
+                    # The richest packet can still miss a different conditional cohort.
+                    # Empty placeholders contribute neither episodes nor zeros to the mean.
+                    first = ep_infos[0]
+                    for info in ep_infos[1:]:
+                        for key in info:
+                            if key.startswith("Goal/") and key not in first:
+                                first[key] = info[key].new_empty(0)
         original_log(*log_args, **log_kwargs)
 
         raw_env = getattr(runner.env, "unwrapped", None)

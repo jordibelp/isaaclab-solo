@@ -74,6 +74,9 @@ def fake_env(cfg=None):
     env._previous_goal_distance = (env._goal_position_w - env.robot.data.root_pos_w).norm(dim=-1) + torch.tensor([.1, -.2])
     env._initial_goal_distance = env._previous_goal_distance.clone()
     env._minimum_goal_distance = env._previous_goal_distance.clone()
+    env._episode_speed_sum = torch.zeros(2)
+    env._episode_peak_speed = torch.zeros(2)
+    env._episode_peak_acceleration = torch.zeros(2)
     env._first_arrival_s = torch.full((2,), -1.)
     env._goal_progress_factor = torch.tensor([1., .25])
     env._goal_episode_level = torch.zeros(2, dtype=torch.long)
@@ -503,10 +506,11 @@ def test_episode_log_includes_failures_and_preserves_pre_promotion_decision():
     assert logs["Goal/deadline_count"] == 1 and logs["Goal/deadline_inside_count"] == 0
     assert logs["Goal/deadline_lin_vel_ok_count"] == 0 and logs["Goal/deadline_ang_vel_ok_count"] == 1
     assert logs["Goal/deadline_speed_m_s"] == pytest.approx(5.) and logs["Goal/deadline_ang_speed_rad_s"] == 0
-    assert logs["Curriculum/selected_force_limit_n"] == 0 and logs["Goal/collection_force_limit_n"] == 0
+    assert logs["Curriculum/selected_force_limit_n"] == 0
+    assert logs["Goal/collection_force_limit_n"].tolist() == [0., 0.]
     env._goal_episode_level[:] = torch.tensor([6, 9])
     env._update_curriculum(torch.tensor([0,1]))
-    assert env.extras["log"]["Goal/collection_force_limit_n"] == pytest.approx(5.)  # mean of 1 N and 9 N
+    assert env.extras["log"]["Goal/collection_force_limit_n"].tolist() == [1., 9.]
     env._goal_episode_level.zero_()
     cfg.curriculum_success_threshold = .5
     env._update_curriculum(torch.tensor([0,1]))
@@ -549,7 +553,7 @@ def test_sampling_metrics_follow_current_stage_not_unfinished_episode_levels():
     assert env.get_curriculum_sampling_metrics()["Curriculum/selected_deadline_min_s"] == 1.59
 
 
-def test_ppo_logs_sampling_snapshot_without_completed_episodes():
+def test_ppo_logs_sampling_snapshot_and_pools_sparse_goal_cohorts():
     # Execute the real public trainer's logging prefix without starting Isaac Sim.
     source = FOLDER.parents[3] / "scripts/rsl_rl/train.py"
     tree = ast.parse(source.read_text())
@@ -566,7 +570,15 @@ def test_ppo_logs_sampling_snapshot_without_completed_episodes():
     env, logged = fake_env(), {}
     runner = SimpleNamespace(env=SimpleNamespace(unwrapped=env), log_dir="unused", tot_timesteps=240000,
                              writer=SimpleNamespace(add_scalar=lambda key, value, step: logged.update({key:(value, step)})))
-    scope = {"runner": runner, "original_log": lambda *a, **kw: None,
+    def upstream_log(locs):
+        if locs["ep_infos"]:
+            for key in locs["ep_infos"][0]:
+                if key.startswith("Goal/"):
+                    values = [info[key] for info in locs["ep_infos"] if key in info]
+                    logged[key] = (torch.cat(values).mean().item(), locs["it"])
+
+    scope = {"runner": runner, "original_log": upstream_log,
+             "_aggregate_race_episode_statistics": lambda *a: None,
              "_update_backward_force_curriculum": lambda *a: None,
              "_log_plasticity_metrics": lambda *a: None, "local_redundancy": SimpleNamespace(log=lambda *a: None),
              "args_cli": SimpleNamespace(plasticity_metrics_interval=1)}
@@ -576,6 +588,20 @@ def test_ppo_logs_sampling_snapshot_without_completed_episodes():
         scope[hook.name]({"it": level, "ep_infos": []})
         for key, value in env.get_curriculum_sampling_metrics().items():
             assert logged[key] == (value, level)
+
+    # Equal-size key sets do not imply the same conditional cohorts. One success
+    # and nine misses must log 10%, not the average of two batch rates (50%).
+    scope[hook.name]({"it": 20, "ep_infos": [
+        {"Goal/reach_rate": torch.ones(1), "Goal/success_rate": torch.ones(1),
+         "Goal/success_duration_s": torch.tensor([.25])},
+        {"Goal/reach_rate": torch.zeros(9), "Goal/success_rate": torch.zeros(9),
+         "Goal/deadline_success_rate": torch.zeros(9)},
+    ]})
+    assert logged["Goal/reach_rate"] == pytest.approx((.1, 20))
+    assert logged["Goal/success_rate"] == pytest.approx((.1, 20))
+    assert logged["Goal/success_duration_s"] == (.25, 20)
+    assert logged["Goal/deadline_success_rate"] == (0., 20)
+    assert "Goal/deadline_inside_rate" not in logged
 
 
 def test_goal_task_is_not_mistaken_for_velocity_symmetry_layout():

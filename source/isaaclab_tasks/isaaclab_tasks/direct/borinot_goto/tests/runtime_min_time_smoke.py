@@ -75,6 +75,16 @@ def main(cfg, agent_cfg):
         env._goal_deadline_steps[3] = 1
         env._episode_steps.zero_()
         env._previous_goal_distance.copy_((env._goal_position_w - env.robot.data.root_pos_w).norm(dim=-1))
+        # Capture simulator values independently at each completed substep.
+        samples = []
+        original_sample_events = env._sample_physics_events
+
+        def record_physics_events():
+            data = env.robot.data
+            samples.append((data.root_lin_vel_w.clone(), data.body_lin_acc_w[:, env.base_id].clone()))
+            original_sample_events()
+
+        env._sample_physics_events = record_physics_events
         obs, reward, done, info = wrapped.step(torch.zeros(4, cfg.action_space, device=env.device))
         check("mixed_automatic_resets", done.tolist() == [True, False, True, True])
         check("safety_failure_beats_spatial_success", info["goal"]["success"].tolist() == [True, False, False, False]
@@ -98,6 +108,28 @@ def main(cfg, agent_cfg):
         check("early_success_logged_for_curriculum", info["log"]["Episode/success_count"] == 1
               and info["log"]["Goal/early_success_count"] == 1
               and torch.isclose(info["log"]["Goal/success_duration_s"], torch.tensor(env.step_dt, device=env.device)))
+        logs = info["log"]
+        check("rate_episode_cohorts", logs["Goal/reach_rate"].tolist() == [1., 1., 0.]
+              and logs["Goal/success_rate"].tolist() == [1., 0., 0.]
+              and logs["Goal/early_success_rate"].tolist() == [1., 0., 0.]
+              and logs["Goal/early_failure_rate"].tolist() == [0., 1., 0.]
+              and logs["Goal/deadline_rate"].tolist() == [0., 0., 1.]
+              and logs["Goal/deadline_inside_rate"].tolist() == [0.]
+              and logs["Goal/deadline_success_rate"].tolist() == [0.]
+              and logs["Goal/first_arrival_s_when_reached"].numel() == 2)
+        speed, acceleration = (torch.stack(values).norm(dim=-1) for values in zip(*samples))
+        ids = [0, 2, 3]
+        check("motion_uses_all_completed_substeps_including_terminal", len(samples) == cfg.decimation
+              and torch.allclose(logs["Goal/avg_speed_m_s"], speed[:, ids].mean(0))
+              and torch.allclose(logs["Goal/peak_speed_m_s"], speed[:, ids].amax(0))
+              and torch.allclose(logs["Goal/peak_acceleration_m_s2"], acceleration[:, ids].amax(0)))
+        check("successful_progress_uses_net_closed_distance", torch.allclose(
+            logs["Goal/avg_progress_speed_when_successful_m_s"],
+            (logs["Goal/initial_distance_when_successful_m"] - logs["Goal/terminal_distance_m"][:1]) / env.step_dt))
+        check("motion_cleared_only_for_completed_clones", env._episode_speed_sum[ids].count_nonzero() == 0
+              and env._episode_peak_speed[ids].count_nonzero() == 0
+              and env._episode_peak_acceleration[ids].count_nonzero() == 0
+              and torch.allclose(env._episode_speed_sum[1], speed[:, 1].sum()))
         check("terminal_time_accumulator_cleared", env._episode_terms["time"].tolist()[0] == 0.0
               and abs(float(env._episode_terms["time"][1]) + .015) < 1e-7)
         kept = torch.tensor([0, 2, 3], device=env.device)
@@ -105,7 +137,7 @@ def main(cfg, agent_cfg):
         snapshots = [value[kept].clone() for value in buffers]
         env._reset_idx(torch.tensor([1], device=env.device))
         check("partial_reset_isolation", all(torch.equal(value[kept], old) for value, old in zip(buffers, snapshots))
-              and env._episode_terms["time"][1] == 0)
+              and env._episode_terms["time"][1] == 0 and env._episode_speed_sum[1] == 0)
         receipt = {"task": args.task, "remove_time_from_actor_obs": cfg.remove_time_from_actor_obs,
                    "actor_dimension": cfg.observation_space, "critic_dimension": cfg.state_space,
                    "checks": checks, "passed": True}

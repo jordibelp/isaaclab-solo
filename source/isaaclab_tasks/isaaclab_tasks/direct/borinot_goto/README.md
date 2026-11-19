@@ -595,29 +595,50 @@ cannot be combined with `--playback_speed`.
 deadline/failure/success masks, and collection stage for every environment.
 The terminal snapshots remain valid after automatic reset.
 
-Episode logs include terminal distance, clean-deadline distance, speed and
-angular speed, initial/minimum distance, first-arrival time when reached,
-energy, and counts of completed tasks, successes, clean deadlines, and early
-failures. To see which success condition fails, divide
-`Goal/deadline_inside_count`, `Goal/deadline_lin_vel_ok_count` and
-`Goal/deadline_ang_vel_ok_count` by `Goal/deadline_count`. "First arrival" and
-`Goal/ever_reached_count` use position only. `Curriculum/selected_force_limit_n`
-is the push limit of the current stage; `Goal/collection_force_limit_n` is the
-mean limit of the episodes that just finished. The public
-PPO trainer pools `Episode/success_count` and `Episode/completed_count` before
-reporting success rate. The existing SAC logger averages those two count fields
-over reset packets; their ratio still gives the pooled success fraction for that
-rollout. It does not publish PPO's pooled `Episode/successRate` field. Do not
-replace this ratio with an average of reset-batch success fractions.
-Curriculum logs distinguish the stage that collected
-an episode, the stage whose evidence was evaluated, and the newly selected
-stage. A selected-stage log is not a claim that the triggering episode used it.
-Distance means are reset-batch means; use the numeric episode counts for exact
-aggregation across unequal batches. RSL averages the curriculum decision fields
-over reset packets within a rollout, so displayed window counts can be fractional.
-The internal promotion uses the actual integer window and the exact rate.
-`Curriculum/global_idx` is the trainer's current stage at logging time; the
-per-reset `info["log"]` packet preserves each exact promotion decision.
+### Goal dashboard
+
+Except for the legacy count charts, each point gives equal weight to each
+eligible episode that finished in the logger's collection window. An episode
+can start before this window; its whole trajectory counts when it finishes.
+Unfinished episodes and manual aborts do not count. Conditional charts are
+omitted when no episode meets their condition. Rates range from 0 to 1.
+
+| W&B key (under `Goal/`) | What it measures |
+| --- | --- |
+| `reach_rate` | Fraction of completed episodes ever inside the goal radius, including at reset. Speed, later failures and the final position do not affect this test. |
+| `success_rate` | Fraction of completed episodes that finish inside the radius, below both speed thresholds, and without a safety failure. MinTime can succeed before the deadline; GoTo only scores success at the deadline. |
+| `early_success_rate`, `early_failure_rate` | Fraction of all completions that succeed or fail strictly before the deadline. |
+| `deadline_rate` | Fraction of all completions ending at a clean deadline (no safety failure). |
+| `first_arrival_s_when_reached` | Time from reset to first position-only reach, among episodes that ever reach. Zero if already inside at reset; otherwise checked on policy ticks. |
+| `success_duration_s` | Time from reset to successful termination, among successes only. For MinTime this is the first settled arrival; for GoTo it is the elapsed deadline. |
+| `initial_distance_m`, `minimum_distance_m`, `terminal_distance_m` | 3D base-link position error at reset, best over policy samples (including reset), and at termination. Terminal error is measured before reset and is not the reward's failure-floor distance. |
+| `deadline_s` | Assigned time budget after rounding to policy ticks, even if the episode ends early. |
+| `deadline_inside_rate`, `deadline_lin_vel_ok_rate`, `deadline_ang_vel_ok_rate` | Among clean deadline episodes only, fraction that pass each position, linear-speed or angular-speed check separately. |
+| `deadline_success_rate` | Fraction of clean deadline episodes that pass all three checks together. |
+| `deadline_distance_m`, `deadline_speed_m_s`, `deadline_ang_speed_rad_s` | Position error, linear speed and angular speed at clean deadlines only. Early successes and safety failures do not count. |
+| `avg_speed_m_s`, `peak_speed_m_s`, `peak_acceleration_m_s2` | Mean base CoM speed, peak base CoM speed and peak kinematic acceleration magnitude per episode, then averaged over completed episodes. Samples are taken at the physics rate, including the terminal substep; impact spikes can count. Acceleration is not an IMU specific-force signal. |
+| `initial_distance_when_successful_m`, `avg_progress_speed_when_successful_m_s` | Starting distance and net goal distance closed per second, among successful episodes. The second metric measures useful motion toward the goal, not total speed along the path. |
+| `collection_progress_factor`, `collection_force_limit_n` | Progress-reward multiplier and maximum vertical push magnitude for the stages that collected these episodes. The force limit is not the measured force. |
+
+The legacy `Goal/*_count` charts remain for compatibility and are averaged
+over reset packets, so use the rates for interpretation. Older runs also
+averaged reset-packet means for `Goal/` timing and distance charts, rather than
+weighting by the number of episodes in each packet. The new values and rates
+are episode-weighted in PPO and SAC.
+
+`Curriculum/window_success_rate` uses a rolling window of eligible episodes
+from the stage being evaluated, not all completions in the current rollout.
+The logger can average multiple window snapshots in one point; promotion
+uses the exact stage-pure window. `Curriculum/selected_force_limit_n` is the
+newly selected stage's limit, not the limit on episodes that just finished.
+
+For controller comparisons, first check success and reach rates at matched
+difficulty. Compare success time and motion on the same goals, deadlines and
+disturbances (or at least within the same initial-distance ranges). A mean
+success time can improve just because longer goals stop succeeding. The
+success-only starting distance and progress speed help spot that, but do not
+replace a matched evaluation.
+
 The public PPO trainer also logs `Curriculum/selected_deadline_min_s`,
 `Curriculum/selected_deadline_max_s`, and `Curriculum/selected_goal_distance_max_m`
 once per iteration from that current stage, without reset-packet averaging.
@@ -626,13 +647,6 @@ distance-based floors and policy-tick rounding. The distance is the norm of the
 current goal box's half-extents: its maximum sampled displacement from the
 episode's starting base position, not the robot's remaining distance to its goal.
 Reward-fade and force-only stages keep the final geometry/time row.
-
-For a fair controller comparison, evaluate the same fixed goals and budgets,
-seeds, model/randomization settings, push limits, and safety limits. Record success at the
-deadline, deadline distance, speeds, and failures. First touch alone is not a
-deadline success. Training to different curriculum levels is not a matched
-comparison. No short smoke test establishes learned performance or hardware
-transfer.
 
 ## Verification
 
