@@ -31,10 +31,17 @@ def read_json(path):
     return json.loads(Path(path).read_text())
 
 
-def write_json(path, value):
+def _encode_config_slice(value):
+    if isinstance(value, slice):
+        return f"slice({value.start},{value.stop},{value.step})"
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
+def write_json(path, value, *, config_snapshot=False):
     path = Path(path)
     temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(value, indent=2, allow_nan=False) + "\n")
+    encoder = _encode_config_slice if config_snapshot else None
+    temporary.write_text(json.dumps(value, indent=2, allow_nan=False, default=encoder) + "\n")
     temporary.replace(path)
 
 

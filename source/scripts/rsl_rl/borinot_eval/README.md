@@ -112,6 +112,29 @@ A minimal GoTo MinTime recipe (edit the checkpoint path and training settings):
   Hydra overrides field to sample a condition’s range in seconds before rounding
   up to a tick.
 
+## Evaluating older checkpoints
+
+Start with the training run's Git commit and saved configuration. Check the
+controller, policy rate, observation layout, and agent against the actual
+checkpoint's run ID. A checkpoint can load at the wrong policy rate, but it
+will not run at the rate it was trained for. To reproduce historical controller
+behavior, run at the training commit. If using a separate Git worktree with
+editable Python installs, point `PYTHONPATH` at that worktree's `source/<package>`
+directories; changing directories alone does not change the imported packages.
+
+For older GoTo/MinTime PPO checkpoints that expect the six-input controller
+state on the actor, set
+`env.use_asym_actor_critic=False env.legacy_controller_observations=True`
+in **Hydra env overrides** to restore the pre-asymmetry observation layout.
+Use the training revision if the checkpoint expects a different controller
+state, such as legacy DSAM-INDI with both joint integrals on the actor. The
+flags do not restore older joint-control laws or other task behavior.
+
+If the GUI shows only an Isaac Sim warning, check the full
+`condition-NN/policy-NN/sim.log` under the output folder. An error after
+`Completed N/N trials` can be a report-writing failure, not a checkpoint
+or inference failure.
+
 ## What the numbers mean
 
 - GoTo success is the task's actual settled-success test. Plain GoTo scores it

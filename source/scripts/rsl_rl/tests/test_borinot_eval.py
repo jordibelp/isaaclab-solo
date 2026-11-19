@@ -10,7 +10,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from borinot_eval.metrics import OUTCOMES, paired_goal_changes, summarize
 from borinot_eval.report import render_report
-from borinot_eval.spec import apply_condition, plan_scenarios, validate
+from borinot_eval.spec import apply_condition, plan_scenarios, read_json, validate, write_json
+
+
+def test_config_snapshot_encodes_slices_without_relaxing_result_json(tmp_path):
+    path = tmp_path / "effective-env.json"
+    cfg = {"events": {"joints": [slice(None), slice(0, 2, 1)]}}
+    with pytest.raises(TypeError, match="slice"):
+        write_json(path, cfg)
+    write_json(path, cfg, config_snapshot=True)
+    assert read_json(path) == {"events": {"joints": ["slice(None,None,None)", "slice(0,2,1)"]}}
+    with pytest.raises(TypeError, match="object"):
+        write_json(path, {"unsupported": object()}, config_snapshot=True)
+    with pytest.raises(ValueError, match="Out of range float"):
+        write_json(path, {"unsupported": float("nan")}, config_snapshot=True)
 
 
 def sample_recipe(tmp):

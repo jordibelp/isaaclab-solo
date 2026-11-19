@@ -329,8 +329,8 @@ def main():
                 rows += batch
                 traces += replay
                 print(f"Completed {len(rows)}/{len(plan)} trials", flush=True)
-        write_json(out / "effective-env.json", cfg.to_dict())
-        write_json(out / "effective-agent.json", agent.to_dict())
+        write_json(out / "effective-env.json", cfg.to_dict(), config_snapshot=True)
+        write_json(out / "effective-agent.json", agent.to_dict(), config_snapshot=True)
         sources = set(raw.get_code_snapshot_files() if hasattr(raw, "get_code_snapshot_files") else ())
         sources.update(inspect.getsourcefile(cls) for cls in type(cfg).__mro__ if cls is not object)
         sources.update(inspect.getsourcefile(cls) for cls in type(raw).__mro__ if cls is not object)
