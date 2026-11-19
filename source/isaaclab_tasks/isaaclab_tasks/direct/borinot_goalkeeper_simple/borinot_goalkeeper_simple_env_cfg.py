@@ -41,6 +41,7 @@ class BorinotGoalkeeperSimpleEnvCfg(DirectRLEnvCfg):
     cbrt = CbrtControllerCfg()  # control_mode=cbrt or cbrt_indi; shared CBRT_CONTROL.md
     model_wrench_indi = ModelWrenchIndiCfg()  # hybrid residual filter; nominal gains stay in wrench
     wrench = WrenchControllerCfg()  # shared gains: wrench / model_wrench; see ../borinot/*WRENCH_CONTROL.md
+    include_integral_prop_PID_joint_control = False  # shared explicit PD/PID for DSAM and wrench modes
     indi = IndiControllerCfg()  # used only by control_mode="dsam_indi"; shared INDI_CONTROL.md
     # geom = method 3; alternatives: method_1, method_2. Definitions:
     # /home/jordibelp/Desktop/emmaDocs/2026-10-23-tau-log-exp-comparison.ipynb
@@ -300,9 +301,9 @@ class BorinotGoalkeeperSimpleEnvCfg(DirectRLEnvCfg):
         self.sim.dt = 1 / self.physics_hz
         self.sim.render_interval = self.decimation
         self.action_space = angle_action_size(self)
-        controller_state = 6 if self.control_mode in ("wrench", "model_wrench", "model_wrench_indi", "model_wrench_yawless", "model_wrench_yawless_indi", "cbrt", "cbrt_indi") else (
-            8 if self.control_mode == "dsam_indi" else (9 if self.control_mode == modes[2] else 0))
+        controller_state = 6 if self.control_mode in ("dsam_indi", "wrench", "model_wrench", "model_wrench_indi", "model_wrench_yawless", "model_wrench_yawless_indi", "cbrt", "cbrt_indi") else (9 if self.control_mode == modes[2] else 0)
         self.state_space = 46 + self.action_space + controller_state
+        self.state_space += 2 * (self.include_integral_prop_PID_joint_control and self.control_mode in modes[3:9])
         point, time = self.obs_actor_includes_ball_plane_intersection_point, self.obs_actor_includes_time_ball_collides_plane
         # Optional actor inputs: plane point (3), time (1), validity (1), phase (5), ball parameters (2).
         self.observation_space = (34 + self.action_space + controller_state + 3 * point + time + (point or time)

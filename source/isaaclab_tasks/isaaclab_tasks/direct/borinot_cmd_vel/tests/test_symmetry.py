@@ -95,7 +95,7 @@ def test_world_rotation_changes_only_world_frame_and_heading_references(home_yaw
     expected = world@rotations
     torch.testing.assert_close(result[:, transform.obs_slices["rotation"]].reshape(-1, 3, 3), expected)
     torch.testing.assert_close(torch.linalg.det(expected), torch.ones(19, dtype=torch.float64))
-    for key in ("velocity", "omega", "joint_position", "joint_velocity", "commands", "rotors", "joint_integral"):
+    for key in ("velocity", "omega", "joint_position", "joint_velocity", "commands", "rotors"):
         sl = transform.obs_slices[key]
         assert torch.equal(result[:, sl], obs[:, sl])
 
@@ -172,18 +172,23 @@ def test_real_tracking_reward_matches_world_rotation():
             torch.testing.assert_close(actual, expected, atol=1e-14, rtol=1e-12)
 
 
-def test_tensordict_alignment_action_only_observation_only_and_rotor_history():
+@pytest.mark.parametrize("pid", [False, True])
+def test_tensordict_alignment_action_only_observation_only_and_rotor_history(pid):
     task = cfg("dsam_indi", (True, True, True), acceleration=True)
     transform = symmetry.BorinotSymmetry(task)
     env = SimpleNamespace(cfg=task)
     obs, _ = observations(transform)
     actions = torch.randn(19, task.action_space, dtype=torch.float64)
-    td = TensorDict({"policy": obs, "critic": obs+0.3}, batch_size=[19])
+    task.state_space = transform.observation_size + 2 * pid
+    critic = torch.cat((obs + .3, obs[:, :2]), dim=-1) if pid else obs + .3
+    td = TensorDict({"policy": obs, "critic": critic}, batch_size=[19])
     output, output_actions = symmetry.compute_symmetric_observations_actions(env, td, actions)
     obs_only, _ = symmetry.compute_symmetric_observations_actions(env, td, None)
     _, act_only = symmetry.compute_symmetric_observations_actions(env, None, actions)
     assert output.batch_size == (38,)
     assert torch.equal(output_actions, act_only)
+    if pid:
+        assert torch.equal(output["critic"][:, -2:], critic[:, -2:].repeat(2, 1))
     assert all(torch.equal(output[k], obs_only[k]) for k in td.keys())
     for index, name in enumerate(transform.transforms):
         torch.testing.assert_close(output["policy"][19*index:19*(index+1)], transform.observations(obs, name))

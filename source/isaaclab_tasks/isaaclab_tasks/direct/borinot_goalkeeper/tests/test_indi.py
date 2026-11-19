@@ -43,7 +43,7 @@ def test_config_resolves_new_mode_without_changing_default_timing(sac, hz):
     cfg.control_mode, cfg.indi, cfg.sac_action_mapping = "dsam_indi", indi.IndiControllerCfg(), sac
     cfg.physics_hz, cfg.policy_hz = hz, hz/2
     method("borinot_goalkeeper_env_cfg.py", "configure_control")(cfg)
-    assert (cfg.action_space, cfg.observation_space, cfg.state_space) == (9, 53, 65)
+    assert (cfg.action_space, cfg.observation_space, cfg.state_space) == (9, 51, 63)
     assert cfg.sim.dt == 1/hz and cfg.decimation == 2
     assert cfg.robot.actuators["arm"].stiffness == cfg.robot.actuators["arm"].damping == 0
 
@@ -176,6 +176,7 @@ def test_equation16_six_rotor_solver_residual_and_bounds(ip, dtype):
 
 def test_joint_pid_antiwindup_and_physics_rate_feedback():
     ctrl = fixture(n=4)
+    ctrl.task.include_integral_prop_PID_joint_control = True
     actions = torch.zeros(4, 9, dtype=torch.float64)
     actions[:, 7] = .01
     zeros, joints = torch.zeros(4, 3, dtype=torch.float64), torch.zeros(4, 2, dtype=torch.float64)
@@ -214,7 +215,7 @@ def test_speed_lag_not_thrust_lag_and_matched_reset(tc):
                                ctrl.rotor_filter.z2, ctrl.joint_integral), preserved):
         torch.testing.assert_close(buffer[0], before, rtol=0, atol=0)
     assert not ctrl.angular_acceleration[[1, 3]].any()
-    torch.testing.assert_close(ctrl.observation()[[1, 3]], torch.tensor([[1.]*6+[0.]*2]*2, dtype=torch.float64))
+    torch.testing.assert_close(ctrl.observation()[[1, 3]], torch.tensor([[1.]*6]*2, dtype=torch.float64))
     ctrl.step(torch.zeros_like(actions), home_quat(ctrl), zeros, joints, joints)
     assert ctrl.angular_acceleration[[1, 3]].abs().max() < 1e-12
 

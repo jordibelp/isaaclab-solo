@@ -70,7 +70,7 @@ class BorinotGoToEnvCfg(BorinotCmdVelEnvCfg):
         # Parent command has four slots: replace it with body goal XYZ + t_norm,
         # then append remaining seconds after controller memory (+1 observation).
         self.observation_space += 1
-        self.state_space = self.observation_space
+        self.state_space += 1
         if self.remove_time_from_actor_obs:
             self.observation_space -= 2
         self.is_finite_horizon = True

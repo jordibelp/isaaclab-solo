@@ -153,3 +153,22 @@ def test_hidden_clocks_keep_sincos_actions_and_controller_memory(mode):
     assert output["critic"].shape[-1] == cfg.state_space == cfg.observation_space + 2
     env._episode_steps += 1
     assert torch.equal(output["policy"], env._get_observations()["policy"])
+
+
+@pytest.mark.parametrize("mode", ["dsam_indi", "model_wrench", "model_wrench_indi"])
+@pytest.mark.parametrize("hide_time", [False, True])
+def test_pid_integral_is_critic_only_for_all_matched_modes(mode, hide_time):
+    cfg = min_time_config(mode, remove_time_from_actor_obs=hide_time,
+                          include_integral_prop_PID_joint_control=True,
+                          obs_include_base_lin_acc=True, obs_include_base_lin_acc_steps=2)
+    env = fake_env(cfg)
+    controller = env._indi if mode == "dsam_indi" else env._wrench
+    controller.joint_integral = torch.tensor([[.15, -.30], [.0, .30]], dtype=torch.float64)
+    obs = env._get_observations()
+    assert obs["policy"].shape == (2, 46 - 2 * hide_time)
+    assert obs["critic"].shape == (2, 48)
+    torch.testing.assert_close(obs["critic"][:, -3:-1], controller.joint_integral / .30)
+    controller.joint_integral.zero_()
+    after = env._get_observations()
+    assert torch.equal(obs["policy"], after["policy"])
+    assert not after["critic"][:, -3:-1].any()

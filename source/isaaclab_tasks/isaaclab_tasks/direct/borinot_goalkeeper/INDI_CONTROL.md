@@ -34,7 +34,7 @@ We adapt the architecture to Borinot, rather than claim an exact reproduction of
 | --- | --- | --- |
 | Four or six rotors? | Borinot's six actual mixer columns | Its geometry and spin order differ from the source quadrotor. |
 | Angular-acceleration feedforward `alpha_r`? | Zero | The policy supplies no jerk or snap trajectory. Differentiating held actions would create impulses. |
-| Joint controller? | Explicit software PID; default `ki=0.5` | It runs at a known physics clock. Set `env.indi.joint_ki=0.0` for PD. |
+| Joint controller? | Explicit software PD by default | Set `env.include_integral_prop_PID_joint_control=True` for PID at the physics clock. |
 | Motor lag? | First-order **speed** lag, 40 ms by default | INDI, Wrench, CBRT and direct rotor modes use speed lag. Only the legacy PI rotor mode retains thrust lag. |
 | Rotor spin inertia `Ip`? | Zero by default; nonzero supported | No calibrated Borinot value was found. We do not borrow another vehicle's value. |
 | Inertia used by INDI? | Nominal USD base-body inertia | This is a fixed controller model, not privileged knowledge of each randomized clone. |
@@ -487,7 +487,7 @@ The direct modes continue filtering thrust with their old implementation; INDI d
 
 ### Joints
 
-Let `error = joint_target - measured_joint_angle`.
+Let `error = joint_target - measured_joint_angle`. PD is the default; the integral term below applies only with `env.include_integral_prop_PID_joint_control=True`.
 The controller uses measured velocity for damping, so a reference step does not cause a derivative kick:
 
 ```text
@@ -502,26 +502,27 @@ We do not accept an integral update if it would push an already saturated torque
 That is conditional anti-windup. The integral has a separate magnitude limit as well.
 
 The implicit actuator's stiffness and damping are both zero in this mode.
-Otherwise PhysX would add another PD controller on top of our explicit PID effort.
+Otherwise PhysX would add another PD controller on top of our explicit joint effort.
 Effort limits, velocity limits, armature, friction and startup randomization remain active.
-`hold_arm=True` requests neutral joint targets through this PID; it does not weld the arm in place.
+`hold_arm=True` requests neutral joint targets through the same PD/PID law; it does not weld the arm in place.
 
 ## 11. Observations, rewards and resets
 
 The goalkeeper observation is **not** replaced with the paper's pose-regulation observation.
 The existing robot and ball inputs remain, followed by nine current actions.
-INDI also exposes six actual rotor thrusts divided by nominal hover thrust and two normalized joint integrals.
-The latter are divided by `joint_integral_limit`, not by the torque limit.
+DSAM-INDI exposes six actual rotor thrusts divided by nominal hover thrust to both networks.
+With PID enabled, only the critic also receives the two joint integrals divided by `joint_integral_limit`.
 
 With the default actor flags:
 
 | Task | Policy actions | Actor inputs | Critic inputs |
 | --- | ---: | ---: | ---: |
-| Original goalkeeper, INDI | 9 | 53 | 65 |
-| Simple goalkeeper, INDI | 9 | 53 | 63 |
+| Original goalkeeper, INDI | 9 | 51 | 63 |
+| Simple goalkeeper, INDI | 9 | 51 | 61 |
 | Either task, direct mode | 8 | 44 | Original 56 / simple 54 |
 | Either task, existing PI mode | 6 | 51 | Original 63 / simple 61 |
 
+PID adds two critic inputs, without changing the actor count. Older DSAM checkpoints require their original observation layout.
 Other actor flags change the actor count as before.
 The filter delay states are internal controller memory; they are not all exposed to the actor or critic.
 Thus this is not a claim that the observation makes the filtered closed-loop system exactly Markov.
@@ -564,7 +565,7 @@ and are used only in INDI mode.
 | `nonlinear_iterations` | `6` | Gauss–Newton steps when rotor inertia is nonzero |
 | `rotor_spin_inertia_kg_m2` | `0` | Per-rotor spin-axis inertia; zero disables `G2` consistently |
 | `inertia_scale` | `1` | Multiply the nominal base inertia used by the controller |
-| `joint_ki` | `0.5` | Integral torque gain; set zero for PD |
+| `joint_ki` | `0.5` | Shared integral torque gain when PID is enabled |
 | `joint_integral_limit` | `0.3` | Integral bound, rad·s |
 
 Existing task fields still control `physics_hz`, `policy_hz`, `kp`, `kd`, `body_rate_scale`, `motor_time_constant_s`, `effort_lim_sim`, `velocity_lim_sim`, rotor positions/signs, `kf`, `km_over_kf`, and rotor limits.

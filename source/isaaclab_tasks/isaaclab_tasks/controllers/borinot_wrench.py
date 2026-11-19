@@ -13,7 +13,7 @@ import torch
 
 from .borinot_angles import clamp_scalar_actions, decode_angle_actions, joint_angle_targets
 
-from .borinot_indi import INDI_TILT_METHODS, attitude_acceleration, rotation_from_quat
+from .borinot_indi import INDI_TILT_METHODS, attitude_acceleration, joint_position_effort, rotation_from_quat
 
 
 @dataclass
@@ -138,6 +138,7 @@ class WrenchController:
         self.requested_wrench = allocation.new_zeros((n, 4))
         self.requested_rotor_thrust = allocation.new_zeros((n, 6))
         self.requested_joint_effort = allocation.new_zeros((n, 2))
+        self.joint_integral = torch.zeros_like(self.requested_joint_effort)
         self.allocation_residual = allocation.new_zeros((n, 4))
         self.accel_scale = allocation.new_tensor(self.cfg.acceleration_scale)
         self.rate_scale = allocation.new_tensor(task.body_rate_scale)
@@ -151,7 +152,7 @@ class WrenchController:
         self.rotor_speed[ids] = math.sqrt(self.reset_thrust / self.task.kf)
         for buffer in (self.external_force_w, self.external_moment_b, self.desired_force_w,
                        self.alpha_desired, self.requested_wrench, self.requested_rotor_thrust,
-                       self.requested_joint_effort, self.allocation_residual):
+                       self.requested_joint_effort, self.joint_integral, self.allocation_residual):
             buffer[ids] = 0
 
     def observation(self):
@@ -183,7 +184,4 @@ class WrenchController:
         self.allocation_residual.copy_(matvec(self.allocator.allocation, commands) - request)
         self.rotor_speed.add_(self.motor_alpha*((commands / self.task.kf).sqrt() - self.rotor_speed))
         self.ready.fill_(True)
-        if self.task.hold_arm:
-            target = torch.zeros_like(target)
-        self.requested_joint_effort.copy_(self.task.kp*(target-joint_pos) - self.task.kd*joint_vel)
-        return commands, self.requested_joint_effort.clamp(-self.task.effort_lim_sim, self.task.effort_lim_sim)
+        return commands, joint_position_effort(self, target, joint_pos, joint_vel)

@@ -164,7 +164,7 @@ checkpoint trained with the single acceleration sample, explicitly set
 | `thrust_and_torque_control` (default) | 6 rotor thrusts + 2 joint torques = 8 | 32 | PPO, SAC CE, SAC MSE |
 | `thrust_and_PD_joint_pos_control` | 6 rotor thrusts + 2 joint targets = 8 | 32 | PPO, SAC CE, SAC MSE |
 | `PI_rotors_PD_joint_pos_control` | Collective + body rates + 2 joint targets = 6 | 39 | PPO |
-| `dsam_indi` | World acceleration + body rates + heading + 2 joint targets = 9 | 41 | PPO, SAC CE, SAC MSE |
+| `dsam_indi` | World acceleration + body rates + heading + 2 joint targets = 9 | 39 | PPO, SAC CE, SAC MSE |
 | `wrench` | World acceleration + heading + body rates + 2 joint targets = 9 | 39 | PPO, SAC CE, SAC MSE |
 | `model_wrench` / `model_wrench_indi` | Same nine-action wrench layout; explicit arm model, optional INDI correction | 39 | PPO, SAC CE, SAC MSE |
 | `model_wrench_yawless` / `model_wrench_yawless_indi` | World acceleration + body rates + 2 joint targets = 8; no heading target | 38 | PPO, SAC CE, SAC MSE |
@@ -172,8 +172,11 @@ checkpoint trained with the single acceleration sample, explicitly set
 
 Optional acceleration adds `3 * obs_include_base_lin_acc_steps` observations in
 every mode (six with the default history length). PI adds six actual
-rotor thrust states and three rate integrals. INDI adds its six thrust states and
-two joint integrals. Wrench and both CBRT variants add six realized rotor thrusts.
+rotor thrust states and three rate integrals. DSAM-INDI, wrench, and both CBRT
+variants add six realized rotor thrusts. DSAM-INDI and the wrench family use
+joint PD by default. With `env.include_integral_prop_PID_joint_control=True`,
+they use the same joint PID law and add two normalized integral states to the
+critic only.
 Rotor states are normalized by nominal hover thrust. As in goalkeeper, not all
 low-level filter memory is exposed. Turning height off removes one observation;
 turning projected gravity on adds three. The table assumes scalar angle actions.

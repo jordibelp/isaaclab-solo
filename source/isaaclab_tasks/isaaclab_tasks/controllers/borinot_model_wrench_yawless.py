@@ -12,7 +12,7 @@ import math
 import torch
 
 from .borinot_angles import clamp_scalar_actions, decode_angle_actions, joint_angle_targets
-from .borinot_indi import rotation_from_quat
+from .borinot_indi import joint_position_effort, rotation_from_quat
 from .borinot_model_wrench import ModelWrenchController
 from .borinot_wrench import matvec
 
@@ -58,10 +58,7 @@ class ModelWrenchYawlessController(ModelWrenchController):
         else:
             u = decode_angle_actions(actions, self.task)
             acceleration, reference_rates, target = u[:, :3], u[:, 3:6], u[:, 6:8]
-        if self.task.hold_arm:
-            target = torch.zeros_like(target)
-        self.requested_joint_effort.copy_(self.task.kp*(target-joint_pos)-self.task.kd*joint_vel)
-        effort = self.requested_joint_effort.clamp(-self.task.effort_lim_sim, self.task.effort_lim_sim)
+        effort = joint_position_effort(self, target, joint_pos, joint_vel)
         rotation = rotation_from_quat(quaternion)
         gravity_b = matvec(rotation.mT, self.gravity_w)
         desired_a = matvec(rotation.mT, acceleration)

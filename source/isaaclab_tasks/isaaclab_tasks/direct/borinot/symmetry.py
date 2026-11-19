@@ -135,8 +135,6 @@ class BorinotSymmetry:
                 add("rate_integral", 3)
             elif self.mode in ("dsam_indi", "wrench", "model_wrench", "model_wrench_indi", "model_wrench_yawless", "model_wrench_yawless_indi", "cbrt", "cbrt_indi"):
                 add("rotors", 6)
-                if self.mode == "dsam_indi":
-                    add("joint_integral", 2)
         self.observation_size = offset
 
     def actions(self, value, name):
@@ -176,9 +174,10 @@ class BorinotSymmetry:
             return result
         raise ValueError(f"Unsupported Borinot symmetry: {name}")
 
-    def observations(self, value, name):
-        if value.shape[-1] != self.observation_size:
-            raise ValueError(f"Expected {self.observation_size} Borinot observations, got {value.shape[-1]}.")
+    def observations(self, value, name, obs_type="policy"):
+        size = self.cfg.state_space if obs_type == "critic" else self.observation_size
+        if value.shape[-1] != size:
+            raise ValueError(f"Expected {size} Borinot {obs_type} observations, got {value.shape[-1]}.")
         if name == "identity":
             return value.clone()
         result = value.clone()
@@ -211,11 +210,11 @@ def compute_symmetric_observations_actions(env=None, obs=None, actions=None, obs
         unknown = set(obs.keys())-{"policy", "critic"}
         if unknown:
             raise ValueError(f"Unmapped Borinot observation groups: {unknown}")
-        data = {key: torch.cat([transform.observations(value, name) for name in transform.transforms], 0)
+        data = {key: torch.cat([transform.observations(value, name, key) for name in transform.transforms], 0)
                 for key, value in obs.items()}
         augmented_obs = TensorDict(data, batch_size=[obs.batch_size[0]*len(transform.transforms)], device=obs.device)
     elif obs is not None:
-        augmented_obs = torch.cat([transform.observations(obs, name) for name in transform.transforms], 0)
+        augmented_obs = torch.cat([transform.observations(obs, name, obs_type) for name in transform.transforms], 0)
     augmented_actions = None if actions is None else torch.cat(
         [transform.actions(actions, name) for name in transform.transforms], 0)
     return augmented_obs, augmented_actions

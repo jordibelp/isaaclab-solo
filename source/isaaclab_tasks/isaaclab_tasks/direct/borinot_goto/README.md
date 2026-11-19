@@ -144,7 +144,7 @@ keep `--symmetry-mode=none`. The launcher rejects that incompatible layout expli
 
 ## What the policy sees
 
-Actor and critic receive the **same** vector, in this order:
+By default the actor and critic receive the **same** vector, in this order:
 
 1. Base-body-frame linear velocity, 3 values, m/s. As in command tracking, this
    is the base rigid body's CoM velocity, not the whole robot's CoM velocity.
@@ -169,8 +169,17 @@ Actor and critic receive the **same** vector, in this order:
 10. Normalized remaining time, 1 value: remaining seconds / assigned seconds.
     It starts at 1 and reaches 0 at the terminal state.
 11. The existing controller-state observations, if any: realized thrust and PI
-    integrator, or the existing INDI/wrench/CBRT memory. Their order is unchanged.
+    integrator, or the six realized thrusts for INDI/wrench/CBRT.
 12. Remaining time in **seconds**, 1 value.
+
+**Matched joint control.** DSAM-INDI and the wrench family use the same
+explicit leg PD law by default. Set `env.include_integral_prop_PID_joint_control=True`
+in both runs for the same physics-rate PID with anti-windup. Both use
+`env.indi.joint_ki` and `env.indi.joint_integral_limit` for the integral term.
+Only the critic then receives the two normalized integrals, just before
+remaining seconds. The actor size never changes with this flag. Older DSAM
+checkpoints have two extra actor inputs and cannot be loaded directly; use
+their original training revision for exact replay.
 
 Why add seconds as well as normalized time? At reset, normalized time is 1 for
 both a 0.8 s task and a 3 s task. With only that fraction and the same position,

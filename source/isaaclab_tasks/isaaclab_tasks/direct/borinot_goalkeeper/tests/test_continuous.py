@@ -160,7 +160,7 @@ def test_rotor_omega_is_default_off_and_updates_only_critic_size(mode):
 def test_optional_rotor_omega_appends_current_speeds_without_changing_actor(env, mode):
     env.cfg.control_mode = mode
     env.actions = torch.full((env.num_envs, 9 if mode == 'dsam_indi' else 6 if mode == control.MODES[2] else 8), .25)
-    env._indi = SimpleNamespace(observation=lambda: torch.zeros(env.num_envs, 8))
+    env._indi = SimpleNamespace(observation=lambda: torch.zeros(env.num_envs, 6))
     # Deliberately unrelated commands and realized rotor speeds; preserve motor order.
     omega = torch.tensor([0., 50., 400., 800., 1200., 1600.]).expand(env.num_envs, -1)
     env._rotor_thrust = env.cfg.kf * omega.square()

@@ -340,16 +340,22 @@ class BorinotCmdVelEnv(DirectRLEnv):
         if self.cfg.include_base_height:
             parts.append(data.root_pos_w[:, 2:3])
         parts.append(self._commands)
+        joint_controller = None
         if self.cfg.control_mode == "PI_rotors_PD_joint_pos_control":
             parts += [self._rotor_thrust / self._hover_per_rotor, self._rate_integral]
         elif self.cfg.control_mode == "dsam_indi":
+            joint_controller = self._indi
             parts.append(self._indi.observation())
         elif self.cfg.control_mode in ("wrench", "model_wrench", "model_wrench_indi", "model_wrench_yawless", "model_wrench_yawless_indi"):
+            joint_controller = self._wrench
             parts.append(self._wrench.observation())
         elif self.cfg.control_mode in ("cbrt", "cbrt_indi"):
             parts.append(self._cbrt.observation())
         observation = torch.cat(parts, -1)
-        return {"policy": observation, "critic": observation}
+        critic = [observation]
+        if self.cfg.include_integral_prop_PID_joint_control and joint_controller is not None:
+            critic.append(joint_controller.joint_integral / self.cfg.indi.joint_integral_limit)
+        return {"policy": observation, "critic": torch.cat(critic, -1) if len(critic) > 1 else observation}
 
     def _update_curriculum(self, env_ids):
         completed = env_ids[self._episode_steps[env_ids] > 0]

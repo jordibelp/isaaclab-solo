@@ -252,3 +252,38 @@ def test_zero_mismatch_stays_zero_for_changing_motion_and_current_arm_commands(y
         assert ctrl.disturbance_b.abs().max() < 1e-14
         # Fixed-iteration allocation can magnify sub-femtonewton-metre roundoff.
         torch.testing.assert_close(actual[0], expected[0], atol=2e-11, rtol=2e-11)
+
+
+@pytest.mark.parametrize("pid", [False, True])
+def test_matched_leg_control_across_base_modes(pid):
+    from test_indi import fixture as dsam_controller
+
+    wrapped, nominal = hybrid(n=2)
+    dsam = dsam_controller(n=2, hz=200)
+    controllers = (dsam, nominal, wrapped)
+    for ctrl in controllers:
+        ctrl.task.include_integral_prop_PID_joint_control = pid
+        ctrl.joint_integral[1] = .04  # Check that PD ignores even stale integral state.
+    quat = torch.tensor([[1., 0., 0., 0.]] * 2, dtype=torch.float64)
+    zeros = quat[:, :3] * 0
+    q = quat[:, :2] * 0
+    dq = q + .02
+    actions = torch.zeros(2, 9, dtype=q.dtype)
+    actions[:, 7:] = torch.tensor([[.08, -.05], [5., -5.]], dtype=q.dtype)
+    expected_integral = dsam.joint_integral.clone()
+    for _ in range(3):
+        pd = 9. * actions[:, 7:] - .2 * dq
+        if pid:
+            expected_integral[0] += .005 * actions[0, 7:]
+        expected = (pd + (.5 * expected_integral if pid else 0.)).clamp(
+            -dsam.task.effort_lim_sim, dsam.task.effort_lim_sim)
+        for ctrl in controllers:
+            args = (actions, quat, zeros, q, dq) + ((zeros,) if ctrl is wrapped else ())
+            _, effort = ctrl.step(*args)
+            torch.testing.assert_close(effort, expected, atol=1e-14, rtol=0)
+            torch.testing.assert_close(ctrl.joint_integral, expected_integral)
+            assert ctrl.observation().shape == (2, 6)
+    for ctrl in controllers:
+        ctrl.reset(torch.tensor([1]))
+        assert not ctrl.joint_integral[1].any()
+        torch.testing.assert_close(ctrl.joint_integral[0], expected_integral[0])

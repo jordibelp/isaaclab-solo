@@ -117,10 +117,11 @@ def main(cfg, agent_cfg):
                 target = torch.zeros_like(target)
             error = target-joint_pos
             integral = (before+env.physics_dt*error).clamp(-cfg.indi.joint_integral_limit, cfg.indi.joint_integral_limit)
-            effort = cfg.kp*error-cfg.kd*joint_vel+cfg.indi.joint_ki*integral
+            ki = cfg.indi.joint_ki if cfg.include_integral_prop_PID_joint_control else 0.0
+            effort = cfg.kp*error-cfg.kd*joint_vel+ki*integral
             frozen = ((effort > cfg.effort_lim_sim) & (error > 0)) | ((effort < -cfg.effort_lim_sim) & (error < 0))
             expected_integral = torch.where(frozen, before, integral)
-            expected = (cfg.kp*error-cfg.kd*joint_vel+cfg.indi.joint_ki*expected_integral).clamp(-cfg.effort_lim_sim, cfg.effort_lim_sim)
+            expected = (cfg.kp*error-cfg.kd*joint_vel+ki*expected_integral).clamp(-cfg.effort_lim_sim, cfg.effort_lim_sim)
             calls.append((torch.allclose(efforts, expected, atol=1e-6), commands.min(), commands.max(),
                           torch.equal(actions, u), torch.allclose(env._indi.alpha_desired, expected_alpha, atol=1e-5)))
             return commands, efforts

@@ -750,12 +750,15 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
                              self._episode_steps * self.step_dt / self.cfg.episode_length_s), dim=-1 # episode progress
                              )
         tail = [self.actions]
+        joint_controller = None
         if self.cfg.control_mode == "PI_rotors_PD_joint_pos_control":
             # Direct modes already command each rotor in the action; PI hides thrusts and its integral state.
             tail += [self._rotor_thrust / self._hover_per_rotor, self._rate_integral]
         elif self.cfg.control_mode == "dsam_indi":
+            joint_controller = self._indi
             tail += [self._indi.observation()]
         elif self.cfg.control_mode in ("wrench", "model_wrench", "model_wrench_indi", "model_wrench_yawless", "model_wrench_yawless_indi"):
+            joint_controller = self._wrench
             tail += [self._wrench.observation()]
         elif self.cfg.control_mode in ("cbrt", "cbrt_indi"):
             tail += [self._cbrt.observation()]
@@ -768,6 +771,8 @@ class BorinotGoalkeeperEnv(DirectRLEnv):
         if self.cfg.obs_actor_includes_ball_params:
             policy.append(self._ball_parameters)
         critic = common + ball_parts + [phase] + tail + [self._ball_parameters]
+        if self.cfg.include_integral_prop_PID_joint_control and joint_controller is not None:
+            critic.append(joint_controller.joint_integral / self.cfg.indi.joint_integral_limit)
         if self.cfg.critic_obs_includes_rotor_omega:
             # Applied thrust retains motor lag, unlike the latest policy command.
             rotor = getattr(self, "_rotor_plant", None)

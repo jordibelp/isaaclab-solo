@@ -283,6 +283,24 @@ class RotorAllocator:
         return invert_rotor_speed(x, previous, self.a, self.b, target, self.cfg.nonlinear_iterations) * self.speed_max
 
 
+def joint_position_effort(controller, target, joint_pos, joint_vel):
+    """Shared DSAM/wrench leg law; keep the unclipped demand for diagnostics."""
+    task = controller.task
+    error = (torch.zeros_like(target) if task.hold_arm else target) - joint_pos
+    effort = task.kp * error - task.kd * joint_vel
+    if task.include_integral_prop_PID_joint_control:
+        limit, gain = task.indi.joint_integral_limit, task.indi.joint_ki
+        integral = controller.joint_integral
+        candidate = (integral + controller.dt * error).clamp(-limit, limit)
+        demand = effort + gain * candidate
+        winding_up = ((demand > task.effort_lim_sim) & (error > 0)) | (
+            (demand < -task.effort_lim_sim) & (error < 0))
+        integral.copy_(torch.where(winding_up, integral, candidate))
+        effort = effort + gain * integral
+    controller.requested_joint_effort.copy_(effort)
+    return effort.clamp(-task.effort_lim_sim, task.effort_lim_sim)
+
+
 class IndiController:
     def __init__(self, task, num_envs, allocation, inertia, mass, hover):
         self.cfg, self.task, self.dt = task.indi, task, 1 / task.physics_hz
@@ -329,8 +347,7 @@ class IndiController:
         self.rotor_filter.reset(ids, self.rotor_speed[ids])
 
     def observation(self):
-        return torch.cat((self.task.kf * self.rotor_speed.square() / self.hover,
-                          self.joint_integral / self.cfg.joint_integral_limit), -1)
+        return self.task.kf * self.rotor_speed.square() / self.hover
 
     def step(self, actions, quaternion, rates, joint_pos, joint_vel):
         if self.task.sac_action_mapping:
@@ -375,14 +392,5 @@ class IndiController:
         self.transient_torque.copy_(((next_speed - self.rotor_speed) / self.dt) @ self.allocator.g2[1:].T)
         self.rotor_speed.copy_(next_speed)
 
-        if self.task.hold_arm:
-            target = torch.zeros_like(target)
-        error = target - joint_pos
-        integral = (self.joint_integral + self.dt*error).clamp(-self.cfg.joint_integral_limit, self.cfg.joint_integral_limit)
-        effort = self.task.kp*error - self.task.kd*joint_vel + self.cfg.joint_ki*integral
-        winding_up = ((effort > self.task.effort_lim_sim) & (error > 0)) | ((effort < -self.task.effort_lim_sim) & (error < 0))
-        self.joint_integral.copy_(torch.where(winding_up, self.joint_integral, integral))
-        effort = self.task.kp*error - self.task.kd*joint_vel + self.cfg.joint_ki*self.joint_integral
-        self.requested_joint_effort.copy_(effort)  # after anti-windup, before output saturation
-        effort = effort.clamp(-self.task.effort_lim_sim, self.task.effort_lim_sim)
+        effort = joint_position_effort(self, target, joint_pos, joint_vel)
         return self.task.kf * command.square(), effort
